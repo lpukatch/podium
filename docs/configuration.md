@@ -7,6 +7,13 @@ wins over the environment. Podium starts with no credentials at all and says
 so — the settings page is how you enter them, so it cannot be behind a process
 that refused to boot without them. Passes wait quietly until they are there.
 
+![The Settings page, showing what Podium is allowed to change and the pacing
+knobs](images/settings.png)
+
+A value still coming from the environment is labelled `from environment`, and
+clearing a field in the UI hands it back — so a setting you changed once and
+forgot cannot silently shadow the environment you thought you were running.
+
 - [Connecting to Dispatcharr](#connecting-to-dispatcharr)
 - [Pacing](#pacing)
 - [Probing](#probing)

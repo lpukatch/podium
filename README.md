@@ -7,8 +7,13 @@ It fetches your channels and streams, works out which streams belong to which
 channel, probes each one with `ffprobe`/`ffmpeg`, and writes the ranked order
 back. One container, one volume.
 
-<!-- Screenshot goes here: the rules editor with live match preview is the thing
-     worth showing. Drop it in public/ or docs/images/ and link it. -->
+![The rules editor, showing a channel's streams in their current Dispatcharr
+order with the measurement behind each one](docs/images/rules-editor.png)
+
+One channel, its streams in the order Dispatcharr currently serves them, and
+what each one actually is. The stream named `1080p` at #2 measures 720p; the one
+named `UHD` at #5 is a black screen; #6 is dead. Matches update as you type, and
+nothing is written until you say so.
 
 ## Quick start
 
@@ -25,6 +30,8 @@ repo.
 On first start it writes an empty rules file and comes up with nothing to check.
 Open the UI on `:3456`, pick a group and start adding channels — or
 [import rules you already have](docs/usage.md#importing-existing-rules).
+
+![The groups list, each showing how many of its channels have rules](docs/images/groups.png)
 
 Podium needs no credentials to boot. If you would rather not put an API key in
 your environment, start it bare and enter one in **Settings**.
@@ -60,6 +67,14 @@ useless for this: the M3U refresh bumps it on every stream every few minutes.)
 starts watching" is what you actually want. A nightly batch hammers every
 provider whether or not anyone is streaming, and if it overruns it is still
 going at breakfast.
+
+![The progress view: a pass in flight, three provider lanes draining
+independently, and how fresh the library is](docs/images/progress.png)
+
+All three show up on one page: each provider lane drains against its own limit,
+the library tiles say how much of the catalogue is still inside the freshness
+target, and channels whose EPG says the match has not kicked off yet are held
+back rather than probed.
 
 ## What it measures
 

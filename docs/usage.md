@@ -38,6 +38,13 @@ currently has assigned, so you can see what a change would actually do. This is
 the fastest way to find out that a `contains` you were about to save claims half
 a category.
 
+![The rules editor for one channel, with its aliases and every stream they match](images/rules-editor.png)
+
+Each matched stream carries its last verdict — resolution, measured bitrate and
+how long ago it was checked — so the cost of a rule change is visible in the
+same place you make it. `new` is a stream your rules claim that Dispatcharr has
+not been given yet; it stays unwritten until you save.
+
 ## Sections
 
 Normalising `AU:` and `US:` away is right until the prefix *is* the difference.
@@ -111,6 +118,12 @@ import, how many streams each holds and how many are currently claimed —
 claimed first, since a group nothing matches is not worth reading — with a
 toggle per group.
 
+![Provider stream groups in Settings, with two groups switched off by glob](images/provider-stream-groups.png)
+
+A group switched off by a glob is struck through and says which pattern caught
+it, so an `exclude_groups` entry that is quietly claiming more than you meant is
+visible rather than inferred.
+
 ### Channel groups
 
 Policy is per Dispatcharr channel group:
@@ -129,6 +142,12 @@ the channel.
 Name patterns like `Auto | *` apply a policy to groups that do not exist yet,
 which matters because Dispatcharr creates groups on its own.
 
+![A channel group with its policy chips and the channels it holds](images/group-policy.png)
+
+The policy is the row of chips at the top of a group. `assigned` is what
+Dispatcharr has on the channel now; `matched` is what your rules claim — the two
+differing is how you spot a stream the provider has just added.
+
 ## Ranking
 
 Step order first (an alias you put first wins), then a weighted score:
@@ -144,6 +163,12 @@ rather than two.
 There is deliberately no loop detection. Catching a loop means watching for at
 least one loop period — around 120s per stream against the ~1s the other checks
 cost — for a failure far rarer than dead, black or throttled.
+
+![Stream ordering settings: mode, preferred providers, and quality weights](images/stream-ordering.png)
+
+Mode and weights live in **Settings → Stream ordering**. Preferred providers
+only apply in `provider` mode; in `quality` mode the best measured source wins
+outright, whoever carries it.
 
 ## Importing existing rules
 
