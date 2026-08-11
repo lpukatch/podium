@@ -48,8 +48,10 @@ jobs:
         with:
           driver-opts: network=host
 
+      # Logs in on pull requests too, even though they do not push an image: the
+      # build cache below lives in this same package, so reading and writing
+      # :buildcache needs credentials on every event.
       - name: Login to Container Registry
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v4
         with:
           registry: ${{ vars.REGISTRY }}
