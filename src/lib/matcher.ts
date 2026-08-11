@@ -216,8 +216,9 @@ const QUALIFIER_WORDS = 4;
  * to delete -- `^NFL\b.*(?<![A-Za-z0-9])Commanders(?![A-Za-z0-9])`.
  *
  * So a qualifier matches the leading words of a prefix segment *or* the leading
- * words of the name. `@NFL` covers both lines above; `Radio: Washington
- * Commanders` and `NRL : PENRITH PANTHERS` still fall outside it.
+ * words of the name *or* a trailing market tag. `@NFL` covers both lines above;
+ * `Radio: Washington Commanders` and `NRL : PENRITH PANTHERS` still fall outside
+ * it.
  */
 function qualifierKeys(norm: NormalizedName): Set<string> {
   const cached = qualifierCache.get(norm);
@@ -233,6 +234,13 @@ function qualifierKeys(norm: NormalizedName): Set<string> {
   };
 
   for (const prefix of norm.prefixes) addRuns(prefix);
+  // Market tags lifted off the tail. Without these the only thing telling two
+  // feeds apart would be the very text `normalize` just removed, so a channel
+  // sold into several markets would be unaddressable.
+  for (const region of norm.regions) {
+    const key = matchKey(region);
+    if (key) keys.add(key);
+  }
   addRuns(norm.name);
 
   qualifierCache.set(norm, keys);

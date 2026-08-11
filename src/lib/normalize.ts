@@ -18,6 +18,8 @@
  * before paying for a probe.
  */
 
+import { iso31661 } from 'iso-3166';
+
 /** Resolution markers, mapped to the vertical resolution they imply. */
 const QUALITY_TOKENS: Record<string, { tier: string; height: number }> = {
   UHD: { tier: 'uhd', height: 2160 },
@@ -42,6 +44,16 @@ const CODEC_TOKENS: Record<string, string> = {
 const AUDIO_TOKENS = new Set(['AAC', 'AC3', 'DTS', 'DD', 'DD+', 'ATMOS', '2.0', '5.1', '7.1']);
 const OTHER_TOKENS = new Set(['RAW', 'MULTI', 'HDR', 'VIP', 'BACKUP', 'ALT']);
 
+/**
+ * ISO 3166-1 alpha-2 codes, for the region tags providers hang off the end of a
+ * name ("Sports Alpha 1 HD TH MY" -- one feed, sold into two markets).
+ *
+ * From the standard rather than a hand-kept list: the register changes, and a
+ * stale copy fails silently -- the tag stays welded to the name and the channel
+ * simply stops matching, which is the failure this is fixing.
+ */
+const COUNTRY_CODES = new Set(iso31661.map((entry) => entry.alpha2));
+
 const RESOLUTION_RE = /^(\d{3,4})[PI]$/;
 const FPS_RE = /^(\d{2,3})FPS$/;
 const BRACKETED = /\[[^\]]*\]|\([^)]*\)/g;
@@ -51,6 +63,15 @@ const BRACKETED = /\[[^\]]*\]|\([^)]*\)/g;
  */
 const DECORATION = /[¹²³ʰ-˿ᴬ-ᶿ⁰-₟⁦-⁩]+/g;
 const SEPARATORS = /\s*[:|]\s*/;
+/**
+ * An opening delimiter, which carries no information on its own.
+ *
+ * Providers bracket the segment as often as they suffix it -- "|XX| Movie
+ * Network" alongside "XX|Movie Network". With the leading bar left in place the
+ * first separator sits at offset zero, so the segment never lifts and the whole
+ * bracket keys as part of the name.
+ */
+const LEADING_SEPARATOR = /^[\s:|]+/;
 
 export interface Quality {
   tier: string;
@@ -67,6 +88,13 @@ export interface NormalizedName {
   /** Leading "USA:" / "SPORTS |" segments, in order. */
   prefixes: string[];
   quality: Quality;
+  /**
+   * Trailing ISO 3166-1 alpha-2 market tags, in the order they were written.
+   *
+   * Kept rather than discarded because they are the only thing separating two
+   * otherwise identical names, and an `@` qualifier can select on them.
+   */
+  regions: string[];
   /** "+1", "+24" -- a different channel entirely, not a variant. */
   isTimeshift: boolean;
 }
@@ -97,8 +125,11 @@ export function normalize(raw: string, maxPrefixSegments = 3): NormalizedName {
   // contains a colon does not get eaten.
   const prefixes: string[] = [];
   for (let i = 0; i < maxPrefixSegments; i++) {
+    // Dropped per segment, not once: a bracketed segment leaves the *next*
+    // segment's opening delimiter at the front of what remains.
+    text = text.replace(LEADING_SEPARATOR, '');
     const match = SEPARATORS.exec(text);
-    if (!match || match.index === 0 || match.index > 25) break;
+    if (!match || match.index > 25) break;
     const head = text.slice(0, match.index).trim();
     if (!head || head.split(/\s+/).length > 4) break;
     prefixes.push(head);
@@ -113,6 +144,29 @@ export function normalize(raw: string, maxPrefixSegments = 3): NormalizedName {
   const flags = new Set<string>();
 
   const words = text.replace(/\+/g, '+ ').split(/\s+/).filter(Boolean);
+
+  /**
+   * Region tags met so far, held back rather than dropped.
+   *
+   * A trailing two-letter code is only noise when something else already marks
+   * the tail as noise -- plenty of real channel names end in a word that is also
+   * a country code ("Discovery ID", "Sky Atlantic IT"), and eating those would
+   * merge distinct channels. So a run of codes is committed only once the scan
+   * reaches a genuine quality token to its left, and restored to the name
+   * otherwise.
+   */
+  const regions: string[] = [];
+  let held: string[] = [];
+  const commit = (): void => {
+    // Right-to-left scan, so `held` is reversed relative to the name.
+    if (held.length > 0) regions.push(...held.reverse());
+    held = [];
+  };
+  const restore = (): void => {
+    if (held.length > 0) words.push(...held.reverse());
+    held = [];
+  };
+
   while (words.length > 0) {
     const token = words[words.length - 1]!.replace(/^[.,\-_]+|[.,\-_]+$/g, '').toUpperCase();
     if (!token) {
@@ -123,6 +177,24 @@ export function normalize(raw: string, maxPrefixSegments = 3): NormalizedName {
     const codecToken = CODEC_TOKENS[token];
     const resolution = RESOLUTION_RE.exec(token);
     const frames = FPS_RE.exec(token);
+    const known =
+      quality ||
+      codecToken ||
+      resolution ||
+      frames ||
+      AUDIO_TOKENS.has(token) ||
+      OTHER_TOKENS.has(token);
+
+    if (!known) {
+      // Recognised tokens win: the check runs here, after them, so a code that
+      // collides with a quality marker is still read as quality.
+      if (COUNTRY_CODES.has(token)) {
+        held.push(words.pop()!);
+        continue;
+      }
+      break;
+    }
+    commit();
 
     if (quality) {
       if (!tier) {
@@ -141,11 +213,13 @@ export function normalize(raw: string, maxPrefixSegments = 3): NormalizedName {
       }
     } else if (frames) {
       fps = fps || Number(frames[1]);
-    } else {
-      break;
     }
     words.pop();
   }
+
+  // Codes the scan ran past without ever reaching a quality token: part of the
+  // name after all.
+  restore();
 
   const name = words
     .join(' ')
@@ -157,6 +231,7 @@ export function normalize(raw: string, maxPrefixSegments = 3): NormalizedName {
     name,
     prefixes,
     quality: { tier, height, codec, fps, flags: [...flags].sort() },
+    regions,
     isTimeshift,
   };
 }

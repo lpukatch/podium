@@ -91,6 +91,44 @@ describe('normalize', () => {
     expect(matchKey('AMC')).not.toBe(matchKey('AMC+'));
     expect(matchKey('Paramount+')).not.toBe(matchKey('Paramount'));
   });
+
+  it('lifts a bracketed prefix', () => {
+    // The opening bar put the separator at offset zero, which broke the segment
+    // scan before it started and left the bracket welded to the name.
+    const n = normalize('|XX| Movie Network');
+    expect(n.name).toBe('Movie Network');
+    expect(n.prefixes).toEqual(['XX']);
+  });
+
+  it('lifts several bracketed prefixes', () => {
+    const n = normalize('|XX| |SPORT| Movie Network HD');
+    expect(n.name).toBe('Movie Network');
+    expect(n.prefixes).toEqual(['XX', 'SPORT']);
+  });
+
+  it('strips market tags that trail the quality marker', () => {
+    const n = normalize('Sports Alpha 1 HD TH MY');
+    expect(n.name).toBe('Sports Alpha 1');
+    expect(n.regions).toEqual(['TH', 'MY']);
+    // The tags used to halt the right-to-left scan, so the quality marker
+    // behind them was never read either.
+    expect(n.quality.tier).toBe('hd');
+  });
+
+  it('keeps a country code that is part of the name', () => {
+    // 'ID' is Indonesia and 'IT' is Italy, but here they are the channel. Only a
+    // quality token to their left marks them as tail noise.
+    expect(normalize('Discovery ID').name).toBe('Discovery ID');
+    expect(normalize('Discovery ID HD').name).toBe('Discovery ID');
+    expect(normalize('Sky Atlantic IT').name).toBe('Sky Atlantic IT');
+    expect(normalize('Sports Alpha 1 TH MY').name).toBe('Sports Alpha 1 TH MY');
+  });
+
+  it('keeps a market tag left of the quality marker', () => {
+    const n = normalize('Sports Alpha MY HD');
+    expect(n.name).toBe('Sports Alpha MY');
+    expect(n.regions).toEqual([]);
+  });
 });
 
 describe('scoring', () => {
@@ -490,6 +528,23 @@ describe('matcher', () => {
   it('scopes an alias to a required prefix', () => {
     const m = matcherFor({ channel_id: 1, aliases: ['@AU beIN Sports'] });
     const index = m.buildIndex([stream(10, 'AU: beIN Sports HD'), stream(11, 'US: beIN Sports')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('scopes an alias to a trailing market tag', () => {
+    // Stripping the tag off the name is what lets the plain alias match at all;
+    // without it being reachable by @, the two feeds would be indistinguishable.
+    const m = matcherFor({ channel_id: 1, aliases: ['@MY Sports Alpha 1'] });
+    const index = m.buildIndex([
+      stream(10, 'Sports Alpha 1 HD TH MY'),
+      stream(11, 'Sports Alpha 1 HD SG'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('matches a market-tagged name with a plain alias', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['Sports Alpha 1'] });
+    const index = m.buildIndex([stream(10, 'Sports Alpha 1 HD TH MY')]);
     expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
   });
 
