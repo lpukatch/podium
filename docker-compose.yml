@@ -1,0 +1,49 @@
+# Podium — one container, does everything.
+#
+#   docker compose up -d
+#
+# On first start it writes an empty rules.json into the volume and comes up with
+# nothing to check. Open the UI, pick a group, and add aliases; or import rules
+# you already have with:
+#
+#   docker compose run --rm podium node_modules/.bin/tsx src/scripts/import.ts \
+#     --json /path/to/export.json --out /app/data/rules.json
+
+services:
+  podium:
+    image: ghcr.io/lpukatch/podium:latest
+    container_name: podium
+    restart: unless-stopped
+    ports:
+      - "3456:3456"
+    environment:
+      # Where Dispatcharr lives, and how to authenticate. An API key is
+      # simplest; DISPATCHARR_USERNAME/PASSWORD works too and mints a JWT.
+      DISPATCHARR_URL: "http://dispatcharr:9191"
+      DISPATCHARR_API_KEY: "${DISPATCHARR_API_KEY:?set DISPATCHARR_API_KEY}"
+
+      TZ: "${TZ:-UTC}"
+
+      # Start by watching only. Podium reorders channels in Dispatcharr and the
+      # write has no undo, so see what it would do before letting it do it.
+      PODIUM_DRY_RUN: "true"
+
+      # Check every channel within this window, using only provider capacity
+      # nobody is watching with. Not a schedule -- a target.
+      PODIUM_MAX_AGE_MS: "86400000"
+      PODIUM_PAUSE_WHEN_WATCHING: "true"
+
+      # Keep streams the rules do not claim, ranked below the ones they do.
+      # "true" unassigns them instead, which is destructive.
+      PODIUM_REMOVE_UNMATCHED: "false"
+    volumes:
+      - podium-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3456/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      start_period: 25s
+      retries: 3
+
+volumes:
+  podium-data:

@@ -1,0 +1,22 @@
+node_modules/
+.next/
+out/
+build/
+coverage/
+*.tsbuildinfo
+next-env.d.ts
+.env
+.env.local
+.local/
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
+# An exported config can carry a live Dispatcharr API key in its settings blob.
+# Keep import inputs out of the repo entirely.
+data/*.json
+dist/
+
+# Local editor/agent state, per-machine. The glob catches the atomic-write temp
+# files that land next to it.
+.claude/settings.local.json*

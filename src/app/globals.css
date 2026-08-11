@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink: #1a1a19;
+  --color-muted: #6b6b66;
+  --color-line: #e4e4e1;
+  --color-panel: #ffffff;
+  --color-canvas: #fbfbfa;
+  --color-accent: #2f6f4e;
+  --color-accent-soft: #e8f2ec;
+  --color-warn: #8a5a1b;
+  --color-bad: #a33a2e;
+}
+
+@media (prefers-color-scheme: dark) {
+  @theme {
+    --color-ink: #e8e8e6;
+    --color-muted: #9a9a95;
+    --color-line: #2e3137;
+    --color-panel: #1d1f23;
+    --color-canvas: #16171a;
+    --color-accent: #6cc295;
+    --color-accent-soft: #1e3129;
+    --color-warn: #d9a55a;
+    --color-bad: #e0776a;
+  }
+}
+
+html,
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+}
+
+body {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* 16px base: the previous 14px read as cramped, and 16px also stops iOS
+     zooming the page when a text input takes focus. */
+  font-size: 16px;
+  line-height: 1.55;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}

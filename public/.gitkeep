@@ -1,0 +1,5 @@
+Next serves static assets from this directory and the Dockerfile copies it.
+Git does not track empty directories, so without this file the directory is
+absent from a fresh checkout and the image build fails on COPY --from=build
+/app/public -- which a local build never reproduces, because the directory
+exists on disk there.

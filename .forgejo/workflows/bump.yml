@@ -1,0 +1,166 @@
+name: Version Bump
+
+# Deliberately manual. This used to run on every push to main, which meant every
+# merged dependency bump cut a release and moved `latest` -- 52 tags in the first
+# few months. Releasing is now a decision somebody makes.
+#
+# The version *number* is still derived from the commits since the last tag
+# (feat: -> minor, BREAKING CHANGE/foo!: -> major, anything else -> patch), so
+# `auto` is almost always the right input. The tag this pushes is what triggers
+# the image build and the GitHub Release on the mirror.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: 'Version bump type'
+        required: true
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+
+jobs:
+  version-bump:
+    # This job only needs git + node, both of which the ubuntu-latest image has.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.BYPASS_TOKEN }}
+          # Without this the checkout is a detached HEAD at the pushed SHA, so
+          # the release commit below never advances local main and the push
+          # sends a stale ref.
+          ref: main
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "Forgejo Actions"
+          git config --global user.email "actions@forgejo.local"
+
+      - name: Get last version tag
+        id: get_version
+        run: |
+          # `git tag -l` exits 0 even when it prints nothing, so `|| echo` never
+          # fires on a repo with no tags -- LATEST_TAG came out empty, the
+          # first-release branch below was skipped, and the version arithmetic
+          # produced "..NaN". Default explicitly instead.
+          LATEST_TAG=$(git tag -l "v*" --sort=-v:refname | head -n 1)
+          LATEST_TAG=${LATEST_TAG:-v0.0.0}
+          echo "latest_tag=${LATEST_TAG}" >> $GITHUB_OUTPUT
+          echo "Latest tag: ${LATEST_TAG}"
+
+      - name: Determine version bump type
+        id: bump_type
+        run: |
+          BUMP_TYPE="${{ github.event.inputs.bump_type }}"
+          LAST_TAG="${{ steps.get_version.outputs.latest_tag }}"
+
+          if [ "$LAST_TAG" != "v0.0.0" ]; then
+            COMMIT_COUNT=$(git rev-list ${LAST_TAG}..HEAD --count)
+            if [ "$COMMIT_COUNT" = "0" ]; then
+              echo "No commits since ${LAST_TAG}. Nothing to version."
+              echo "skip=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+
+          if [ "$BUMP_TYPE" != "auto" ] && [ -n "$BUMP_TYPE" ]; then
+            echo "bump=${BUMP_TYPE}" >> $GITHUB_OUTPUT
+            echo "skip=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          if [ "$LAST_TAG" = "v0.0.0" ]; then
+            echo "bump=minor" >> $GITHUB_OUTPUT
+            echo "skip=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          COMMITS=$(git log ${LAST_TAG}..HEAD --pretty=format:"%s")
+          if echo "$COMMITS" | grep -qiE "BREAKING CHANGE:|^[a-z]+!:"; then
+            echo "bump=major" >> $GITHUB_OUTPUT
+          elif echo "$COMMITS" | grep -qE "^feat(\(.+\))?:"; then
+            echo "bump=minor" >> $GITHUB_OUTPUT
+          else
+            echo "bump=patch" >> $GITHUB_OUTPUT
+          fi
+          echo "skip=false" >> $GITHUB_OUTPUT
+
+      - name: Bump version and push
+        id: version
+        if: steps.bump_type.outputs.skip != 'true'
+        run: |
+          BUMP_TYPE="${{ steps.bump_type.outputs.bump }}"
+          LATEST_TAG="${{ steps.get_version.outputs.latest_tag }}"
+          CURRENT_VERSION="${LATEST_TAG#v}"
+          
+          # Calculate new version
+          NEW_VERSION=$(node -e "
+          const v = '$CURRENT_VERSION'.split('.');
+          if ('$BUMP_TYPE' === 'major') { v[0] = String(Number(v[0])+1); v[1] = '0'; v[2] = '0'; }
+          else if ('$BUMP_TYPE' === 'minor') { v[1] = String(Number(v[1])+1); v[2] = '0'; }
+          else { v[2] = String(Number(v[2])+1); }
+          console.log(v.join('.'));
+          ")
+
+          echo "Bumping from $CURRENT_VERSION to $NEW_VERSION"
+
+          # Update package.json version
+          node -e "
+          const fs = require('fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.version = '$NEW_VERSION';
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+          git add package.json
+          if git diff --cached --quiet; then
+            echo "package.json already at version $NEW_VERSION, skipping commit"
+          else
+            git commit -m "chore(release): v$NEW_VERSION"
+          fi
+          git tag -a "v$NEW_VERSION" -m "Release v$NEW_VERSION"
+          git push origin HEAD:main --follow-tags
+          
+          echo "new_version=v$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "version_number=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Generate changelog
+        id: changelog
+        if: steps.bump_type.outputs.skip != 'true'
+        run: |
+          LAST_TAG="${{ steps.get_version.outputs.latest_tag }}"
+          NEW_VERSION="${{ steps.version.outputs.new_version }}"
+          echo "## Changelog" > /tmp/changelog.md
+          # On a first release there is no previous tag to diff against, so walk
+          # the whole history rather than an invalid range.
+          if [ "$LAST_TAG" = "v0.0.0" ]; then
+            git log ${NEW_VERSION} --pretty=format:"- %s (%h)" >> /tmp/changelog.md
+          else
+            git log ${LAST_TAG}..${NEW_VERSION} --pretty=format:"- %s (%h)" >> /tmp/changelog.md
+          fi
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          cat /tmp/changelog.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ "${{ steps.bump_type.outputs.skip }}" = "true" ]; then
+            echo "## ⏭️ Version Bump Skipped" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## 🎉 Version Released" >> $GITHUB_STEP_SUMMARY
+            echo "- **Previous Version**: ${{ steps.get_version.outputs.latest_tag }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **New Version**: ${{ steps.version.outputs.new_version }}" >> $GITHUB_STEP_SUMMARY
+            echo "### Changes" >> $GITHUB_STEP_SUMMARY
+            echo "${{ steps.changelog.outputs.changelog }}" >> $GITHUB_STEP_SUMMARY
+          fi

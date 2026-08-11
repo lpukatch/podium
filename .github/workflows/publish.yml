@@ -1,0 +1,86 @@
+name: Publish
+
+# Two different things, deliberately kept apart:
+#
+#   push to main  -> ghcr.io/...:main       an edge image, for tracking main
+#   tag v*        -> :X.Y.Z :X.Y :latest    a release, plus a GitHub Release
+#
+# `latest` only ever moves on a tag, so pulling `latest` gets a version somebody
+# chose to cut rather than whatever landed on main last.
+#
+# Tags arrive here by mirror from the upstream Forgejo repo, which is where
+# version bumping lives. Nothing in this repo writes commits: a mirror push is a
+# force push, so anything committed here would be overwritten.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # softprops/action-gh-release
+      packages: write # push to ghcr
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.title=podium
+            org.opencontainers.image.description=Provider-aware stream checker and reorderer for Dispatcharr
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          # amd64 only: an arm64 pass costs a full QEMU-emulated Next.js build.
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Skips the attestation manifest, which otherwise shows up on the
+          # packages page as an "unknown/unknown" platform entry.
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+          body: |
+            ```sh
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            ```

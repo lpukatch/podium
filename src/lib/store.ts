@@ -1,0 +1,856 @@
+/**
+ * Probe result cache and run history.
+ *
+ * The cache is the second big lever after provider lanes. A full pass over a
+ * few thousand mapped streams is a day of probe work at tens of seconds each,
+ * no matter how well it is scheduled. But provider stream sets barely change
+ * between runs, so most of that work is repeated for nothing.
+ *
+ * Dispatcharr gives every stream a `stream_hash`. Keying the cache on
+ * `(streamId, streamHash)` means a stream is re-probed only when the provider
+ * actually changes it, or when the cached verdict ages out. Dead streams get a
+ * much shorter TTL than live ones -- a dead stream is the thing most likely to
+ * have come back, and the thing most worth rechecking.
+ *
+ * That last part is only true of a stream that *just* died. A stream dead on
+ * twenty consecutive checks is not coming back between now and the next one,
+ * and rechecking it every three hours forever is the single largest source of
+ * pointless work here: a small set of permanently dead streams can account for
+ * something like 40% of all probes in a day, every one of them re-confirming
+ * HTTP 4XX and "Invalid data found" against the same URLs. Worse, that trickle
+ * is never empty, so the worker's idle sleep never engages and every pass pays
+ * a full catalogue crawl. So the dead TTL doubles per consecutive dead verdict,
+ * up to a cap: quick to notice a stream that comes back, cheap about one that
+ * does not. See `deadTtlFor`.
+ *
+ * Together the cache and the backoff keep the large majority of streams out of
+ * the queue on a steady-state pass.
+ */
+
+import Database from 'better-sqlite3';
+import { mkdirSync } from 'fs';
+import { dirname } from 'path';
+import type { ProbeResult } from './probe';
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS probe_cache (
+    stream_id    INTEGER NOT NULL,
+    stream_hash  TEXT    NOT NULL,
+    probed_at    INTEGER NOT NULL,
+    alive        INTEGER NOT NULL,
+    result       TEXT    NOT NULL,
+    -- Consecutive dead verdicts, reset to 0 by any alive one. Drives the
+    -- backoff in deadTtlFor().
+    dead_streak  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (stream_id, stream_hash)
+);
+CREATE INDEX IF NOT EXISTS probe_cache_probed_at ON probe_cache (probed_at);
+
+CREATE TABLE IF NOT EXISTS runs (
+    run_id           TEXT PRIMARY KEY,
+    started_at       INTEGER NOT NULL,
+    finished_at      INTEGER,
+    channels         INTEGER NOT NULL DEFAULT 0,
+    probed           INTEGER NOT NULL DEFAULT 0,
+    cached           INTEGER NOT NULL DEFAULT 0,
+    dead             INTEGER NOT NULL DEFAULT 0,
+    reordered        INTEGER NOT NULL DEFAULT 0,
+    unchanged        INTEGER NOT NULL DEFAULT 0,
+    skipped          INTEGER NOT NULL DEFAULT 0,
+    deferred         INTEGER NOT NULL DEFAULT 0,
+    backlog          INTEGER NOT NULL DEFAULT 0,
+    next_due_at      INTEGER,
+    oldest_probed_at INTEGER,
+    error            TEXT
+);
+CREATE INDEX IF NOT EXISTS runs_started_at ON runs (started_at DESC);
+
+-- Single-row live progress. The worker and the UI are separate processes
+-- sharing this database, so progress goes through SQLite (WAL) rather than
+-- in-process state the UI could never see.
+-- Singleton worker lock. Two workers would double-probe every stream and race
+-- each other's reorders into Dispatcharr, and their progress rows would stomp
+-- on one another. A rolling deploy briefly runs two, so this cannot rely on
+-- replicas=1 alone.
+CREATE TABLE IF NOT EXISTS worker_lock (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    owner       TEXT    NOT NULL,
+    heartbeat   INTEGER NOT NULL
+);
+
+-- Settings edited in the UI. Env vars seed these; a stored value wins, so an
+-- install configured by environment keeps working and a change made in the UI
+-- actually takes effect.
+CREATE TABLE IF NOT EXISTS settings (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS progress (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    updated_at  INTEGER NOT NULL,
+    payload     TEXT    NOT NULL
+);
+`;
+
+export interface Progress {
+  runId: string | null;
+  phase: 'idle' | 'fetching' | 'planning' | 'probing' | 'paused' | 'done' | 'failed';
+  startedAt: number | null;
+  probed: number;
+  total: number;
+  dead: number;
+  reordered: number;
+  /** Channels checked and found already in the right order. */
+  unchanged: number;
+  cached: number;
+  deferred: number;
+  /**
+   * Streams waiting for a probe, and when the next verdict expires.
+   *
+   * Both count only streams a pass could actually probe -- matched by a rule
+   * and on an eligible channel. The cache as a whole cannot answer this: a
+   * verdict on an excluded channel expires like any other and is never
+   * refreshed, so a cache-wide number would report work that never happens.
+   */
+  backlog: number;
+  dueAt: number | null;
+  heldBack: Record<string, number>;
+  lanes: Array<{
+    id: number;
+    name: string;
+    limit: number;
+    /** Probes that returned a verdict this run, alive or dead (reads as progress). */
+    done: number;
+    /** Probes that came back dead. Absent on a row from an older worker. */
+    dead?: number;
+    /** Probes that errored rather than returning a verdict -- an actual failure. */
+    failed: number;
+    queued: number;
+    /**
+     * Channels this lane is probing right now.
+     *
+     * The runner has always emitted this and the progress view has always read
+     * it; the type simply never declared it, which slipped through because it
+     * arrives from a function return rather than an object literal.
+     */
+    current: string[];
+  }>;
+  message: string;
+  /**
+   * When the next pass is due, and the cadence and target it is working to.
+   *
+   * Without these the UI could say what a run *did* but never when the next one
+   * happens, which makes a paced trickle look like a loop firing at random.
+   */
+  nextRunAt: number | null;
+  tickMs: number;
+  maxAgeMs: number;
+  /**
+   * The least-recently probed *managed* stream, or null before the first pass.
+   *
+   * The cache-wide MIN(probed_at) also counts verdicts on excluded, unmatched,
+   * or removed streams that the pacer never rechecks, so it drifts past the
+   * target whatever the real freshness. This is that number restricted to the
+   * streams the worker actually manages (matched + eligible), sourced from
+   * `plan()` -- the same set `backlog` and `dueAt` already describe. Absent on a
+   * progress row written by an older worker, so readers fall back to the cache.
+   */
+  oldestManagedProbedAt?: number | null;
+  updatedAt: number;
+}
+
+/**
+ * Beyond this with no heartbeat, the worker holding the lock is considered gone.
+ *
+ * One definition for the lock's own takeover window, the health endpoint, the
+ * metrics gauge and the progress page, so the four cannot disagree about
+ * whether a worker is alive. Generous next to the 30s heartbeat interval: a
+ * missed beat under load is not an outage.
+ */
+export const STALE_LOCK_MS = 120_000;
+
+export const IDLE_PROGRESS: Progress = {
+  runId: null,
+  phase: 'idle',
+  startedAt: null,
+  probed: 0,
+  total: 0,
+  dead: 0,
+  reordered: 0,
+  unchanged: 0,
+  cached: 0,
+  deferred: 0,
+  backlog: 0,
+  dueAt: null,
+  heldBack: {},
+  lanes: [],
+  message: '',
+  nextRunAt: null,
+  tickMs: 0,
+  maxAgeMs: 0,
+  oldestManagedProbedAt: null,
+  updatedAt: 0,
+};
+
+export interface RunRow {
+  run_id: string;
+  started_at: number;
+  finished_at: number | null;
+  channels: number;
+  probed: number;
+  cached: number;
+  dead: number;
+  reordered: number;
+  unchanged?: number;
+  skipped: number;
+  deferred?: number;
+  backlog?: number;
+  next_due_at?: number | null;
+  oldest_probed_at?: number | null;
+  error: string | null;
+}
+
+/**
+ * What the cache says about the library as a whole.
+ *
+ * The progress page used to answer only "what is this pass doing", which on a
+ * settled install is "nothing, again" once a minute. These are the numbers that
+ * are still interesting when there is no work to do: how much is alive, how
+ * stale it is getting, and when anything next falls due.
+ */
+export interface CacheHealth {
+  total: number;
+  alive: number;
+  dead: number;
+  oldestProbedAt: number | null;
+  newestProbedAt: number | null;
+  /** Verdicts already past their TTL: the work the next pass would pick up. */
+  due: number;
+  /** When the earliest verdict expires. Null when the cache is empty. */
+  nextDueAt: number | null;
+  /** Verdict ages in coarse buckets, so freshness reads as a distribution. */
+  ages: { hour: number; sixHours: number; day: number; older: number };
+}
+
+export interface RunStats {
+  passes: number;
+  /** Passes that actually probed or rewrote something. */
+  working: number;
+  probed: number;
+  dead: number;
+  reordered: number;
+  failed: number;
+}
+
+/** One hour of run history, for the activity chart. */
+export interface ActivityBucket {
+  from: number;
+  probed: number;
+  dead: number;
+}
+
+export interface RunUpdate {
+  channels?: number;
+  probed?: number;
+  cached?: number;
+  dead?: number;
+  reordered?: number;
+  unchanged?: number;
+  skipped?: number;
+  deferred?: number;
+  backlog?: number;
+  nextDueAt?: number | null;
+  oldestProbedAt?: number | null;
+  error?: string;
+}
+
+/**
+ * How long a dead verdict is trusted, given how many times running it has been dead.
+ *
+ * Doubles per consecutive dead verdict and stops at `deadTtlMaxMs`: with the
+ * defaults that is 3h, 6h, 12h, 24h, 24h, ... A stream that dies is still
+ * rechecked within the base TTL, because the streak is 1 at that point; only
+ * one that keeps failing gets left alone.
+ *
+ * The cap defaults to the base TTL, which makes the backoff opt-in: a caller
+ * that passes no cap gets the old flat behaviour exactly, and setting
+ * PODIUM_DEAD_TTL_MAX_MS equal to PODIUM_DEAD_TTL_MS turns it off in
+ * production. A cap below the base is a typo rather than a request to expire
+ * dead verdicts faster than live ones, so it is raised to the base.
+ *
+ * The exponent is clamped before it is used: `2 ** 1024` is Infinity, and a
+ * stream dead every three hours for a year would otherwise reach it and make
+ * the verdict permanent.
+ */
+export function deadTtlFor(
+  deadStreak: number,
+  deadTtlMs: number,
+  deadTtlMaxMs: number = deadTtlMs,
+): number {
+  const cap = Math.max(deadTtlMaxMs, deadTtlMs);
+  const doublings = Math.min(Math.max(Math.floor(deadStreak) - 1, 0), 30);
+  return Math.min(deadTtlMs * 2 ** doublings, cap);
+}
+
+/** The TTL that applies to one cached verdict. The single source for it. */
+export function ttlFor(
+  alive: boolean,
+  deadStreak: number,
+  liveTtlMs: number,
+  deadTtlMs: number,
+  deadTtlMaxMs: number = deadTtlMs,
+): number {
+  return alive ? liveTtlMs : deadTtlFor(deadStreak, deadTtlMs, deadTtlMaxMs);
+}
+
+/** A cached verdict with the bookkeeping `ttlFor` needs. */
+export interface CacheEntry {
+  probedAt: number;
+  alive: boolean;
+  deadStreak: number;
+  result: ProbeResult | null;
+}
+
+export class Store {
+  private readonly db: Database.Database;
+  private static initializedPaths = new Set<string>();
+
+  constructor(path: string) {
+    mkdirSync(dirname(path), { recursive: true });
+    this.db = new Database(path);
+    this.db.pragma('journal_mode = WAL');
+    this.db.pragma('synchronous = NORMAL');
+
+    if (path === ':memory:' || !Store.initializedPaths.has(path)) {
+      this.db.exec(SCHEMA);
+      for (const [table, col] of [
+        ['runs', 'unchanged INTEGER NOT NULL DEFAULT 0'],
+        ['runs', 'deferred INTEGER NOT NULL DEFAULT 0'],
+        ['runs', 'backlog INTEGER NOT NULL DEFAULT 0'],
+        ['runs', 'next_due_at INTEGER'],
+        ['runs', 'oldest_probed_at INTEGER'],
+        // Existing rows land on 0, which `deadTtlFor` treats as the base TTL:
+        // an install upgrading in place re-probes its dead streams once at the
+        // old cadence and starts backing them off from there, rather than
+        // inheriting a streak it never measured.
+        ['probe_cache', 'dead_streak INTEGER NOT NULL DEFAULT 0'],
+      ] as const) {
+        try {
+          this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`);
+        } catch {
+          // column already exists
+        }
+      }
+      if (path !== ':memory:') {
+        Store.initializedPaths.add(path);
+      }
+    }
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
+  /**
+   * The stored verdict for a stream, whether or not it is still within its TTL.
+   *
+   * One query for what the planner used to take two to learn -- it needed the
+   * age for pacing and the result for the cache hit, and now needs the streak
+   * for the TTL as well. At ~1,700 managed streams a pass that is thousands of
+   * round trips a minute saved.
+   */
+  entry(streamId: number, streamHash: string): CacheEntry | null {
+    const row = this.db
+      .prepare(
+        `SELECT probed_at, alive, result, dead_streak FROM probe_cache
+         WHERE stream_id = ? AND stream_hash = ?`,
+      )
+      .get(streamId, streamHash) as
+      | { probed_at: number; alive: number; result: string; dead_streak: number }
+      | undefined;
+    if (!row) return null;
+
+    let result: ProbeResult | null = null;
+    try {
+      result = JSON.parse(row.result) as ProbeResult;
+    } catch {
+      // An unreadable row is an unknown verdict, but its age and streak are
+      // still good -- it was written by a probe that did happen.
+    }
+    return {
+      probedAt: row.probed_at,
+      alive: Boolean(row.alive),
+      deadStreak: row.dead_streak ?? 0,
+      result,
+    };
+  }
+
+  /** A cached result, if still valid for this hash and within its TTL. */
+  get(
+    streamId: number,
+    streamHash: string,
+    liveTtlMs: number,
+    deadTtlMs: number,
+    deadTtlMaxMs: number = deadTtlMs,
+  ): ProbeResult | null {
+    const row = this.entry(streamId, streamHash);
+    if (!row) return null;
+
+    const ttl = ttlFor(row.alive, row.deadStreak, liveTtlMs, deadTtlMs, deadTtlMaxMs);
+    // `>=`, not `>`: a TTL of 0 must mean "never serve from cache", and with a
+    // strict `>` a same-millisecond write would still be a hit.
+    if (Date.now() - row.probedAt >= ttl) return null;
+    return row.result;
+  }
+
+  /** Age of the cached entry in ms, or null when absent. Drives the pacer. */
+  age(streamId: number, streamHash: string): number | null {
+    const row = this.db
+      .prepare('SELECT probed_at FROM probe_cache WHERE stream_id = ? AND stream_hash = ?')
+      .get(streamId, streamHash) as { probed_at: number } | undefined;
+    return row ? Date.now() - row.probed_at : null;
+  }
+
+  /**
+   * Record a verdict, maintaining the consecutive-dead count.
+   *
+   * The streak is updated in the same statement that writes the verdict rather
+   * than read-then-written: the worker holds the lock so nothing else writes
+   * here, but a count that can silently skip on a retry is not worth the risk
+   * when SQL expresses it exactly.
+   */
+  put(streamId: number, streamHash: string, result: ProbeResult): void {
+    this.db
+      .prepare(
+        `INSERT INTO probe_cache (stream_id, stream_hash, probed_at, alive, result, dead_streak)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(stream_id, stream_hash) DO UPDATE SET
+           probed_at   = excluded.probed_at,
+           alive       = excluded.alive,
+           result      = excluded.result,
+           dead_streak = CASE WHEN excluded.alive = 1 THEN 0
+                              ELSE probe_cache.dead_streak + 1 END`,
+      )
+      .run(
+        streamId,
+        streamHash,
+        Date.now(),
+        result.alive ? 1 : 0,
+        JSON.stringify(result),
+        result.alive ? 0 : 1,
+      );
+  }
+
+  startRun(runId: string): void {
+    this.db
+      .prepare('INSERT OR REPLACE INTO runs (run_id, started_at) VALUES (?, ?)')
+      .run(runId, Date.now());
+  }
+
+  finishRun(runId: string, fields: RunUpdate = {}): void {
+    const columnMap: Array<[keyof RunUpdate, string]> = [
+      ['channels', 'channels'],
+      ['probed', 'probed'],
+      ['cached', 'cached'],
+      ['dead', 'dead'],
+      ['reordered', 'reordered'],
+      ['unchanged', 'unchanged'],
+      ['skipped', 'skipped'],
+      ['deferred', 'deferred'],
+      ['backlog', 'backlog'],
+      ['nextDueAt', 'next_due_at'],
+      ['oldestProbedAt', 'oldest_probed_at'],
+      ['error', 'error'],
+    ];
+    const entries = columnMap
+      .filter(([key]) => fields[key] !== undefined)
+      .map(([key, col]) => [col, fields[key]] as const);
+    const setClause = entries.map(([col]) => `${col} = ?`).join(', ');
+    this.db
+      .prepare(
+        `UPDATE runs SET finished_at = ?${setClause ? `, ${setClause}` : ''} WHERE run_id = ?`,
+      )
+      .run(Date.now(), ...entries.map(([, value]) => value as string | number), runId);
+  }
+
+  /**
+   * Cached verdicts for a set of streams, keyed by stream id.
+   *
+   * Batched rather than one `get` per stream: the editor wants the last probe
+   * time and result for every stream on a channel at once, and a query per
+   * stream would be dozens of round trips for one page render.
+   */
+  verdicts(
+    streamIds: number[],
+  ): Map<number, { probedAt: number; alive: boolean; result: ProbeResult }> {
+    const out = new Map<number, { probedAt: number; alive: boolean; result: ProbeResult }>();
+    if (streamIds.length === 0) return out;
+
+    // Chunked to stay under SQLite's bound-variable limit on a large channel.
+    for (let i = 0; i < streamIds.length; i += 400) {
+      const chunk = streamIds.slice(i, i + 400);
+      const holes = chunk.map(() => '?').join(',');
+      const rows = this.db
+        .prepare(
+          `SELECT stream_id, probed_at, alive, result FROM probe_cache
+           WHERE stream_id IN (${holes})`,
+        )
+        .all(...chunk) as Array<{
+        stream_id: number;
+        probed_at: number;
+        alive: number;
+        result: string;
+      }>;
+      for (const row of rows) {
+        try {
+          out.set(row.stream_id, {
+            probedAt: row.probed_at,
+            alive: Boolean(row.alive),
+            result: JSON.parse(row.result) as ProbeResult,
+          });
+        } catch {
+          // An unreadable row is simply an unknown verdict.
+        }
+      }
+    }
+    return out;
+  }
+
+  recentRuns(limit = 20): RunRow[] {
+    // rowid breaks ties: two runs started in the same millisecond would
+    // otherwise come back in arbitrary order.
+    return this.db
+      .prepare('SELECT * FROM runs ORDER BY started_at DESC, rowid DESC LIMIT ?')
+      .all(limit) as RunRow[];
+  }
+
+  /**
+   * Claim the worker lock, or report who holds it.
+   *
+   * A lock whose heartbeat has gone stale is taken over: a worker that was
+   * SIGKILLed never releases, and the alternative is a deployment that stays
+   * dead until someone clears a row by hand.
+   */
+  acquireLock(owner: string, staleAfterMs = STALE_LOCK_MS): { ok: boolean; heldBy?: string } {
+    const now = Date.now();
+    const row = this.db.prepare('SELECT owner, heartbeat FROM worker_lock WHERE id = 1').get() as
+      | { owner: string; heartbeat: number }
+      | undefined;
+
+    if (row && row.owner !== owner && now - row.heartbeat < staleAfterMs) {
+      return { ok: false, heldBy: row.owner };
+    }
+    this.db
+      .prepare(
+        `INSERT INTO worker_lock (id, owner, heartbeat) VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET owner = excluded.owner, heartbeat = excluded.heartbeat`,
+      )
+      .run(owner, now);
+    return { ok: true };
+  }
+
+  heartbeat(owner: string): void {
+    this.db
+      .prepare('UPDATE worker_lock SET heartbeat = ? WHERE id = 1 AND owner = ?')
+      .run(Date.now(), owner);
+  }
+
+  releaseLock(owner: string): void {
+    this.db.prepare('DELETE FROM worker_lock WHERE id = 1 AND owner = ?').run(owner);
+  }
+
+  /** Every stored setting. */
+  settings(): Record<string, string> {
+    const rows = this.db.prepare('SELECT key, value FROM settings').all() as Array<{
+      key: string;
+      value: string;
+    }>;
+    return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  }
+
+  /**
+   * Write settings. A value of null removes the key, which is how a field is
+   * handed back to whatever the environment provides.
+   */
+  setSettings(values: Record<string, string | null>): void {
+    const upsert = this.db.prepare(
+      `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    );
+    const remove = this.db.prepare('DELETE FROM settings WHERE key = ?');
+    const now = Date.now();
+    this.db.transaction(() => {
+      for (const [key, value] of Object.entries(values)) {
+        if (value === null) remove.run(key);
+        else upsert.run(key, value, now);
+      }
+    })();
+  }
+
+  /** When settings last changed, so readers can cheaply detect an edit. */
+  settingsVersion(): number {
+    const row = this.db.prepare('SELECT MAX(updated_at) AS v FROM settings').get() as {
+      v: number | null;
+    };
+    return row.v ?? 0;
+  }
+
+  setProgress(progress: Omit<Progress, 'updatedAt'>): void {
+    this.db
+      .prepare(
+        `INSERT INTO progress (id, updated_at, payload) VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at, payload = excluded.payload`,
+      )
+      .run(Date.now(), JSON.stringify(progress));
+  }
+
+  getProgress(): Progress {
+    const row = this.db.prepare('SELECT updated_at, payload FROM progress WHERE id = 1').get() as
+      | { updated_at: number; payload: string }
+      | undefined;
+    if (!row) return IDLE_PROGRESS;
+    try {
+      return { ...(JSON.parse(row.payload) as Progress), updatedAt: row.updated_at };
+    } catch {
+      return IDLE_PROGRESS;
+    }
+  }
+
+  /**
+   * Aggregate probe-cache state, for metrics.
+   *
+   * `oldestProbedAt` is the freshness signal that matters: the pacer targets
+   * "every stream checked within max_age", so the oldest entry is how far
+   * behind that target the install actually is.
+   */
+  cacheStats(): { total: number; alive: number; dead: number; oldestProbedAt: number | null } {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS total,
+                COALESCE(SUM(alive), 0) AS alive,
+                MIN(probed_at) AS oldest
+         FROM probe_cache`,
+      )
+      .get() as { total: number; alive: number; oldest: number | null };
+    return {
+      total: row.total,
+      alive: row.alive,
+      dead: row.total - row.alive,
+      oldestProbedAt: row.oldest,
+    };
+  }
+
+  /** Cache state as the progress page reads it: alive, dead, stale, due. */
+  cacheHealth(
+    liveTtlMs: number,
+    deadTtlMs: number,
+    now = Date.now(),
+    deadTtlMaxMs: number = deadTtlMs,
+  ): CacheHealth {
+    // `deadTtlFor` in SQL, so "when is this due" answers the same here as it
+    // does in the planner. Two-argument MIN/MAX are SQLite's scalar forms, not
+    // aggregates; the shift is the doubling and is clamped for the same reason
+    // the TypeScript is.
+    const ttl = `CASE alive WHEN 1 THEN :live
+                      ELSE MIN(:deadMax, :dead * (1 << MIN(MAX(dead_streak - 1, 0), 30)))
+                 END`;
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS total,
+                COALESCE(SUM(alive), 0)      AS alive,
+                MIN(probed_at)               AS oldest,
+                MAX(probed_at)               AS newest,
+                MIN(probed_at + ${ttl}) AS nextDue,
+                COALESCE(SUM(probed_at + ${ttl}
+                             <= :now), 0)    AS due,
+                COALESCE(SUM(probed_at >  :now - 3600000), 0)  AS hour,
+                COALESCE(SUM(probed_at <= :now - 3600000
+                         AND probed_at >  :now - 21600000), 0) AS sixHours,
+                COALESCE(SUM(probed_at <= :now - 21600000
+                         AND probed_at >  :now - 86400000), 0) AS day,
+                COALESCE(SUM(probed_at <= :now - 86400000), 0) AS older
+         FROM probe_cache`,
+      )
+      .get({
+        live: liveTtlMs,
+        dead: deadTtlMs,
+        deadMax: Math.max(deadTtlMaxMs, deadTtlMs),
+        now,
+      }) as Record<string, number | null>;
+    const total = (row.total as number) ?? 0;
+    const alive = (row.alive as number) ?? 0;
+    return {
+      total,
+      alive,
+      dead: total - alive,
+      oldestProbedAt: row.oldest ?? null,
+      newestProbedAt: row.newest ?? null,
+      due: (row.due as number) ?? 0,
+      nextDueAt: row.nextDue ?? null,
+      ages: {
+        hour: (row.hour as number) ?? 0,
+        sixHours: (row.sixHours as number) ?? 0,
+        day: (row.day as number) ?? 0,
+        older: (row.older as number) ?? 0,
+      },
+    };
+  }
+
+  /** Run totals over a window -- "what has it done today", not since install. */
+  runStats(sinceMs: number): RunStats {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS passes,
+                COALESCE(SUM(probed > 0 OR reordered > 0), 0) AS working,
+                COALESCE(SUM(probed), 0)    AS probed,
+                COALESCE(SUM(dead), 0)      AS dead,
+                COALESCE(SUM(reordered), 0) AS reordered,
+                COALESCE(SUM(error IS NOT NULL), 0) AS failed
+         FROM runs WHERE started_at >= ?`,
+      )
+      .get(sinceMs) as Record<string, number>;
+    return {
+      passes: row.passes ?? 0,
+      working: row.working ?? 0,
+      probed: row.probed ?? 0,
+      dead: row.dead ?? 0,
+      reordered: row.reordered ?? 0,
+      failed: row.failed ?? 0,
+    };
+  }
+
+  /**
+   * Probes per hour over the recent past, oldest bucket first.
+   *
+   * Empty hours are filled in rather than omitted: a gap in the chart is the
+   * interesting part, and a sparse array would draw as if it never happened.
+   */
+  activity(hours = 24, now = Date.now()): ActivityBucket[] {
+    const start = Math.floor(now / 3_600_000) * 3_600_000 - (hours - 1) * 3_600_000;
+    const rows = this.db
+      .prepare(
+        // CAST, because a bound JS number arrives as a REAL and float division
+        // would give 5.43 rather than the bucket index 5.
+        `SELECT CAST((started_at - :start) / 3600000 AS INTEGER) AS bucket,
+                COALESCE(SUM(probed), 0) AS probed,
+                COALESCE(SUM(dead), 0)   AS dead
+         FROM runs WHERE started_at >= :start GROUP BY bucket`,
+      )
+      .all({ start }) as Array<{ bucket: number; probed: number; dead: number }>;
+    const byBucket = new Map(rows.map((r) => [r.bucket, r]));
+    return Array.from({ length: hours }, (_, i) => ({
+      from: start + i * 3_600_000,
+      probed: byBucket.get(i)?.probed ?? 0,
+      dead: byBucket.get(i)?.dead ?? 0,
+    }));
+  }
+
+  /** Lifetime totals across every recorded run. */
+  runTotals(): {
+    runs: number;
+    failed: number;
+    probed: number;
+    cached: number;
+    dead: number;
+    reordered: number;
+    skipped: number;
+  } {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS runs,
+                COALESCE(SUM(error IS NOT NULL), 0) AS failed,
+                COALESCE(SUM(probed), 0)    AS probed,
+                COALESCE(SUM(cached), 0)    AS cached,
+                COALESCE(SUM(dead), 0)      AS dead,
+                COALESCE(SUM(reordered), 0) AS reordered,
+                COALESCE(SUM(skipped), 0)   AS skipped
+         FROM runs`,
+      )
+      .get() as Record<string, number>;
+    return {
+      runs: row.runs ?? 0,
+      failed: row.failed ?? 0,
+      probed: row.probed ?? 0,
+      cached: row.cached ?? 0,
+      dead: row.dead ?? 0,
+      reordered: row.reordered ?? 0,
+      skipped: row.skipped ?? 0,
+    };
+  }
+
+  /** Who holds the worker lock, and how fresh their heartbeat is. */
+  lockState(): { owner: string; heartbeat: number } | null {
+    const row = this.db.prepare('SELECT owner, heartbeat FROM worker_lock WHERE id = 1').get() as
+      | { owner: string; heartbeat: number }
+      | undefined;
+    return row ?? null;
+  }
+
+  /** Drop cache rows untouched for a month, so the file cannot grow forever. */
+  prune(olderThanMs = 30 * 86_400_000): number {
+    return this.db
+      .prepare('DELETE FROM probe_cache WHERE probed_at < ?')
+      .run(Date.now() - olderThanMs).changes;
+  }
+
+  /** Hard reset for all historical and cached data. */
+  resetData(): void {
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM probe_cache').run();
+      this.db.prepare('DELETE FROM runs').run();
+    })();
+  }
+
+  /**
+   * Drop cache rows for streams no longer managed, so a stream that was probed
+   * and then excluded, unmatched, or removed from every lineup does not linger
+   * and drag the freshness numbers past the target forever.
+   *
+   * `keep` is the set of stream ids the worker still manages -- matched by a
+   * rule on a channel whose group is not excluded. A row whose stream is not in
+   * that set is orphan work the pacer will never redo. Membership is by stream
+   * id only; a row carrying a stale `stream_hash` for a still-managed stream is
+   * left for `prune()`'s age-based sweep.
+   *
+   * An empty `keep` deletes nothing: it means no channel is managed at all
+   * (no rules, or every group excluded), which is a state to leave alone rather
+   * than a request to wipe the cache.
+   */
+  pruneOutside(
+    keep: Set<number>,
+    minFraction = 0.2,
+    warn: (message: string) => void = () => {},
+  ): number {
+    if (keep.size === 0) return 0;
+    const totalCount =
+      (this.db.prepare('SELECT COUNT(*) as cnt FROM probe_cache').get() as { cnt: number })?.cnt ??
+      0;
+    // A `keep` set suddenly a fraction of the cache is far more likely to be a
+    // rules file that momentarily parsed short, or a truncated channel fetch,
+    // than a genuine decision to stop managing 80% of the library. Deleting on
+    // that costs hours of re-probing and cannot be undone, so refuse -- loudly,
+    // because a silent skip is indistinguishable from a prune that found
+    // nothing, and if the reduction *was* deliberate the cache never shrinks
+    // and nobody is told why.
+    if (totalCount > 50 && keep.size < totalCount * minFraction) {
+      warn(
+        `skipping cache prune: only ${keep.size} of ${totalCount} cached streams are still ` +
+          `managed (under ${Math.round(minFraction * 100)}%). If this reduction is intended, ` +
+          `the orphans age out via prune() instead.`,
+      );
+      return 0;
+    }
+    const run = this.db.transaction((ids: number[]) => {
+      this.db.exec('CREATE TEMP TABLE IF NOT EXISTS _podium_keep (id INTEGER PRIMARY KEY)');
+      this.db.prepare('DELETE FROM _podium_keep').run();
+      const insert = this.db.prepare('INSERT INTO _podium_keep (id) VALUES (?)');
+      for (const id of ids) insert.run(id);
+      return this.db
+        .prepare('DELETE FROM probe_cache WHERE stream_id NOT IN (SELECT id FROM _podium_keep)')
+        .run().changes;
+    });
+    return run([...keep]);
+  }
+}

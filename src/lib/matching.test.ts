@@ -1,0 +1,858 @@
+import { describe, expect, it } from 'vitest';
+import {
+  convert,
+  decompose,
+  hasUnescaped,
+  scopeOf,
+  splitTopLevel,
+  unescapeLiteral,
+} from './legacy';
+import type { StreamLike } from './matcher';
+import { matchKey, normalize } from './normalize';
+import { resolveOrdering } from './ordering';
+import type { ProbeResult } from './probe';
+import { parseFps, parsePayload } from './probe';
+import { loadRules } from './rules';
+import { statsPayload } from './runner';
+import { DEFAULT_WEIGHTS, isUsable, type RankStrategy, rank, score } from './scoring';
+
+const alive = (over: Partial<ProbeResult> = {}): ProbeResult => ({
+  alive: true,
+  width: 1920,
+  height: 1080,
+  fps: 30,
+  bitrateKbps: 5000,
+  videoCodec: 'h264',
+  audioCodec: 'aac',
+  pixelFormat: 'yuv420p',
+  audioChannels: 2,
+  elapsedMs: 0,
+  error: '',
+  ...over,
+});
+
+const dead: ProbeResult = {
+  alive: false,
+  width: 0,
+  height: 0,
+  fps: 0,
+  bitrateKbps: 0,
+  videoCodec: '',
+  audioCodec: '',
+  pixelFormat: '',
+  audioChannels: 0,
+  elapsedMs: 0,
+  error: 'timeout',
+};
+
+const stream = (id: number, name: string, providerId = 1): StreamLike => ({ id, name, providerId });
+
+const grouped = (id: number, name: string, groupId: number): StreamLike => ({
+  id,
+  name,
+  providerId: 1,
+  groupId,
+});
+
+function matcherFor(channel: Record<string, unknown>, defaults: Record<string, unknown> = {}) {
+  return loadRules({ schema: 2, defaults, channels: [{ enabled: true, ...channel }] }).matcher;
+}
+
+describe('normalize', () => {
+  it('strips prefixes and quality suffixes', () => {
+    const n = normalize('USA: HBO East FHD H265');
+    expect(n.name).toBe('HBO East');
+    expect(n.prefixes).toEqual(['USA']);
+    expect(n.quality.tier).toBe('fhd');
+    expect(n.quality.codec).toBe('hevc');
+  });
+
+  it('handles unicode decoration', () => {
+    expect(normalize('⁨HBO East⁩ ᴴᴰ').name).toBe('HBO East');
+  });
+
+  it('detects timeshift channels', () => {
+    expect(normalize('HBO +1').isTimeshift).toBe(true);
+    expect(normalize('HBO East').isTimeshift).toBe(false);
+  });
+
+  it('reads resolution and fps', () => {
+    const n = normalize('Sky Sports Main Event 1080p 60fps');
+    expect(n.quality.height).toBe(1080);
+    expect(n.quality.fps).toBe(60);
+  });
+
+  it('folds case and punctuation in the match key', () => {
+    expect(matchKey('The Discovery-Channel')).toBe(matchKey('THE DISCOVERY CHANNEL'));
+  });
+
+  it('keeps + significant', () => {
+    // 'AMC' and 'AMC+' are different channels and must not collapse.
+    expect(matchKey('AMC')).not.toBe(matchKey('AMC+'));
+    expect(matchKey('Paramount+')).not.toBe(matchKey('Paramount'));
+  });
+});
+
+describe('scoring', () => {
+  it('scores a dead stream zero', () => {
+    expect(score(dead)).toBe(0);
+  });
+
+  it('prefers higher resolution', () => {
+    expect(score(alive({ height: 1080 }))).toBeGreaterThan(score(alive({ height: 720 })));
+  });
+
+  it('sinks dead streams below live ones regardless of step', () => {
+    expect(
+      rank([
+        { streamId: 1, stepOrder: 0, providerId: 1, result: dead },
+        {
+          streamId: 2,
+          stepOrder: 9,
+          providerId: 1,
+          result: alive({ height: 480, bitrateKbps: 500 }),
+        },
+      ]),
+    ).toEqual([2, 1]);
+  });
+
+  it('ranks by quality regardless of step order (quality is the default)', () => {
+    // The 2160p stream outscores the 720p one; step order no longer overrides that.
+    expect(
+      rank([
+        {
+          streamId: 1,
+          stepOrder: 0,
+          providerId: 1,
+          result: alive({ height: 720, bitrateKbps: 2000 }),
+        },
+        {
+          streamId: 2,
+          stepOrder: 1,
+          providerId: 1,
+          result: alive({ height: 2160, bitrateKbps: 12000 }),
+        },
+      ]),
+    ).toEqual([2, 1]);
+  });
+
+  it('lets step order beat score in alias mode', () => {
+    const alias: RankStrategy = {
+      mode: 'alias',
+      weights: DEFAULT_WEIGHTS,
+      providerRank: new Map(),
+    };
+    expect(
+      rank(
+        [
+          {
+            streamId: 1,
+            stepOrder: 0,
+            providerId: 1,
+            result: alive({ height: 720, bitrateKbps: 2000 }),
+          },
+          {
+            streamId: 2,
+            stepOrder: 1,
+            providerId: 1,
+            result: alive({ height: 2160, bitrateKbps: 12000 }),
+          },
+        ],
+        alias,
+      ),
+    ).toEqual([1, 2]);
+  });
+
+  it('ranks preferred providers first, then by quality within them (provider mode)', () => {
+    const provider: RankStrategy = {
+      mode: 'provider',
+      weights: DEFAULT_WEIGHTS,
+      providerRank: new Map([[1, 0]]), // provider 1 is preferred
+    };
+    expect(
+      rank(
+        [
+          // provider 2, highest quality -- but not preferred, so last
+          {
+            streamId: 1,
+            stepOrder: 0,
+            providerId: 2,
+            result: alive({ height: 2160, bitrateKbps: 12000 }),
+          },
+          // provider 1, lower quality
+          {
+            streamId: 2,
+            stepOrder: 0,
+            providerId: 1,
+            result: alive({ height: 720, bitrateKbps: 2000 }),
+          },
+          // provider 1, higher than stream 2 -- wins within the tier
+          {
+            streamId: 3,
+            stepOrder: 0,
+            providerId: 1,
+            result: alive({ height: 1080, bitrateKbps: 8000 }),
+          },
+        ],
+        provider,
+      ),
+    ).toEqual([3, 2, 1]);
+  });
+
+  it('breaks ties within a step by score', () => {
+    expect(
+      rank([
+        {
+          streamId: 1,
+          stepOrder: 0,
+          providerId: 1,
+          result: alive({ height: 720, bitrateKbps: 2000 }),
+        },
+        {
+          streamId: 2,
+          stepOrder: 0,
+          providerId: 1,
+          result: alive({ height: 1080, bitrateKbps: 8000 }),
+        },
+      ]),
+    ).toEqual([2, 1]);
+  });
+
+  it('treats an alive but sub-floor stream as unusable', () => {
+    // ffprobe reports "1080p" for feeds delivering 193kbps. Ranking those last
+    // still puts them ahead of honestly-dead streams; they belong with the dead.
+    const trickle = alive({ height: 1080, bitrateKbps: 193 });
+    expect(isUsable(trickle)).toBe(false);
+    expect(score(trickle)).toBe(0);
+    expect(isUsable(alive({ bitrateKbps: 600 }))).toBe(true);
+  });
+
+  it('treats an unmeasured bitrate as unknown, not as zero', () => {
+    // 0 means we could not measure, so it must not be punished as sub-floor.
+    expect(isUsable(alive({ bitrateKbps: 0 }))).toBe(true);
+  });
+
+  it('sinks sub-floor streams below usable ones regardless of step', () => {
+    expect(
+      rank([
+        {
+          streamId: 1,
+          stepOrder: 0,
+          providerId: 1,
+          result: alive({ height: 1080, bitrateKbps: 193 }),
+        },
+        {
+          streamId: 2,
+          stepOrder: 9,
+          providerId: 1,
+          result: alive({ height: 480, bitrateKbps: 900 }),
+        },
+      ]),
+    ).toEqual([2, 1]);
+  });
+
+  it('disables the floor when set to zero', () => {
+    const off = { ...DEFAULT_WEIGHTS, minBitrateKbps: 0 };
+    expect(isUsable(alive({ bitrateKbps: 1 }), off)).toBe(true);
+  });
+
+  it('honours preferH265 in both directions', () => {
+    const h265 = alive({ videoCodec: 'hevc' });
+    const h264 = alive({ videoCodec: 'h264' });
+    expect(score(h265)).toBeGreaterThan(score(h264));
+    const flipped = {
+      resolution: 0.35,
+      bitrate: 0.4,
+      fps: 0.15,
+      codec: 0.1,
+      preferH265: false,
+      minBitrateKbps: 500,
+    };
+    expect(score(h264, flipped)).toBeGreaterThan(score(h265, flipped));
+  });
+});
+
+describe('ordering strategy', () => {
+  it('defaults to quality mode with no provider preference', () => {
+    const s = resolveOrdering(undefined, new Map(), 500);
+    expect(s.mode).toBe('quality');
+    expect(s.providerRank.size).toBe(0);
+    expect(s.weights.minBitrateKbps).toBe(500);
+  });
+
+  it('maps provider preference names to tiers, case-insensitively', () => {
+    const names = new Map([
+      [1, 'Premium'],
+      [2, 'Backup'],
+    ]);
+    const s = resolveOrdering(
+      { mode: 'provider', providerPreference: ['premium', 'BACKUP'], weights: {} },
+      names,
+      500,
+    );
+    expect(s.providerRank.get(1)).toBe(0);
+    expect(s.providerRank.get(2)).toBe(1);
+  });
+
+  it('leaves unlisted providers for the back tier', () => {
+    const names = new Map([
+      [1, 'Premium'],
+      [2, 'Other'],
+    ]);
+    const s = resolveOrdering(
+      { mode: 'provider', providerPreference: ['Premium'], weights: {} },
+      names,
+      500,
+    );
+    expect(s.providerRank.has(1)).toBe(true);
+    expect(s.providerRank.has(2)).toBe(false);
+  });
+
+  it('only resolves the provider map in provider mode', () => {
+    const names = new Map([[1, 'Premium']]);
+    const s = resolveOrdering(
+      { mode: 'quality', providerPreference: ['Premium'], weights: {} },
+      names,
+      500,
+    );
+    expect(s.providerRank.size).toBe(0);
+  });
+
+  it('lets rules weights override the defaults, and the floor over the env', () => {
+    const s = resolveOrdering(
+      { mode: 'quality', providerPreference: [], weights: { bitrate: 0.9, minBitrateKbps: 1000 } },
+      new Map(),
+      500,
+    );
+    expect(s.weights.bitrate).toBe(0.9);
+    expect(s.weights.resolution).toBe(DEFAULT_WEIGHTS.resolution);
+    expect(s.weights.minBitrateKbps).toBe(1000);
+  });
+
+  it('falls back to the env bitrate floor when rules set none', () => {
+    const s = resolveOrdering(
+      { mode: 'quality', providerPreference: [], weights: {} },
+      new Map(),
+      750,
+    );
+    expect(s.weights.minBitrateKbps).toBe(750);
+  });
+});
+
+describe('ffprobe parsing', () => {
+  it.each([
+    ['30000/1001', 29.97],
+    ['60/1', 60],
+    ['0/0', 0],
+    [undefined, 0],
+    ['garbage', 0],
+  ])('parses fps %s', (raw, expected) => {
+    expect(parseFps(raw as string | undefined)).toBe(expected);
+  });
+
+  it('rejects an audio-only payload', () => {
+    expect(parsePayload({ streams: [{ codec_type: 'audio', codec_name: 'aac' }] }).alive).toBe(
+      false,
+    );
+  });
+
+  it('falls back to format bitrate', () => {
+    const parsed = parsePayload({
+      streams: [
+        {
+          codec_type: 'video',
+          codec_name: 'h264',
+          width: 1280,
+          height: 720,
+          avg_frame_rate: '30/1',
+        },
+      ],
+      format: { bit_rate: '3000000' },
+    });
+    expect(parsed.bitrateKbps).toBe(3000);
+  });
+});
+
+describe('matcher', () => {
+  it('keeps the earliest alias position for a stream', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['HBO East', 'HBO'] });
+    const index = m.buildIndex([stream(10, 'HBO East HD')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('honours per-channel provider scoping', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['HBO East'], providers: [2] });
+    const index = m.buildIndex([stream(10, 'HBO East', 1), stream(11, 'HBO East', 2)]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[11, 0]]);
+  });
+
+  it('applies the exclude list', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['HBO East'], exclude: ['HBO East'] });
+    const index = m.buildIndex([stream(10, 'HBO East')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([]);
+  });
+
+  it('compiles Python inline (?i) flags', () => {
+    // JS RegExp rejects `(?i)` outright. Every regex carried over from an
+    // imported rule set starts with it, and without translation they all fail
+    // to compile and their channels silently stop matching.
+    const report = loadRules({
+      schema: 2,
+      channels: [{ channel_id: 1, patterns: [{ pattern: '(?i)^hbo\\s*east$' }] }],
+    });
+    expect(report.skippedPatterns).toEqual([]);
+    const m = report.matcher;
+    const index = m.buildIndex([stream(10, 'HBO EAST')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('normalises aliases the same way as stream names', () => {
+    // Converted radio aliases carry the prefix ("Radio: Coast FM") while the
+    // stream normalises to "Coast FM" with "Radio" lifted out. Keying
+    // the raw alias made every one of those channels match nothing.
+    const m = matcherFor({ channel_id: 1, aliases: ['Radio: Coast FM'] });
+    const index = m.buildIndex([stream(10, 'Radio: Coast FM')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('lets a radio channel claim radio streams', () => {
+    // The global radio guard must not fire on a channel that is itself radio.
+    const m = matcherFor({ channel_id: 1, aliases: ['Radio: Classic Rewind'] });
+    const index = m.buildIndex([stream(10, 'Radio: Classic Rewind')]);
+    expect(m.match(m.rules.get(1)!, index)).toHaveLength(1);
+  });
+
+  it('still keeps radio streams away from TV channels', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['Classic Rewind'] });
+    const index = m.buildIndex([stream(10, 'Radio: Classic Rewind')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([]);
+  });
+
+  it('skips an invalid regex without failing the load', () => {
+    const report = loadRules({
+      schema: 2,
+      channels: [{ channel_id: 1, patterns: [{ pattern: 'HBO[' }, { pattern: 'HBO' }] }],
+    });
+    expect(report.skippedPatterns).toHaveLength(1);
+    expect(report.matcher.rules.get(1)!.patterns).toHaveLength(1);
+  });
+
+  it('drops disabled channels', () => {
+    expect(
+      loadRules({ schema: 2, channels: [{ channel_id: 1, enabled: false, aliases: ['x'] }] })
+        .loaded,
+    ).toBe(0);
+  });
+
+  it('coerces string channel ids', () => {
+    // Imported rule sets store channel_id as TEXT; Dispatcharr ids are integers.
+    const report = loadRules({ schema: 2, channels: [{ channel_id: '15070', aliases: ['x'] }] });
+    expect([...report.matcher.rules.keys()]).toEqual([15070]);
+  });
+
+  it('respects a per-channel region override', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['HBO East'], exclude_regions: ['UK'] });
+    const index = m.buildIndex([stream(10, 'UK: HBO East'), stream(11, 'US: HBO East')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[11, 0]]);
+  });
+
+  it('excludes no regions when the override is empty', () => {
+    const m = matcherFor(
+      { channel_id: 1, aliases: ['HBO East'], exclude_regions: [] },
+      { exclude_regions: ['US'] },
+    );
+    const index = m.buildIndex([stream(10, 'US: HBO East')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('matches call signs via contains', () => {
+    // The DC-locals case: the call sign is embedded in a longer provider name.
+    const m = matcherFor({ channel_id: 1, contains: ['WRC'] });
+    const index = m.buildIndex([
+      stream(10, 'VA | Luray | NBC 4 WRC'),
+      stream(11, 'DC | Washington | NBC WRC'),
+      stream(12, 'HBO East'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index).map(([id]) => id)).toEqual([10, 11]);
+  });
+
+  it('contains matches whole words only', () => {
+    // "WRC" must not drag in "WRCB" -- a different station in another city.
+    const m = matcherFor({ channel_id: 1, contains: ['WRC'] });
+    const index = m.buildIndex([
+      stream(10, 'DC | Washington | NBC WRC'),
+      stream(11, 'TN | Chattanooga | NBC 3 WRCB'),
+      stream(12, 'CITY| NBC WRCB WASHINGTON'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index).map(([id]) => id)).toEqual([10]);
+  });
+
+  it('scopes an alias to a required prefix', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['@AU beIN Sports'] });
+    const index = m.buildIndex([stream(10, 'AU: beIN Sports HD'), stream(11, 'US: beIN Sports')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('rejects a prefix with @!', () => {
+    // The "Prime:" copy of a US network is usually the FAST channel, not the
+    // linear feed, and it is worth keeping off the channel entirely.
+    const m = matcherFor({ channel_id: 1, aliases: ['@!Prime ESPN'] });
+    const index = m.buildIndex([stream(10, 'US: ESPN'), stream(11, 'Prime: ESPN')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('accepts any of several required prefixes', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['@US @USA Fox Sports 1'] });
+    const index = m.buildIndex([
+      stream(10, 'US: Fox Sports 1'),
+      stream(11, 'USA: Fox Sports 1'),
+      stream(12, 'CA: Fox Sports 1'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index).map(([id]) => id)).toEqual([10, 11]);
+  });
+
+  it('ranks a prefixed alias above the unqualified fallback', () => {
+    // "Prefer the AU feed, take any other if there is none" is two lines,
+    // because alias order is already preference order.
+    const m = matcherFor({ channel_id: 1, aliases: ['@AU beIN Sports', 'beIN Sports'] });
+    const index = m.buildIndex([stream(10, 'US: beIN Sports'), stream(11, 'AU: beIN Sports')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([
+      [11, 0],
+      [10, 1],
+    ]);
+  });
+
+  it('lets a required prefix override the region denylist', () => {
+    // 389 channels here carry the AU/NZ denylist inherited from the legacy
+    // patterns. Without this, "@AU beIN Sports" on one of them matches nothing.
+    const m = matcherFor(
+      { channel_id: 1, aliases: ['@AU beIN Sports'] },
+      { exclude_regions: ['AU', 'NZ'] },
+    );
+    const index = m.buildIndex([stream(10, 'AU: beIN Sports'), stream(11, 'NZ: beIN Sports')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('matches prefixes regardless of case and punctuation', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['@uk-fast: Sports Alpha Main Event'] });
+    const index = m.buildIndex([
+      stream(10, 'UK-FAST: Sports Alpha Main Event'),
+      stream(11, 'UK: Sports Alpha Main Event'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('quotes a multi-word prefix', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['@"US East" ESPN'] });
+    const index = m.buildIndex([stream(10, 'US East: ESPN'), stream(11, 'US West: ESPN')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('leaves an alias that is only an @-word alone', () => {
+    // "@Home" was a real channel. A qualifier needs a name after it.
+    const m = matcherFor({ channel_id: 1, aliases: ['@Home'] });
+    const index = m.buildIndex([stream(10, 'US: @Home')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('leaves a literal prefix in an alias meaning what it always did', () => {
+    // Converted "Radio: <station>" aliases are unqualified aliases, not prefix
+    // requirements: the prefix is still stripped on both sides.
+    const m = matcherFor({ channel_id: 1, aliases: ['Radio: Coast FM'] });
+    const index = m.buildIndex([stream(10, 'Satellite Radio: Coast FM')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('scopes a contains needle by prefix', () => {
+    const m = matcherFor({ channel_id: 1, contains: ['@DC WRC'] });
+    const index = m.buildIndex([
+      stream(10, 'DC | Washington | NBC WRC'),
+      stream(11, 'VA | Luray | NBC 4 WRC'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('scopes an exclude by prefix', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['ESPN'], exclude: ['@Prime ESPN'] });
+    const index = m.buildIndex([stream(10, 'US: ESPN'), stream(11, 'Prime: ESPN')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('matches a qualifier against the leading word of a longer prefix', () => {
+    // The section is "NFL"; the provider happens to write the segment as
+    // "NFL Teams". Requiring the whole segment makes every operator guess at
+    // the provider's exact wording.
+    const m = matcherFor({ channel_id: 1, contains: ['@NFL Bears'] });
+    const index = m.buildIndex([
+      stream(10, 'NFL Teams: CBS Bears (WBBM) Chicago IL'),
+      stream(11, 'NFL TEAMS| FOX BEARS CHICAGO IL'),
+      stream(12, 'CAN: HERSHEY BEARS'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index).map(([id]) => id)).toEqual([10, 11]);
+  });
+
+  it('matches a qualifier against a section the provider never punctuated', () => {
+    // "NFL WASHINGTON COMMANDERS" carries no separator, so `normalize` lifts no
+    // prefix at all -- and before this the only way to reach it was the
+    // per-channel regex the alias layer exists to replace.
+    const m = matcherFor({ channel_id: 1, contains: ['@NFL Commanders'] });
+    const index = m.buildIndex([
+      stream(10, 'NFL WASHINGTON COMMANDERS'),
+      stream(11, 'NFL Teams: FOX Commanders (WTTG) Washington DC'),
+      stream(12, 'Radio: Washington Commanders'),
+      stream(13, 'NRL : PENRITH COMMANDERS'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index).map(([id]) => id)).toEqual([10, 11]);
+  });
+
+  it('matches a qualified alias against a section left inside the name', () => {
+    // "US| MLB CHICAGO CUBS HD" has one separator, so "MLB CHICAGO CUBS" is all
+    // name. The alias is still "Chicago Cubs" -- in the MLB section.
+    const m = matcherFor({ channel_id: 1, aliases: ['@MLB Chicago Cubs'] });
+    const index = m.buildIndex([
+      stream(10, 'US| MLB CHICAGO CUBS HD'),
+      stream(11, 'USA: MLB CHICAGO CUBS [720p]'),
+      stream(12, 'MLB: Chicago Cubs'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index).map(([id]) => id)).toEqual([10, 11, 12]);
+  });
+
+  it('keeps a qualified alias off fixtures that merely name the team', () => {
+    // The nightly game feeds sit in the same section and carry the team name,
+    // but they are not the team channel: "MLB 19" is a fixture, not a name.
+    // This is why the section belongs on an *alias* and not on a `contains`.
+    const m = matcherFor({ channel_id: 1, aliases: ['@MLB Chicago Cubs'] });
+    const index = m.buildIndex([
+      stream(10, 'US| MLB CHICAGO CUBS HD'),
+      stream(11, 'MLB 19 | Los Angeles Dodgers at Chicago Cubs AWAY 04 Aug 08:05 PM ET'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index).map(([id]) => id)).toEqual([10]);
+  });
+
+  it('strips only the section the alias named', () => {
+    // Stripping any leading word would turn every qualified alias into a
+    // suffix match, and "@US Chicago Cubs" would claim an MLB-sectioned name.
+    const m = matcherFor({ channel_id: 1, aliases: ['@US Chicago Cubs'] });
+    const index = m.buildIndex([stream(10, 'US| MLB CHICAGO CUBS HD')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([]);
+  });
+
+  it('does not let a qualifier reach past the leading words of a name', () => {
+    // A qualifier names a section, not a name. Matching "Bears" anywhere in the
+    // name would make `@` a second, looser spelling of `contains`.
+    const m = matcherFor({ channel_id: 1, contains: ['@Bears Chicago'] });
+    const index = m.buildIndex([stream(10, 'NFL Teams: CBS Bears (WBBM) Chicago IL')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([]);
+  });
+
+  it('keeps a rejecting qualifier scoped to the section too', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['@!NFL Commanders'] });
+    const index = m.buildIndex([
+      stream(10, 'NFL Commanders'),
+      stream(11, 'US: Commanders'),
+      stream(12, 'NFL Teams: Commanders'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index).map(([id]) => id)).toEqual([11]);
+  });
+
+  it('takes an excluded provider group out of matching entirely', () => {
+    const names = new Map([
+      [1, 'US Sports'],
+      [2, 'PPV EVENTS'],
+    ]);
+    const m = matcherFor({ channel_id: 1, aliases: ['ESPN'] }, { exclude_groups: ['PPV EVENTS'] });
+    const index = m.buildIndex([grouped(10, 'US: ESPN', 1), grouped(11, 'US: ESPN', 2)], names);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('excludes groups by glob, so groups created later are covered', () => {
+    // Dispatcharr builds "Auto | ..." groups on its own; naming ids would mean
+    // the next one silently comes back into matching.
+    const names = new Map([
+      [1, 'Auto | MLB'],
+      [2, 'Auto | NFL'],
+      [3, 'US Sports'],
+    ]);
+    const m = matcherFor({ channel_id: 1, contains: ['Cubs'] }, { exclude_groups: ['Auto | *'] });
+    const index = m.buildIndex(
+      [
+        grouped(10, 'MLB 19 | Dodgers at Chicago Cubs AWAY', 1),
+        grouped(11, 'NFL Cubs', 2),
+        grouped(12, 'US| MLB CHICAGO CUBS HD', 3),
+      ],
+      names,
+    );
+    expect(m.match(m.rules.get(1)!, index).map(([id]) => id)).toEqual([12]);
+  });
+
+  it('keeps an excluded group away from legacy regex too', () => {
+    // The exclusion is "these are not candidates", not "aliases skip them" --
+    // a leftover regex must not be a way back in.
+    const m = matcherFor(
+      { channel_id: 1, patterns: [{ pattern: '(?i)ESPN' }] },
+      { exclude_groups: ['PPV EVENTS'] },
+    );
+    const index = m.buildIndex([grouped(10, 'PPV: ESPN', 2)], new Map([[2, 'PPV EVENTS']]));
+    expect(m.match(m.rules.get(1)!, index)).toEqual([]);
+  });
+
+  it('refuses to build an index that would silently ignore exclusions', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['ESPN'] }, { exclude_groups: ['PPV EVENTS'] });
+    expect(() => m.buildIndex([grouped(10, 'US: ESPN', 1)])).toThrow(/group list/);
+  });
+
+  it('leaves streams with no group alone', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['ESPN'] }, { exclude_groups: ['PPV EVENTS'] });
+    const index = m.buildIndex([stream(10, 'US: ESPN')], new Map([[2, 'PPV EVENTS']]));
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('keeps the radio guard off a prefix-qualified radio channel', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['@Radio Classic Rewind'] });
+    const index = m.buildIndex([stream(10, 'Radio: Classic Rewind')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('ranks exact aliases above contains hits', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['WRC'], contains: ['WRC'] });
+    const index = m.buildIndex([stream(10, 'WRC'), stream(11, 'NBC 4 WRC')]);
+    const hits = m.match(m.rules.get(1)!, index);
+    expect(hits[0]![0]).toBe(10);
+    expect(hits[0]![1]).toBeLessThan(hits[1]![1]);
+  });
+});
+
+describe('legacy conversion', () => {
+  const REAL =
+    '(?i)^(?!\\s*(?:AU|NZ)\\s*(?:[:|]|\\s))(?!.*\\+\\s*1(?![0-9]))' +
+    '(?:(?!Radio:)[^:|]{1,25}[:|]\\s*){0,3}' +
+    '(?:Food\\s*Network\\s*East|FOOD\\s*NETWORK|Food\\s*Network)' +
+    '(?:\\s*(?:HD|FHD|SD|UHD|HDR|RAW))*\\s*$';
+
+  it('decomposes a real exported pattern', () => {
+    const result = decompose(REAL);
+    expect(result.converted).toBe(true);
+    expect(result.aliases).toEqual(['Food Network East', 'FOOD NETWORK', 'Food Network']);
+    expect([...result.regions].sort()).toEqual(['AU', 'NZ']);
+    expect(result.timeshift).toBe(true);
+    expect(result.radio).toBe(true);
+  });
+
+  it('unescapes literal brackets but rejects character classes', () => {
+    expect(unescapeLiteral('Sky\\s*Sports\\s*\\[\\s*4K\\s*\\]')).toBe('Sky Sports [ 4K ]');
+    expect(unescapeLiteral('[A-Z]{2}')).toBeNull();
+  });
+
+  it('handles \\s+ as well as \\s*', () => {
+    expect(unescapeLiteral('MLB\\s+Arizona\\s*Diamondbacks')).toBe('MLB Arizona Diamondbacks');
+  });
+
+  it('detects unescaped metacharacters only', () => {
+    expect(hasUnescaped('Starz\\(Pacific\\)', '()')).toBe(false);
+    expect(hasUnescaped('(?:A|B)', '()')).toBe(true);
+  });
+
+  it('splits only on unescaped pipes', () => {
+    expect(splitTopLevel('A|B\\|C')).toEqual(['A', 'B\\|C']);
+  });
+
+  it('reads the string "null" as unscoped', () => {
+    // Imported rule sets persist an unscoped pattern as the *string* "null".
+    expect(scopeOf('null')).toBeNull();
+    expect(scopeOf('[6]')).toEqual([6]);
+    expect(scopeOf([5, 7])).toEqual([5, 7]);
+  });
+
+  it('emits region guards per channel, never unioned', () => {
+    const { doc } = convert({
+      channels: [
+        { channel_id: 1, patterns: [{ pattern: REAL, m3u_accounts: 'null' }] },
+        { channel_id: 2, patterns: [{ pattern: '(?i)^Plain\\s*Name\\s*$', m3u_accounts: 'null' }] },
+      ],
+    });
+    const channels = doc.channels as Array<Record<string, unknown>>;
+    expect(channels[0]!.exclude_regions).toEqual(['AU', 'NZ']);
+    // The second pattern had no region guard, and must not inherit the first's.
+    expect(channels[1]!.exclude_regions).toEqual([]);
+    expect((doc.defaults as Record<string, unknown>).exclude_regions).toEqual([]);
+  });
+
+  it('carries a uniform provider scope onto the channel', () => {
+    const { doc } = convert({
+      channels: [{ channel_id: 1, patterns: [{ pattern: REAL, m3u_accounts: '[6]' }] }],
+    });
+    expect((doc.channels as Array<Record<string, unknown>>)[0]!.providers).toEqual([6]);
+  });
+
+  it('dedupes aliases that collapse under the match key', () => {
+    const { doc } = convert({
+      channels: [
+        {
+          channel_id: 1,
+          patterns: [{ pattern: '(?i)^(?:HBO\\s*EAST|HBO\\s*East)\\s*$', m3u_accounts: 'null' }],
+        },
+      ],
+    });
+    expect((doc.channels as Array<Record<string, unknown>>)[0]!.aliases).toEqual(['HBO EAST']);
+  });
+});
+
+describe('black screen handling', () => {
+  it('treats a black stream as unusable however healthy it looks', () => {
+    // The failure quality metrics miss: right size, good bitrate, showing a slate.
+    const slate = alive({ height: 1080, bitrateKbps: 6000, black: true });
+    expect(isUsable(slate)).toBe(false);
+    expect(score(slate)).toBe(0);
+  });
+
+  it('sinks a black stream below a lower-quality live one', () => {
+    expect(
+      rank([
+        {
+          streamId: 1,
+          stepOrder: 0,
+          providerId: 1,
+          result: alive({ height: 1080, bitrateKbps: 9000, black: true }),
+        },
+        {
+          streamId: 2,
+          stepOrder: 5,
+          providerId: 1,
+          result: alive({ height: 480, bitrateKbps: 800 }),
+        },
+      ]),
+    ).toEqual([2, 1]);
+  });
+
+  it('leaves a non-black stream alone', () => {
+    expect(isUsable(alive({ black: false }))).toBe(true);
+    expect(isUsable(alive())).toBe(true);
+  });
+});
+
+describe('stats payload', () => {
+  it('reports a readable reason for each outcome', () => {
+    expect(statsPayload(alive()).quality_reason).toBe('ok');
+    expect(statsPayload(alive({ black: true })).quality_reason).toBe('black screen');
+    expect(statsPayload({ ...dead, error: 'timeout' }).quality_reason).toBe('timeout');
+  });
+
+  it('publishes a resolution string Dispatcharr can display', () => {
+    expect(statsPayload(alive()).resolution).toBe('1920x1080');
+    expect(statsPayload(dead).resolution).toBe('0x0');
+  });
+
+  it('publishes the bitrate under video_bitrate, the key Dispatcharr displays', () => {
+    // The channel table reads stream_stats.video_bitrate; the older bitrate_kbps
+    // key rendered an empty badge there.
+    const payload = statsPayload(alive({ bitrateKbps: 4875 }));
+    expect(payload.video_bitrate).toBe(4875);
+    expect(payload.bitrate_kbps).toBeUndefined();
+  });
+
+  it('publishes pixel format and audio channels under the keys Dispatcharr displays', () => {
+    const payload = statsPayload(alive());
+    expect(payload.pixel_format).toBe('yuv420p');
+    expect(payload.audio_channels).toBe(2);
+  });
+});

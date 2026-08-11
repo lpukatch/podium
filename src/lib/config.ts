@@ -1,0 +1,172 @@
+/**
+ * Configuration, entirely from environment variables.
+ *
+ * Deliberately flat and small. Every knob here changes run time or
+ * correctness; anything that only changed cosmetics was left out.
+ */
+
+import { join } from 'path';
+import { z } from 'zod';
+
+/** An unset or unparseable env var falls back rather than failing the boot. */
+const num = (fallback: number): z.ZodType<number> =>
+  z.preprocess((raw) => {
+    if (raw === undefined || raw === '') return fallback;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : fallback;
+  }, z.number());
+
+const bool = (fallback: boolean): z.ZodType<boolean> =>
+  z.preprocess((raw) => {
+    if (raw === undefined || raw === '') return fallback;
+    return ['1', 'true', 'yes', 'on'].includes(String(raw).trim().toLowerCase());
+  }, z.boolean());
+
+export const configSchema = z.object({
+  DISPATCHARR_URL: z.string().default('http://dispatcharr:9191'),
+  DISPATCHARR_API_KEY: z.string().default(''),
+  DISPATCHARR_USERNAME: z.string().default(''),
+  DISPATCHARR_PASSWORD: z.string().default(''),
+
+  PODIUM_DATA_DIR: z.string().default('/app/data'),
+  PODIUM_RULES: z.string().default(''),
+
+  /** The single biggest lever on total run time. */
+  PODIUM_ANALYZE_SECONDS: num(6),
+  PODIUM_PROBE_TIMEOUT_MS: num(12_000),
+  PODIUM_USER_AGENT: z.string().default('VLC/3.0.14'),
+  /** Live TS/HLS rarely declares a bitrate; measuring it keeps ranking honest. */
+  PODIUM_MEASURE_BITRATE: bool(true),
+  PODIUM_MEASURE_SECONDS: num(5),
+  /** Alive but below this is unwatchable; treated as dead for ranking. */
+  PODIUM_MIN_BITRATE_KBPS: num(500),
+  /** Detect a black screen: alive and healthy-looking, showing a slate. */
+  PODIUM_DETECT_BLACK: bool(true),
+  PODIUM_BLACK_RATIO: num(0.8),
+  /**
+   * Publish probe results back to Dispatcharr's stream_stats.
+   *
+   * On by default, on the assumption Podium is the only thing writing the
+   * field: with two writers it would flap, with one it is the only place these
+   * numbers are visible outside this tool. Turn it off if something else owns
+   * stream_stats.
+   */
+  PODIUM_WRITE_STATS: bool(true),
+
+  /**
+   * Whether a reorder drops streams the rule does not claim.
+   *
+   * Off by default: writing only the matched set silently unassigns anything
+   * else on the channel, which is a destructive surprise on a first run. When
+   * off, unclaimed streams are kept and appended after the ranked ones.
+   */
+  PODIUM_REMOVE_UNMATCHED: bool(false),
+
+  /** Cache TTLs. Dead streams are rechecked far more often than live ones. */
+  PODIUM_LIVE_TTL_MS: num(24 * 3_600_000),
+  PODIUM_DEAD_TTL_MS: num(3 * 3_600_000),
+  /**
+   * Ceiling on the dead TTL once it has backed off.
+   *
+   * A dead verdict starts at PODIUM_DEAD_TTL_MS and doubles per consecutive
+   * dead verdict, so a stream that just died is still rechecked promptly while
+   * one that has failed every check for a week is not re-probed every three
+   * hours forever. This caps the doubling; set it equal to PODIUM_DEAD_TTL_MS
+   * to get the old flat behaviour back.
+   */
+  PODIUM_DEAD_TTL_MAX_MS: num(24 * 3_600_000),
+  /**
+   * How long the EPG grid is reused across passes before re-fetching it. The
+   * grid carries each programme's start/end times, so a pass re-derives "what
+   * is airing now" from the cached rows -- this only goes stale when the grid's
+   * own window of listed programmes is shorter than the TTL, in which case it
+   * degrades to "no EPG" and refreshes at the next boundary.
+   */
+  PODIUM_EPG_TTL_MS: num(60 * 60_000),
+
+  PODIUM_LANE_STAGGER_MS: num(0),
+  /**
+   * Ceiling on probes in flight at once, across every provider lane.
+   *
+   * The lane limits protect the *providers*; this protects the machine. Peak
+   * concurrency is otherwise the sum of every provider's max_streams, and each
+   * probe in flight is an ffprobe plus an ffmpeg decoding video -- which is how
+   * a 2GiB container gets OOM-killed by adding a provider. 0 disables the cap.
+   */
+  PODIUM_MAX_CONCURRENT_PROBES: num(6),
+
+  /** Freshness target: every channel checked within this window. */
+  PODIUM_MAX_AGE_MS: num(24 * 3_600_000),
+  /** How often a pass is considered. Each pass takes a slice, not everything. */
+  PODIUM_TICK_MS: num(60_000),
+  /**
+   * Longest gap between passes when there is genuinely nothing to do.
+   *
+   * A pass costs a full fetch of every channel and stream from Dispatcharr, so
+   * repeating it every minute once every verdict is cached is load with no
+   * information in it. When a pass finds nothing due, the loop waits until the
+   * earliest cached verdict actually expires -- but never longer than this, so
+   * streams the provider added since are still picked up promptly.
+   */
+  PODIUM_IDLE_MAX_MS: num(15 * 60_000),
+  PODIUM_PAUSE_WHEN_WATCHING: bool(true),
+  PODIUM_MIN_FREE_SLOTS: num(1),
+  PODIUM_MAX_SLICE: num(400),
+
+  /**
+   * Dry-run by default, everywhere. Reordering a channel is a write with no
+   * undo, so the safe direction for an unconfigured install is to watch and
+   * record. The default used to be false with only the compose file setting
+   * true, which meant the documented "it starts in dry-run" was untrue of the
+   * `docker run` line people actually copy.
+   */
+  PODIUM_DRY_RUN: bool(true),
+  PODIUM_RUN_ONCE: bool(false),
+  LOG_LEVEL: z.string().default('info'),
+});
+
+export type RawConfig = z.infer<typeof configSchema>;
+
+export interface Config extends RawConfig {
+  dbPath: string;
+  rulesPath: string;
+  /** Whether there is anything to authenticate to Dispatcharr with. */
+  hasCredentials: boolean;
+}
+
+/** Every schema default, for surfacing "what happens if I leave this blank". */
+export const CONFIG_DEFAULTS: RawConfig = configSchema.parse({});
+
+/** Takes a plain record, not NodeJS.ProcessEnv: nothing here needs NODE_ENV. */
+export const NO_CREDENTIALS =
+  'set DISPATCHARR_API_KEY, or DISPATCHARR_USERNAME and DISPATCHARR_PASSWORD';
+
+/**
+ * Missing credentials are a *state*, not a configuration error.
+ *
+ * They used to throw here, which meant the container exited before either half
+ * started -- including the settings page you would use to enter them. Anyone
+ * who cleared the environment variables to set them in the UI instead got a
+ * crash loop and no way back in, and every API route that reads `dbPath`
+ * through this function failed with them.
+ *
+ * Same reasoning as `ensureRulesFile`: a fresh install has to come up empty and
+ * let you fill it in. The failure belongs at the point something actually tries
+ * to reach Dispatcharr -- see `requireCredentials`.
+ */
+export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
+  const raw = configSchema.parse(env);
+  return {
+    ...raw,
+    dbPath: join(raw.PODIUM_DATA_DIR, 'podium.db'),
+    rulesPath: raw.PODIUM_RULES || join(raw.PODIUM_DATA_DIR, 'rules.json'),
+    hasCredentials: Boolean(
+      raw.DISPATCHARR_API_KEY || (raw.DISPATCHARR_USERNAME && raw.DISPATCHARR_PASSWORD),
+    ),
+  };
+}
+
+/** Throw where a Dispatcharr call is about to be made, not at boot. */
+export function requireCredentials(config: Config): void {
+  if (!config.hasCredentials) throw new Error(NO_CREDENTIALS);
+}

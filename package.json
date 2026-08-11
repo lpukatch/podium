@@ -1,0 +1,54 @@
+{
+  "name": "podium",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Ranks the streams behind your Dispatcharr channels, best first, by measuring them rather than trusting their names.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lpukatch/podium.git"
+  },
+  "homepage": "https://github.com/lpukatch/podium#readme",
+  "bugs": "https://github.com/lpukatch/podium/issues",
+  "scripts": {
+    "dev": "next dev -p 3456",
+    "build": "next build && npm run build:worker",
+    "start": "next start -p 3456",
+    "type-check": "tsc --noEmit",
+    "worker": "tsx src/worker/index.ts",
+    "worker:dev": "tsx watch src/worker/index.ts",
+    "import": "tsx src/scripts/import.ts",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "lint": "biome lint ./src",
+    "format": "biome format --write ./src",
+    "format:check": "biome check ./src",
+    "docker:build": "docker build -t podium .",
+    "docker:run": "docker run -p 3456:3456 -v ./data:/app/data podium",
+    "build:worker": "esbuild src/entry.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/entry.cjs --external:better-sqlite3 --external:./server.js",
+    "worker:prod": "node dist/entry.cjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.1",
+    "lucide-react": "^1.25.0",
+    "next": "^16.2.11",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.5",
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/better-sqlite3": "^9.0.0",
+    "@types/node": "^26.1.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitest/coverage-v8": "^4.1.10",
+    "postcss": "^8.5.22",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.0",
+    "vitest": "^4.1.10"
+  }
+}
