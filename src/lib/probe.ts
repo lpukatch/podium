@@ -271,7 +271,12 @@ export async function sampleStream(
   ];
 
   return new Promise<SampleResult>((resolve) => {
-    const child = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    // ffmpegPath defaults to a bare `ffmpeg` resolved from PATH, never a file in
+    // this project. Without the opt-out Turbopack cannot prove that and traces
+    // the whole source tree into the standalone output.
+    const child = spawn(/*turbopackIgnore: true*/ ffmpegPath, args, {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
     runningChildren.add(child);
 
     let stderr = '';
@@ -345,7 +350,10 @@ export async function probe(url: string, options: ProbeOptions = {}): Promise<Pr
 
   const started = Date.now();
   return new Promise<ProbeResult>((resolve) => {
-    const child = spawn(ffprobePath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    // Resolved from PATH, not the project tree -- see the note on the ffmpeg spawn.
+    const child = spawn(/*turbopackIgnore: true*/ ffprobePath, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
     runningChildren.add(child);
 
     let stdout = '';
