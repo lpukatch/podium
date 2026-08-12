@@ -91,12 +91,26 @@ There is deliberately no loop detection. Catching a loop means watching for at
 least one loop period — around 120s per stream against the ~1s the other checks
 cost — for a failure far rarer than dead, black or throttled.
 
+## Who can reach it
+
+Podium has no login: it manages one Dispatcharr on your own network, and
+accounts would be ceremony. It does refuse the two things that can reach it
+without being on your network — a page you are visiting driving your browser at
+your LAN address, and a hostname that resolves to it. So cross-site writes are
+rejected, and it only answers to private addresses and names (plus anything you
+put in `PODIUM_ALLOWED_HOSTS`).
+
+That is not the same as being safe to expose. Anyone who can reach the port can
+reorder your channels, and it holds a Dispatcharr credential. Keep it on your
+network, and set `PODIUM_AUTH_TOKEN` if it goes anywhere else —
+[the details are here](docs/configuration.md#who-can-reach-it).
+
 ## Documentation
 
 | guide | what is in it |
 | --- | --- |
 | **[Usage](docs/usage.md)** | Matching streams to channels, section qualifiers, group policy, ranking, and importing existing rules |
-| **[Configuration](docs/configuration.md)** | Every environment variable, concurrency limits, and how to keep a settled install quiet |
+| **[Configuration](docs/configuration.md)** | Every environment variable, who can reach it, concurrency limits, and how to keep a settled install quiet |
 | **[Contributing](CONTRIBUTING.md)** | Development setup, and how PRs land given the mirror |
 
 ## Development
