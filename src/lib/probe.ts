@@ -122,6 +122,43 @@ function userAgentArgs(url: string, userAgent: string): string[] {
   return /^https?:\/\//i.test(url) ? ['-user_agent', userAgent] : [];
 }
 
+/**
+ * What the input is allowed to reach, beyond itself.
+ *
+ * A stream URL is not ours: it arrives in the provider's M3U, through
+ * Dispatcharr, from whoever sells the subscription. The playlist at the end of
+ * it is theirs too, and an HLS playlist can name the protocol of each segment
+ * -- so a remote input that is allowed `file` can ask ffmpeg to read the
+ * container's filesystem and mix it into the decode. Nothing here reads that
+ * output back (it goes to /dev/null), but bitrate and blackness both come out
+ * of it, which is enough to answer questions about a file a byte at a time.
+ *
+ * A remote input therefore gets no `file`, and a local one -- which only exists
+ * so this can be exercised against a sample on disk -- gets no network.
+ */
+function protocolArgs(url: string): string[] {
+  return /^https?:\/\//i.test(url)
+    ? ['-protocol_whitelist', 'http,https,tcp,tls,crypto,data']
+    : ['-protocol_whitelist', 'file,crypto,data'];
+}
+
+/**
+ * Why a URL cannot be handed to ffmpeg, or empty if it can.
+ *
+ * `spawn` takes an argv array and never a shell, so there is no injecting a
+ * second command here. There is still argument injection: ffprobe takes its
+ * input as a positional, so a "URL" of `-report` is read as an option and
+ * writes a log file into the working directory instead of probing anything.
+ * `--` would also end option parsing, but relying on it means relying on a
+ * cmdutils behaviour across every ffmpeg build a self-hoster might have; a
+ * stream URL that starts with a dash is not a stream URL, so say so instead.
+ */
+export function rejectUrl(url: string): string {
+  if (url.trim() === '') return 'empty url';
+  if (url.startsWith('-')) return 'refusing a url that begins with "-"';
+  return '';
+}
+
 export function parseFps(rate: string | undefined): number {
   if (!rate || rate === '0/0') return 0;
   if (rate.includes('/')) {
@@ -247,6 +284,7 @@ export async function sampleStream(
     '-threads',
     '1',
     ...userAgentArgs(url, userAgent),
+    ...protocolArgs(url),
     '-t',
     String(seconds),
     '-i',
@@ -269,6 +307,8 @@ export async function sampleStream(
     'null',
     '-',
   ];
+
+  if (rejectUrl(url)) return { bitrateKbps: 0, blackSeconds: 0 };
 
   return new Promise<SampleResult>((resolve) => {
     // ffmpegPath defaults to a bare `ffmpeg` resolved from PATH, never a file in
@@ -332,11 +372,15 @@ export async function probe(url: string, options: ProbeOptions = {}): Promise<Pr
     blackRatio = 0.8,
   } = options;
 
+  const refusal = rejectUrl(url);
+  if (refusal) return { ...DEAD, elapsedMs: 0, error: refusal };
+
   const micros = String(Math.round(analyzeSeconds * 1_000_000));
   const args = [
     '-v',
     'error',
     ...userAgentArgs(url, userAgent),
+    ...protocolArgs(url),
     '-analyzeduration',
     micros,
     '-probesize',

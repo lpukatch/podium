@@ -1,9 +1,9 @@
 import { execFileSync } from 'child_process';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, readdirSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { parseSampleStderr, probe, sampleStream } from './probe';
+import { parseSampleStderr, probe, rejectUrl, sampleStream } from './probe';
 
 /** ffmpeg is installed in CI; skip the integration tests where it is not. */
 function hasFfmpeg(): boolean {
@@ -47,6 +47,38 @@ describe('parseSampleStderr', () => {
       '[blackdetect] black_start:0 black_end:5 black_duration:5\n',
     );
     expect(result).toEqual({ bitrateKbps: 2500, blackSeconds: 5 });
+  });
+});
+
+describe('rejectUrl', () => {
+  it('refuses a url that would be read as an ffprobe option', () => {
+    // Stream URLs come from the provider's M3U. ffprobe takes its input as a
+    // positional argument, so "-report" is an option, not an address: it writes
+    // ffprobe-<timestamp>.log into the working directory and probes nothing.
+    expect(rejectUrl('-report')).toContain('begins with');
+    expect(rejectUrl('-i')).not.toBe('');
+    expect(rejectUrl('')).toBe('empty url');
+  });
+
+  it('passes anything that is actually a url or a path', () => {
+    expect(rejectUrl('http://provider.example/live/1.ts')).toBe('');
+    expect(rejectUrl('/app/data/sample.ts')).toBe('');
+    expect(rejectUrl('./sample.ts')).toBe('');
+  });
+});
+
+describe('probe refuses a hostile url before spawning', () => {
+  it('reports the refusal as a dead verdict and writes no log file', async () => {
+    const before = readdirSync(process.cwd()).filter((f) => f.startsWith('ffprobe-'));
+    const result = await probe('-report');
+    expect(result.alive).toBe(false);
+    expect(result.error).toContain('begins with');
+    const after = readdirSync(process.cwd()).filter((f) => f.startsWith('ffprobe-'));
+    expect(after).toEqual(before);
+  });
+
+  it('does not sample one either', async () => {
+    expect(await sampleStream('-report')).toEqual({ bitrateKbps: 0, blackSeconds: 0 });
   });
 });
 

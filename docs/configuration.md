@@ -15,6 +15,7 @@ clearing a field in the UI hands it back — so a setting you changed once and
 forgot cannot silently shadow the environment you thought you were running.
 
 - [Connecting to Dispatcharr](#connecting-to-dispatcharr)
+- [Who can reach it](#who-can-reach-it)
 - [Pacing](#pacing)
 - [Probing](#probing)
 - [Writing back](#writing-back)
@@ -31,6 +32,62 @@ forgot cannot silently shadow the environment you thought you were running.
 | `PODIUM_DATA_DIR` | `/app/data` | rules file, probe cache, run history |
 | `PODIUM_ENABLE_WEB` / `_WORKER` | `true` | run the halves separately |
 | `PORT` | `3456` | UI and API; 3000 is too crowded a default to sit on |
+
+## Who can reach it
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `PODIUM_ALLOWED_HOSTS` | — | extra hostnames Podium will answer to |
+| `PODIUM_AUTH_TOKEN` | — | require a shared token on every request |
+
+Podium has no login, because a tool that manages one Dispatcharr on your own
+network does not need accounts. It does need to be sure a request came from
+*you*, and there are two ways it can be reached without being on your network at
+all — both through a browser you already trust.
+
+**Cross-site requests are refused.** Every write here is a JSON `POST` or `PUT`,
+and nothing about being on a LAN stops a page you happen to be visiting from
+sending one to `http://podium.lan:3456` — your browser is on the LAN. Podium
+rejects any write whose `Origin` or `Sec-Fetch-Site` says it came from
+somewhere else. This needs no configuration and cannot break a normal install.
+
+**Unexpected hostnames are refused.** The other route in is DNS rebinding: an
+attacker's domain answers first with their address, then with yours, and the
+page that was loaded from it can then talk to Podium as its own origin. The
+`Host` header is the part that cannot be faked, so Podium only answers to names
+that cannot be pointed at you from outside:
+
+- `localhost`, and any single-label name — `http://podium:3456` between
+  containers, or a short Kubernetes service name. A rebinding attack needs a
+  registrable domain, and every one of those has a dot in it.
+- Loopback and private addresses: `127.0.0.0/8`, `10/8`, `172.16/12`,
+  `192.168/16`, `169.254/16`, `100.64/10` (which is every Tailscale address),
+  `::1`, `fc00::/7`, `fe80::/10`.
+- Anything under `.local`, `.lan`, `.home`, `.home.arpa`, `.internal`,
+  `.localdomain`, `.localhost` or `.ts.net`.
+
+If you reach Podium at a real hostname — behind Caddy, Traefik, nginx, an
+Ingress — name it, or it gets a 403 that says exactly this:
+
+```sh
+PODIUM_ALLOWED_HOSTS="podium.example.com"
+```
+
+Several are comma-separated, a leading dot is a subdomain wildcard
+(`.example.com`), and `*` disables the check entirely.
+
+**A token, if you have put it on the internet.** Setting `PODIUM_AUTH_TOKEN`
+makes every request carry it: `Authorization: Bearer <token>`, an
+`X-Podium-Token` header, or the `podium_token` cookie. Visiting
+`http://podium.lan:3456/?token=<token>` once puts it in that cookie and takes it
+back out of the URL, which is how you log a browser in without a login page.
+`/api/health` is exempt so the container's own health check still works;
+`/api/metrics` is not, so give Prometheus a `bearer_token`.
+
+Both of these are environment-only, and deliberately not on the Settings page: a
+boundary you can move through the API it protects is not a boundary. None of it
+is a substitute for not exposing Podium — it can reorder your channels and it
+holds a Dispatcharr credential.
 
 ## Pacing
 
