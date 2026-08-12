@@ -1,6 +1,6 @@
 {
   "name": "podium",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "license": "MIT",
   "description": "Ranks the streams behind your Dispatcharr channels, best first, by measuring them rather than trusting their names.",
