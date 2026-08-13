@@ -3,7 +3,13 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadConfig } from './config';
-import { describeSettings, FIELD_KEYS, resolveEnv, validateSettings } from './settings';
+import {
+  describeSettings,
+  FIELD_KEYS,
+  mergeForTest,
+  resolveEnv,
+  validateSettings,
+} from './settings';
 import { Store } from './store';
 
 describe('resolveEnv', () => {
@@ -144,6 +150,85 @@ describe('validateSettings', () => {
     expect(validateSettings({ PODIUM_ANALYZE_SECONDS: '6' }).errors).toHaveLength(0);
     // Below a minute the loop would spend its life re-fetching the channel list.
     expect(validateSettings({ PODIUM_TICK_MS: '0' }).errors).toHaveLength(1);
+  });
+});
+
+describe('mergeForTest', () => {
+  const saved = {
+    DISPATCHARR_URL: 'http://dispatcharr.lan:9191',
+    DISPATCHARR_API_KEY: 'saved-key',
+    DISPATCHARR_USERNAME: 'admin',
+    DISPATCHARR_PASSWORD: 'saved-password',
+  };
+
+  it('keeps the saved credential when the host is unchanged', () => {
+    // The flow the endpoint exists for: paste a new key, test it against the
+    // URL already configured.
+    const { merged, withheld } = mergeForTest(saved, { DISPATCHARR_API_KEY: 'new-key' }, {});
+    expect(merged.DISPATCHARR_API_KEY).toBe('new-key');
+    expect(merged.DISPATCHARR_PASSWORD).toBe('saved-password');
+    expect(withheld).toBe(false);
+  });
+
+  it('keeps it across a port change, which stays on the same machine', () => {
+    const { merged, withheld } = mergeForTest(
+      saved,
+      { DISPATCHARR_URL: 'http://dispatcharr.lan:9999' },
+      {},
+    );
+    expect(merged.DISPATCHARR_API_KEY).toBe('saved-key');
+    expect(withheld).toBe(false);
+  });
+
+  it('withholds every credential when the patch names another host', () => {
+    // The attack: one POST carrying nothing but a URL used to exfiltrate the
+    // key, the username and the password to a host of the caller's choosing.
+    const { merged, withheld } = mergeForTest(
+      saved,
+      { DISPATCHARR_URL: 'http://attacker.example' },
+      {},
+    );
+    expect(merged.DISPATCHARR_API_KEY).toBe('');
+    expect(merged.DISPATCHARR_USERNAME).toBe('');
+    expect(merged.DISPATCHARR_PASSWORD).toBe('');
+    expect(withheld).toBe(true);
+    expect(loadConfig(resolveEnv({}, merged)).hasCredentials).toBe(false);
+  });
+
+  it('withholds a credential that came from the environment too', () => {
+    // A compose-configured key is not in the settings table, and deleting the
+    // stored key would fall straight through to it.
+    const { merged, withheld } = mergeForTest(
+      {},
+      { DISPATCHARR_URL: 'http://attacker.example' },
+      { DISPATCHARR_URL: 'http://dispatcharr.lan:9191', DISPATCHARR_API_KEY: 'env-key' },
+    );
+    expect(withheld).toBe(true);
+    expect(loadConfig(resolveEnv({ DISPATCHARR_API_KEY: 'env-key' }, merged)).hasCredentials).toBe(
+      false,
+    );
+  });
+
+  it('sends a credential supplied in the same request to the new host', () => {
+    // Moving Dispatcharr is a real thing to do; it just has to be done by
+    // somebody holding the credential.
+    const { merged, withheld } = mergeForTest(
+      saved,
+      { DISPATCHARR_URL: 'http://dispatcharr.new', DISPATCHARR_API_KEY: 'typed-key' },
+      {},
+    );
+    expect(merged.DISPATCHARR_API_KEY).toBe('typed-key');
+    // The password the caller did *not* supply still stays behind.
+    expect(merged.DISPATCHARR_PASSWORD).toBe('');
+    expect(withheld).toBe(true);
+  });
+
+  it('does not report withholding when there was nothing to withhold', () => {
+    // First run: the message the UI shows has to be "fill these in", not
+    // "we kept your credential back".
+    const { merged, withheld } = mergeForTest({}, { DISPATCHARR_URL: 'http://elsewhere' }, {});
+    expect(withheld).toBe(false);
+    expect(loadConfig(resolveEnv({}, merged)).hasCredentials).toBe(false);
   });
 });
 

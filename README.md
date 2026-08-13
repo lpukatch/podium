@@ -18,11 +18,15 @@ nothing is written until you say so.
 ## Quick start
 
 ```sh
-docker run -d -p 3456:3456 -v podium-data:/app/data \
+docker run -d -p 127.0.0.1:3456:3456 -v podium-data:/app/data \
   -e DISPATCHARR_URL=http://dispatcharr:9191 \
   -e DISPATCHARR_API_KEY=... \
   ghcr.io/lpukatch/podium:latest
 ```
+
+That publishes the port on loopback only. To reach Podium from another machine
+drop the `127.0.0.1:`, and read [who can reach it](docs/configuration.md#who-can-reach-it)
+first — there is no login, and it holds a Dispatcharr credential.
 
 Or `docker compose up -d` with the [compose file](docker-compose.yml) in this
 repo.

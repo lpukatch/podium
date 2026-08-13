@@ -353,3 +353,73 @@ export function validateSettings(patch: Record<string, unknown>): {
 export function readStored(store: Store): Record<string, string> {
   return store.settings();
 }
+
+/** The fields that authenticate to Dispatcharr. */
+export const CREDENTIAL_KEYS = [
+  'DISPATCHARR_API_KEY',
+  'DISPATCHARR_USERNAME',
+  'DISPATCHARR_PASSWORD',
+] as const;
+
+/** The hostname a configured URL points at, or the raw text if it will not parse. */
+function hostOfUrl(raw: string): string {
+  try {
+    return new URL(raw).hostname.toLowerCase();
+  } catch {
+    return raw.trim().toLowerCase();
+  }
+}
+
+/**
+ * Merge a candidate patch over stored settings for a connection test,
+ * withholding saved credentials when the patch names a different host.
+ *
+ * The connection test exists so a bad URL or a stale key is found at the moment
+ * of typing, and to make "test just the key" work it overlays the patch on what
+ * is already stored. Overlaid the other way round, that is a credential
+ * disclosure: a request carrying nothing but a URL got the saved API key *and*
+ * the username and password sent to whatever host it named, in cleartext, with
+ * nothing written to the database to show it had happened. Podium has no login,
+ * so "whoever can reach the port" is who could ask -- and that turned reaching
+ * the port into holding the Dispatcharr credential.
+ *
+ * So a saved credential is only ever sent back to the host it was saved for.
+ * Testing a new host means supplying the credential in the same request, which
+ * the person typing it into the form has and an attacker does not.
+ *
+ * Compared by hostname alone, deliberately -- unlike the Origin check in
+ * `access.ts`, which treats a different port as a different application. The
+ * question there is which app is talking to Podium; the question here is which
+ * *machine* is being handed a secret, and a port change keeps it on the machine
+ * that already has it. That keeps the commonest URL edit -- fixing the port --
+ * from demanding the key be pasted again.
+ */
+export function mergeForTest(
+  stored: Record<string, string>,
+  values: Record<string, string | null>,
+  env: Record<string, string | undefined>,
+): { merged: Record<string, string>; withheld: boolean } {
+  const merged = { ...stored };
+  for (const [key, value] of Object.entries(values)) {
+    if (value === null) delete merged[key];
+    else merged[key] = value;
+  }
+
+  const urlOf = (source: Record<string, string | undefined>): string =>
+    source.DISPATCHARR_URL || env.DISPATCHARR_URL || CONFIG_DEFAULTS.DISPATCHARR_URL;
+  if (hostOfUrl(urlOf(stored)) === hostOfUrl(urlOf(merged))) {
+    return { merged, withheld: false };
+  }
+
+  let withheld = false;
+  for (const key of CREDENTIAL_KEYS) {
+    // Supplied in this very request: the caller already has it, so sending it
+    // back out discloses nothing.
+    if (values[key]) continue;
+    if (merged[key] || env[key]) withheld = true;
+    // Blanked rather than deleted: a deleted key falls through to the
+    // environment, which is exactly where a compose-configured credential is.
+    merged[key] = '';
+  }
+  return { merged, withheld };
+}
