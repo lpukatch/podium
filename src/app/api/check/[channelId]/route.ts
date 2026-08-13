@@ -1,7 +1,12 @@
 import { NextResponse } from 'next/server';
 import { requireCredentials } from '@/lib/config';
 import { DispatcharrClient } from '@/lib/dispatcharr';
-import { AFTER_EPG_START, currentProgrammes, Eligibility } from '@/lib/eligibility';
+import {
+  AFTER_EPG_START,
+  currentProgrammes,
+  describeVerdict,
+  Eligibility,
+} from '@/lib/eligibility';
 import { Mutex } from '@/lib/mutex';
 import { resolveOrdering } from '@/lib/ordering';
 import { type ProbeResult, probe } from '@/lib/probe';
@@ -137,7 +142,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         dead: 0,
         workerBusy: false,
         allowed: false,
-        heldBack: verdict.reason,
+        heldBack: describeVerdict(verdict),
         identical:
           workerOrder.length === current.length && workerOrder.every((s, i) => s === current[i]),
         current,
@@ -301,7 +306,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       dead: [...results.values()].filter((r) => !r.alive).length,
       workerBusy,
       allowed: verdict.allowed,
-      heldBack: verdict.allowed ? null : verdict.reason,
+      heldBack: verdict.allowed ? null : describeVerdict(verdict),
       identical,
       current,
       proposed,

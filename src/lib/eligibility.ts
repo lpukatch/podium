@@ -59,7 +59,23 @@ export interface EpgRow {
 
 export interface AllowResult {
   allowed: boolean;
+  /**
+   * Why, as a category: one of a closed set of short phrases.
+   *
+   * Kept free of anything channel-specific on purpose. A pass tallies held-back
+   * channels by this string, and when the programme title was part of it every
+   * distinct title became its own row -- one pass reported twelve separate
+   * "event window passed" entries, one per fixture, where it meant to say
+   * twenty-one channels were between events.
+   */
   reason: string;
+  /** The channel-specific part: which programme, and when it started. */
+  detail?: string;
+}
+
+/** Reason plus detail, for somewhere that is talking about one channel. */
+export function describeVerdict(verdict: AllowResult): string {
+  return verdict.detail ? `${verdict.reason} — ${verdict.detail}` : verdict.reason;
 }
 
 export interface GroupPattern extends GroupPolicy {
@@ -125,13 +141,17 @@ export class Eligibility {
 
     const opens = programme.start.getTime() + policy.graceMinutes * 60_000;
     const closes = programme.start.getTime() + policy.windowMinutes * 60_000;
-    const title = programme.title ? ` "${programme.title}"` : '';
+    const title = programme.title ? `"${programme.title}"` : '';
     if (now.getTime() < opens) {
-      const at = programme.start.toISOString().slice(11, 16);
-      return { allowed: false, reason: `before kickoff (${at}Z${title})` };
+      const at = `${programme.start.toISOString().slice(11, 16)}Z`;
+      return {
+        allowed: false,
+        reason: 'before kickoff',
+        detail: title ? `${at} ${title}` : at,
+      };
     }
     if (now.getTime() > closes) {
-      return { allowed: false, reason: `event window passed${title}` };
+      return { allowed: false, reason: 'event window passed', detail: title || undefined };
     }
     return { allowed: true, reason: '' };
   }

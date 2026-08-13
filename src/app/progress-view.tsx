@@ -353,6 +353,7 @@ export function ProgressView() {
           <p className="mt-1 text-sm text-[var(--color-muted)]">
             Held back:{' '}
             {Object.entries(p.heldBack)
+              .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
               .map(([why, count]) => `${n(count)} ${why}`)
               .join(', ')}
           </p>

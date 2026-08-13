@@ -14,6 +14,7 @@ import {
 import {
   AFTER_EPG_START,
   currentProgrammes,
+  describeVerdict,
   Eligibility,
   globToRegExp,
   NEVER,
@@ -103,6 +104,23 @@ describe('eligibility', () => {
     const verdict = e.allows(9, 'UNKNOWN', new Map(), NOW);
     expect(verdict.allowed).toBe(false);
     expect(verdict.reason).toContain('EPG');
+  });
+
+  it('keeps the programme out of the reason and in the detail', () => {
+    // The reason is a tally key, so it has to be the same string for every
+    // channel in the same situation; the fixture belongs in `detail`, which is
+    // what a single-channel view shows.
+    const e = new Eligibility(
+      new Map([[9, { mode: AFTER_EPG_START, graceMinutes: 5, windowMinutes: 60 }]]),
+    );
+    const passed = e.allows(9, 'GAME.us', currentProgrammes(epgRows(-90), NOW), NOW);
+    expect(passed.reason).toBe('event window passed');
+    expect(passed.detail).toBe('"First Pitch"');
+    expect(describeVerdict(passed)).toBe('event window passed — "First Pitch"');
+
+    const early = e.allows(9, 'GAME.us', currentProgrammes(epgRows(0), NOW), NOW);
+    expect(early.reason).toBe('before kickoff');
+    expect(early.detail).toBe('18:00Z "First Pitch"');
   });
 
   it('indexes only the programme airing now', () => {
@@ -925,6 +943,35 @@ describe('Runner.plan (rule-less channels in an after-kickoff group)', () => {
     const { jobs, heldBack } = plan([gated], new Map());
     expect(jobs).toEqual([]);
     expect(heldBack['no EPG data']).toBe(1);
+  });
+
+  it('tallies channels between events as one row, not one row per fixture', () => {
+    // The programme title used to be part of the reason string, so a pass with
+    // a group of per-fixture channels reported a dozen near-identical rows --
+    // 1 "event window passed \"Coming up: NFL Football at 7:00 PM EDT\"", 1 for
+    // the 7:30 game, and so on -- where it meant to say three channels.
+    const now = new Date();
+    const long_ago = (title: string, tvg: string) => ({
+      tvg_id: tvg,
+      start_time: new Date(now.getTime() - 6 * 3_600_000).toISOString(),
+      end_time: new Date(now.getTime() + 3_600_000).toISOString(),
+      title,
+    });
+    const programmes = currentProgrammes(
+      [
+        long_ago('Coming up: NFL Football at 7:00 PM EDT', 'GAME.us'),
+        long_ago('Coming up: NFL Football at 7:30 PM EDT', 'GAME2.us'),
+        long_ago('Minor League Baseball', 'GAME3.us'),
+      ],
+      now,
+    );
+    const channels = [
+      gated,
+      { ...gated, id: 11, tvgId: 'GAME2.us' },
+      { ...gated, id: 12, tvgId: 'GAME3.us' },
+    ];
+    const { heldBack } = plan(channels, programmes as Map<string, unknown>);
+    expect(heldBack).toEqual({ 'event window passed': 3 });
   });
 });
 

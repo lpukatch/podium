@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireCredentials } from '@/lib/config';
 import { DispatcharrClient } from '@/lib/dispatcharr';
-import { currentProgrammes, Eligibility } from '@/lib/eligibility';
+import { currentProgrammes, describeVerdict, Eligibility } from '@/lib/eligibility';
 import { composeOrder } from '@/lib/runner';
 import { groupPatterns, policies, config as serverConfig, snapshot } from '@/lib/server/state';
 import { Store } from '@/lib/store';
@@ -74,7 +74,10 @@ export async function POST(request: Request, context: { params: Promise<{ channe
 
     if (!verdict.allowed && !body.force) {
       return NextResponse.json(
-        { error: `Group policy prevents apply: ${verdict.reason}`, heldBack: verdict.reason },
+        {
+          error: `Group policy prevents apply: ${describeVerdict(verdict)}`,
+          heldBack: describeVerdict(verdict),
+        },
         { status: 409 },
       );
     }
@@ -94,7 +97,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       channelId: id,
       previous,
       order: targetOrder,
-      heldBack: verdict.allowed ? null : verdict.reason,
+      heldBack: verdict.allowed ? null : describeVerdict(verdict),
     });
   } catch (error) {
     return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
