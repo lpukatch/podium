@@ -11,7 +11,13 @@
 
 import type { Config } from './config';
 import { type Channel, DispatcharrClient, type Provider, type Stream } from './dispatcharr';
-import { currentProgrammes, type Eligibility, NEVER, type Programme } from './eligibility';
+import {
+  AFTER_EPG_START,
+  currentProgrammes,
+  type Eligibility,
+  NEVER,
+  type Programme,
+} from './eligibility';
 import { EpgCache } from './epg-cache';
 import type { Matcher, StreamIndex } from './matcher';
 import { resolveOrdering } from './ordering';
@@ -93,6 +99,53 @@ export function composeOrder(
   if (removeUnmatched) return matched;
   const matchedSet = new Set(matched);
   return [...matched, ...assigned.filter((id) => !matchedSet.has(id))];
+}
+
+/**
+ * Candidates for a channel the rules file says nothing about.
+ *
+ * Another app creates channels as fixtures appear -- a whole `Auto | SPORT`
+ * group that exists for one evening -- and assigns their streams itself. Nothing
+ * in the rules file names them, so `matcher.rules` has no entry and the normal
+ * path skips them before eligibility is ever consulted. For an
+ * `after_epg_start` group that is backwards: the operator has already said
+ * "probe this group once its programme starts", and a channel that carries its
+ * own lineup needs no alias to say which streams that means. The assignment *is*
+ * the rule.
+ *
+ * Restricted to `after_epg_start` at the call sites, deliberately. The same
+ * fallback under `always` would sweep every rule-less channel in the install
+ * into the backlog, which is a much larger decision than the one this answers.
+ *
+ * Nothing is ever assigned from here -- `composeOrder` still intersects with
+ * what the channel carries -- so this only ever reorders and probes streams
+ * Dispatcharr already put on the channel.
+ */
+export function assignedCandidates(
+  channel: Channel,
+  byId: Map<number, Stream>,
+  excludedGroups: Set<number>,
+): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  const seen = new Set<number>();
+  for (const streamId of channel.streams) {
+    if (seen.has(streamId)) continue;
+    const stream = byId.get(streamId);
+    if (!stream) continue;
+    // The one guard that still applies. An excluded provider group is the
+    // operator saying those streams are not candidates for anything; the name
+    // guards (region, timeshift, radio) exist to stop a rule *claiming* a
+    // stream it was never meant to, and nothing is being claimed here.
+    if (stream.groupId != null && excludedGroups.has(stream.groupId)) continue;
+    seen.add(streamId);
+    // Step order 0 for all of them, not the position in the channel's array.
+    // Step order is a hard tier above quality in alias mode, so ranking by
+    // assignment position would pin the existing order and leave the best
+    // stream wherever the other app happened to put it -- which is the entire
+    // thing being asked for here.
+    out.push([streamId, 0]);
+  }
+  return out;
 }
 
 export interface OpenJobItem {
@@ -726,12 +779,25 @@ export class Runner {
             const channel = channels.find((c) => c.id === channelId);
             const { matcher } = this.deps.rules.get();
             const rule = channel ? matcher.rules.get(channel.id) : undefined;
-            if (!channel || !rule) return;
+            if (!channel) return;
+            const groupName =
+              channel.groupId === null ? undefined : groupNames.get(channel.groupId);
+            // The rule-less kickoff channels `plan` admitted arrive here too, and
+            // returning early would probe them every pass and never reorder them.
+            if (
+              !rule &&
+              eligibility.policyFor(channel.groupId, groupName).mode !== AFTER_EPG_START
+            ) {
+              return;
+            }
 
             const index = getIndex();
             const entries: RankEntry[] = [];
             let complete = true;
-            for (const [streamId, stepOrder] of matcher.match(rule, index)) {
+            const hits = rule
+              ? matcher.match(rule, index)
+              : assignedCandidates(channel, streamById, index.excludedGroups);
+            for (const [streamId, stepOrder] of hits) {
               const freshlyProbed = results.find(([job]) => job.streamId === streamId);
               if (freshlyProbed) {
                 if (freshlyProbed[1] !== null) {
@@ -956,9 +1022,17 @@ export class Runner {
     for (const channel of channels) {
       if (channel.hidden_from_output) continue;
       const rule = matcher.rules.get(channel.id);
-      if (!rule) continue;
-
       const groupName = channel.groupId === null ? undefined : groupNames.get(channel.groupId);
+      const policy = eligibility.policyFor(channel.groupId, groupName);
+      // A channel with no rule is normally not ours to touch. The exception is a
+      // group set to `after_epg_start`, where the channel's own assignment
+      // stands in for the rule -- see `assignedCandidates`.
+      if (!rule && policy.mode !== AFTER_EPG_START) continue;
+      // Lazily, because matching is the expensive part of the pass and an
+      // excluded channel must not pay for it.
+      const candidates = (): Array<[number, number]> =>
+        rule ? matcher.match(rule, index) : assignedCandidates(channel, byId, index.excludedGroups);
+
       const verdict = eligibility.allows(
         channel.groupId,
         channel.tvgId,
@@ -971,13 +1045,13 @@ export class Runner {
         // Held back only by the clock (waiting for kickoff) is still managed:
         // keep its verdicts so they are not pruned, and leave them out of the
         // freshness number until the channel is actually probeable.
-        if (eligibility.policyFor(channel.groupId, groupName).mode !== NEVER) {
-          for (const [streamId] of matcher.match(rule, index)) keepStreamIds.add(streamId);
+        if (policy.mode !== NEVER) {
+          for (const [streamId] of candidates()) keepStreamIds.add(streamId);
         }
         continue;
       }
 
-      for (const [streamId, stepOrder] of matcher.match(rule, index)) {
+      for (const [streamId, stepOrder] of candidates()) {
         const stream = byId.get(streamId);
         if (!stream || stream.is_stale) continue;
         keepStreamIds.add(stream.id);
@@ -1063,9 +1137,13 @@ export class Runner {
     for (const channel of channels) {
       if (channel.hidden_from_output) continue;
       const rule = matcher.rules.get(channel.id);
-      if (!rule) continue;
-
       const groupName = channel.groupId === null ? undefined : groupNames.get(channel.groupId);
+      // Same fallback `plan` applies, or a rule-less kickoff channel whose
+      // streams are all cache hits would never be reordered at all.
+      if (!rule && eligibility.policyFor(channel.groupId, groupName).mode !== AFTER_EPG_START) {
+        continue;
+      }
+
       const verdict = eligibility.allows(
         channel.groupId,
         channel.tvgId,
@@ -1075,7 +1153,9 @@ export class Runner {
       );
       if (!verdict.allowed) continue;
 
-      const hits = matcher.match(rule, index);
+      const hits = rule
+        ? matcher.match(rule, index)
+        : assignedCandidates(channel, byId, index.excludedGroups);
       if (hits.length === 0) continue;
 
       const entries: RankEntry[] = [];

@@ -25,6 +25,8 @@ interface ChannelRow {
   patterns: string[];
   regexCount: number;
   hasRule: boolean;
+  /** No rule, but an after-kickoff group: ranked off what the channel carries. */
+  assignmentOnly?: boolean;
 }
 
 interface PatternRule {
@@ -746,7 +748,7 @@ export default function Page() {
                         <span className="text-sm tabular-nums text-[var(--color-muted)]">
                           {c.assigned} assigned · {c.matched} matched
                           {c.regexCount > 0 ? ` · ${c.regexCount} regex` : ''}
-                          {!c.hasRule ? ' · no rule' : ''}
+                          {c.assignmentOnly ? ' · assigned only' : !c.hasRule ? ' · no rule' : ''}
                         </span>
                       </span>
                       <span className="flex flex-none items-center gap-2">

@@ -1,11 +1,11 @@
 import { NextResponse } from 'next/server';
 import { requireCredentials } from '@/lib/config';
 import { DispatcharrClient } from '@/lib/dispatcharr';
-import { currentProgrammes, Eligibility } from '@/lib/eligibility';
+import { AFTER_EPG_START, currentProgrammes, Eligibility } from '@/lib/eligibility';
 import { Mutex } from '@/lib/mutex';
 import { resolveOrdering } from '@/lib/ordering';
 import { type ProbeResult, probe } from '@/lib/probe';
-import { composeOrder, statsPayload } from '@/lib/runner';
+import { assignedCandidates, composeOrder, statsPayload } from '@/lib/runner';
 import { type ProbeJob, runLanes } from '@/lib/scheduler';
 import { isUsable, type RankEntry, rank, score } from '@/lib/scoring';
 import {
@@ -87,18 +87,6 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     const channel = await client.channel(id);
     if (!channel) return NextResponse.json({ error: 'unknown channel' }, { status: 404 });
 
-    const rule = m.rules.get(id);
-    if (!rule) {
-      return NextResponse.json({ error: 'channel has no rule yet' }, { status: 400 });
-    }
-
-    const hits = m.match(rule, idx);
-    if (hits.length === 0) {
-      return NextResponse.json({ error: 'rule matches no streams' }, { status: 400 });
-    }
-
-    store = new Store(config.dbPath);
-
     // Group Eligibility Check (Finding 03)
     const groupName =
       channel.groupId !== null
@@ -108,6 +96,34 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     const epgRows = (await client.epgNow().catch(() => [])) as never[];
     const programmes = currentProgrammes(epgRows);
     const verdict = elig.allows(channel.groupId, channel.tvgId, programmes, new Date(), groupName);
+
+    const streamById = new Map(snap.streams.map((s) => [s.id, s]));
+    const rule = m.rules.get(id);
+    // The worker probes a rule-less channel in an `after_epg_start` group off
+    // its own assignment (see `assignedCandidates`), so this has to as well --
+    // the endpoint exists to preview what the worker would do, and refusing
+    // here would say "no rule" about a channel the worker is actively ranking.
+    const assignmentOnly =
+      !rule && elig.policyFor(channel.groupId, groupName).mode === AFTER_EPG_START;
+    if (!rule && !assignmentOnly) {
+      return NextResponse.json({ error: 'channel has no rule yet' }, { status: 400 });
+    }
+
+    const hits = rule
+      ? m.match(rule, idx)
+      : assignedCandidates(channel, streamById, idx.excludedGroups);
+    if (hits.length === 0) {
+      return NextResponse.json(
+        {
+          error: rule
+            ? 'rule matches no streams'
+            : 'channel has no streams assigned to rank; the group is set to after kickoff, so podium ranks what the channel already carries',
+        },
+        { status: 400 },
+      );
+    }
+
+    store = new Store(config.dbPath);
 
     const current = channel.streams ?? [];
 
@@ -168,7 +184,6 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       limits.set(pid, Math.max(0, limit - reserve - (workerBusy ? 1 : 0)));
     }
 
-    const streamById = new Map(snap.streams.map((s) => [s.id, s]));
     const jobs: ProbeJob[] = [];
     const maxCheckStreams = 50;
     const boundedHits = hits.slice(0, maxCheckStreams);

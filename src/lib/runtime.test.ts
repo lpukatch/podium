@@ -775,6 +775,159 @@ describe('Runner.plan (managed set + oldest check)', () => {
   });
 });
 
+describe('Runner.plan (rule-less channels in an after-kickoff group)', () => {
+  // Another app creates "Auto | SPORT" channels per fixture and assigns their
+  // streams. Nothing names them in the rules file, so they have no rule at all.
+  let dir: string;
+  let store: Store;
+  let rulesPath: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'podium-assigned-'));
+    store = new Store(join(dir, 'assigned.db'));
+    rulesPath = join(dir, 'rules.json');
+    const doc = JSON.stringify({
+      schema: 2,
+      defaults: { exclude_groups: ['PPV JUNK'] },
+      channels: [],
+      group_patterns: [{ pattern: 'Auto | *', mode: 'after_epg_start' }],
+    });
+    const tmp = `${rulesPath}.tmp`;
+    writeFileSync(tmp, doc, 'utf8');
+    renameSync(tmp, rulesPath);
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const stream = (id: number, groupId: number): Stream => ({
+    id,
+    name: `stream ${id}`,
+    url: `u${id}`,
+    providerId: 5,
+    streamHash: 'h',
+    currentViewers: 0,
+    groupId,
+  });
+  // 42 sits in the provider group the operator switched off entirely.
+  const streams: Stream[] = [stream(40, 900), stream(41, 900), stream(42, 901)];
+  const groupNames = new Map([
+    [700, 'Auto | SPORT'],
+    [800, 'Movies'],
+    [900, 'PROVIDER SPORT'],
+    [901, 'PPV JUNK'],
+  ]);
+  const gated: Channel = {
+    id: 1,
+    name: 'Auto | Cubs v Cards',
+    tvgId: 'GAME.us',
+    streams: [40, 41, 42],
+    groupId: 700,
+  };
+  const plain: Channel = {
+    id: 2,
+    name: 'Some Movie Channel',
+    tvgId: 'movie.us',
+    streams: [40, 41],
+    groupId: 800,
+  };
+
+  // `plan` reads the wall clock itself, so every programme here is built
+  // relative to the same real "now" the call will use.
+  function plan(channels: Channel[], programmes: Map<string, unknown>) {
+    const rules = new RulesSource(rulesPath);
+    const runner = new Runner({
+      config: () => loadConfig({ DISPATCHARR_API_KEY: 'k' }),
+      store,
+      rules,
+    });
+    const heldBack: Record<string, number> = {};
+    const planned = (
+      runner as unknown as {
+        plan: (
+          channels: Channel[],
+          streams: Stream[],
+          programmes: Map<string, unknown>,
+          eligibility: unknown,
+          counters: { cached: number },
+          heldBack: Record<string, number>,
+          groupNames: Map<number, string>,
+        ) => { jobs: Array<{ streamId: number; stepOrder: number }>; keepStreamIds: Set<number> };
+      }
+    ).plan.call(
+      runner,
+      channels,
+      streams,
+      programmes,
+      rules.get().eligibility,
+      { cached: 0 },
+      heldBack,
+      groupNames,
+    );
+    return { ...planned, heldBack };
+  }
+
+  const started = (at: Date) =>
+    currentProgrammes(
+      [
+        {
+          tvg_id: 'GAME.us',
+          start_time: new Date(at.getTime() - 30 * 60_000).toISOString(),
+          end_time: new Date(at.getTime() + 90 * 60_000).toISOString(),
+          title: 'First Pitch',
+        },
+      ],
+      at,
+    );
+
+  it('probes the streams the channel already carries once the programme has started', () => {
+    const now = new Date();
+    const { jobs } = plan([gated], started(now) as Map<string, unknown>);
+    // 40 and 41 are candidates off the assignment alone; 42 is in an excluded
+    // provider group, which no channel may claim by any route.
+    expect(jobs.map((j) => j.streamId).sort()).toEqual([40, 41]);
+    // No alias said anything about preference, so nothing may outrank quality.
+    expect(jobs.every((j) => j.stepOrder === 0)).toBe(true);
+  });
+
+  it('leaves a rule-less channel alone when its group is not after kickoff', () => {
+    const now = new Date();
+    const { jobs } = plan([plain], started(now) as Map<string, unknown>);
+    expect(jobs).toEqual([]);
+  });
+
+  it('holds the channel back before kickoff but keeps its streams managed', () => {
+    const now = new Date();
+    const soon = currentProgrammes(
+      [
+        {
+          tvg_id: 'GAME.us',
+          // Started a minute ago: inside the 5-minute default grace.
+          start_time: new Date(now.getTime() - 60_000).toISOString(),
+          end_time: new Date(now.getTime() + 90 * 60_000).toISOString(),
+          title: 'First Pitch',
+        },
+      ],
+      now,
+    );
+    const { jobs, keepStreamIds, heldBack } = plan([gated], soon as Map<string, unknown>);
+    expect(jobs).toEqual([]);
+    expect(Object.keys(heldBack).some((r) => r.startsWith('before kickoff'))).toBe(true);
+    // Managed, just not probeable yet -- their cache rows must survive the prune.
+    expect(keepStreamIds.has(40)).toBe(true);
+    expect(keepStreamIds.has(41)).toBe(true);
+    expect(keepStreamIds.has(42)).toBe(false);
+  });
+
+  it('holds the channel back when the group has no EPG for it', () => {
+    const { jobs, heldBack } = plan([gated], new Map());
+    expect(jobs).toEqual([]);
+    expect(heldBack['no EPG data']).toBe(1);
+  });
+});
+
 describe('reorder live re-fetch', () => {
   // reorder() is private; reach it directly with a fake client so the live
   // re-fetch before the write can be exercised without Dispatcharr.

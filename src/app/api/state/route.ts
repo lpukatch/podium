@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
-import { ALWAYS, Eligibility, type GroupPolicy } from '@/lib/eligibility';
+import { AFTER_EPG_START, ALWAYS, Eligibility, type GroupPolicy } from '@/lib/eligibility';
+import { assignedCandidates } from '@/lib/runner';
 import {
   config,
   groupPatterns,
@@ -38,6 +39,7 @@ export async function GET(request: Request) {
     }
 
     const providerNames = Object.fromEntries(snap.providers.map((p) => [p.id, p.name]));
+    const streamById = new Map(snap.streams.map((s) => [s.id, s]));
 
     const payload = groups.map((group) => {
       const channels = byGroup.get(group.id) ?? [];
@@ -50,7 +52,15 @@ export async function GET(request: Request) {
 
       const rows = channels.map((channel) => {
         const rule = m.rules.get(channel.id);
-        const hits = rule ? m.match(rule, idx) : [];
+        // A rule-less channel in an after-kickoff group is ranked off its own
+        // assignment by the worker, so showing it as "no rule, 0 matched" would
+        // describe the opposite of what happens to it.
+        const assignmentOnly = !rule && mode === AFTER_EPG_START;
+        const hits = rule
+          ? m.match(rule, idx)
+          : assignmentOnly
+            ? assignedCandidates(channel, streamById, idx.excludedGroups)
+            : [];
         if (rule) ruled += 1;
         if (hits.length > 0) matchedChannels += 1;
         links += hits.length;
@@ -69,6 +79,7 @@ export async function GET(request: Request) {
           patterns: (rule?.patterns ?? []).map((p) => p.regex.source),
           regexCount: rule?.patterns.length ?? 0,
           hasRule: Boolean(rule),
+          assignmentOnly,
         };
       });
       rows.sort((a, b) => a.name.localeCompare(b.name));

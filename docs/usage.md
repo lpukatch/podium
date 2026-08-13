@@ -142,6 +142,15 @@ the channel.
 Name patterns like `Auto | *` apply a policy to groups that do not exist yet,
 which matters because Dispatcharr creates groups on its own.
 
+`after_epg_start` is also the one policy that covers channels with no rule at
+all. Channels created by another app — a scheduler that spawns one per fixture —
+have streams assigned but nothing in the rules file naming them, so under any
+other policy podium leaves them alone. In an `after_epg_start` group it ranks
+what the channel already carries instead, once the programme has started: the
+assignment stands in for the rule. It still only reorders, never assigns, and
+streams in a provider group you excluded stay out. Such a channel shows as
+`assigned only` in the channel list.
+
 ![A channel group with its policy chips and the channels it holds](images/group-policy.png)
 
 The policy is the row of chips at the top of a group. `assigned` is what
