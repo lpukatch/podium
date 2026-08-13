@@ -2,6 +2,7 @@ import { readFileSync } from 'fs';
 import { DispatcharrClient } from '../lib/dispatcharr';
 import {
   currentProgrammes,
+  describeVerdict,
   Eligibility,
   parseGroupPatterns,
   parsePolicies,
@@ -43,7 +44,9 @@ async function main() {
     console.log(
       `  programme  : ${prog ? `${prog.title} started ${Math.round((now.getTime() - prog.start.getTime()) / 60000)}m ago` : 'none airing'}`,
     );
-    console.log(`  ELIGIBLE   : ${verdict.allowed}${verdict.reason ? ` (${verdict.reason})` : ''}`);
+    console.log(
+      `  ELIGIBLE   : ${verdict.allowed}${verdict.reason ? ` (${describeVerdict(verdict)})` : ''}`,
+    );
     console.log(`  WOULD PROBE: ${verdict.allowed && hasRule}`);
   }
 
