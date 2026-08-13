@@ -140,17 +140,23 @@ jobs:
         run: |
           LAST_TAG="${{ steps.get_version.outputs.latest_tag }}"
           NEW_VERSION="${{ steps.version.outputs.new_version }}"
-          echo "## Changelog" > /tmp/changelog.md
+          # `--pretty=format:` omits the trailing newline, so the closing
+          # heredoc delimiter used to land glued to the last commit subject
+          # ("- fix: whatever (abc1234)EOF"), the runner never found EOF on a
+          # line of its own, and the step failed *after* the tag had already
+          # been pushed -- a red run on a release that actually happened.
+          # `--pretty=` (tformat) terminates every line, including the last.
+          #
           # On a first release there is no previous tag to diff against, so walk
           # the whole history rather than an invalid range.
-          if [ "$LAST_TAG" = "v0.0.0" ]; then
-            git log ${NEW_VERSION} --pretty=format:"- %s (%h)" >> /tmp/changelog.md
-          else
-            git log ${LAST_TAG}..${NEW_VERSION} --pretty=format:"- %s (%h)" >> /tmp/changelog.md
-          fi
-          echo "changelog<<EOF" >> $GITHUB_OUTPUT
-          cat /tmp/changelog.md >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          {
+            echo "## Changelog"
+            if [ "$LAST_TAG" = "v0.0.0" ]; then
+              git log "${NEW_VERSION}" --pretty="- %s (%h)"
+            else
+              git log "${LAST_TAG}..${NEW_VERSION}" --pretty="- %s (%h)"
+            fi
+          } > /tmp/changelog.md
 
       - name: Summary
         if: always()
@@ -162,5 +168,9 @@ jobs:
             echo "- **Previous Version**: ${{ steps.get_version.outputs.latest_tag }}" >> $GITHUB_STEP_SUMMARY
             echo "- **New Version**: ${{ steps.version.outputs.new_version }}" >> $GITHUB_STEP_SUMMARY
             echo "### Changes" >> $GITHUB_STEP_SUMMARY
-            echo "${{ steps.changelog.outputs.changelog }}" >> $GITHUB_STEP_SUMMARY
+            # Read the file rather than interpolating the changelog into the
+            # script. `echo "${{ ... }}"` pastes commit subjects into a shell
+            # command, so one subject containing a double quote or `$(...)`
+            # breaks the step or runs whatever it says.
+            cat /tmp/changelog.md >> $GITHUB_STEP_SUMMARY || true
           fi
