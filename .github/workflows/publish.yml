@@ -75,12 +75,41 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # GitHub's own generated notes are built from merged pull requests, and
+      # this repo has none: it is a mirror, the PRs live upstream on Forgejo,
+      # and a mirror push is a force push. So the generated section came out
+      # empty and every release read as the docker pull line and nothing else.
+      # The commits are all here, though, so write the changelog from those.
+      - name: Compose release notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          # Walk back from the tagged commit's *parent*, or describe would
+          # answer with the tag being released and the range would be empty.
+          PREV=$(git describe --tags --abbrev=0 --match "v*" "${TAG}^" 2>/dev/null || true)
+          {
+            echo '```sh'
+            # The image is tagged from the semver, which has no leading v --
+            # `docker pull ...:v1.2.0` is not a tag that exists.
+            echo "docker pull ${REGISTRY}/${IMAGE_NAME}:${TAG#v}"
+            echo '```'
+            echo
+            echo "## Changes"
+            echo
+            if [ -n "$PREV" ]; then RANGE="${PREV}..${TAG}"; else RANGE="${TAG}"; fi
+            # A merge commit repeats the subject of the branch it merges and the
+            # release commit is bookkeeping, so neither earns a line of its own.
+            git log "$RANGE" --no-merges --pretty="- %s (%h)" \
+              | grep -v '^- chore(release):' \
+              || echo "- no changes"
+          } > "${RUNNER_TEMP}/release-notes.md"
+          cat "${RUNNER_TEMP}/release-notes.md"
+
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
         with:
+          # body_path wins over body, and generate_release_notes appends
+          # GitHub's section (the Full Changelog compare link) after it.
+          body_path: ${{ runner.temp }}/release-notes.md
           generate_release_notes: true
-          body: |
-            ```sh
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
-            ```
