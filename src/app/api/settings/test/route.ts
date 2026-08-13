@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
-import { loadConfig } from '@/lib/config';
+import { loadConfig, NO_CREDENTIALS } from '@/lib/config';
 import { DispatcharrClient } from '@/lib/dispatcharr';
-import { resolveEnv, validateSettings } from '@/lib/settings';
+import { mergeForTest, resolveEnv, validateSettings } from '@/lib/settings';
 import { Store } from '@/lib/store';
 
 export const dynamic = 'force-dynamic';
@@ -24,13 +24,10 @@ export async function POST(request: Request) {
     }
 
     store = new Store(loadConfig().dbPath);
-    // Overlay the candidate values on what is already stored: a test of "just
-    // the URL" should still use the saved credential.
-    const merged = { ...store.settings() };
-    for (const [k, v] of Object.entries(values)) {
-      if (v === null) delete merged[k];
-      else merged[k] = v;
-    }
+    // Overlay the candidate values on what is already stored, so a test of
+    // "just the key" still uses the saved URL -- but never the reverse for a
+    // host this credential was not saved for. See `mergeForTest`.
+    const { merged, withheld } = mergeForTest(store.settings(), values, process.env);
 
     let config: ReturnType<typeof loadConfig>;
     try {
@@ -41,6 +38,21 @@ export async function POST(request: Request) {
         error: String(error)
           .replace(/^Error:\s*/, '')
           .slice(0, 200),
+      });
+    }
+
+    // Refuse before reaching the network rather than after: with nothing to
+    // authenticate with there is no test to run, and answering here keeps this
+    // endpoint from being a way to make the server fetch an arbitrary URL for
+    // the asking.
+    if (!config.hasCredentials) {
+      return NextResponse.json({
+        ok: false,
+        needsCredentials: true,
+        error: withheld
+          ? 'This names a different Dispatcharr host, so the saved credential was not sent. ' +
+            'Enter the API key (or username and password) to test against it.'
+          : `Nothing to authenticate with — ${NO_CREDENTIALS}.`,
       });
     }
 

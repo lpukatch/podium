@@ -15,7 +15,12 @@ services:
     container_name: podium
     restart: unless-stopped
     ports:
-      - "3456:3456"
+      # Loopback only. Podium has no login and holds a Dispatcharr credential,
+      # so the default should not be "reachable from every device on the
+      # network". To reach it from elsewhere, change this to "3456:3456" and
+      # read docs/configuration.md#who-can-reach-it first -- if it is going
+      # anywhere but your own network, it wants PODIUM_AUTH_TOKEN.
+      - "127.0.0.1:3456:3456"
     environment:
       # Where Dispatcharr lives, and how to authenticate. An API key is
       # simplest; DISPATCHARR_USERNAME/PASSWORD works too and mints a JWT.
