@@ -185,7 +185,12 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
             `${summary.reordered} reordered, ${summary.unchanged} already in order, ` +
             `${summary.skipped} skipped`,
         );
-        const held = Object.entries(summary.heldBack);
+        // Biggest bucket first, ties by name: the same order the progress page
+        // uses, and it keeps the line stable between passes so a diff in the
+        // log is a real change rather than a reshuffle.
+        const held = Object.entries(summary.heldBack).sort(
+          (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
+        );
         if (held.length > 0) {
           log(`held back: ${held.map(([why, n]) => `${n} ${why}`).join(', ')}`);
         }
