@@ -169,8 +169,14 @@ jobs:
             echo "- **New Version**: ${{ steps.version.outputs.new_version }}" >> $GITHUB_STEP_SUMMARY
             echo "### Changes" >> $GITHUB_STEP_SUMMARY
             # Read the file rather than interpolating the changelog into the
-            # script. `echo "${{ ... }}"` pastes commit subjects into a shell
-            # command, so one subject containing a double quote or `$(...)`
-            # breaks the step or runs whatever it says.
+            # script. Expanding it as an expression pastes commit subjects
+            # straight into a shell command, so one subject containing a double
+            # quote or a command substitution breaks the step or runs whatever
+            # it says.
+            #
+            # Note for anyone editing this file: never write an expression
+            # delimiter in a comment. The workflow parser scans `run:` blocks
+            # for them regardless of `#`, and an illustrative one here is what
+            # broke this config after the last merge.
             cat /tmp/changelog.md >> $GITHUB_STEP_SUMMARY || true
           fi
