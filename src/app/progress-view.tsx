@@ -6,12 +6,30 @@ interface Lane {
   id: number;
   name: string;
   limit: number;
+  /** Every probe that returned a verdict, alive or dead. */
   done: number;
-  /** Probes that came back dead. Absent on a row from an older worker. */
+  /**
+   * The subset of `done` that came back dead. Absent on a row from an older
+   * worker. Surfaced separately because a dead stream is information, not a
+   * failure -- but it is *already counted* in `done`.
+   */
   dead?: number;
+  /** Probes that threw. Disjoint from `done`, which never reached its counter. */
   failed: number;
   queued: number;
   current: string[];
+}
+
+/**
+ * How many of a lane's queued probes have settled.
+ *
+ * `dead` is a breakdown of `done`, not a sibling of it, so adding the two
+ * counts every dead stream twice -- a lane that probed 44 streams and found 20
+ * dead reported "64/44". Only `failed` is genuinely separate: it is incremented
+ * on the throw path, before `done` is ever reached.
+ */
+export function laneCompleted(lane: Pick<Lane, 'done' | 'failed'> & { dead?: number }): number {
+  return lane.done + (lane.failed ?? 0);
 }
 
 interface Progress {
@@ -446,11 +464,9 @@ export function ProgressView() {
           </p>
           <ul className="mt-3">
             {p.lanes.map((lane) => {
-              // `done` is every probe that returned a verdict (alive or dead);
-              // a dead stream is information, not a failure, so it has its own
-              // counter and only `failed` (a probe that errored) reads as red.
-              const completed = lane.done + (lane.dead ?? 0) + (lane.failed ?? 0);
-              const width = lane.queued > 0 ? Math.round((completed / lane.queued) * 100) : 0;
+              const completed = laneCompleted(lane);
+              const width =
+                lane.queued > 0 ? Math.min(Math.round((completed / lane.queued) * 100), 100) : 0;
               return (
                 <li
                   key={lane.id}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { collapseRuns } from './progress-view';
+import { collapseRuns, laneCompleted } from './progress-view';
 
 const run = (over: Partial<Parameters<typeof collapseRuns>[0][number]> = {}) => ({
   run_id: Math.random().toString(36).slice(2),
@@ -42,5 +42,26 @@ describe('recent passes', () => {
     expect(collapseRuns([run({ started_at: 100 })])).toEqual([
       { kind: 'quiet', count: 1, from: 100, to: 100 },
     ]);
+  });
+});
+
+describe('provider lanes', () => {
+  it('does not count a dead stream twice', () => {
+    // The lane that produced "64/44 · limit 5 · 20 dead": every dead stream had
+    // already advanced `done` before it was broken out into `dead`.
+    expect(laneCompleted({ done: 44, dead: 20, failed: 0 })).toBe(44);
+  });
+
+  it('counts a failed probe, which never reached done', () => {
+    expect(laneCompleted({ done: 40, dead: 5, failed: 4 })).toBe(44);
+  });
+
+  it('handles a lane row from a worker that predates the dead counter', () => {
+    expect(laneCompleted({ done: 7, failed: 0 })).toBe(7);
+  });
+
+  it('never reports more settled than were queued', () => {
+    const lane = { done: 44, dead: 20, failed: 0, queued: 44 };
+    expect(laneCompleted(lane)).toBeLessThanOrEqual(lane.queued);
   });
 });
