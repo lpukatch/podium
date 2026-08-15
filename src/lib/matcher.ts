@@ -20,7 +20,7 @@
  */
 
 import { globToRegExp } from './eligibility';
-import { matchKey, type NormalizedName, normalize } from './normalize';
+import { matchKey, type NormalizedName, normalize, qualityKeys } from './normalize';
 
 export interface StreamLike {
   id: number;
@@ -150,6 +150,10 @@ export function resolveExcludedGroups(
  * may be stacked (`@US @USA Fox Sports 1`), and a multi-word segment can be
  * quoted (`@"US East" ESPN`).
  *
+ * The tokens providers hang off the *end* -- "4K", "H265", "1080p" -- are the
+ * same problem at the other end of the name, and take a trailing `~`:
+ * `@AU beIN Sports ~4K` is the AU section's UHD copy. See `TAIL_QUALIFIER`.
+ *
  * The `@` marker rather than the provider's own `AU:` syntax because aliases
  * containing a literal prefix already exist and already mean the loose thing --
  * every converted "Radio: <station>" alias, and there are usually hundreds.
@@ -163,6 +167,10 @@ export interface AliasSpec {
   require: Set<string>;
   /** Prefix keys that disqualify a stream. */
   reject: Set<string>;
+  /** Tail tokens the stream must carry, all of them. See `tagsSatisfy`. */
+  requireTags: Set<string>;
+  /** Tail tokens that disqualify a stream. */
+  rejectTags: Set<string>;
 }
 
 /**
@@ -171,10 +179,26 @@ export interface AliasSpec {
  */
 const QUALIFIER = /^@(!?)(?:"([^"]+)"|(\S+))\s+/;
 
+/**
+ * The same question at the other end of the name: `CNN ~4K`, `CNN ~!hevc`.
+ *
+ * A separate marker, written where the thing it names actually sits. `@`
+ * constrains the section a provider puts in front; `~` constrains the tokens it
+ * hangs off the back. Reusing `@` for both would have meant one marker whose
+ * meaning depended on position, and -- worse -- would have quietly widened every
+ * `@HD` already in a rules file from "the HD: section" to "anything tagged HD".
+ *
+ * Leading whitespace is required for the same reason `@` requires trailing
+ * whitespace: a name is allowed to contain a tilde.
+ */
+const TAIL_QUALIFIER = /\s+~(!?)(?:"([^"]+)"|(\S+))$/;
+
 export function parseAlias(line: string): AliasSpec {
   let text = line.trim();
   const require = new Set<string>();
   const reject = new Set<string>();
+  const requireTags = new Set<string>();
+  const rejectTags = new Set<string>();
 
   for (;;) {
     const match = QUALIFIER.exec(text);
@@ -186,10 +210,24 @@ export function parseAlias(line: string): AliasSpec {
     text = text.slice(match[0].length);
   }
 
-  return { text: text.trim(), require, reject };
+  for (;;) {
+    const match = TAIL_QUALIFIER.exec(text);
+    if (!match) break;
+    const key = matchKey(match[2] ?? match[3] ?? '');
+    if (key) (match[1] ? rejectTags : requireTags).add(key);
+    text = text.slice(0, match.index);
+  }
+
+  return { text: text.trim(), require, reject, requireTags, rejectTags };
 }
 
-const UNQUALIFIED: AliasSpec = { text: '', require: new Set(), reject: new Set() };
+const UNQUALIFIED: AliasSpec = {
+  text: '',
+  require: new Set(),
+  reject: new Set(),
+  requireTags: new Set(),
+  rejectTags: new Set(),
+};
 
 /**
  * How many leading words of a segment a qualifier may consume.
@@ -264,6 +302,24 @@ export function prefixesSatisfy(spec: AliasSpec, norm: NormalizedName): boolean 
   return false;
 }
 
+/**
+ * Whether a stream's tail tokens satisfy an alias's `~` qualifiers.
+ *
+ * `require` is **all of**, where the `@` side is **any of**, and the difference
+ * is not an inconsistency -- it follows from what the two sides name. A stream
+ * sits in one section, spelled several ways, so `@US @USA` is one question with
+ * two acceptable answers. A stream carries several tail tokens *at once* -- tier,
+ * codec, fps, flags -- so `~4K ~hevc` is two questions, and meaning "either"
+ * there would make the pair say less than each line alone.
+ */
+export function tagsSatisfy(spec: AliasSpec, norm: NormalizedName): boolean {
+  if (spec.requireTags.size === 0 && spec.rejectTags.size === 0) return true;
+  const keys = qualityKeys(norm.quality);
+  for (const key of spec.rejectTags) if (keys.has(key)) return false;
+  for (const key of spec.requireTags) if (!keys.has(key)) return false;
+  return true;
+}
+
 export function rejectedBy(guards: Guards, norm: NormalizedName): string {
   if (guards.timeshift && norm.isTimeshift) return 'timeshift';
   for (const prefix of norm.prefixes) {
@@ -308,6 +364,24 @@ export class Matcher {
   compileAlias(line: string): { key: string; spec: AliasSpec } {
     const spec = parseAlias(line);
     return { key: this.aliasKey(spec.text), spec };
+  }
+
+  /**
+   * An `exclude` line, keyed both as a name and as a tail token.
+   *
+   * `tag` is keyed off the raw text rather than through `aliasKey`, because
+   * `normalize` eats the very token being named: "4K" normalises to the empty
+   * name, so the alias key of an entry like that is `''` and would otherwise
+   * silently mean "exclude every stream whose name normalises away".
+   *
+   * Both are kept, and neither can be mistaken for the other: a name that
+   * survives normalisation never keys to a token normalisation removes.
+   */
+  compileExclude(line: string): { key: string; tag: string; spec: AliasSpec } {
+    const { key, spec } = this.compileAlias(line);
+    // Always case-insensitive: "4k" and "4K" are the same tag, and a
+    // case-sensitive ruleset is asking about *names*, not decoration.
+    return { key, tag: matchKey(spec.text), spec };
   }
 
   /**
@@ -373,7 +447,7 @@ export class Matcher {
   /** Return `[streamId, stepOrder]` for every stream this channel claims. */
   match(rule: ChannelRule, index: StreamIndex): Array<[number, number]> {
     const guards = this.guardsFor(rule);
-    const excludes = rule.exclude.map((entry) => this.compileAlias(entry));
+    const excludes = rule.exclude.map((entry) => this.compileExclude(entry));
     const best = new Map<number, number>();
 
     /**
@@ -400,10 +474,22 @@ export class Matcher {
       // or regex reaches them -- including the legacy patterns.
       if (stream.groupId != null && index.excludedGroups.has(stream.groupId)) return;
       const norm = index.normalized.get(stream.id);
-      if (!norm || !prefixesSatisfy(spec, norm)) return;
+      if (!norm || !prefixesSatisfy(spec, norm) || !tagsSatisfy(spec, norm)) return;
       if (rejectedBy(guardsWith(spec), norm)) return;
       const key = this.key(norm.name);
-      if (excludes.some((x) => x.key === key && prefixesSatisfy(x.spec, norm))) return;
+      // An exclude entry hits on the name -- optionally narrowed by its own
+      // qualifiers, so `CNN ~4K` drops one variant and leaves the rest -- or on
+      // a bare tail token, which names the variant with no name at all. An empty
+      // name key is not a match: it means the entry named a token, and only
+      // `tag` speaks for those.
+      const excluded = excludes.some(
+        (x) =>
+          ((key !== '' && x.key === key) ||
+            (x.tag !== '' && qualityKeys(norm.quality).has(x.tag))) &&
+          prefixesSatisfy(x.spec, norm) &&
+          tagsSatisfy(x.spec, norm),
+      );
+      if (excluded) return;
       const current = best.get(stream.id);
       if (current === undefined || step < current) best.set(stream.id, step);
     };

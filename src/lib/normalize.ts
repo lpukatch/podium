@@ -237,6 +237,58 @@ export function normalize(raw: string, maxPrefixSegments = 3): NormalizedName {
 }
 
 /**
+ * Every spelling the tokens stripped off a name can be addressed by.
+ *
+ * The tail tokens are the one part of a stream name a rule cannot otherwise
+ * reach: `normalize` lifts "4K" out so that "US: CNN 4K" and "CNN" key alike,
+ * which is exactly what makes one alias claim every variant -- and exactly why
+ * "keep the 4K feed off this channel" had no way to be said. An `exclude` entry
+ * is matched against this set as well as against the name.
+ *
+ * A resolution word means its *tier*, not the literal token: "US: CNN UHD" and
+ * "US: CNN 2160p" are the same feed described twice, and an operator excluding
+ * `4K` means both. The exact height is addressable separately (`2160p`) for the
+ * rare case where that distinction is the point.
+ *
+ * Keys are `matchKey`ed, so what the operator types is compared the same way an
+ * alias is -- and no *name* can collide with one, because every token in here is
+ * one `normalize` has already taken out of the name.
+ */
+export function qualityKeys(quality: Quality): Set<string> {
+  const cached = qualityKeyCache.get(quality);
+  if (cached) return cached;
+
+  const keys = new Set<string>();
+  const add = (text: string): void => {
+    const key = matchKey(text);
+    if (key) keys.add(key);
+  };
+
+  if (quality.tier) {
+    for (const [token, spec] of Object.entries(QUALITY_TOKENS)) {
+      if (spec.tier === quality.tier) add(token);
+    }
+  }
+  if (quality.height) add(`${quality.height}p`);
+  if (quality.codec) {
+    for (const [token, codec] of Object.entries(CODEC_TOKENS)) {
+      if (codec === quality.codec) add(token);
+    }
+  }
+  if (quality.fps) add(`${quality.fps}fps`);
+  for (const flag of quality.flags) add(flag);
+
+  qualityKeyCache.set(quality, keys);
+  return keys;
+}
+
+/**
+ * Keyed on the quality object, which `buildIndex` holds for the life of the
+ * index -- one set per stream, built only if a rule ever asks.
+ */
+const qualityKeyCache = new WeakMap<Quality, Set<string>>();
+
+/**
  * Key for alias comparison: fold, casefold, drop insignificant punctuation.
  *
  * 'The Discovery Channel', 'DISCOVERY CHANNEL' and 'Discovery-Channel' all

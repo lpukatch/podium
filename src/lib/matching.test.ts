@@ -430,6 +430,139 @@ describe('matcher', () => {
     expect(m.match(m.rules.get(1)!, index)).toEqual([]);
   });
 
+  it('excludes a quality variant by its tail token', () => {
+    // The token is exactly what `normalize` strips, so before this the only
+    // thing separating "US: CNN 4K" from "US: CNN" was unaddressable and an
+    // exclude of "4K" quietly did nothing at all.
+    const m = matcherFor({ channel_id: 1, aliases: ['CNN'], exclude: ['4K'] });
+    const index = m.buildIndex([stream(10, 'US: CNN'), stream(11, 'US: CNN 4K')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('reads a resolution word as its tier, however the provider spelled it', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['CNN'], exclude: ['4K'] });
+    const index = m.buildIndex([
+      stream(10, 'US: CNN FHD'),
+      stream(11, 'US: CNN UHD'),
+      stream(12, 'US: CNN 2160p'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('excludes codec, fps and flag tokens too', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['CNN'], exclude: ['H265', '60fps', 'RAW'] });
+    const index = m.buildIndex([
+      stream(10, 'US: CNN HD'),
+      stream(11, 'US: CNN HD HEVC'),
+      stream(12, 'US: CNN HD 60FPS'),
+      stream(13, 'US: CNN HD RAW'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('keeps a tag exclude off streams a qualifier does not cover', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['CNN'], exclude: ['@US 4K'] });
+    const index = m.buildIndex([stream(10, 'AU: CNN 4K'), stream(11, 'US: CNN 4K')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('excludes a tagged stream a contains claimed', () => {
+    const m = matcherFor({ channel_id: 1, contains: ['WRC'], exclude: ['4K'] });
+    const index = m.buildIndex([stream(10, 'VA | NBC 4 WRC'), stream(11, 'VA | NBC 4 WRC 4K')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('takes only the tagged variant with a trailing ~', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['CNN ~4K'] });
+    const index = m.buildIndex([stream(10, 'US: CNN'), stream(11, 'US: CNN 4K')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[11, 0]]);
+  });
+
+  it('rejects a tagged variant with ~!', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['CNN ~!4K'] });
+    const index = m.buildIndex([stream(10, 'US: CNN'), stream(11, 'US: CNN 4K')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('combines a section qualifier with a tail qualifier', () => {
+    // The case a single exclude line cannot state: keep AU's 4K feed, drop US's.
+    const m = matcherFor({ channel_id: 1, aliases: ['@AU CNN ~4K', 'CNN ~!4K'] });
+    const index = m.buildIndex([
+      stream(10, 'AU: CNN 4K'),
+      stream(11, 'AU: CNN FHD'),
+      stream(12, 'US: CNN 4K'),
+      stream(13, 'US: CNN HD'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([
+      [10, 0],
+      [11, 1],
+      [13, 1],
+    ]);
+  });
+
+  it('prefers the tagged feed but still falls back', () => {
+    // Same shape as "@AU beIN Sports" above "beIN Sports": order is preference,
+    // and the qualified line is only a preference when an unqualified one
+    // follows it.
+    const m = matcherFor({ channel_id: 1, aliases: ['CNN ~4K', 'CNN'] });
+    const index = m.buildIndex([stream(10, 'US: CNN HD'), stream(11, 'US: CNN 4K')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([
+      [11, 0],
+      [10, 1],
+    ]);
+  });
+
+  it('requires every tail qualifier, not any of them', () => {
+    // A stream carries tier, codec and fps at once, so stacking them narrows.
+    const m = matcherFor({ channel_id: 1, aliases: ['CNN ~4K ~hevc'] });
+    const index = m.buildIndex([
+      stream(10, 'US: CNN 4K'),
+      stream(11, 'US: CNN 4K H265'),
+      stream(12, 'US: CNN FHD H265'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[11, 0]]);
+  });
+
+  it('narrows an exclude to one variant with a tail qualifier', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['CNN'], exclude: ['@US CNN ~4K'] });
+    const index = m.buildIndex([
+      stream(10, 'AU: CNN 4K'),
+      stream(11, 'US: CNN 4K'),
+      stream(12, 'US: CNN HD'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([
+      [10, 0],
+      [12, 0],
+    ]);
+  });
+
+  it('applies tail qualifiers to contains as well', () => {
+    const m = matcherFor({ channel_id: 1, contains: ['WRC ~!4K'] });
+    const index = m.buildIndex([stream(10, 'VA | NBC 4 WRC'), stream(11, 'VA | NBC 4 WRC 4K')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('leaves a tilde inside a name alone', () => {
+    // The marker is a trailing word, so a name that merely contains one is
+    // still a name -- the same contract that keeps "@Home" an alias.
+    const m = matcherFor({ channel_id: 1, aliases: ['Rock~FM'] });
+    const index = m.buildIndex([stream(10, 'US: Rock~FM')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('does not let a tag exclude match on the empty name it keys to', () => {
+    // "HD" normalises to nothing, and so does a stream whose name is only
+    // tokens. Comparing those two empty keys would turn every tag exclude into
+    // a blanket one for such streams, whatever tag it actually named.
+    const m = matcherFor({
+      channel_id: 1,
+      exclude: ['HD'],
+      patterns: [{ pattern: '(?i)^Sports: 1080p$' }],
+    });
+    const index = m.buildIndex([stream(10, 'Sports: 1080p')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
   it('compiles Python inline (?i) flags', () => {
     // JS RegExp rejects `(?i)` outright. Every regex carried over from an
     // imported rule set starts with it, and without translation they all fail

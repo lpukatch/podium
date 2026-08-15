@@ -816,9 +816,14 @@ export default function Page() {
               </p>
               <p className="mt-1.5 text-sm text-[var(--color-muted)]">
                 Prefix it with <code className="mono">@AU</code> to take only that region’s feed, or{' '}
-                <code className="mono">@!Prime</code> to keep one out. Put{' '}
-                <code className="mono">@AU beIN Sports</code> above{' '}
-                <code className="mono">beIN Sports</code> to prefer one and still fall back.
+                <code className="mono">@!Prime</code> to keep one out.
+              </p>
+              <p className="mt-1.5 text-sm text-[var(--color-muted)]">
+                Suffix it with <code className="mono">~4K</code> to take only that variant, or{' '}
+                <code className="mono">~!4K</code> to keep it out —{' '}
+                <code className="mono">~1080p</code>, <code className="mono">~hevc</code>,{' '}
+                <code className="mono">~60fps</code> and <code className="mono">~raw</code> work the
+                same. Both ends combine: <code className="mono">@AU CNN ~4K</code>.
               </p>
               {preview && unifiedRows.length > 0 && (
                 <StreamList
@@ -848,7 +853,7 @@ export default function Page() {
               />
               <Editor
                 title="Exclude"
-                hint="Reject these even if an alias matches."
+                hint="Reject these even if an alias matches. A name, or a tail token to drop one variant — 4K, HEVC, 1080p, RAW."
                 value={exclude}
                 onChange={setExclude}
               />

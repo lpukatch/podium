@@ -30,7 +30,7 @@ them:
 | --- | --- |
 | **Alias** | The channel name. What you want almost always. |
 | **Contains** | Whole-word substring, for a call sign buried in a longer name. Looser, and it will claim more than you expect — prefer an alias where one works. |
-| **Exclude** | Reject a name even if an alias matches it. |
+| **Exclude** | Reject a name — or one quality variant of it — even if an alias matches. |
 | **Regex** | An escape hatch for what the first three cannot express. |
 
 The UI shows what each rule matches *as you type*, alongside what Dispatcharr
@@ -69,7 +69,8 @@ is none" is two lines:
 Sports Alpha
 ```
 
-Qualifiers work on `contains` and `exclude` too. A prefix you name explicitly
+Qualifiers — `@` here, and the `~` in [Quality variants](#quality-variants) —
+work on `contains` and `exclude` too. A prefix you name explicitly
 beats the region denylist — `@AU Sports Alpha` matches on a channel whose
 `exclude_regions` holds `AU`, since naming it is the more specific instruction.
 
@@ -86,6 +87,65 @@ In the UI, **Find streams** lists the prefixes each name appears under with a
 count — `AU ×3` `US ×5` — and clicking one adds the qualified alias. Searching a
 word that sits *inside* a name offers the section chips rather than an alias,
 because an alias there would be wrong.
+
+## Quality variants
+
+`@` answers the question at the front of a name. The tokens providers hang off
+the **back** — `4K`, `H265`, `1080p`, `RAW` — are the same problem at the other
+end, and take a trailing `~`:
+
+```
+CNN ~4K            only the UHD copy
+CNN ~!4K           any CNN except the UHD copy
+CNN ~1080p         exactly that height
+CNN ~hevc ~60fps   both, not either
+```
+
+Those tokens are the ones `normalize` lifts off the name, which is why they need
+saying separately: "US: CNN 4K" and "US: CNN" both key as `CNN`, and that is the
+whole reason one alias claims every variant.
+
+The marker is different from `@` on purpose, and sits where the thing it names
+sits. `@` is the section in front, `~` is the token behind — so `@HD Sports`
+still means the `HD:` section and nothing in an existing rules file changes
+meaning.
+
+Both ends combine, which is how one line says "that section's copy of that
+variant, and nothing else":
+
+```
+@AU CNN ~4K        the AU section's 4K copy
+```
+
+Line order is still preference, so a qualified line above an unqualified one is
+a fallback rather than a hard selection — `@AU CNN ~4K` above `CNN` takes the AU
+4K copy where there is one and anything else where there is not. Reach for that
+when a variant is *better*; most quality rules are the plain kind above, where a
+variant should simply never be picked.
+
+A resolution word means its **tier**, not the literal token: `4K` covers `UHD`
+and `2160p`, because they are one feed described three ways. Write the height
+(`~2160p`) when the exact number is the point.
+
+Stacked `~` qualifiers are **all of**, where stacked `@` qualifiers are any of.
+That follows from what each names: a stream sits in one section spelled several
+ways, so `@US @USA` is one question with two acceptable answers; a stream carries
+tier, codec and fps at once, so `~4K ~hevc` is two questions.
+
+`exclude` reads the same tokens, and a bare one is the short way to say it for a
+whole channel:
+
+```
+4K                 drop the UHD copy, whatever it is called
+@US 4K             ...in the US section only
+@US CNN ~4K        ...only that name, only that section
+```
+
+All of this is rejection and selection, not ranking. If you would take the 4K
+feed but rank it below the others, that is [ordering](configuration.md), which
+already sorts on measured resolution — reach for these when the variant should
+never be selected at all, usually because it is bandwidth you are not going to
+spend.
 
 ## Groups
 
