@@ -91,8 +91,8 @@ because an alias there would be wrong.
 ## Quality variants
 
 `@` answers the question at the front of a name. The tokens providers hang off
-the **back** — `4K`, `H265`, `1080p`, `RAW` — are the same problem at the other
-end, and take a trailing `~`:
+the **back** — `4K`, `H265`, `1080p`, `RAW`, `(Event Only)` — are the same
+problem at the other end, and take a trailing `~`:
 
 ```
 CNN ~4K            only the UHD copy
@@ -104,6 +104,28 @@ CNN ~hevc ~60fps   both, not either
 Those tokens are the ones `normalize` lifts off the name, which is why they need
 saying separately: "US: CNN 4K" and "US: CNN" both key as `CNN`, and that is the
 whole reason one alias claims every variant.
+
+Bracketed text is addressable the same way, and often it is the only thing there
+is to name:
+
+```
+FS1 ~!"event only"    every FS1 except "FS1 4K (Event Only)"
+ESPN ~!multi          not the "[HEVC Multi]" copy
+~"event only"         the variant, whatever it is called
+```
+
+Brackets are stripped before a name is keyed — for decoration like `[Multi]`
+that is right, and it is why an `exclude` of `FS1 (Event Only)` does **not** do
+what it looks like: the bracket goes, the line means `FS1`, and the channel
+matches nothing at all. Write the bracket as a `~` qualifier instead. A bracket
+is matched whole *and* by word, because providers pack several tokens into one.
+
+Unlike the quality words, bracket text is **not** in the bare vocabulary — an
+`exclude` line of `Event Only` is a name and stays a name. A quality token can
+never collide with a name (normalisation has already removed every one of them
+from every name); bracket text has no such guarantee, so it takes an explicit
+`~`. A qualifier may stand alone on the line, which is what makes the third
+example above legal.
 
 The marker is different from `@` on purpose, and sits where the thing it names
 sits. `@` is the section in front, `~` is the token behind — so `@HD Sports`

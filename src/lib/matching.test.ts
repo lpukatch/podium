@@ -542,6 +542,60 @@ describe('matcher', () => {
     expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
   });
 
+  it('excludes a variant marked only by bracketed text', () => {
+    // "FS1 4K (Event Only)" and "FS1 4K" are the same name and the same tag
+    // once the bracket is stripped, so the bracket is the only thing that can
+    // tell them apart.
+    const m = matcherFor({ channel_id: 1, aliases: ['FS1 ~!"event only"'] });
+    const index = m.buildIndex([
+      stream(10, 'US: FS1 HD'),
+      stream(11, 'US: FS1 4K'),
+      stream(12, 'FS1 4K (Event Only)'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([
+      [10, 0],
+      [11, 0],
+    ]);
+  });
+
+  it('takes a qualifier-only exclude line', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['FS1'], exclude: ['~"event only"'] });
+    const index = m.buildIndex([stream(10, 'US: FS1 HD'), stream(11, 'FS1 4K (Event Only)')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('keys a bracket by word as well as whole', () => {
+    // Providers pack several tokens into one bracket, and a key for the whole
+    // string would be one nobody could guess.
+    const m = matcherFor({ channel_id: 1, aliases: ['ESPN ~!multi'] });
+    const index = m.buildIndex([stream(10, 'ESPN'), stream(11, 'ESPN [HEVC Multi]')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('keeps bracketed text out of the bare exclude vocabulary', () => {
+    // A quality token cannot collide with a name; bracket text can, so it is
+    // reachable only when a rule names it with `~`. Without this a plain-name
+    // exclude would quietly start dropping streams that merely mention it.
+    const m = matcherFor({ channel_id: 1, aliases: ['FS1'], exclude: ['Event Only'] });
+    const index = m.buildIndex([stream(10, 'FS1 4K (Event Only)')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('ignores a blank exclude line', () => {
+    // A qualifier-only entry rejects on its qualifiers; an entry with no
+    // qualifiers either is a stray newline, and must reject nothing at all.
+    const m = matcherFor({ channel_id: 1, aliases: ['FS1'], exclude: ['', '   '] });
+    const index = m.buildIndex([stream(10, 'US: FS1 HD')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('leaves a bracket out of the name it is written next to', () => {
+    const n = normalize('FS1 4K (Event Only)');
+    expect(n.name).toBe('FS1');
+    expect(n.brackets).toEqual(['Event Only']);
+    expect(n.quality.tier).toBe('uhd');
+  });
+
   it('leaves a tilde inside a name alone', () => {
     // The marker is a trailing word, so a name that merely contains one is
     // still a name -- the same contract that keeps "@Home" an alias.

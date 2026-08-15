@@ -823,7 +823,9 @@ export default function Page() {
                 <code className="mono">~!4K</code> to keep it out —{' '}
                 <code className="mono">~1080p</code>, <code className="mono">~hevc</code>,{' '}
                 <code className="mono">~60fps</code> and <code className="mono">~raw</code> work the
-                same. Both ends combine: <code className="mono">@AU CNN ~4K</code>.
+                same. Bracketed text too — <code className="mono">~!&quot;event only&quot;</code> is
+                how you keep “FS1 4K (Event Only)” out. Both ends combine:{' '}
+                <code className="mono">@AU CNN ~4K</code>.
               </p>
               {preview && unifiedRows.length > 0 && (
                 <StreamList
@@ -853,7 +855,10 @@ export default function Page() {
               />
               <Editor
                 title="Exclude"
-                hint="Reject these even if an alias matches. A name, or a tail token to drop one variant — 4K, HEVC, 1080p, RAW."
+                hint={
+                  'Reject these even if an alias matches. A name, a tail token to drop one ' +
+                  'variant — 4K, HEVC, 1080p, RAW — or ~"event only" for bracketed text.'
+                }
                 value={exclude}
                 onChange={setExclude}
               />

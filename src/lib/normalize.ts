@@ -95,6 +95,17 @@ export interface NormalizedName {
    * otherwise identical names, and an `@` qualifier can select on them.
    */
   regions: string[];
+  /**
+   * The contents of each bracketed group, in the order they were written.
+   *
+   * Brackets are stripped before anything else looks at the name, and for
+   * decoration -- "[Multi]", "(HEVC)" -- that is right. But providers also put
+   * the one thing that distinguishes a feed in there: "FS1 4K (Event Only)" is
+   * a different stream from "FS1 4K", and with the bracket discarded the two
+   * were identical to every rule Podium has. Kept so a `~` qualifier can name
+   * them; still out of the name itself, so aliases are unaffected.
+   */
+  brackets: string[];
   /** "+1", "+24" -- a different channel entirely, not a variant. */
   isTimeshift: boolean;
 }
@@ -115,7 +126,12 @@ function tierFor(height: number): string {
 }
 
 export function normalize(raw: string, maxPrefixSegments = 3): NormalizedName {
-  let text = fold(raw).replace(BRACKETED, ' ');
+  const brackets: string[] = [];
+  let text = fold(raw).replace(BRACKETED, (group) => {
+    const inner = group.slice(1, -1).trim();
+    if (inner) brackets.push(inner);
+    return ' ';
+  });
 
   // Timeshift channels ("HBO +1") are a *different* channel, never a variant of
   // the base one, so this is surfaced rather than stripped.
@@ -232,6 +248,7 @@ export function normalize(raw: string, maxPrefixSegments = 3): NormalizedName {
     prefixes,
     quality: { tier, height, codec, fps, flags: [...flags].sort() },
     regions,
+    brackets,
     isTimeshift,
   };
 }
@@ -287,6 +304,41 @@ export function qualityKeys(quality: Quality): Set<string> {
  * index -- one set per stream, built only if a rule ever asks.
  */
 const qualityKeyCache = new WeakMap<Quality, Set<string>>();
+
+/**
+ * Everything at the tail of a name a `~` qualifier can address: the quality
+ * tokens above, plus whatever the provider put in brackets.
+ *
+ * A bracket is keyed whole *and* by word. Whole, because "(Event Only)" is one
+ * phrase and that is how an operator will name it. By word, because providers
+ * pack several tokens into one bracket -- "(1080p 60fps)", "[HEVC Multi]" --
+ * and a key for that whole string would be one nobody could guess.
+ *
+ * Bracket keys stay out of `qualityKeys` on purpose. A quality token can never
+ * collide with a name, because `normalize` has already removed every one of
+ * them from every name; bracket text has no such guarantee, so it is reachable
+ * only when a rule names it explicitly with `~`. That is what keeps a bare
+ * `exclude` line meaning exactly what it meant before this existed.
+ */
+export function tailKeys(norm: NormalizedName): Set<string> {
+  const cached = tailKeyCache.get(norm);
+  if (cached) return cached;
+
+  const keys = new Set(qualityKeys(norm.quality));
+  for (const bracket of norm.brackets) {
+    const whole = matchKey(bracket);
+    if (whole) keys.add(whole);
+    for (const word of bracket.split(/\s+/)) {
+      const key = matchKey(word);
+      if (key) keys.add(key);
+    }
+  }
+
+  tailKeyCache.set(norm, keys);
+  return keys;
+}
+
+const tailKeyCache = new WeakMap<NormalizedName, Set<string>>();
 
 /**
  * Key for alias comparison: fold, casefold, drop insignificant punctuation.

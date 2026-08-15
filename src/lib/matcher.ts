@@ -20,7 +20,7 @@
  */
 
 import { globToRegExp } from './eligibility';
-import { matchKey, type NormalizedName, normalize, qualityKeys } from './normalize';
+import { matchKey, type NormalizedName, normalize, qualityKeys, tailKeys } from './normalize';
 
 export interface StreamLike {
   id: number;
@@ -188,10 +188,13 @@ const QUALIFIER = /^@(!?)(?:"([^"]+)"|(\S+))\s+/;
  * meaning depended on position, and -- worse -- would have quietly widened every
  * `@HD` already in a rules file from "the HD: section" to "anything tagged HD".
  *
- * Leading whitespace is required for the same reason `@` requires trailing
- * whitespace: a name is allowed to contain a tilde.
+ * The tilde must start a word, for the same reason `@` must end one: a name is
+ * allowed to contain a tilde. It may stand alone as the whole line, unlike `@`
+ * -- "@Home" was a real channel and had to keep being a name, while a leading
+ * tilde is not a way anyone writes one. That is what lets `exclude` hold
+ * `~"event only"`, naming a variant that has no name of its own.
  */
-const TAIL_QUALIFIER = /\s+~(!?)(?:"([^"]+)"|(\S+))$/;
+const TAIL_QUALIFIER = /(?:^|\s+)~(!?)(?:"([^"]+)"|(\S+))$/;
 
 export function parseAlias(line: string): AliasSpec {
   let text = line.trim();
@@ -314,7 +317,7 @@ export function prefixesSatisfy(spec: AliasSpec, norm: NormalizedName): boolean 
  */
 export function tagsSatisfy(spec: AliasSpec, norm: NormalizedName): boolean {
   if (spec.requireTags.size === 0 && spec.rejectTags.size === 0) return true;
-  const keys = qualityKeys(norm.quality);
+  const keys = tailKeys(norm);
   for (const key of spec.rejectTags) if (keys.has(key)) return false;
   for (const key of spec.requireTags) if (!keys.has(key)) return false;
   return true;
@@ -377,11 +380,12 @@ export class Matcher {
    * Both are kept, and neither can be mistaken for the other: a name that
    * survives normalisation never keys to a token normalisation removes.
    */
-  compileExclude(line: string): { key: string; tag: string; spec: AliasSpec } {
+  compileExclude(line: string): { key: string; tag: string; named: boolean; spec: AliasSpec } {
     const { key, spec } = this.compileAlias(line);
     // Always case-insensitive: "4k" and "4K" are the same tag, and a
     // case-sensitive ruleset is asking about *names*, not decoration.
-    return { key, tag: matchKey(spec.text), spec };
+    const tag = matchKey(spec.text);
+    return { key, tag, named: key !== '' || tag !== '', spec };
   }
 
   /**
@@ -477,18 +481,21 @@ export class Matcher {
       if (!norm || !prefixesSatisfy(spec, norm) || !tagsSatisfy(spec, norm)) return;
       if (rejectedBy(guardsWith(spec), norm)) return;
       const key = this.key(norm.name);
-      // An exclude entry hits on the name -- optionally narrowed by its own
-      // qualifiers, so `CNN ~4K` drops one variant and leaves the rest -- or on
-      // a bare tail token, which names the variant with no name at all. An empty
-      // name key is not a match: it means the entry named a token, and only
-      // `tag` speaks for those.
-      const excluded = excludes.some(
-        (x) =>
-          ((key !== '' && x.key === key) ||
-            (x.tag !== '' && qualityKeys(norm.quality).has(x.tag))) &&
-          prefixesSatisfy(x.spec, norm) &&
-          tagsSatisfy(x.spec, norm),
-      );
+      // An exclude entry names a stream three ways, and its qualifiers narrow
+      // whichever it used: by name (`CNN`, or `CNN ~4K` for one variant of it),
+      // by bare quality token (`4K` -- the variant across every name), or by
+      // qualifier alone (`~"event only"` -- a variant whose only mark is text
+      // the name does not keep). An empty name key is not a name match: it means
+      // the entry named something other than a name.
+      const excluded = excludes.some((x) => {
+        const hit = x.named
+          ? (key !== '' && x.key === key) || (x.tag !== '' && qualityKeys(norm.quality).has(x.tag))
+          : // Qualifiers alone. An entry with nothing at all -- a blank line in
+            // the box -- names nothing and must reject nothing, or one stray
+            // newline empties the channel.
+            x.spec.requireTags.size > 0 || x.spec.rejectTags.size > 0;
+        return hit && prefixesSatisfy(x.spec, norm) && tagsSatisfy(x.spec, norm);
+      });
       if (excluded) return;
       const current = best.get(stream.id);
       if (current === undefined || step < current) best.set(stream.id, step);
