@@ -294,15 +294,34 @@ export function deadTtlFor(
   return Math.min(deadTtlMs * 2 ** doublings, cap);
 }
 
-/** The TTL that applies to one cached verdict. The single source for it. */
+/**
+ * The TTL that applies to one cached verdict. The single source for it.
+ *
+ * Three cases, not two. A dead verdict backs off; a live one lasts the live
+ * lifetime; and a live one carrying no bitrate reading -- `alive` with
+ * `bitrateKbps <= 0`, which means the sample never landed rather than that the
+ * stream delivers nothing -- expires early so the next pass can try to measure
+ * it. Ranking sinks an unmeasured stream behind everything with real data, so
+ * without this a stream that might be the channel's best sits at the bottom of
+ * it until the full live lifetime runs out.
+ *
+ * `unknownBitrateTtlMs` only ever shortens: it is capped by `liveTtlMs`, and 0
+ * turns the case off so the function reduces to the old two-case behaviour.
+ */
 export function ttlFor(
-  alive: boolean,
-  deadStreak: number,
+  entry: Pick<CacheEntry, 'alive' | 'deadStreak' | 'result'>,
   liveTtlMs: number,
   deadTtlMs: number,
   deadTtlMaxMs: number = deadTtlMs,
+  unknownBitrateTtlMs = 0,
 ): number {
-  return alive ? liveTtlMs : deadTtlFor(deadStreak, deadTtlMs, deadTtlMaxMs);
+  if (!entry.alive) return deadTtlFor(entry.deadStreak, deadTtlMs, deadTtlMaxMs);
+  // An unreadable result is an unknown verdict, not an unmeasured one -- it gets
+  // the plain live lifetime, matching what `entry()` already does with it.
+  if (unknownBitrateTtlMs > 0 && entry.result && entry.result.bitrateKbps <= 0) {
+    return Math.min(liveTtlMs, unknownBitrateTtlMs);
+  }
+  return liveTtlMs;
 }
 
 /** A cached verdict with the bookkeeping `ttlFor` needs. */
@@ -394,11 +413,12 @@ export class Store {
     liveTtlMs: number,
     deadTtlMs: number,
     deadTtlMaxMs: number = deadTtlMs,
+    unknownBitrateTtlMs = 0,
   ): ProbeResult | null {
     const row = this.entry(streamId, streamHash);
     if (!row) return null;
 
-    const ttl = ttlFor(row.alive, row.deadStreak, liveTtlMs, deadTtlMs, deadTtlMaxMs);
+    const ttl = ttlFor(row, liveTtlMs, deadTtlMs, deadTtlMaxMs, unknownBitrateTtlMs);
     // `>=`, not `>`: a TTL of 0 must mean "never serve from cache", and with a
     // strict `>` a same-millisecond write would still be a hit.
     if (Date.now() - row.probedAt >= ttl) return null;
@@ -648,13 +668,23 @@ export class Store {
     deadTtlMs: number,
     now = Date.now(),
     deadTtlMaxMs: number = deadTtlMs,
+    unknownBitrateTtlMs = 0,
   ): CacheHealth {
-    // `deadTtlFor` in SQL, so "when is this due" answers the same here as it
-    // does in the planner. Two-argument MIN/MAX are SQLite's scalar forms, not
+    // `ttlFor` in SQL, so "when is this due" answers the same here as it does in
+    // the planner. Two-argument MIN/MAX are SQLite's scalar forms, not
     // aggregates; the shift is the doubling and is clamped for the same reason
-    // the TypeScript is.
-    const ttl = `CASE alive WHEN 1 THEN :live
-                      ELSE MIN(:deadMax, :dead * (1 << MIN(MAX(dead_streak - 1, 0), 30)))
+    // the TypeScript is. `json_valid` guards the extract because a corrupt row
+    // would otherwise raise and take the whole health query down -- and it lands
+    // on the plain live lifetime, which is what `ttlFor` does with a result it
+    // could not parse.
+    const ttl = `CASE
+                   WHEN alive = 0
+                     THEN MIN(:deadMax, :dead * (1 << MIN(MAX(dead_streak - 1, 0), 30)))
+                   WHEN :unknown > 0
+                        AND json_valid(result)
+                        AND COALESCE(json_extract(result, '$.bitrateKbps'), 0) <= 0
+                     THEN MIN(:live, :unknown)
+                   ELSE :live
                  END`;
     const row = this.db
       .prepare(
@@ -677,6 +707,7 @@ export class Store {
         live: liveTtlMs,
         dead: deadTtlMs,
         deadMax: Math.max(deadTtlMaxMs, deadTtlMs),
+        unknown: unknownBitrateTtlMs,
         now,
       }) as Record<string, number | null>;
     const total = (row.total as number) ?? 0;

@@ -205,7 +205,10 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
                         {row.alive ? (
                           <span className="text-[var(--color-muted)]">
                             {row.height ? `${row.height}p` : '?'} · {row.fps || '?'}fps ·{' '}
-                            {Math.round(row.bitrateKbps)}kbps · {row.videoCodec}
+                            {row.bitrateKbps > 0
+                              ? `${Math.round(row.bitrateKbps)}kbps`
+                              : 'bitrate unknown'}{' '}
+                            · {row.videoCodec}
                           </span>
                         ) : (
                           <span className="text-[var(--color-bad)]">{row.error || 'dead'}</span>
@@ -216,6 +219,12 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
                         {row.alive && !row.usable && !row.black && (
                           <span className="ml-1 text-[var(--color-bad)]">
                             (under {result.minBitrateKbps}kbps — treated as dead)
+                          </span>
+                        )}
+                        {row.alive && row.usable && !row.black && row.bitrateKbps <= 0 && (
+                          <span className="ml-1 text-[var(--color-warn)]">
+                            (not measured — ranked below every stream with a reading, and due for
+                            another probe)
                           </span>
                         )}
                       </td>

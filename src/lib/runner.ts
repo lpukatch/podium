@@ -819,6 +819,7 @@ export class Runner {
                 config.PODIUM_LIVE_TTL_MS,
                 config.PODIUM_DEAD_TTL_MS,
                 config.PODIUM_DEAD_TTL_MAX_MS,
+                config.PODIUM_UNKNOWN_BITRATE_TTL_MS,
               );
               if (hit) {
                 entries.push({
@@ -1066,11 +1067,11 @@ export class Runner {
             oldestProbedAt = cached.probedAt;
           }
           const ttl = ttlFor(
-            cached.alive,
-            cached.deadStreak,
+            cached,
             config.PODIUM_LIVE_TTL_MS,
             config.PODIUM_DEAD_TTL_MS,
             config.PODIUM_DEAD_TTL_MAX_MS,
+            config.PODIUM_UNKNOWN_BITRATE_TTL_MS,
           );
           // The freshness test and the unreadable-result check mirror
           // `Store.get`, which this deliberately no longer calls: a second read

@@ -1035,7 +1035,11 @@ function StreamList({
                         </span>
                         <span className="text-[var(--color-muted)]">
                           {r.lastAlive && !r.lastBlack && r.lastHeight
-                            ? ` · ${r.lastHeight}p · ${Math.round(r.lastBitrateKbps ?? 0)}kbps`
+                            ? ` · ${r.lastHeight}p · ${
+                                (r.lastBitrateKbps ?? 0) > 0
+                                  ? `${Math.round(r.lastBitrateKbps as number)}kbps`
+                                  : 'bitrate unknown'
+                              }`
                             : ''}
                           {` · checked ${since(r.lastProbedAt)}`}
                         </span>

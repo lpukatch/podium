@@ -76,6 +76,20 @@ export const configSchema = z.object({
    */
   PODIUM_DEAD_TTL_MAX_MS: num(24 * 3_600_000),
   /**
+   * How long a live verdict that never yielded a bitrate is trusted.
+   *
+   * ffprobe declares no `bit_rate` on most live TS/HLS, so the number comes from
+   * the ffmpeg sample -- and when that times out the verdict is "alive, 0kbps",
+   * which is a half-measurement rather than a reading. Ranking demotes those
+   * behind every stream we have real data for, so leaving one to sit for the
+   * full live lifetime parks a possibly-good stream at the bottom of its channel
+   * for a day. A short lifetime books it in for another attempt instead.
+   *
+   * Capped by PODIUM_LIVE_TTL_MS, so it can only ever shorten a live verdict.
+   * Set to 0 to disable and let these expire with everything else.
+   */
+  PODIUM_UNKNOWN_BITRATE_TTL_MS: num(30 * 60_000),
+  /**
    * How long the EPG grid is reused across passes before re-fetching it. The
    * grid carries each programme's start/end times, so a pass re-derives "what
    * is airing now" from the cached rows -- this only goes stale when the grid's
