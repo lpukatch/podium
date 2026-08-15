@@ -183,6 +183,16 @@ export const FIELDS: FieldSpec[] = [
     max: 43_200,
   },
   {
+    key: 'PODIUM_UNKNOWN_BITRATE_TTL_MS',
+    kind: 'number',
+    label: 'Unmeasured verdict lifetime (minutes)',
+    help: 'How soon a stream that came back alive but with no bitrate reading is measured again. Ranking puts these behind every stream it has real data for, so a short lifetime stops a possibly-good stream sitting at the bottom of its channel for a whole day. Never longer than the live lifetime. 0 lets them expire with everything else.',
+    section: 'behaviour',
+    scale: 60_000,
+    min: 0,
+    max: 43_200,
+  },
+  {
     key: 'PODIUM_MAX_SLICE',
     kind: 'number',
     label: 'Max streams per pass',

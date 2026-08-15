@@ -50,6 +50,18 @@ export function isUsable(result: ProbeResult, weights: Weights = DEFAULT_WEIGHTS
   return result.bitrateKbps >= weights.minBitrateKbps;
 }
 
+/**
+ * True when the probe came back alive without ever resolving a bitrate.
+ *
+ * Not the same as a slow stream: live TS/HLS rarely declares `bit_rate`, so the
+ * number comes from the ffmpeg sample, and a 0 means that sample never landed
+ * (disabled, timed out, or empty). The stream might be the best on its channel
+ * or the worst -- we simply did not measure it.
+ */
+export function bitrateUnknown(result: ProbeResult): boolean {
+  return result.bitrateKbps <= 0;
+}
+
 /** Score a probe result in [0, 1]. A dead or unusable stream always scores 0. */
 export function score(result: ProbeResult, weights: Weights = DEFAULT_WEIGHTS): number {
   if (!isUsable(result, weights)) return 0;
@@ -108,8 +120,9 @@ export const DEFAULT_STRATEGY: RankStrategy = {
  * Order stream ids best-first.
  *
  * Unusable streams (dead / black / sub-floor) always sink regardless of mode.
- * The mode then picks the primary key, quality score breaks ties within it, and
- * a stable stream-id sort is the last resort:
+ * The mode then picks the primary key, streams whose bitrate was never measured
+ * sink within it, quality score breaks ties after that, and a stable stream-id
+ * sort is the last resort:
  *
  * - `quality` (default): score, then streamId. The best source wins outright.
  * - `provider`: preferred providers first (by `providerRank`), then score
@@ -130,6 +143,20 @@ export function rank(entries: RankEntry[], strategy: RankStrategy = DEFAULT_STRA
         const tb = providerRank.get(b.providerId) ?? Number.MAX_SAFE_INTEGER;
         if (ta !== tb) return ta - tb;
       }
+
+      // An unmeasured stream is not a better stream. `score` gives its bitrate
+      // term a zero, which costs it only `weights.bitrate` -- enough to leave a
+      // 1080p50 feed we never measured ahead of a 720p25 one we did, on the
+      // strength of resolution and fps alone. Rank it behind everything we have
+      // real data for and let the short unknown-bitrate TTL re-probe it into its
+      // true position.
+      //
+      // Below the mode key, not above it: provider and alias order are the
+      // operator's explicit curation, and a missing measurement is not grounds
+      // to overrule them. Within a tier, and in quality mode throughout, known
+      // beats unknown outright.
+      const measured = (bitrateUnknown(a.result) ? 1 : 0) - (bitrateUnknown(b.result) ? 1 : 0);
+      if (measured !== 0) return measured;
 
       const scoreDelta = score(b.result, weights) - score(a.result, weights);
       if (scoreDelta !== 0) return scoreDelta;

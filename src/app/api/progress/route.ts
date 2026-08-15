@@ -75,6 +75,7 @@ export function GET() {
           config.PODIUM_DEAD_TTL_MS,
           Date.now(),
           config.PODIUM_DEAD_TTL_MAX_MS,
+          config.PODIUM_UNKNOWN_BITRATE_TTL_MS,
         ),
         day: store.runStats(Date.now() - DAY_MS),
         activity: store.activity(24),

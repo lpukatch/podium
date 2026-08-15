@@ -67,8 +67,47 @@ describe('deadTtlFor', () => {
   });
 
   it('leaves live verdicts on the live TTL whatever the streak says', () => {
-    expect(ttlFor(true, 9, 24 * HOUR, BASE, CAP)).toBe(24 * HOUR);
-    expect(ttlFor(false, 9, 24 * HOUR, BASE, CAP)).toBe(CAP);
+    const live = { alive: true, deadStreak: 9, result: verdict(true) };
+    const dead = { alive: false, deadStreak: 9, result: verdict(false) };
+    expect(ttlFor(live, 24 * HOUR, BASE, CAP)).toBe(24 * HOUR);
+    expect(ttlFor(dead, 24 * HOUR, BASE, CAP)).toBe(CAP);
+  });
+});
+
+describe('ttlFor on an unmeasured bitrate', () => {
+  const unmeasured = {
+    alive: true,
+    deadStreak: 0,
+    result: { ...verdict(true), bitrateKbps: 0, bitrateMeasured: false },
+  };
+  const measured = { alive: true, deadStreak: 0, result: verdict(true) };
+
+  it('books a live verdict with no bitrate reading in for a re-probe', () => {
+    expect(ttlFor(unmeasured, 24 * HOUR, BASE, CAP, 30 * 60_000)).toBe(30 * 60_000);
+  });
+
+  it('leaves a measured live verdict alone', () => {
+    expect(ttlFor(measured, 24 * HOUR, BASE, CAP, 30 * 60_000)).toBe(24 * HOUR);
+  });
+
+  it('is off at 0, so the rule reduces to live-or-dead', () => {
+    expect(ttlFor(unmeasured, 24 * HOUR, BASE, CAP)).toBe(24 * HOUR);
+  });
+
+  it('can only shorten -- never outlives the live TTL', () => {
+    expect(ttlFor(unmeasured, HOUR, BASE, CAP, 24 * HOUR)).toBe(HOUR);
+  });
+
+  it('gives an unreadable result the plain live TTL rather than re-probing it', () => {
+    // `entry()` nulls a result it cannot parse. That is an unknown verdict, not
+    // a measured-nothing one, and it must not fall into the short TTL.
+    const corrupt = { alive: true, deadStreak: 0, result: null };
+    expect(ttlFor(corrupt, 24 * HOUR, BASE, CAP, 30 * 60_000)).toBe(24 * HOUR);
+  });
+
+  it('does not shorten a dead verdict, whose bitrate is 0 by definition', () => {
+    const dead = { alive: false, deadStreak: 1, result: verdict(false) };
+    expect(ttlFor(dead, 24 * HOUR, BASE, CAP, 30 * 60_000)).toBe(BASE);
   });
 });
 
@@ -179,6 +218,64 @@ describe('cacheHealth agrees with deadTtlFor', () => {
     const health = store.cacheHealth(24 * HOUR, BASE, Date.now(), CAP);
     expect(health.nextDueAt).toBe(Date.now() + 24 * HOUR);
     store.close();
+  });
+
+  it('applies the unmeasured-bitrate TTL in SQL exactly as ttlFor does', () => {
+    const store = new Store(':memory:');
+    const unmeasured = { ...verdict(true), bitrateKbps: 0, bitrateMeasured: false };
+    store.put(1, 'h', verdict(true));
+    store.put(2, 'h', unmeasured);
+    const writtenAt = Date.now();
+
+    // The unmeasured row, not the live one, drives the next due time.
+    const health = store.cacheHealth(24 * HOUR, BASE, Date.now(), CAP, 30 * 60_000);
+    expect(health.nextDueAt).toBe(
+      writtenAt +
+        ttlFor(
+          { alive: true, deadStreak: 0, result: unmeasured },
+          24 * HOUR,
+          BASE,
+          CAP,
+          30 * 60_000,
+        ),
+    );
+
+    vi.advanceTimersByTime(30 * 60_000);
+    expect(store.cacheHealth(24 * HOUR, BASE, Date.now(), CAP, 30 * 60_000).due).toBe(1);
+    // With the rule off, the same row is not due for a full day.
+    expect(store.cacheHealth(24 * HOUR, BASE, Date.now(), CAP).due).toBe(0);
+    store.close();
+  });
+});
+
+describe('cacheHealth with an unreadable result column', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'podium-corrupt-'));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('does not let a corrupt row take the whole health query down', () => {
+    // json_extract raises on malformed JSON, and one bad row would otherwise
+    // break the progress page rather than just itself.
+    const path = join(dir, 'corrupt.db');
+    const store = new Store(path);
+    store.put(1, 'h', verdict(true));
+    store.close();
+
+    const raw = new Database(path);
+    raw.prepare('UPDATE probe_cache SET result = ? WHERE stream_id = 1').run('not json {');
+    raw.close();
+
+    const reopened = new Store(path);
+    const health = reopened.cacheHealth(24 * HOUR, BASE, Date.now(), CAP, 30 * 60_000);
+    // Falls back to the plain live TTL, which is what ttlFor does with a result
+    // it could not parse.
+    expect(health.total).toBe(1);
+    expect(health.nextDueAt).toBe(health.newestProbedAt! + 24 * HOUR);
+    reopened.close();
   });
 });
 

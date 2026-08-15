@@ -99,6 +99,7 @@ holds a Dispatcharr credential.
 | `PODIUM_LIVE_TTL_MS` | `86400000` | how long a working stream is trusted |
 | `PODIUM_DEAD_TTL_MS` | `10800000` | how soon a stream that *just* died is rechecked |
 | `PODIUM_DEAD_TTL_MAX_MS` | `86400000` | ceiling once that has backed off; [see below](#when-there-is-nothing-to-do) |
+| `PODIUM_UNKNOWN_BITRATE_TTL_MS` | `1800000` | how soon an alive-but-unmeasured stream is tried again; [see below](#streams-whose-bitrate-never-resolved) |
 | `PODIUM_PAUSE_WHEN_WATCHING` | `true` | stop while anyone is streaming |
 
 ## Probing
@@ -171,3 +172,37 @@ full catalogue to find a median of about two due streams.
 
 Set `PODIUM_DEAD_TTL_MAX_MS` equal to `PODIUM_DEAD_TTL_MS` to turn the backoff
 off.
+
+## Streams whose bitrate never resolved
+
+ffprobe declares no `bit_rate` on most live TS/HLS, so the number comes from the
+short ffmpeg sample instead. When that sample does not land — disabled, timed
+out, or empty — the verdict is "alive, 0kbps", which means *not measured* rather
+than *delivers nothing*. The check panel shows these as **bitrate unknown**.
+
+Two things follow from that:
+
+**They are not treated as dead.** `PODIUM_MIN_BITRATE_KBPS` deliberately ignores
+a zero, because a floor cannot judge a reading that was never taken.
+
+**They rank behind every stream that does have a reading.** Scoring alone gets
+this wrong: the bitrate term goes to zero, which costs the stream only its
+weight, leaving an unmeasured 1080p50 feed above a 720p25 one measured at
+2667kbps on resolution and fps alone. So ranking sinks an unmeasured stream
+below anything measured, within whatever the ordering mode has already decided —
+provider tiers and alias step order still come first, since those are explicit
+curation and a missing measurement is no reason to overrule them.
+
+The score shown next to such a stream is still its real score, which is why it
+can read higher than the rows above it. That is the ranking saying "not proven",
+not the score being wrong.
+
+Because a demoted stream might genuinely be the best on its channel,
+`PODIUM_UNKNOWN_BITRATE_TTL_MS` (30 minutes by default) expires its verdict
+early so the next pass tries to measure it again, rather than leaving it parked
+at the bottom for the full `PODIUM_LIVE_TTL_MS`. It can only ever shorten a live
+verdict; set it to `0` to disable and let these expire with everything else.
+
+If a stream is *persistently* unmeasurable, raising `PODIUM_ANALYZE_SECONDS` or
+the probe timeout is the real fix — a short TTL alone will just re-probe it
+every half hour to the same result.
