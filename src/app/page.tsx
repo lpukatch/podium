@@ -224,12 +224,32 @@ export default function Page() {
     return q ? base.filter((g) => g.name.toLowerCase().includes(q)) : base;
   }, [groups, showDisabled, groupFilter]);
 
-  const openChannel = (c: ChannelRow, gid?: number) => {
-    navigate({ group: gid ?? groupId, channel: c.id });
+  /** Fill the rule boxes from a channel's saved rule. */
+  const seededFor = useRef<number | null>(null);
+  const seedRules = useCallback((c: ChannelRow) => {
+    seededFor.current = c.id;
     setAliases(c.aliases.join('\n'));
     setContains(c.contains.join('\n'));
     setExclude(c.exclude.join('\n'));
     setPreview(null);
+  }, []);
+
+  // Arriving by URL rather than by click: the channel id comes from the query
+  // string before the state fetch has the row to seed from, so seed as soon as
+  // the row shows up. The ref keeps a later refresh -- saving reloads state --
+  // from overwriting whatever is in the boxes.
+  useEffect(() => {
+    if (channelId === null) {
+      seededFor.current = null;
+      return;
+    }
+    if (seededFor.current === channelId || !channel) return;
+    seedRules(channel);
+  }, [channelId, channel, seedRules]);
+
+  const openChannel = (c: ChannelRow, gid?: number) => {
+    navigate({ group: gid ?? groupId, channel: c.id });
+    seedRules(c);
   };
 
   const runPreview = useCallback(async () => {
