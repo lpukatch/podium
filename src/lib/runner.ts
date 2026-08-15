@@ -12,7 +12,7 @@
 import type { Config } from './config';
 import { type Channel, DispatcharrClient, type Provider, type Stream } from './dispatcharr';
 import {
-  AFTER_EPG_START,
+  assignmentIsRule,
   currentProgrammes,
   type Eligibility,
   NEVER,
@@ -111,11 +111,12 @@ export function composeOrder(
  * `after_epg_start` group that is backwards: the operator has already said
  * "probe this group once its programme starts", and a channel that carries its
  * own lineup needs no alias to say which streams that means. The assignment *is*
- * the rule.
+ * the rule. `assigned` is the same bargain without the kickoff clause, for
+ * someone whose lineups are already curated and who wants only the ranking.
  *
- * Restricted to `after_epg_start` at the call sites, deliberately. The same
- * fallback under `always` would sweep every rule-less channel in the install
- * into the backlog, which is a much larger decision than the one this answers.
+ * Both are modes an operator set on a named group -- see `assignmentIsRule`.
+ * Under `always`, the default every unconfigured group falls back to, this
+ * would sweep every rule-less channel in the install into the backlog.
  *
  * Nothing is ever assigned from here -- `composeOrder` still intersects with
  * what the channel carries -- so this only ever reorders and probes streams
@@ -782,11 +783,11 @@ export class Runner {
             if (!channel) return;
             const groupName =
               channel.groupId === null ? undefined : groupNames.get(channel.groupId);
-            // The rule-less kickoff channels `plan` admitted arrive here too, and
+            // The rule-less channels `plan` admitted arrive here too, and
             // returning early would probe them every pass and never reorder them.
             if (
               !rule &&
-              eligibility.policyFor(channel.groupId, groupName).mode !== AFTER_EPG_START
+              !assignmentIsRule(eligibility.policyFor(channel.groupId, groupName).mode)
             ) {
               return;
             }
@@ -1025,10 +1026,10 @@ export class Runner {
       const rule = matcher.rules.get(channel.id);
       const groupName = channel.groupId === null ? undefined : groupNames.get(channel.groupId);
       const policy = eligibility.policyFor(channel.groupId, groupName);
-      // A channel with no rule is normally not ours to touch. The exception is a
-      // group set to `after_epg_start`, where the channel's own assignment
-      // stands in for the rule -- see `assignedCandidates`.
-      if (!rule && policy.mode !== AFTER_EPG_START) continue;
+      // A channel with no rule is normally not ours to touch. The exceptions are
+      // the groups set to `after_epg_start` or `assigned`, where the channel's
+      // own assignment stands in for the rule -- see `assignedCandidates`.
+      if (!rule && !assignmentIsRule(policy.mode)) continue;
       // Lazily, because matching is the expensive part of the pass and an
       // excluded channel must not pay for it.
       const candidates = (): Array<[number, number]> =>
@@ -1139,9 +1140,9 @@ export class Runner {
       if (channel.hidden_from_output) continue;
       const rule = matcher.rules.get(channel.id);
       const groupName = channel.groupId === null ? undefined : groupNames.get(channel.groupId);
-      // Same fallback `plan` applies, or a rule-less kickoff channel whose
-      // streams are all cache hits would never be reordered at all.
-      if (!rule && eligibility.policyFor(channel.groupId, groupName).mode !== AFTER_EPG_START) {
+      // Same fallback `plan` applies, or a rule-less channel whose streams are
+      // all cache hits would never be reordered at all.
+      if (!rule && !assignmentIsRule(eligibility.policyFor(channel.groupId, groupName).mode)) {
         continue;
       }
 

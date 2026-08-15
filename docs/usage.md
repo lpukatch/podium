@@ -212,9 +212,17 @@ Policy is per Dispatcharr channel group:
 
 | mode | behaviour |
 | --- | --- |
-| `always` | check on the normal freshness schedule (default) |
+| `always` | check the group's **ruled** channels on the normal freshness schedule (default) |
 | `never` | never probe; leave the ordering alone |
-| `after_epg_start` | only once the channel's EPG programme has started |
+| `after_epg_start` | rule or not, but only once the channel's EPG programme has started |
+| `assigned` | rule or not, on the normal freshness schedule |
+
+The policy says *when* a channel is checked. What decides whether it is checked
+at all is having a rule: under `always` — which is also what a group you have
+never touched resolves to — a channel with no alias is not podium's to look at,
+so a fresh install with an empty rules file checks nothing whatever its groups
+say. The other two modes lift exactly that condition, which is the difference
+worth reading the rest of this section for.
 
 `after_epg_start` exists for event channels. A channel carrying a 2pm first
 pitch is genuinely dead at 1pm — probing it then records a dead stream, sinks it
@@ -224,14 +232,21 @@ the channel.
 Name patterns like `Auto | *` apply a policy to groups that do not exist yet,
 which matters because Dispatcharr creates groups on its own.
 
-`after_epg_start` is also the one policy that covers channels with no rule at
-all. Channels created by another app — a scheduler that spawns one per fixture —
-have streams assigned but nothing in the rules file naming them, so under any
-other policy podium leaves them alone. In an `after_epg_start` group it ranks
-what the channel already carries instead, once the programme has started: the
-assignment stands in for the rule. It still only reorders, never assigns, and
-streams in a provider group you excluded stay out. Such a channel shows as
-`assigned only` in the channel list.
+`after_epg_start` and `assigned` are the two policies that cover channels with
+no rule at all, by taking the channel's own assignment as the rule. Channels
+created by another app — a scheduler that spawns one per fixture — have streams
+assigned but nothing in the rules file naming them, so under `always` podium
+leaves them alone; in one of these groups it ranks what the channel already
+carries instead. `assigned` is that bargain for a lineup you have already built
+by hand: point it at a group and podium keeps the order of every channel in it
+honest without your writing a single alias. It still only reorders, never
+assigns, and streams in a provider group you excluded stay out. Such a channel
+shows as `assigned only` in the channel list.
+
+An alias is still worth adding on top, per channel, where the order is not
+purely a question of measurement: alias order is preference, and `exclude`
+keeps a variant out of the ranking altogether. Rank-by-assignment has neither —
+every stream on the channel is a candidate, scored on what it measures.
 
 ![A channel group with its policy chips and the channels it holds](images/group-policy.png)
 

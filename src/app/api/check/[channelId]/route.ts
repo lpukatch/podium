@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { requireCredentials } from '@/lib/config';
 import { DispatcharrClient } from '@/lib/dispatcharr';
 import {
-  AFTER_EPG_START,
+  assignmentIsRule,
   currentProgrammes,
   describeVerdict,
   Eligibility,
@@ -104,12 +104,13 @@ export async function POST(request: Request, context: { params: Promise<{ channe
 
     const streamById = new Map(snap.streams.map((s) => [s.id, s]));
     const rule = m.rules.get(id);
-    // The worker probes a rule-less channel in an `after_epg_start` group off
-    // its own assignment (see `assignedCandidates`), so this has to as well --
-    // the endpoint exists to preview what the worker would do, and refusing
-    // here would say "no rule" about a channel the worker is actively ranking.
+    // The worker probes a rule-less channel in an `assigned` or
+    // `after_epg_start` group off its own assignment (see
+    // `assignedCandidates`), so this has to as well -- the endpoint exists to
+    // preview what the worker would do, and refusing here would say "no rule"
+    // about a channel the worker is actively ranking.
     const assignmentOnly =
-      !rule && elig.policyFor(channel.groupId, groupName).mode === AFTER_EPG_START;
+      !rule && assignmentIsRule(elig.policyFor(channel.groupId, groupName).mode);
     if (!rule && !assignmentOnly) {
       return NextResponse.json({ error: 'channel has no rule yet' }, { status: 400 });
     }
@@ -122,7 +123,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         {
           error: rule
             ? 'rule matches no streams'
-            : 'channel has no streams assigned to rank; the group is set to after kickoff, so podium ranks what the channel already carries',
+            : 'channel has no streams assigned to rank; its group policy ranks what the channel already carries, and it carries nothing',
         },
         { status: 400 },
       );

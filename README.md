@@ -35,6 +35,11 @@ On first start it writes an empty rules file and comes up with nothing to check.
 Open the UI on `:3456`, pick a group and start adding channels — or
 [import rules you already have](docs/usage.md#importing-existing-rules).
 
+If your lineups are already set and you only want them kept in the right order,
+you do not have to describe them twice: set a group to
+[`assigned`](docs/usage.md#channel-groups) and Podium ranks every channel in it
+off the streams Dispatcharr has already given it, no rules to write.
+
 ![The groups list, each showing how many of its channels have rules](docs/images/groups.png)
 
 Podium needs no credentials to boot. If you would rather not put an API key in
