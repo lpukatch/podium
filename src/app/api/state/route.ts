@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { AFTER_EPG_START, ALWAYS, Eligibility, type GroupPolicy } from '@/lib/eligibility';
+import { ALWAYS, assignmentIsRule, Eligibility, type GroupPolicy } from '@/lib/eligibility';
 import { assignedCandidates } from '@/lib/runner';
 import {
   config,
@@ -52,10 +52,10 @@ export async function GET(request: Request) {
 
       const rows = channels.map((channel) => {
         const rule = m.rules.get(channel.id);
-        // A rule-less channel in an after-kickoff group is ranked off its own
-        // assignment by the worker, so showing it as "no rule, 0 matched" would
-        // describe the opposite of what happens to it.
-        const assignmentOnly = !rule && mode === AFTER_EPG_START;
+        // A rule-less channel in an `assigned` or after-kickoff group is ranked
+        // off its own assignment by the worker, so showing it as "no rule, 0
+        // matched" would describe the opposite of what happens to it.
+        const assignmentOnly = !rule && assignmentIsRule(mode);
         const hits = rule
           ? m.match(rule, idx)
           : assignmentOnly

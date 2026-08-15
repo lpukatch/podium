@@ -9,7 +9,7 @@ import { SettingsView } from './settings-view';
 import { StreamGroupsView } from './stream-groups-view';
 import { StreamSearch } from './stream-search';
 
-type Mode = 'always' | 'never' | 'after_epg_start';
+type Mode = 'always' | 'never' | 'after_epg_start' | 'assigned';
 type Tab = 'groups' | 'all' | 'rules' | 'progress' | 'settings';
 type ChanFilter = 'all' | 'regex' | 'noregex' | 'nomatch';
 
@@ -25,7 +25,7 @@ interface ChannelRow {
   patterns: string[];
   regexCount: number;
   hasRule: boolean;
-  /** No rule, but an after-kickoff group: ranked off what the channel carries. */
+  /** No rule, but an `assigned`/after-kickoff group: ranked off what it carries. */
   assignmentOnly?: boolean;
 }
 
@@ -81,11 +81,51 @@ function since(ms: number | null): string {
   return `${Math.round(s / 86400)}d ago`;
 }
 
-const MODES: Array<{ value: Mode; label: string }> = [
-  { value: 'always', label: 'Always' },
-  { value: 'never', label: 'Never' },
-  { value: 'after_epg_start', label: 'After kickoff' },
+// The hint is the whole difference between "Always" and "Assigned", and picking
+// the wrong one is silent -- a group set to Always where nothing has a rule
+// simply never gets checked, which reads as podium being broken.
+const MODES: Array<{ value: Mode; label: string; hint: string }> = [
+  {
+    value: 'always',
+    label: 'Always',
+    hint: 'Checks the channels you have given a rule, on the normal freshness schedule. Channels with no rule are left alone.',
+  },
+  { value: 'never', label: 'Never', hint: 'Never probed, and the order is left as it is.' },
+  {
+    value: 'after_epg_start',
+    label: 'After kickoff',
+    hint: 'For event channels: checked once the EPG programme has started. A channel with no rule is ranked off the streams it already carries.',
+  },
+  {
+    value: 'assigned',
+    label: 'Assigned',
+    hint: 'Normal schedule, and a channel with no rule is ranked off the streams it already carries. For lineups you have already set by hand — podium only reorders, it never assigns.',
+  },
 ];
+
+/** The short form, for a chip with no room to explain itself. */
+const MODE_CHIP: Record<Mode, string> = {
+  always: 'always',
+  never: 'never',
+  after_epg_start: 'kickoff',
+  assigned: 'assigned',
+};
+
+/** Modes where a channel with no rule is still ranked, off its own assignment. */
+const RANKS_ASSIGNED = new Set<Mode>(['after_epg_start', 'assigned']);
+
+/**
+ * How much of a group podium is actually working on.
+ *
+ * "0/40 ruled" is the wrong thing to say about a group whose rule-less channels
+ * are ranked off their own assignment -- they are managed, and the count that
+ * looks like nothing is happening is the one thing it must not imply.
+ */
+function coverage(g: GroupRow): string {
+  return RANKS_ASSIGNED.has(g.mode)
+    ? `${g.matchedChannels}/${g.channels} ranked`
+    : `${g.ruled}/${g.channels} ruled`;
+}
 
 const card = 'rounded-xl border border-[var(--color-line)] bg-[var(--color-panel)]';
 const pill = 'inline-block rounded-full px-2 py-0.5 text-xs whitespace-nowrap';
@@ -571,7 +611,7 @@ export default function Page() {
                             {g.name}
                           </span>
                           <span className="text-sm tabular-nums text-[var(--color-muted)]">
-                            {g.ruled}/{g.channels} ruled · {g.links} links
+                            {coverage(g)} · {g.links} links
                             {g.mode !== 'never' && g.ruled - g.matchedChannels > 0
                               ? ` · ${g.ruled - g.matchedChannels} no match`
                               : ''}
@@ -586,7 +626,7 @@ export default function Page() {
                                   : 'bg-[var(--color-accent-soft)] text-[var(--color-accent)]'
                               }`}
                             >
-                              {g.mode === 'never' ? 'never' : 'kickoff'}
+                              {MODE_CHIP[g.mode]}
                               {g.fromPattern ? ' *' : ''}
                             </span>
                           )}
@@ -614,7 +654,7 @@ export default function Page() {
                     <div key={p.pattern} className="mt-3 flex items-center gap-3">
                       <code className="mono min-w-0 flex-1 truncate">{p.pattern}</code>
                       <span className={`${pill} bg-[var(--color-line)] text-[var(--color-muted)]`}>
-                        {p.mode === 'never' ? 'never' : 'after kickoff'}
+                        {MODE_CHIP[p.mode]}
                       </span>
                       <button
                         type="button"
@@ -641,6 +681,13 @@ export default function Page() {
                       onClick={() => void savePattern('after_epg_start')}
                     >
                       After kickoff
+                    </button>
+                    <button
+                      type="button"
+                      className={btn}
+                      onClick={() => void savePattern('assigned')}
+                    >
+                      Assigned
                     </button>
                   </div>
                 </div>
@@ -726,7 +773,7 @@ export default function Page() {
               </button>
               <h2 className="mt-1 text-xl font-semibold">{group.name}</h2>
               <p className="text-sm tabular-nums text-[var(--color-muted)]">
-                {group.ruled}/{group.channels} channels ruled · {group.links} stream links
+                {coverage(group)} · {group.links} stream links
                 {group.ruled - group.matchedChannels > 0
                   ? ` · ${group.ruled - group.matchedChannels} with no match`
                   : ''}
@@ -745,6 +792,16 @@ export default function Page() {
                   </button>
                 ))}
               </div>
+              <p className="mt-2 text-sm text-[var(--color-muted)]">
+                {MODES.find((m) => m.value === group.mode)?.hint}
+              </p>
+              {group.mode === 'always' && group.ruled === 0 && group.channels > 0 && (
+                <p className="mt-2 text-sm text-[var(--color-warn)]">
+                  Nothing in this group has a rule, so nothing here is being checked. Add an alias
+                  to a channel, or set the group to <strong>Assigned</strong> to rank every channel
+                  off the streams Dispatcharr already has on it.
+                </p>
+              )}
               {group.fromPattern && (
                 <p className="mt-2 text-sm text-[var(--color-muted)]">
                   Currently set by a name rule. Choosing here pins this group explicitly.
@@ -795,6 +852,16 @@ export default function Page() {
               Dispatcharr
               {group?.mode === 'never' ? ' · group excluded from checking' : ''}
             </p>
+
+            {/* Without this, an alias-less channel in one of these groups looks
+                unmanaged in the one view that would say so. */}
+            {!channel.hasRule && group && RANKS_ASSIGNED.has(group.mode) && (
+              <p className="mb-4 text-sm text-[var(--color-muted)]">
+                This group ranks channels with no rule off the streams they already carry, so this
+                one is being checked without an alias. Adding one narrows it to the streams the
+                alias matches.
+              </p>
+            )}
 
             {/* Aliases and their live result sit together: the whole point is
                 watching the match set change as you type. */}

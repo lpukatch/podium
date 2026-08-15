@@ -13,6 +13,8 @@ import {
 } from './dispatcharr';
 import {
   AFTER_EPG_START,
+  ASSIGNED,
+  assignmentIsRule,
   currentProgrammes,
   describeVerdict,
   Eligibility,
@@ -128,15 +130,35 @@ describe('eligibility', () => {
     expect(currentProgrammes(epgRows(-10), NOW).has('GAME.us')).toBe(true);
   });
 
+  it('needs no EPG for an assigned group', () => {
+    // `assigned` differs from `always` only in where a rule-less channel's
+    // candidates come from, so it must not inherit the kickoff gate.
+    const e = new Eligibility(
+      new Map([[9, { mode: ASSIGNED, graceMinutes: 5, windowMinutes: 180 }]]),
+    );
+    expect(e.allows(9, 'UNKNOWN', new Map(), NOW).allowed).toBe(true);
+  });
+
+  it('takes the assignment as the rule only where the operator said so', () => {
+    expect(assignmentIsRule(ASSIGNED)).toBe(true);
+    expect(assignmentIsRule(AFTER_EPG_START)).toBe(true);
+    // `always` is what every unconfigured group resolves to; the fallback there
+    // would probe the whole catalogue on a fresh install.
+    expect(assignmentIsRule('always')).toBe(false);
+    expect(assignmentIsRule(NEVER)).toBe(false);
+  });
+
   it('parses both policy shapes and rejects junk', () => {
     const parsed = parsePolicies({
       '1': 'never',
       '2': { mode: 'after_epg_start', grace_minutes: 9 },
+      '4': 'assigned',
       x: 'never',
       '3': 'nonsense',
     });
     expect(parsed.get(1)?.mode).toBe(NEVER);
     expect(parsed.get(2)?.graceMinutes).toBe(9);
+    expect(parsed.get(4)?.mode).toBe(ASSIGNED);
     expect(parsed.has(Number.NaN)).toBe(false);
     expect(parsed.get(3)?.mode).toBe('always');
   });
@@ -793,9 +815,10 @@ describe('Runner.plan (managed set + oldest check)', () => {
   });
 });
 
-describe('Runner.plan (rule-less channels in an after-kickoff group)', () => {
+describe('Runner.plan (rule-less channels ranked off their assignment)', () => {
   // Another app creates "Auto | SPORT" channels per fixture and assigns their
   // streams. Nothing names them in the rules file, so they have no rule at all.
+  // The same fallback serves a hand-built lineup in an `assigned` group.
   let dir: string;
   let store: Store;
   let rulesPath: string;
@@ -910,10 +933,34 @@ describe('Runner.plan (rule-less channels in an after-kickoff group)', () => {
     expect(jobs.every((j) => j.stepOrder === 0)).toBe(true);
   });
 
-  it('leaves a rule-less channel alone when its group is not after kickoff', () => {
+  it('leaves a rule-less channel alone under the default policy', () => {
     const now = new Date();
     const { jobs } = plan([plain], started(now) as Map<string, unknown>);
     expect(jobs).toEqual([]);
+  });
+
+  it('probes a rule-less channel in an assigned group with no EPG at all', () => {
+    // The whole point of `assigned`: lineups already set by hand, ranked on the
+    // normal schedule, with nothing to wait for.
+    writeFileSync(
+      rulesPath,
+      JSON.stringify({
+        schema: 2,
+        defaults: { exclude_groups: ['PPV JUNK'] },
+        channels: [],
+        group_patterns: [{ pattern: 'Movies', mode: 'assigned' }],
+      }),
+      'utf8',
+    );
+    // Carries 42 as well, which sits in a switched-off provider group: the
+    // fallback is still bounded by `exclude_groups`.
+    const { jobs, keepStreamIds, heldBack } = plan(
+      [{ ...plain, streams: [40, 41, 42] }],
+      new Map(),
+    );
+    expect(jobs.map((j) => j.streamId).sort()).toEqual([40, 41]);
+    expect(heldBack).toEqual({});
+    expect(keepStreamIds.has(42)).toBe(false);
   });
 
   it('holds the channel back before kickoff but keeps its streams managed', () => {

@@ -1,7 +1,7 @@
 /**
  * Which channels are allowed to be probed right now.
  *
- * Two problems this solves, both of which a plain "check everything on a timer"
+ * Three problems this solves, all of which a plain "check everything on a timer"
  * model gets wrong:
  *
  * **Event channels.** A channel carrying a 2pm first pitch is genuinely dead at
@@ -12,6 +12,10 @@
  * **Groups you never want touched.** Some groups are noise -- 24/7 PPV filler,
  * adult, VOD dumps. Burning a Provider C slot on them delays what matters.
  *
+ * **Lineups that are already right.** Someone who has curated their channels in
+ * Dispatcharr wants the order kept honest, not a second set of rules describing
+ * what the channel already carries. `assigned` says so for a whole group.
+ *
  * Policy is per group, because that is the granularity Dispatcharr already
  * organises by.
  */
@@ -19,8 +23,22 @@
 export const ALWAYS = 'always';
 export const NEVER = 'never';
 export const AFTER_EPG_START = 'after_epg_start';
-export type PolicyMode = typeof ALWAYS | typeof NEVER | typeof AFTER_EPG_START;
-export const VALID_MODES: PolicyMode[] = [ALWAYS, NEVER, AFTER_EPG_START];
+export const ASSIGNED = 'assigned';
+export type PolicyMode = typeof ALWAYS | typeof NEVER | typeof AFTER_EPG_START | typeof ASSIGNED;
+export const VALID_MODES: PolicyMode[] = [ALWAYS, NEVER, AFTER_EPG_START, ASSIGNED];
+
+/**
+ * Whether a rule-less channel in this mode is ranked off its own assignment.
+ *
+ * `always` is the default every unconfigured group resolves to, so it cannot
+ * carry this: a fresh install with an empty rules file would probe the entire
+ * catalogue on its first pass. Both modes here are ones an operator picked for
+ * a named group, which is the consent the fallback needs. See
+ * `assignedCandidates` in `runner.ts` for what it then ranks.
+ */
+export function assignmentIsRule(mode: PolicyMode): boolean {
+  return mode === AFTER_EPG_START || mode === ASSIGNED;
+}
 
 export interface GroupPolicy {
   mode: PolicyMode;
@@ -130,7 +148,9 @@ export class Eligibility {
   ): AllowResult {
     const policy = this.policyFor(groupId, groupName);
     if (policy.mode === NEVER) return { allowed: false, reason: 'group excluded' };
-    if (policy.mode === ALWAYS) return { allowed: true, reason: '' };
+    // `assigned` differs from `always` only in where a rule-less channel's
+    // candidates come from; the timing is the same, so there is nothing to gate.
+    if (policy.mode === ALWAYS || policy.mode === ASSIGNED) return { allowed: true, reason: '' };
 
     const programme = programmes.get(tvgId);
     if (!programme) {
