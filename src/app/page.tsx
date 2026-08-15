@@ -816,9 +816,7 @@ export default function Page() {
               </p>
               <p className="mt-1.5 text-sm text-[var(--color-muted)]">
                 Prefix it with <code className="mono">@AU</code> to take only that region’s feed, or{' '}
-                <code className="mono">@!Prime</code> to keep one out. Put{' '}
-                <code className="mono">@AU beIN Sports</code> above{' '}
-                <code className="mono">beIN Sports</code> to prefer one and still fall back.
+                <code className="mono">@!Prime</code> to keep one out.
               </p>
               <p className="mt-1.5 text-sm text-[var(--color-muted)]">
                 Suffix it with <code className="mono">~4K</code> to take only that variant, or{' '}

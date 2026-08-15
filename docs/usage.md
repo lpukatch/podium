@@ -110,13 +110,18 @@ sits. `@` is the section in front, `~` is the token behind — so `@HD Sports`
 still means the `HD:` section and nothing in an existing rules file changes
 meaning.
 
-Both ends combine, and order is still preference:
+Both ends combine, which is how one line says "that section's copy of that
+variant, and nothing else":
 
 ```
-@AU CNN ~4K        the AU 4K feed first
-@AU CNN            ...then any other AU copy
-CNN ~!4K           ...then anything but a 4K one
+@AU CNN ~4K        the AU section's 4K copy
 ```
+
+Line order is still preference, so a qualified line above an unqualified one is
+a fallback rather than a hard selection — `@AU CNN ~4K` above `CNN` takes the AU
+4K copy where there is one and anything else where there is not. Reach for that
+when a variant is *better*; most quality rules are the plain kind above, where a
+variant should simply never be picked.
 
 A resolution word means its **tier**, not the literal token: `4K` covers `UHD`
 and `2160p`, because they are one feed described three ways. Write the height
