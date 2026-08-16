@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Eligibility } from '@/lib/eligibility';
-import { composeOrder, splitAssigned } from '@/lib/runner';
+import { composeOrder, splitAssigned, withoutStream } from '@/lib/runner';
 
 describe('composeOrder safety (Finding 02 & Acceptance Criteria)', () => {
   it('does not unassign unmatched streams when removeUnmatched is false', () => {
@@ -53,6 +53,31 @@ describe('what a check may offer to unassign', () => {
     const { unprobed } = splitAssigned([10, 20, 30], new Set([10, 20, 30]), new Set([10]));
     const removeUnmatched = true && unprobed.length === 0;
     expect(composeOrder([10], [10, 20, 30], removeUnmatched)).toEqual([10, 20, 30]);
+  });
+});
+
+describe('taking one stream off a channel', () => {
+  it('keeps the live order of everything else', () => {
+    expect(withoutStream([30, 10, 20], 10)).toEqual([30, 20]);
+  });
+
+  it('is computed against the live order, not the one the page is showing', () => {
+    // The editor draws from a snapshot up to five minutes old. Here the worker
+    // has since reordered the channel and something else dropped 40. Removing
+    // the ✕'d stream from the live array leaves both of those changes intact;
+    // posting back the page's copy minus 20 would have reverted the ranking
+    // and put 40 back on the channel.
+    const shownInTheEditor = [10, 20, 30, 40];
+    const live = [30, 10, 20];
+    expect(withoutStream(live, 20)).toEqual([30, 10]);
+    expect(withoutStream(shownInTheEditor, 20)).not.toEqual(withoutStream(live, 20));
+  });
+
+  it('asking twice is the same as asking once', () => {
+    // A double click, or two tabs open on the same channel: the second call
+    // finds nothing to remove and must not report a different lineup.
+    const once = withoutStream([10, 20, 30], 20);
+    expect(withoutStream(once, 20)).toEqual(once);
   });
 });
 

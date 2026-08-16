@@ -182,6 +182,8 @@ export default function Page() {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [saved, setSaved] = useState('');
+  const [removing, setRemoving] = useState<number | null>(null);
+  const [removeNote, setRemoveNote] = useState<{ text: string; bad: boolean } | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(async (refresh = false) => {
@@ -272,6 +274,7 @@ export default function Page() {
     setContains(c.contains.join('\n'));
     setExclude(c.exclude.join('\n'));
     setPreview(null);
+    setRemoveNote(null);
   }, []);
 
   // Arriving by URL rather than by click: the channel id comes from the query
@@ -320,6 +323,48 @@ export default function Page() {
       if (timer.current) clearTimeout(timer.current);
     };
   }, [channelId, runPreview]);
+
+  /**
+   * Bring the channel editor back in step with a write that just landed.
+   *
+   * Both writers -- the ✕ here and the check panel's apply -- fold what they
+   * wrote into the server's snapshot, so this reads the new lineup without the
+   * forced refresh, which refetches every channel and stream from Dispatcharr
+   * to learn one channel's order. Without re-running the preview the listing
+   * above kept showing the streams the apply had already removed.
+   */
+  const resync = useCallback(async () => {
+    await load();
+    await runPreview();
+  }, [load, runPreview]);
+
+  /** Take one stream off the channel in Dispatcharr. */
+  const removeStream = useCallback(
+    async (streamId: number, name: string) => {
+      if (channelId === null) return;
+      setRemoving(streamId);
+      setRemoveNote(null);
+      try {
+        const resp = await fetch(`/api/unassign/${channelId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ streamId }),
+        });
+        const body = await resp.json();
+        if (!resp.ok || body.error) {
+          setRemoveNote({ text: body.error ?? `HTTP ${resp.status}`, bad: true });
+          return;
+        }
+        setRemoveNote({ text: `Removed ${name} from this channel.`, bad: false });
+        await resync();
+      } catch (e) {
+        setRemoveNote({ text: String(e), bad: true });
+      } finally {
+        setRemoving(null);
+      }
+    },
+    [channelId, resync],
+  );
 
   const save = async () => {
     if (channelId === null) return;
@@ -914,6 +959,15 @@ export default function Page() {
                 how you keep “FS1 4K (Event Only)” out. Both ends combine:{' '}
                 <code className="mono">@AU CNN ~4K</code>.
               </p>
+              {removeNote && (
+                <p
+                  className={`mt-3 text-sm ${
+                    removeNote.bad ? 'text-[var(--color-bad)]' : 'text-[var(--color-accent)]'
+                  }`}
+                >
+                  {removeNote.text}
+                </p>
+              )}
               {preview && unifiedRows.length > 0 && (
                 <StreamList
                   title={`Live ordering & Matched (${unifiedRows.length})`}
@@ -923,11 +977,13 @@ export default function Page() {
                   flush
                   orphanedIds={orphanedIds}
                   onAdd={addAlias}
+                  onRemove={removeStream}
+                  removing={removing}
                 />
               )}
             </div>
 
-            <CheckPanel channelId={channel.id} onApplied={() => void load(true)} />
+            <CheckPanel channelId={channel.id} onApplied={() => void resync()} />
 
             <div className="mt-4">
               <StreamSearch onAdd={addAlias} onAddContains={addContains} />
@@ -1024,6 +1080,8 @@ function StreamList({
   rows,
   tone,
   onAdd,
+  onRemove,
+  removing,
   flush,
   orphanedIds,
 }: {
@@ -1032,6 +1090,9 @@ function StreamList({
   rows: StreamRow[];
   tone: 'normal' | 'warn';
   onAdd?: (name: string) => void;
+  /** Take an unmatched stream off the channel. Only offered for those. */
+  onRemove?: (id: number, name: string) => void;
+  removing?: number | null;
   flush?: boolean;
   orphanedIds?: Set<number>;
 }) {
@@ -1123,6 +1184,20 @@ function StreamList({
                     onClick={() => onAdd(r.normalized)}
                   >
                     + alias
+                  </button>
+                )}
+                {/* The two answers to an unmatched stream sit together: claim
+                    it with an alias, or take it off the channel. */}
+                {onRemove && orphaned && (
+                  <button
+                    type="button"
+                    title="Remove this stream from the channel"
+                    aria-label={`Remove ${r.raw} from this channel`}
+                    className={`${btn} flex-none px-3 py-1.5 text-sm text-[var(--color-bad)] hover:border-[var(--color-bad)]`}
+                    disabled={removing === r.id}
+                    onClick={() => onRemove(r.id, r.normalized)}
+                  >
+                    {removing === r.id ? '…' : '✕'}
                   </button>
                 )}
               </li>

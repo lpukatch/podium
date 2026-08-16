@@ -101,6 +101,20 @@ export function composeOrder(
   return [...matched, ...assigned.filter((id) => !matchedSet.has(id))];
 }
 
+/**
+ * The order to write back when one stream is being taken off a channel.
+ *
+ * `live` has to be what Dispatcharr holds right now, not the list the caller is
+ * looking at. The channel editor draws from a snapshot up to five minutes old,
+ * so posting its copy back minus one id would also undo any reordering the
+ * worker did in between and resurrect anything something else had already
+ * unassigned. Filtering one id out of the live array changes exactly one thing,
+ * and asking twice is the same as asking once.
+ */
+export function withoutStream(live: number[], streamId: number): number[] {
+  return live.filter((id) => id !== streamId);
+}
+
 /** Streams on a channel, split by why they are missing from a ranked order. */
 export interface AssignedSplit {
   /** Claimed by nothing. The only streams a drop may take. */
