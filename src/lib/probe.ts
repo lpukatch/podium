@@ -203,6 +203,8 @@ export function parsePayload(payload: FfprobePayload): Omit<ProbeResult, 'elapse
 export interface SampleResult {
   bitrateKbps: number;
   blackSeconds: number;
+  /** True when the sample was cut short, so it covers less than the full window. */
+  truncated?: boolean;
 }
 
 /**
@@ -234,6 +236,14 @@ export function parseSampleStderr(stderr: string, blackLines: string): SampleRes
  * would open two connections to the provider and so cost two slots against its
  * concurrency limit -- the reason to fold them together is capacity, not the
  * 0.2s of wall time.
+ *
+ * A sample that runs out of time still returns what it read. `-stats` rewrites
+ * the total continuously, so the last line printed before the kill is an honest
+ * average over the portion that was muxed -- and throwing that away is why 4K
+ * streams came back with an unknown bitrate. The decode branch feeding
+ * `blackdetect` is single-threaded and roughly realtime at 2160p, so a
+ * five-second sample of 4K regularly outlasts the budget left over from
+ * ffprobe, where the same sample at 1080p finishes in a fraction of a second.
  *
  * Returns zeroes rather than throwing: missing detail degrades ranking, it does
  * not invalidate the probe.
@@ -324,6 +334,16 @@ export async function sampleStream(
     let lineBuffer = '';
     let settled = false;
 
+    /**
+     * What the child has said so far. `stderr` already holds every chunk;
+     * `lineBuffer` is only the tail that has not been split into lines yet, so
+     * it is consulted for a blackdetect line the splitter has not seen.
+     */
+    const parseCollected = (): SampleResult => {
+      const trailing = lineBuffer.includes('black_start') ? `${lineBuffer}\n` : '';
+      return parseSampleStderr(stderr, blackLines + trailing);
+    };
+
     const finish = (value: SampleResult) => {
       if (settled) return;
       settled = true;
@@ -334,7 +354,7 @@ export async function sampleStream(
 
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
-      finish({ bitrateKbps: 0, blackSeconds: 0 });
+      finish({ ...parseCollected(), truncated: true });
     }, timeoutMs);
 
     child.stderr.on('data', (chunk) => {
@@ -352,10 +372,7 @@ export async function sampleStream(
     });
 
     child.on('error', () => finish({ bitrateKbps: 0, blackSeconds: 0 }));
-    child.on('close', () => {
-      if (lineBuffer.includes('black_start')) blackLines += `${lineBuffer}\n`;
-      finish(parseSampleStderr(stderr, blackLines));
-    });
+    child.on('close', () => finish(parseCollected()));
   });
 }
 
@@ -463,12 +480,19 @@ export async function probe(url: string, options: ProbeOptions = {}): Promise<Pr
           ffmpegPath,
         })
           .then((sample) => {
+            // A cut-short sample still measured a real bitrate over the bytes it
+            // read, but its black total is only a floor: the run it was in the
+            // middle of never ended. Judging that floor against the full window
+            // would report a definite "not black" on evidence we do not have, so
+            // an unfinished sample that has not already cleared the bar leaves
+            // the verdict open instead.
+            const blackEnough = sample.blackSeconds >= measureSeconds * blackRatio;
             finish({
               ...parsed,
               bitrateKbps:
                 shouldMeasure && sample.bitrateKbps > 0 ? sample.bitrateKbps : parsed.bitrateKbps,
               bitrateMeasured: shouldMeasure && sample.bitrateKbps > 0,
-              black: detectBlack ? sample.blackSeconds >= measureSeconds * blackRatio : undefined,
+              black: detectBlack && (blackEnough || !sample.truncated) ? blackEnough : undefined,
               blackSeconds: detectBlack ? Math.round(sample.blackSeconds * 100) / 100 : undefined,
               error: '',
             });

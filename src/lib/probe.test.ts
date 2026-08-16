@@ -1,5 +1,5 @@
 import { execFileSync } from 'child_process';
-import { mkdtempSync, readdirSync, rmSync } from 'fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -198,4 +198,84 @@ describe('probe against generated video', () => {
     },
     120_000,
   );
+});
+
+/**
+ * A sample that runs out of time, without depending on how fast the machine
+ * decodes.
+ *
+ * The real trigger is 2160p: the blackdetect branch decodes single-threaded at
+ * roughly realtime at that size, so a five-second sample outlasts whatever is
+ * left of the probe budget after ffprobe -- where the same sample at 1080p
+ * finishes in a fraction of a second. Reproducing that with a genuine 4K
+ * fixture would make the test a race against the CI runner's CPU, so these
+ * stand in a stub for ffmpeg that prints the same stats lines and then hangs.
+ */
+describe('a sample cut short keeps what it read', () => {
+  const usable = process.platform !== 'win32';
+  let dir: string;
+  let fakeFfmpeg: string;
+  let fakeFfprobe: string;
+
+  beforeAll(() => {
+    if (!usable) return;
+    dir = mkdtempSync(join(tmpdir(), 'podium-truncated-'));
+    fakeFfmpeg = join(dir, 'slow-ffmpeg');
+    fakeFfprobe = join(dir, 'fake-ffprobe');
+    // ffmpeg rewrites the stats line with \r as it goes, so the last one
+    // printed before the kill is the total over everything muxed so far.
+    writeFileSync(
+      fakeFfmpeg,
+      [
+        '#!/bin/sh',
+        "printf 'frame=  10 size=  100KiB time=00:00:00.40 bitrate= 900.0kbits/s\\r' >&2",
+        "printf '[blackdetect @ 0x1] black_start:0 black_end:0.4 black_duration:0.4\\n' >&2",
+        "printf 'frame=  40 size= 1000KiB time=00:00:01.60 bitrate=4744.1kbits/s\\r' >&2",
+        'sleep 30',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      fakeFfprobe,
+      [
+        '#!/bin/sh',
+        // Live TS almost never declares a bitrate, which is the whole reason
+        // the sample exists -- so this one does not either.
+        'printf \'{"streams":[{"codec_type":"video","codec_name":"hevc",' +
+          '"width":3840,"height":2160,"avg_frame_rate":"50/1"}],"format":{}}\'',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+  });
+
+  afterAll(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it.runIf(usable)('reports the bitrate measured before the kill', async () => {
+    const sample = await sampleStream(join(dir, 'stream.ts'), {
+      timeoutMs: 750,
+      ffmpegPath: fakeFfmpeg,
+    });
+    expect(sample.bitrateKbps).toBe(4744.1);
+    expect(sample.blackSeconds).toBe(0.4);
+    expect(sample.truncated).toBe(true);
+  });
+
+  it.runIf(usable)('carries that bitrate through as a measured one', async () => {
+    const result = await probe(join(dir, 'stream.ts'), {
+      timeoutMs: 750,
+      ffprobePath: fakeFfprobe,
+      ffmpegPath: fakeFfmpeg,
+    });
+    expect(result.alive).toBe(true);
+    expect(result.height).toBe(2160);
+    expect(result.bitrateKbps).toBe(4744.1);
+    expect(result.bitrateMeasured).toBe(true);
+    // 0.4s of black out of a window that never finished is a floor, not a
+    // verdict -- so the probe declines to call it either way.
+    expect(result.black).toBeUndefined();
+  });
 });

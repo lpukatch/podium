@@ -33,7 +33,25 @@ export const configSchema = z.object({
 
   /** The single biggest lever on total run time. */
   PODIUM_ANALYZE_SECONDS: num(6),
-  PODIUM_PROBE_TIMEOUT_MS: num(12_000),
+  /**
+   * Covers ffprobe and the sample that follows it, which is what makes 2160p
+   * the sizing case.
+   *
+   * The blackdetect branch decodes single-threaded, and measured against real
+   * 4K HEVC providers that runs at 0.575x-1.12x realtime -- so the five-second
+   * sample costs 5-11.7s of wall time, on top of 0.4-3.8s of ffprobe. At the
+   * old 12s a 4K stream could not finish: the sample was killed, and since no
+   * 4K provider observed declares `bit_rate` in either the stream or the format
+   * block, the sample is the only source there is and the stream ranked with an
+   * unknown bitrate. 1080p never hit this -- it samples in a fraction of a
+   * second.
+   *
+   * The cost lands on hung streams, which burn the whole budget before being
+   * called dead. Measured on a 1926-stream install that is 91 streams, so ~2
+   * extra minutes per pass at six concurrent probes; 0.9% of live probes reach
+   * the ceiling at all.
+   */
+  PODIUM_PROBE_TIMEOUT_MS: num(20_000),
   PODIUM_USER_AGENT: z.string().default('VLC/3.0.14'),
   /** Live TS/HLS rarely declares a bitrate; measuring it keeps ranking honest. */
   PODIUM_MEASURE_BITRATE: bool(true),
