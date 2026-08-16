@@ -53,12 +53,35 @@ export interface GroupPolicy {
    * late joiner has already been served by an earlier pass.
    */
   windowMinutes: number;
+  /**
+   * Require the programme airing now to be marked live.
+   *
+   * Event EPGs do not leave an event channel blank until kickoff -- they fill
+   * the gap with a countdown block. A real one, from a live install:
+   *
+   *     16:00Z-17:05Z  "Coming up: Minor League Baseball at 1:05 PM EDT"  is_live false
+   *
+   * Reading `start` off that says the event began at 16:00Z when first pitch is
+   * at 17:05Z, so the gate opens an hour early and every probe lands on a feed
+   * that is not up yet -- which is the exact failure `after_epg_start` exists to
+   * prevent. Postgame blocks are the same problem after the fact. On the install
+   * this was found on, 99 of the 109 event programmes airing at any moment were
+   * countdown blocks, and the gate had never once held a channel back.
+   *
+   * On by default, because a source with per-programme times precise enough to
+   * gate on is a source that marks its live programmes. An EPG that never sets
+   * the flag holds every channel back with reason `no live programme` -- visible
+   * in one glance at the pass tally rather than silent -- and turning this off
+   * for that group restores the old behaviour.
+   */
+  requireLive: boolean;
 }
 
 export const DEFAULT_POLICY: GroupPolicy = {
   mode: ALWAYS,
   graceMinutes: 5,
   windowMinutes: 180,
+  requireLive: true,
 };
 
 export interface Programme {
@@ -66,6 +89,8 @@ export interface Programme {
   start: Date;
   end: Date;
   title: string;
+  /** Whether the EPG marks this programme as airing live. */
+  isLive: boolean;
 }
 
 export interface EpgRow {
@@ -73,6 +98,7 @@ export interface EpgRow {
   start_time?: string | null;
   end_time?: string | null;
   title?: string | null;
+  is_live?: boolean | null;
 }
 
 export interface AllowResult {
@@ -159,9 +185,17 @@ export class Eligibility {
       return { allowed: false, reason: 'no EPG data' };
     }
 
+    const title = programme.title ? `"${programme.title}"` : '';
+    // Before the clock arithmetic, not after: a countdown block's `start` is the
+    // moment the *countdown* began, so every window computed from it is a window
+    // around the wrong instant. One reason for both sides of the event -- a
+    // countdown block and a postgame block are the same answer, "not the event".
+    if (policy.requireLive && !programme.isLive) {
+      return { allowed: false, reason: 'no live programme', detail: title || undefined };
+    }
+
     const opens = programme.start.getTime() + policy.graceMinutes * 60_000;
     const closes = programme.start.getTime() + policy.windowMinutes * 60_000;
-    const title = programme.title ? `"${programme.title}"` : '';
     if (now.getTime() < opens) {
       const at = `${programme.start.toISOString().slice(11, 16)}Z`;
       return {
@@ -175,6 +209,18 @@ export class Eligibility {
     }
     return { allowed: true, reason: '' };
   }
+}
+
+/**
+ * A boolean knob that has to survive JSON, a form post and a hand-edited rules
+ * file, where `false` arrives as `false`, `"false"` or `0` depending on which.
+ * Anything unset keeps the default rather than reading as off.
+ */
+function bool(value: unknown, fallback: boolean): boolean {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  return !/^(false|0|no|off)$/i.test(String(value).trim());
 }
 
 /** Parse `{"1571": "never", "3419": {"mode": "after_epg_start", ...}}`. */
@@ -209,6 +255,7 @@ export function parsePolicies(
       mode: mode as PolicyMode,
       graceMinutes: Number(extra.grace_minutes ?? DEFAULT_POLICY.graceMinutes),
       windowMinutes: Number(extra.window_minutes ?? DEFAULT_POLICY.windowMinutes),
+      requireLive: bool(extra.require_live, DEFAULT_POLICY.requireLive),
     });
   }
   return out;
@@ -236,6 +283,7 @@ export function parseGroupPatterns(
       mode: mode as PolicyMode,
       graceMinutes: Number(row.grace_minutes ?? DEFAULT_POLICY.graceMinutes),
       windowMinutes: Number(row.window_minutes ?? DEFAULT_POLICY.windowMinutes),
+      requireLive: bool(row.require_live, DEFAULT_POLICY.requireLive),
     });
   }
   return out;
@@ -251,7 +299,13 @@ export function currentProgrammes(rows: EpgRow[], now: Date = new Date()): Map<s
     const end = new Date(row.end_time);
     if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) continue;
     if (start.getTime() <= at && at < end.getTime()) {
-      out.set(row.tvg_id, { tvgId: row.tvg_id, start, end, title: row.title ?? '' });
+      out.set(row.tvg_id, {
+        tvgId: row.tvg_id,
+        start,
+        end,
+        title: row.title ?? '',
+        isLive: row.is_live === true,
+      });
     }
   }
   return out;

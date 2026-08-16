@@ -29,10 +29,19 @@ export async function PUT(request: Request, context: { params: Promise<{ groupId
     // entries that say "behave normally".
     delete groups[String(id)];
   } else {
+    // `require_live` has no control in this UI, so it is carried over from
+    // whatever is stored rather than dropped -- an operator who turned the gate
+    // off by hand should not have it switched back on by saving a mode.
+    const stored = groups[String(id)];
+    const kept =
+      stored && typeof stored === 'object'
+        ? (stored as Record<string, unknown>).require_live
+        : undefined;
     groups[String(id)] = {
       mode,
       grace_minutes: body.graceMinutes ?? 5,
       window_minutes: body.windowMinutes ?? 180,
+      ...(kept === undefined ? {} : { require_live: kept }),
     };
   }
 

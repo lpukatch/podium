@@ -101,6 +101,40 @@ export function composeOrder(
   return [...matched, ...assigned.filter((id) => !matchedSet.has(id))];
 }
 
+/** Streams on a channel, split by why they are missing from a ranked order. */
+export interface AssignedSplit {
+  /** Claimed by nothing. The only streams a drop may take. */
+  unclaimed: number[];
+  /** Claimed, but with no probe verdict this pass. */
+  unprobed: number[];
+}
+
+/**
+ * Why each assigned stream is absent from a ranking -- rule, or capacity.
+ *
+ * Two different answers that a ranked list alone cannot tell apart, because a
+ * stream is missing from it either way. The on-demand check conflated them: it
+ * read "not in the proposed order" as "the rule does not claim this", and
+ * offered to unassign the result. On a provider whose `max_streams` is 1, every
+ * stream is skipped for want of a slot the moment a viewer is reserved for, so
+ * the offer was to delete streams the rule claims perfectly well -- with the
+ * channel's own rule named as the justification.
+ *
+ * `unprobed` is therefore not a softer `unclaimed`; it is the signal that a drop
+ * must not be offered at all, the same conclusion the worker reaches when it
+ * refuses to reorder a channel it lacks a verdict for.
+ */
+export function splitAssigned(
+  assigned: number[],
+  claimed: Set<number>,
+  probed: Set<number>,
+): AssignedSplit {
+  return {
+    unclaimed: assigned.filter((id) => !claimed.has(id)),
+    unprobed: assigned.filter((id) => claimed.has(id) && !probed.has(id)),
+  };
+}
+
 /**
  * Candidates for a channel the rules file says nothing about.
  *

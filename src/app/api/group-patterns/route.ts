@@ -9,6 +9,7 @@ interface PatternRow {
   mode: string;
   grace_minutes?: number;
   window_minutes?: number;
+  require_live?: boolean;
 }
 
 /** Add or replace a name-pattern rule, and report which groups it would hit. */
@@ -31,6 +32,12 @@ export async function PUT(request: Request) {
     if (existing >= 0) patterns.splice(existing, 1);
   } else {
     const entry: PatternRow = { pattern, mode, grace_minutes: 5, window_minutes: 180 };
+    // Carried over rather than reset: `require_live` has no control in this UI,
+    // so an operator who turned it off did it by hand in the rules file, and
+    // silently switching the gate back on the next time they touch the mode
+    // dropdown is the failure mode the setting exists to avoid.
+    const kept = existing >= 0 ? patterns[existing]?.require_live : undefined;
+    if (kept !== undefined) entry.require_live = kept;
     if (existing >= 0) patterns[existing] = entry;
     else patterns.push(entry);
   }

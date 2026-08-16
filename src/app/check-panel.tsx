@@ -37,6 +37,7 @@ interface CheckResult {
   minBitrateKbps: number;
   rows: Row[];
   unclaimed: Row[];
+  unprobed?: Row[];
 }
 
 const card = 'rounded-xl border border-[var(--color-line)] bg-[var(--color-panel)]';
@@ -62,6 +63,10 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
     setError('');
     setNote('');
     setResult(null);
+    // Per check, not per panel: the box is hidden when the new result has
+    // unprobed streams, and a tick left over from the previous channel would
+    // otherwise still be sent with the apply.
+    setDropUnclaimed(false);
     try {
       const url = force ? `/api/check/${channelId}?force=true` : `/api/check/${channelId}`;
       const resp = await fetch(url, { method: 'POST' });
@@ -239,12 +244,24 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
           {result.truncated && (
             <p className="mt-3 text-sm text-[var(--color-warn)]">
               This rule claims {result.totalHits} streams; only the first {result.probeLimit} were
-              probed. The list below is partial, and nothing will be unassigned from this channel on
-              apply.
+              probed. The ranking above is partial.
             </p>
           )}
 
-          {result.unclaimed.length > 0 && !result.truncated && (
+          {(result.unprobed?.length ?? 0) > 0 && (
+            <p className="mt-3 text-sm text-[var(--color-warn)]">
+              {result.unprobed?.length} stream(s) this rule claims went unprobed — no spare provider
+              capacity, or past the {result.probeLimit} probe cap (
+              {(result.unprobed ?? [])
+                .map((u) => `${u.name} · ${u.provider}`)
+                .join(', ')
+                .slice(0, 120)}
+              ). They stay on the channel, unranked and after the ranked ones, and nothing can be
+              unassigned until a check gets a verdict for them.
+            </p>
+          )}
+
+          {result.unclaimed.length > 0 && (result.unprobed?.length ?? 0) === 0 && (
             <label className="mt-3 flex cursor-pointer items-start gap-2 text-sm">
               <input
                 type="checkbox"

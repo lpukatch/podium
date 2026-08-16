@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Eligibility } from '@/lib/eligibility';
-import { composeOrder } from '@/lib/runner';
+import { composeOrder, splitAssigned } from '@/lib/runner';
 
 describe('composeOrder safety (Finding 02 & Acceptance Criteria)', () => {
   it('does not unassign unmatched streams when removeUnmatched is false', () => {
@@ -26,10 +26,40 @@ describe('composeOrder safety (Finding 02 & Acceptance Criteria)', () => {
   });
 });
 
+describe('what a check may offer to unassign', () => {
+  it('calls a stream unclaimed only when the rule did not match it', () => {
+    // The live case this comes from: a channel carrying 7 streams whose rule
+    // claims all 7, two of them on a provider with max_streams 1. Reserving a
+    // slot for a viewer leaves that provider none, so the two go unprobed --
+    // and the check offered to delete them as streams "this rule does not
+    // claim", naming the rule that claims them.
+    const assigned = [75339, 75340, 93512, 93513, 131939];
+    const claimed = new Set(assigned);
+    const probed = new Set([75339, 75340, 131939]);
+    const { unclaimed, unprobed } = splitAssigned(assigned, claimed, probed);
+    expect(unclaimed).toEqual([]);
+    expect(unprobed).toEqual([93512, 93513]);
+  });
+
+  it('separates a genuine stray from a stream that went unprobed', () => {
+    const { unclaimed, unprobed } = splitAssigned([10, 20, 30], new Set([10, 20]), new Set([10]));
+    expect(unclaimed).toEqual([30]);
+    expect(unprobed).toEqual([20]);
+  });
+
+  it('keeps every assigned stream when one of them has no verdict', () => {
+    // `unprobed` being non-empty is what forces removeUnmatched off, so a
+    // half-probed check composes an order that drops nothing.
+    const { unprobed } = splitAssigned([10, 20, 30], new Set([10, 20, 30]), new Set([10]));
+    const removeUnmatched = true && unprobed.length === 0;
+    expect(composeOrder([10], [10, 20, 30], removeUnmatched)).toEqual([10, 20, 30]);
+  });
+});
+
 describe('Eligibility Group Policy (Finding 03 & Acceptance Criteria)', () => {
   it('returns group excluded verdict for never policy', () => {
     const policies = new Map([
-      [1, { mode: 'never' as const, graceMinutes: 5, windowMinutes: 180 }],
+      [1, { mode: 'never' as const, graceMinutes: 5, windowMinutes: 180, requireLive: true }],
     ]);
     const elig = new Eligibility(policies);
     const verdict = elig.allows(1, 'tvg1', new Map());
@@ -39,13 +69,21 @@ describe('Eligibility Group Policy (Finding 03 & Acceptance Criteria)', () => {
 
   it('returns before kickoff for after_epg_start policy before start time', () => {
     const policies = new Map([
-      [2, { mode: 'after_epg_start' as const, graceMinutes: 5, windowMinutes: 180 }],
+      [
+        2,
+        {
+          mode: 'after_epg_start' as const,
+          graceMinutes: 5,
+          windowMinutes: 180,
+          requireLive: true,
+        },
+      ],
     ]);
     const elig = new Eligibility(policies);
     const futureStart = new Date(Date.now() + 30 * 60_000);
     const futureEnd = new Date(Date.now() + 120 * 60_000);
     const programmes = new Map([
-      ['tvg2', { tvgId: 'tvg2', start: futureStart, end: futureEnd, title: 'Game' }],
+      ['tvg2', { tvgId: 'tvg2', start: futureStart, end: futureEnd, title: 'Game', isLive: true }],
     ]);
     const verdict = elig.allows(2, 'tvg2', programmes);
     expect(verdict.allowed).toBe(false);
