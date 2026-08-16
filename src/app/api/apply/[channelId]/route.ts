@@ -3,7 +3,13 @@ import { requireCredentials } from '@/lib/config';
 import { DispatcharrClient } from '@/lib/dispatcharr';
 import { currentProgrammes, describeVerdict, Eligibility } from '@/lib/eligibility';
 import { composeOrder } from '@/lib/runner';
-import { groupPatterns, policies, config as serverConfig, snapshot } from '@/lib/server/state';
+import {
+  groupPatterns,
+  noteStreamOrder,
+  policies,
+  config as serverConfig,
+  snapshot,
+} from '@/lib/server/state';
 import { Store } from '@/lib/store';
 
 export const dynamic = 'force-dynamic';
@@ -91,6 +97,11 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     }
 
     await client.setStreamOrder(id, targetOrder);
+    // So the page that applied can redraw from the shared snapshot instead of
+    // forcing a full refetch of every channel and stream just to see its own
+    // write -- which is what made an applied removal look like it had not
+    // happened until Refresh.
+    noteStreamOrder(id, targetOrder);
 
     return NextResponse.json({
       status: 'applied',

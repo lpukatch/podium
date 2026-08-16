@@ -45,6 +45,14 @@ how long ago it was checked — so the cost of a rule change is visible in the
 same place you make it. `new` is a stream your rules claim that Dispatcharr has
 not been given yet; it stays unwritten until you save.
 
+A stream the channel carries but no rule claims is marked `NOT MATCHED`, and has
+the two answers next to it: **+ alias** claims it, **✕** takes it off the channel
+in Dispatcharr. The ✕ writes immediately — it removes that one stream and leaves
+the order of the rest exactly as Dispatcharr has it. Podium never assigns, so
+putting one back is a job for Dispatcharr. To clear several at once, use the
+tick under **Check now** instead, which removes everything the rule does not
+claim as part of applying the new order.
+
 ## Sections
 
 Normalising `AU:` and `US:` away is right until the prefix *is* the difference.

@@ -188,6 +188,24 @@ export async function snapshot(force = false): Promise<Snapshot> {
   }
 }
 
+/**
+ * Fold a stream-order write we just made into the cached snapshot.
+ *
+ * Every page here reads the five-minute snapshot, so a write made from the UI
+ * is invisible to the very view that made it: applying an order, or dropping a
+ * stray, left the channel editor listing the old lineup until the cache expired
+ * or the user hit Refresh -- and Refresh costs a full crawl of Dispatcharr to
+ * learn one thing we already know. Patching the one channel we wrote keeps the
+ * cached copy true without the crawl.
+ *
+ * Only the stream array moves; nothing else about the channel changed, and the
+ * match index is built from the stream catalogue, not from assignments.
+ */
+export function noteStreamOrder(channelId: number, streams: number[]): void {
+  const channel = cache.snapshot?.channels.find((c) => c.id === channelId);
+  if (channel) channel.streams = [...streams];
+}
+
 export async function index(): Promise<StreamIndex> {
   const snap = await snapshot();
   const m = matcher();
