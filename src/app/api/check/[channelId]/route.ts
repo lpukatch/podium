@@ -10,7 +10,7 @@ import {
 import { Mutex } from '@/lib/mutex';
 import { resolveOrdering } from '@/lib/ordering';
 import { type ProbeResult, probe } from '@/lib/probe';
-import { assignedCandidates, composeOrder, statsPayload } from '@/lib/runner';
+import { assignedCandidates, composeOrder, splitAssigned, statsPayload } from '@/lib/runner';
 import { type ProbeJob, runLanes } from '@/lib/scheduler';
 import { isUsable, type RankEntry, rank, score } from '@/lib/scoring';
 import {
@@ -153,6 +153,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         minBitrateKbps: config.PODIUM_MIN_BITRATE_KBPS,
         rows: [],
         unclaimed: [],
+        unprobed: [],
       });
     }
 
@@ -262,10 +263,24 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         result: results.get(j.streamId) as ProbeResult,
       }));
     const ranked = rank(entries, strategy);
-    // A truncated check has only seen part of what the rule claims, so it cannot
-    // safely say which assigned streams are unmatched -- dropping them would
-    // unassign streams purely because they fell past the cap. Keep them.
-    const removeUnmatched = config.PODIUM_REMOVE_UNMATCHED && !truncated;
+
+    // Whether the rule claims a stream is a question about the rule, so it is
+    // answered from `hits` -- everything the rule matched -- and not from what
+    // this check managed to probe. Those are different sets, and reading the
+    // second as the first is how a stream ends up reported as unclaimed for
+    // reasons that have nothing to do with the rule: its provider had no spare
+    // slot (`limits`, above -- a provider with max_streams 1 has none at all
+    // once a viewer is reserved for), or it fell past `maxCheckStreams`.
+    const claimed = new Set(hits.map(([streamId]) => streamId));
+    const { unclaimed: unclaimedIds, unprobed: unprobedIds } = splitAssigned(
+      current,
+      claimed,
+      new Set(results.keys()),
+    );
+    // A claimed stream with no verdict takes the drop off the table entirely --
+    // the same bargain the worker strikes when it refuses to reorder a channel
+    // it has not got a verdict for every stream on.
+    const removeUnmatched = config.PODIUM_REMOVE_UNMATCHED && unprobedIds.length === 0;
     const workerOrder = composeOrder(ranked, current, removeUnmatched);
     const kept = composeOrder(ranked, current, false);
     const proposed = ranked;
@@ -295,7 +310,11 @@ export async function POST(request: Request, context: { params: Promise<{ channe
 
     const rows = proposed.map(describe);
     // Streams Dispatcharr has on the channel that this rule does not claim.
-    const unclaimed = current.filter((s) => !proposed.includes(s)).map(describe);
+    const unclaimed = unclaimedIds.map(describe);
+    // Claimed, but never probed -- see above. Reported apart from `unclaimed`
+    // because the two ask for opposite things: one is a rule that could be
+    // tightened, the other is a check that should be run again with capacity.
+    const unprobed = unprobedIds.map(describe);
 
     const identical =
       workerOrder.length === current.length && workerOrder.every((s, i) => s === current[i]);
@@ -313,14 +332,16 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       proposed,
       kept,
       workerOrder,
-      // Surfaced rather than silent: a capped check has not seen the whole rule,
-      // so "unclaimed" is only unclaimed among what it looked at.
+      // Surfaced rather than silent: a capped check has probed only part of what
+      // the rule claims, so the ranking below is partial even though the
+      // unclaimed list beside it is now complete.
       truncated,
       totalHits: hits.length,
       probeLimit: maxCheckStreams,
       minBitrateKbps: config.PODIUM_MIN_BITRATE_KBPS,
       rows,
       unclaimed,
+      unprobed,
     });
   } catch (error) {
     return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
