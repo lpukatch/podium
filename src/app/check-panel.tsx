@@ -45,6 +45,44 @@ const btn =
   'rounded-lg border border-[var(--color-line)] bg-[var(--color-panel)] px-4 py-2 text-[15px] hover:border-[var(--color-accent)] disabled:opacity-50';
 const pill = 'inline-block rounded-full px-2 py-0.5 text-xs whitespace-nowrap';
 
+/** The three orders an apply may send, and which one the tick asks for. */
+type OrderChoice = Pick<CheckResult, 'proposed' | 'kept' | 'workerOrder'>;
+
+/**
+ * Which of the check's orders to send to `/api/apply`.
+ *
+ * `workerOrder` is what the worker itself would write, so it is the right
+ * default -- but the check derives it from the *global* remove-unmatched
+ * setting, which is off on a default install. There it equals `kept`: the
+ * ranked streams with the unclaimed ones appended. Sending that alongside
+ * `removeUnmatched: true` removes nothing, because the server drops only what
+ * the order it was handed leaves out, and that one leaves out nothing.
+ *
+ * So the tick has to be consulted before `workerOrder`, not after it. Written
+ * as `workerOrder ?? (drop ? proposed : kept)` the tick is unreachable, since
+ * `workerOrder` is always present.
+ */
+export function orderToApply(result: OrderChoice, dropUnclaimed: boolean): number[] {
+  if (dropUnclaimed) return result.proposed;
+  return result.workerOrder ?? result.kept;
+}
+
+/**
+ * Whether an apply would change anything.
+ *
+ * `identical` compares `workerOrder` with what the channel carries, so on a
+ * default install it ignores the unclaimed streams entirely -- a channel whose
+ * only outstanding change is the drop reports "nothing to change", which hides
+ * the apply button and leaves the tick with no way to take effect.
+ */
+export function pendingChange(
+  result: { identical: boolean; unclaimed: { length: number } },
+  dropUnclaimed: boolean,
+): { dropPending: boolean; nothingToChange: boolean } {
+  const dropPending = dropUnclaimed && result.unclaimed.length > 0;
+  return { dropPending, nothingToChange: result.identical && !dropPending };
+}
+
 /**
  * Probe this channel now and compare the resulting order with what Dispatcharr
  * already has -- the A/B view against whatever produced the current order.
@@ -88,7 +126,7 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
     setApplying(true);
     setError('');
     try {
-      const targetOrder = result.workerOrder ?? (dropUnclaimed ? result.proposed : result.kept);
+      const targetOrder = orderToApply(result, dropUnclaimed);
       const resp = await fetch(`/api/apply/${channelId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -111,6 +149,10 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
       setApplying(false);
     }
   };
+
+  const { dropPending, nothingToChange } = result
+    ? pendingChange(result, dropUnclaimed)
+    : { dropPending: false, nothingToChange: false };
 
   const movement = (row: Row): string => {
     if (row.currentRank === null) return 'new';
@@ -152,12 +194,16 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
             {result.dead > 0 && (
               <span className={`${pill} bg-[var(--color-bad)] text-white`}>{result.dead} dead</span>
             )}
-            {result.identical ? (
+            {nothingToChange ? (
               <span className="text-[var(--color-muted)]">
                 Order already matches — nothing to change.
               </span>
             ) : (
-              <span className="text-[var(--color-warn)]">Order differs from Dispatcharr.</span>
+              <span className="text-[var(--color-warn)]">
+                {result.identical
+                  ? `Order already matches — applying will remove ${result.unclaimed.length} stream(s).`
+                  : 'Order differs from Dispatcharr.'}
+              </span>
             )}
             {result.workerBusy && (
               <span className="text-[var(--color-muted)]">
@@ -280,7 +326,7 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
             </label>
           )}
 
-          {!result.identical && (
+          {!nothingToChange && (
             <div className="mt-4 flex items-center gap-3">
               <button
                 type="button"
@@ -288,7 +334,7 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
                 disabled={applying}
                 onClick={() => void apply()}
               >
-                {applying ? 'Applying…' : 'Apply this order'}
+                {applying ? 'Applying…' : dropPending ? 'Apply and remove' : 'Apply this order'}
               </button>
               <span className="text-sm text-[var(--color-muted)]">
                 Overwrites the channel's stream order. There is no undo.
