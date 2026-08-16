@@ -1,9 +1,10 @@
 /**
- * Three fixes that share a theme: the worker being honest about what it is
+ * Four fixes that share a theme: the worker being honest about what it is
  * doing and what it is holding.
  *
  *   - the lock owner is unique per process, so two workers cannot both hold it
  *   - a worker that finds the lock held waits instead of giving up forever
+ *   - the dry-run banner reports the effective setting, not the booted one
  *   - a pass that will pause does not fetch the stream catalogue first
  */
 
@@ -126,6 +127,70 @@ describe('startWorker when the lock is held', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('the dry-run banner', () => {
+  let dir: string;
+  let stop: (() => void) | null = null;
+  const originalFetch = globalThis.fetch;
+  const originalDryRun = process.env.PODIUM_DRY_RUN;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'podium-dryrun-'));
+    writeFileSync(join(dir, 'rules.json'), JSON.stringify({ schema: 2, channels: [] }), 'utf8');
+    // The lock is free in here, so acquiring it starts a pass. None of this is
+    // about the pass, and an unstubbed one reaches for a real Dispatcharr; the
+    // loop is built to survive a failing pass, so failing is the cheapest stub.
+    globalThis.fetch = vi.fn(async () => {
+      throw new Error('offline');
+    }) as unknown as typeof fetch;
+    // `liveConfig` resolves against the real process environment rather than
+    // the object handed to `loadConfig`, so an exported value out here would
+    // decide the assertion instead of the stored one.
+    delete process.env.PODIUM_DRY_RUN;
+  });
+
+  afterEach(() => {
+    stop?.();
+    stop = null;
+    globalThis.fetch = originalFetch;
+    if (originalDryRun === undefined) delete process.env.PODIUM_DRY_RUN;
+    else process.env.PODIUM_DRY_RUN = originalDryRun;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** The environment-only config `entry.ts` builds before any setting is read. */
+  const bootConfig = () => loadConfig({ PODIUM_DATA_DIR: dir, DISPATCHARR_API_KEY: 'k' });
+
+  const storeSettings = (config: ReturnType<typeof loadConfig>, values: Record<string, string>) => {
+    const s = new Store(config.dbPath);
+    s.setSettings(values);
+    s.close();
+  };
+
+  it('stays quiet when Settings turned the dry run off', async () => {
+    const config = bootConfig();
+    // The regression, stated: the booted value really is on, because the
+    // default is on and the environment says nothing either way. Reading it
+    // rather than the stored one is what announced a dry run on an install
+    // that had been reordering channels for days.
+    expect(config.PODIUM_DRY_RUN).toBe(true);
+    storeSettings(config, { PODIUM_DRY_RUN: 'false' });
+
+    const lines: string[] = [];
+    stop = await startWorker(config, (m) => lines.push(m));
+
+    expect(lines.join('\n')).toContain('paced loop started');
+    expect(lines.join('\n')).not.toContain('DRY RUN');
+  });
+
+  it('still announces one when nothing has turned it off', async () => {
+    const config = bootConfig();
+    const lines: string[] = [];
+    stop = await startWorker(config, (m) => lines.push(m));
+
+    expect(lines.join('\n')).toContain('DRY RUN: nothing will be written to Dispatcharr');
   });
 });
 

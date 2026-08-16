@@ -237,7 +237,14 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
     beat = setInterval(() => store.heartbeat(owner), 30_000);
     beat.unref?.();
 
-    if (config.PODIUM_DRY_RUN) log('DRY RUN: nothing will be written to Dispatcharr');
+    // The *effective* dry run, not the booted one. `startWorker` is handed the
+    // environment-only config and `PODIUM_DRY_RUN` defaults to on, so an
+    // install that turned it off in Settings -- where the value is stored
+    // rather than exported -- announced a dry run on every boot and then
+    // reordered channels anyway. A banner promising nothing will be written, on
+    // a worker that writes, is worse than no banner at all: reordering has no
+    // undo, and this line is what someone reads to check before walking away.
+    if (currentConfig().PODIUM_DRY_RUN) log('DRY RUN: nothing will be written to Dispatcharr');
 
     void tick();
     log(
