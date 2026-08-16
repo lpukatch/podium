@@ -42,7 +42,7 @@ async function main() {
     );
     console.log(`  has rule   : ${hasRule}`);
     console.log(
-      `  programme  : ${prog ? `${prog.title} started ${Math.round((now.getTime() - prog.start.getTime()) / 60000)}m ago` : 'none airing'}`,
+      `  programme  : ${prog ? `${prog.title} started ${Math.round((now.getTime() - prog.start.getTime()) / 60000)}m ago, live=${prog.isLive}` : 'none airing'}`,
     );
     console.log(
       `  ELIGIBLE   : ${verdict.allowed}${verdict.reason ? ` (${describeVerdict(verdict)})` : ''}`,
@@ -52,7 +52,13 @@ async function main() {
 
   // What would change if the group used after_epg_start instead of never?
   const hypothetical = new Eligibility(new Map(), undefined, [
-    { pattern: 'Auto | *', mode: 'after_epg_start', graceMinutes: 5, windowMinutes: 180 },
+    {
+      pattern: 'Auto | *',
+      mode: 'after_epg_start',
+      graceMinutes: 5,
+      windowMinutes: 180,
+      requireLive: true,
+    },
   ]);
   console.log('\n--- if "Auto | *" were after_epg_start instead of never ---');
   for (const c of targets) {

@@ -229,6 +229,30 @@ pitch is genuinely dead at 1pm — probing it then records a dead stream, sinks 
 in the ranking, and the next person to tune in at 2:05 gets the worst stream on
 the channel.
 
+It waits for a programme the EPG marks **live**, not merely for one to be
+airing. Event EPGs do not leave a channel blank until kickoff; they fill the gap
+with a countdown block —
+
+```
+16:00Z–17:05Z  "Coming up: Minor League Baseball at 1:05 PM EDT"   is_live false
+```
+
+— whose start is the moment the countdown began, hours before first pitch. Gate
+on that and the group is open all day, which is the opposite of what the mode is
+for. Postgame blocks are the same problem afterwards.
+
+If your EPG never marks anything live, every channel in the group is held back
+with the reason `no live programme`, shown in the pass tally on the dashboard.
+Set `require_live` to `false` on that group in `rules.json` to fall back to
+gating on the programme's start alone:
+
+```json
+"groups": { "3618": { "mode": "after_epg_start", "require_live": false } }
+```
+
+It works the same way on a name pattern, alongside `grace_minutes` and
+`window_minutes`.
+
 Name patterns like `Auto | *` apply a policy to groups that do not exist yet,
 which matters because Dispatcharr creates groups on its own.
 

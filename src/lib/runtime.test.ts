@@ -32,7 +32,7 @@ import { Store } from './store';
 
 const NOW = new Date('2026-08-03T18:00:00Z');
 
-function epgRows(offsetMinutes: number) {
+function epgRows(offsetMinutes: number, isLive = true) {
   const start = new Date(NOW.getTime() + offsetMinutes * 60_000);
   return [
     {
@@ -40,6 +40,7 @@ function epgRows(offsetMinutes: number) {
       start_time: start.toISOString(),
       end_time: new Date(start.getTime() + 3 * 3_600_000).toISOString(),
       title: 'First Pitch',
+      is_live: isLive,
     },
   ];
 }
@@ -63,7 +64,9 @@ const result = (over: Partial<ProbeResult> = {}): ProbeResult => ({
 
 describe('eligibility', () => {
   it('always blocks a never group', () => {
-    const e = new Eligibility(new Map([[7, { mode: NEVER, graceMinutes: 5, windowMinutes: 180 }]]));
+    const e = new Eligibility(
+      new Map([[7, { mode: NEVER, graceMinutes: 5, windowMinutes: 180, requireLive: true }]]),
+    );
     const verdict = e.allows(7, 'GAME.us', new Map(), NOW);
     expect(verdict.allowed).toBe(false);
     expect(verdict.reason).toContain('excluded');
@@ -75,7 +78,9 @@ describe('eligibility', () => {
 
   it('blocks an event channel before kickoff', () => {
     const e = new Eligibility(
-      new Map([[9, { mode: AFTER_EPG_START, graceMinutes: 5, windowMinutes: 180 }]]),
+      new Map([
+        [9, { mode: AFTER_EPG_START, graceMinutes: 5, windowMinutes: 180, requireLive: true }],
+      ]),
     );
     const verdict = e.allows(9, 'GAME.us', currentProgrammes(epgRows(0), NOW), NOW);
     expect(verdict.allowed).toBe(false);
@@ -84,14 +89,18 @@ describe('eligibility', () => {
 
   it('allows an event channel after the grace period', () => {
     const e = new Eligibility(
-      new Map([[9, { mode: AFTER_EPG_START, graceMinutes: 5, windowMinutes: 180 }]]),
+      new Map([
+        [9, { mode: AFTER_EPG_START, graceMinutes: 5, windowMinutes: 180, requireLive: true }],
+      ]),
     );
     expect(e.allows(9, 'GAME.us', currentProgrammes(epgRows(-30), NOW), NOW).allowed).toBe(true);
   });
 
   it('blocks once the event window has passed', () => {
     const e = new Eligibility(
-      new Map([[9, { mode: AFTER_EPG_START, graceMinutes: 5, windowMinutes: 60 }]]),
+      new Map([
+        [9, { mode: AFTER_EPG_START, graceMinutes: 5, windowMinutes: 60, requireLive: true }],
+      ]),
     );
     const verdict = e.allows(9, 'GAME.us', currentProgrammes(epgRows(-90), NOW), NOW);
     expect(verdict.allowed).toBe(false);
@@ -101,7 +110,9 @@ describe('eligibility', () => {
   it('holds off when an event channel has no EPG', () => {
     // "Probe it anyway" would defeat the whole point of the policy.
     const e = new Eligibility(
-      new Map([[9, { mode: AFTER_EPG_START, graceMinutes: 5, windowMinutes: 180 }]]),
+      new Map([
+        [9, { mode: AFTER_EPG_START, graceMinutes: 5, windowMinutes: 180, requireLive: true }],
+      ]),
     );
     const verdict = e.allows(9, 'UNKNOWN', new Map(), NOW);
     expect(verdict.allowed).toBe(false);
@@ -113,7 +124,9 @@ describe('eligibility', () => {
     // channel in the same situation; the fixture belongs in `detail`, which is
     // what a single-channel view shows.
     const e = new Eligibility(
-      new Map([[9, { mode: AFTER_EPG_START, graceMinutes: 5, windowMinutes: 60 }]]),
+      new Map([
+        [9, { mode: AFTER_EPG_START, graceMinutes: 5, windowMinutes: 60, requireLive: true }],
+      ]),
     );
     const passed = e.allows(9, 'GAME.us', currentProgrammes(epgRows(-90), NOW), NOW);
     expect(passed.reason).toBe('event window passed');
@@ -125,6 +138,63 @@ describe('eligibility', () => {
     expect(early.detail).toBe('18:00Z "First Pitch"');
   });
 
+  it('blocks on a countdown block, whose start is not the event start', () => {
+    // The failure this guards: an event EPG fills the hours before kickoff with
+    // "Coming up: ... at 1:05 PM", so a programme *is* airing and its start is
+    // hours old. Gating on start alone opens every event channel permanently --
+    // on the install this was found on, not one channel was ever held back.
+    // Through the parser, so this is the policy an operator actually gets from
+    // writing `"9": {"mode": "after_epg_start"}` and nothing else.
+    const e = new Eligibility(parsePolicies({ 9: { mode: AFTER_EPG_START } }));
+    const verdict = e.allows(9, 'GAME.us', currentProgrammes(epgRows(-30, false), NOW), NOW);
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.reason).toBe('no live programme');
+    expect(verdict.detail).toBe('"First Pitch"');
+  });
+
+  it('treats a missing live flag as not live', () => {
+    // Absent is not "assume it started": that is the reading that produced the
+    // bug, and the reason string says plainly which knob to reach for.
+    const e = new Eligibility(parsePolicies({ 9: { mode: AFTER_EPG_START } }));
+    const rows = [
+      {
+        tvg_id: 'GAME.us',
+        start_time: new Date(NOW.getTime() - 30 * 60_000).toISOString(),
+        end_time: new Date(NOW.getTime() + 150 * 60_000).toISOString(),
+        title: 'First Pitch',
+      },
+    ];
+    expect(e.allows(9, 'GAME.us', currentProgrammes(rows, NOW), NOW).reason).toBe(
+      'no live programme',
+    );
+  });
+
+  it('lets a group opt out of the live requirement', () => {
+    // For an EPG that never marks anything live, start-only is all there is.
+    const e = new Eligibility(
+      new Map([
+        [9, { mode: AFTER_EPG_START, graceMinutes: 5, windowMinutes: 180, requireLive: false }],
+      ]),
+    );
+    expect(e.allows(9, 'GAME.us', currentProgrammes(epgRows(-30, false), NOW), NOW).allowed).toBe(
+      true,
+    );
+  });
+
+  it('defaults require_live on, and parses it off from either side', () => {
+    expect(parsePolicies({ 9: { mode: AFTER_EPG_START } }).get(9)?.requireLive).toBe(true);
+    expect(
+      parsePolicies({ 9: { mode: AFTER_EPG_START, require_live: false } }).get(9)?.requireLive,
+    ).toBe(false);
+    expect(
+      parseGroupPatterns([{ pattern: 'Auto | *', mode: AFTER_EPG_START, require_live: 'false' }])[0]
+        ?.requireLive,
+    ).toBe(false);
+    expect(
+      parseGroupPatterns([{ pattern: 'Auto | *', mode: AFTER_EPG_START }])[0]?.requireLive,
+    ).toBe(true);
+  });
+
   it('indexes only the programme airing now', () => {
     expect(currentProgrammes(epgRows(120), NOW).size).toBe(0);
     expect(currentProgrammes(epgRows(-10), NOW).has('GAME.us')).toBe(true);
@@ -134,7 +204,7 @@ describe('eligibility', () => {
     // `assigned` differs from `always` only in where a rule-less channel's
     // candidates come from, so it must not inherit the kickoff gate.
     const e = new Eligibility(
-      new Map([[9, { mode: ASSIGNED, graceMinutes: 5, windowMinutes: 180 }]]),
+      new Map([[9, { mode: ASSIGNED, graceMinutes: 5, windowMinutes: 180, requireLive: true }]]),
     );
     expect(e.allows(9, 'UNKNOWN', new Map(), NOW).allowed).toBe(true);
   });
@@ -604,7 +674,7 @@ describe('lane capacity contract', () => {
 describe('group name patterns', () => {
   it('applies a glob to matching group names', () => {
     const e = new Eligibility(new Map(), undefined, [
-      { pattern: 'Auto | *', mode: NEVER, graceMinutes: 5, windowMinutes: 180 },
+      { pattern: 'Auto | *', mode: NEVER, graceMinutes: 5, windowMinutes: 180, requireLive: true },
     ]);
     expect(e.policyFor(1, 'Auto | Baseball | MLB').mode).toBe(NEVER);
     expect(e.policyFor(2, 'Auto | Soccer | Carabao Cup').mode).toBe(NEVER);
@@ -613,9 +683,19 @@ describe('group name patterns', () => {
 
   it('lets an explicit group id override a pattern', () => {
     const e = new Eligibility(
-      new Map([[1, { mode: 'always' as const, graceMinutes: 5, windowMinutes: 180 }]]),
+      new Map([
+        [1, { mode: 'always' as const, graceMinutes: 5, windowMinutes: 180, requireLive: true }],
+      ]),
       undefined,
-      [{ pattern: 'Auto | *', mode: NEVER, graceMinutes: 5, windowMinutes: 180 }],
+      [
+        {
+          pattern: 'Auto | *',
+          mode: NEVER,
+          graceMinutes: 5,
+          windowMinutes: 180,
+          requireLive: true,
+        },
+      ],
     );
     expect(e.policyFor(1, 'Auto | Baseball | MLB').mode).toBe('always');
   });
@@ -918,6 +998,9 @@ describe('Runner.plan (rule-less channels ranked off their assignment)', () => {
           start_time: new Date(at.getTime() - 30 * 60_000).toISOString(),
           end_time: new Date(at.getTime() + 90 * 60_000).toISOString(),
           title: 'First Pitch',
+          // Under way, not counting down to it -- see the countdown-block case
+          // in the eligibility suite for the other half.
+          is_live: true,
         },
       ],
       at,
@@ -973,6 +1056,7 @@ describe('Runner.plan (rule-less channels ranked off their assignment)', () => {
           start_time: new Date(now.getTime() - 60_000).toISOString(),
           end_time: new Date(now.getTime() + 90 * 60_000).toISOString(),
           title: 'First Pitch',
+          is_live: true,
         },
       ],
       now,
@@ -995,19 +1079,20 @@ describe('Runner.plan (rule-less channels ranked off their assignment)', () => {
   it('tallies channels between events as one row, not one row per fixture', () => {
     // The programme title used to be part of the reason string, so a pass with
     // a group of per-fixture channels reported a dozen near-identical rows --
-    // 1 "event window passed \"Coming up: NFL Football at 7:00 PM EDT\"", 1 for
-    // the 7:30 game, and so on -- where it meant to say three channels.
+    // 1 "event window passed \"NFL Football\"", 1 for the next fixture, and so
+    // on -- where it meant to say three channels.
     const now = new Date();
     const long_ago = (title: string, tvg: string) => ({
       tvg_id: tvg,
       start_time: new Date(now.getTime() - 6 * 3_600_000).toISOString(),
       end_time: new Date(now.getTime() + 3_600_000).toISOString(),
       title,
+      is_live: true,
     });
     const programmes = currentProgrammes(
       [
-        long_ago('Coming up: NFL Football at 7:00 PM EDT', 'GAME.us'),
-        long_ago('Coming up: NFL Football at 7:30 PM EDT', 'GAME2.us'),
+        long_ago('NFL Football', 'GAME.us'),
+        long_ago('NFL Football: Overtime', 'GAME2.us'),
         long_ago('Minor League Baseball', 'GAME3.us'),
       ],
       now,
