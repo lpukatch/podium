@@ -115,6 +115,23 @@ export interface AllowResult {
   reason: string;
   /** The channel-specific part: which programme, and when it started. */
   detail?: string;
+  /**
+   * The earliest instant this verdict could turn into `allowed`, computed from
+   * the rows in hand.
+   *
+   * The loop sleeps on this. A held-back channel is not a reason to come back
+   * in a minute -- it is a reason to come back *when it opens*, and where the
+   * clock alone decides that, the grid says exactly when.
+   *
+   * Left undefined whenever these rows cannot answer it, which is more often
+   * than it looks: Dispatcharr's grid endpoint returns what is airing *now*
+   * rather than a window of what is coming, so a channel showing a countdown
+   * block has nothing here to say when the countdown ends -- the block's own
+   * end is when it stops being described, not when the event starts. The caller
+   * falls back to when it will next have new rows. An excluded group answers
+   * nothing here either; only an operator changes that.
+   */
+  eligibleAt?: number;
 }
 
 /** Reason plus detail, for somewhere that is talking about one channel. */
@@ -165,12 +182,18 @@ export class Eligibility {
     return this.fallback;
   }
 
+  /**
+   * `nextStarts` is optional because only the loop's sleep depends on it: every
+   * `allowed` decision here is made from `programmes` alone, so a caller that
+   * only wants the verdict can leave it out and get the same answer.
+   */
   allows(
     groupId: number | null | undefined,
     tvgId: string,
     programmes: Map<string, Programme>,
     now: Date = new Date(),
     groupName?: string,
+    nextStarts?: Map<string, number>,
   ): AllowResult {
     const policy = this.policyFor(groupId, groupName);
     if (policy.mode === NEVER) return { allowed: false, reason: 'group excluded' };
@@ -178,11 +201,23 @@ export class Eligibility {
     // candidates come from; the timing is the same, so there is nothing to gate.
     if (policy.mode === ALWAYS || policy.mode === ASSIGNED) return { allowed: true, reason: '' };
 
+    // The soonest this channel could open, whatever is holding it back now: the
+    // next programme the grid lists for it, plus the grace the policy waits out
+    // anyway. Waking at the start itself would only re-hold it for the length
+    // of the grace period and pay a second full pass to learn that.
+    //
+    // Empty against a grid that only lists what is airing, which is what
+    // Dispatcharr's endpoint returns today -- hence `nextStarts` being optional
+    // and every use of it below falling through to undefined.
+    const grace = policy.graceMinutes * 60_000;
+    const nextStart = nextStarts?.get(tvgId);
+    const opensNext = nextStart === undefined ? undefined : nextStart + grace;
+
     const programme = programmes.get(tvgId);
     if (!programme) {
       // Falling back to "probe it" would defeat the whole point of the policy,
       // so it waits until there is EPG data.
-      return { allowed: false, reason: 'no EPG data' };
+      return { allowed: false, reason: 'no EPG data', eligibleAt: opensNext };
     }
 
     const title = programme.title ? `"${programme.title}"` : '';
@@ -191,10 +226,19 @@ export class Eligibility {
     // around the wrong instant. One reason for both sides of the event -- a
     // countdown block and a postgame block are the same answer, "not the event".
     if (policy.requireLive && !programme.isLive) {
-      return { allowed: false, reason: 'no live programme', detail: title || undefined };
+      return {
+        allowed: false,
+        reason: 'no live programme',
+        detail: title || undefined,
+        // Deliberately not the block's own end. A countdown block ending does
+        // not make this channel probeable -- it makes it a channel with no
+        // programme listed, which is held back just the same. Only a programme
+        // marked live opens it, and only new rows can carry one.
+        eligibleAt: opensNext,
+      };
     }
 
-    const opens = programme.start.getTime() + policy.graceMinutes * 60_000;
+    const opens = programme.start.getTime() + grace;
     const closes = programme.start.getTime() + policy.windowMinutes * 60_000;
     if (now.getTime() < opens) {
       const at = `${programme.start.toISOString().slice(11, 16)}Z`;
@@ -202,10 +246,18 @@ export class Eligibility {
         allowed: false,
         reason: 'before kickoff',
         detail: title ? `${at} ${title}` : at,
+        eligibleAt: opens,
       };
     }
     if (now.getTime() > closes) {
-      return { allowed: false, reason: 'event window passed', detail: title || undefined };
+      return {
+        allowed: false,
+        reason: 'event window passed',
+        detail: title || undefined,
+        // Nothing about *this* programme can reopen the window -- only the next
+        // one starting can.
+        eligibleAt: opensNext,
+      };
     }
     return { allowed: true, reason: '' };
   }
@@ -307,6 +359,37 @@ export function currentProgrammes(rows: EpgRow[], now: Date = new Date()): Map<s
         isLive: row.is_live === true,
       });
     }
+  }
+  return out;
+}
+
+/**
+ * The next programme start after `now` for each tvg_id in the grid.
+ *
+ * The companion to `currentProgrammes`, and the reason a held-back channel can
+ * be slept on rather than polled. `currentProgrammes` answers "what is airing",
+ * which is what the gate needs; this answers "when does the next thing start",
+ * which is what the gate's *waiting* needs -- a channel with no programme now,
+ * or one showing a countdown block, turns eligible when the grid's next entry
+ * for it begins, and the grid already says when that is.
+ *
+ * Only starts strictly in the future count, so the programme airing now is
+ * never its own answer.
+ *
+ * Empty against Dispatcharr's own grid endpoint, which returns what is airing
+ * and nothing beyond it -- callers must have an answer for that case rather
+ * than treating a miss here as "never". It is cheap, and it is exact wherever
+ * the rows do reach into the future.
+ */
+export function nextProgrammeStarts(rows: EpgRow[], now: Date = new Date()): Map<string, number> {
+  const out = new Map<string, number>();
+  const at = now.getTime();
+  for (const row of rows) {
+    if (!row.tvg_id || !row.start_time) continue;
+    const start = new Date(row.start_time).getTime();
+    if (Number.isNaN(start) || start <= at) continue;
+    const soonest = out.get(row.tvg_id);
+    if (soonest === undefined || start < soonest) out.set(row.tvg_id, start);
   }
   return out;
 }

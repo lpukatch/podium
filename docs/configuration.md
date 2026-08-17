@@ -146,15 +146,28 @@ is compared with the one Dispatcharr already holds, and an identical list is
 skipped. Without this, a managed channel takes a PATCH every minute forever, and
 every pass reports having reordered everything.
 
-**The loop sleeps until something actually expires.** When a pass probes nothing,
-changes nothing and defers nothing, the next one is scheduled for when the
-earliest verdict *it could act on* falls due. That number comes from the pass
-itself, not from the cache: a verdict on an excluded channel expires like any
-other and is never refreshed, so a cache-wide answer would wake the loop every
-few minutes for work that does not exist. Capped by `PODIUM_IDLE_MAX_MS` so a
-stream the provider added is still picked up. Anything held back for a reason
-that resolves with the clock (waiting on kickoff or on EPG) keeps the normal
-cadence.
+**The loop sleeps until the answer could actually differ.** When a pass probes
+nothing, changes nothing, defers nothing and has nothing left it could probe,
+the next one is scheduled for the earlier of two instants: when the earliest
+verdict *it could act on* falls due, and when the earliest channel it held back
+turns eligible. Both come from the pass itself, not from the cache: a verdict on
+an excluded channel expires like any other and is never refreshed, so a
+cache-wide answer would wake the loop every few minutes for work that does not
+exist.
+
+The second instant is what a gated group contributes. A channel waiting on
+kickoff opens at its programme's start plus the grace period — an exact time, so
+the loop waits for it rather than polling towards it. For every other held-back
+channel the answer is when the next EPG grid arrives (`PODIUM_EPG_TTL_MS`),
+because Dispatcharr's grid endpoint returns what is airing *now* rather than a
+window of what is coming: once those rows are cached, no amount of re-reading
+them turns a channel showing a countdown block into one showing its event. A
+pass run before the grid refreshes fetches the whole catalogue to reach the
+answer it already had.
+
+Every sleep is capped by `PODIUM_IDLE_MAX_MS` regardless, so a stream the
+provider added is still noticed, and a grid TTL longer than the cap costs
+nothing in gate timeliness.
 
 **A stream that stays dead is asked less often.** A dead verdict starts at
 `PODIUM_DEAD_TTL_MS` and doubles per consecutive dead verdict, up to

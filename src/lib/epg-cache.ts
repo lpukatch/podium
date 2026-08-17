@@ -39,6 +39,23 @@ export class EpgCache<T> {
     return entry && entry.source === source ? entry.value : null;
   }
 
+  /**
+   * When the cached grid stops being fresh, or null when there is nothing
+   * cached for `source`.
+   *
+   * The loop sleeps on this. Dispatcharr's grid endpoint answers "what is
+   * airing now" rather than a window of what is coming, so once the rows are
+   * cached, no amount of re-deriving can turn a channel that has no programme
+   * listed into one that has: the next fetch is the only thing that can. That
+   * makes this the honest wake-up time for a channel held back by a gap in the
+   * grid, and re-running a pass before it is load that cannot learn anything.
+   */
+  expiresAt(source: string, ttlMs: number): number | null {
+    const entry = this.entry;
+    if (!entry || entry.source !== source) return null;
+    return entry.fetchedAt + ttlMs;
+  }
+
   /** Record a successful fetch for `source`. */
   set(source: string, value: T): void {
     this.entry = { source, value, fetchedAt: this.now() };

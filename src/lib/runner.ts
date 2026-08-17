@@ -16,6 +16,7 @@ import {
   currentProgrammes,
   type Eligibility,
   NEVER,
+  nextProgrammeStarts,
   type Programme,
 } from './eligibility';
 import { EpgCache } from './epg-cache';
@@ -275,6 +276,24 @@ export interface RunSummary {
    */
   nextDueAt: number | null;
   /**
+   * The earliest instant a channel this pass held back could be found eligible:
+   * a kickoff the clock alone decides, or -- for everything the rows in hand
+   * cannot date -- the next EPG grid landing. Null when neither applies, which
+   * on a settled install means nothing was held back at all.
+   *
+   * An excluded group never appears here. Only an operator clears that one, and
+   * waking for it would be the once-a-minute crawl all over again.
+   */
+  nextEligibleAt: number | null;
+  /**
+   * Streams needing a probe that a provider lane actually existed for this
+   * pass. The subset of `backlog` the loop may sleep on: jobs on a saturated
+   * provider are counted as deferred work, and jobs on an inactive one can
+   * never run at all, but anything left here is work this install could have
+   * done and must come straight back to.
+   */
+  runnableBacklog: number;
+  /**
    * Least-recently probed eligible stream (the honest "Oldest check"), or null
    * when nothing managed has been probed yet. Excluded/unmatched/removed streams
    * never appear here, unlike the cache-wide MIN(probed_at).
@@ -422,6 +441,8 @@ export class Runner {
         deferred: 0,
         backlog: 0,
         nextDueAt: null,
+        nextEligibleAt: null,
+        runnableBacklog: 0,
         oldestProbedAt: null,
         eligibleChannels: 0,
         heldBack: { 'no credentials': 1 },
@@ -473,6 +494,8 @@ export class Runner {
       deferred: 0,
       backlog: 0,
       nextDueAt: null as number | null,
+      nextEligibleAt: null as number | null,
+      runnableBacklog: 0,
       oldestProbedAt: null as number | null,
     };
     const heldBack: Record<string, number> = {};
@@ -526,11 +549,12 @@ export class Runner {
         );
       }
 
-      const [streams, epgRows, groups] = await Promise.all([
+      const [streams, epg, groups] = await Promise.all([
         client.streams(),
         this.epgRows(client, config),
         client.groups(),
       ]);
+      const epgRows = epg.rows;
       const groupNames = new Map(groups.map((g) => [g.id, g.name]));
       // Built once here -- both the lane snapshot below and the ranking strategy
       // need provider names, and the strategy must be resolved before the
@@ -542,6 +566,9 @@ export class Runner {
         config.PODIUM_MIN_BITRATE_KBPS,
       );
       const programmes = currentProgrammes(epgRows as never[]);
+      // Derived from the same grid, in the same breath: what is airing decides
+      // the verdict, what airs next decides how long the loop may sleep on it.
+      const nextStarts = nextProgrammeStarts(epgRows as never[]);
 
       const streamToChannel = new Map<number, number>();
       for (const channel of channels) {
@@ -594,7 +621,7 @@ export class Runner {
       };
 
       this.emit({ phase: 'planning', message: 'matching channels and checking the cache' });
-      const { jobs, ages, nextDueAt, oldestProbedAt, keepStreamIds } = this.plan(
+      const { jobs, ages, nextDueAt, nextEligibleAt, oldestProbedAt, keepStreamIds } = this.plan(
         channels,
         streams,
         programmes,
@@ -602,12 +629,15 @@ export class Runner {
         counters,
         heldBack,
         groupNames,
+        nextStarts,
+        epg.expiresAt,
         getIndex(),
         streamById,
       );
       const eligibleChannels = new Set(jobs.map((j) => j.channelId)).size;
       counters.backlog = jobs.length;
       counters.nextDueAt = nextDueAt;
+      counters.nextEligibleAt = nextEligibleAt;
       counters.oldestProbedAt = oldestProbedAt;
 
       // Verdicts for streams the worker no longer manages -- excluded, unmatched,
@@ -668,6 +698,10 @@ export class Runner {
       }
       const closed = jobs.length - open.length - unrunnable;
       counters.deferred = closed;
+      // Before the slice, deliberately: what the pacer chose to leave for later
+      // is still work this install could do right now, and the loop must not
+      // sleep past it.
+      counters.runnableBacklog = open.length;
       if (closed > 0) {
         log(
           `deferring ${closed} streams on provider(s) ${[...noCapacity].join(', ')}: no spare capacity`,
@@ -937,21 +971,29 @@ export class Runner {
    * (a transient outage, or genuinely nothing airing right now) falls back to
    * the last good rows, since stale EPG still informs the after_epg_start call.
    */
-  private async epgRows(client: DispatcharrClient, config: Config): Promise<unknown[]> {
+  private async epgRows(
+    client: DispatcharrClient,
+    config: Config,
+  ): Promise<{ rows: unknown[]; expiresAt: number | null }> {
     const source = config.DISPATCHARR_URL;
+    // Read after the fetch below, so a grid refreshed by this pass reports its
+    // own expiry rather than the one it replaced.
+    const expiry = () => this.epg.expiresAt(source, config.PODIUM_EPG_TTL_MS);
     const fresh = this.epg.fresh(source, config.PODIUM_EPG_TTL_MS);
-    if (fresh) return fresh;
+    if (fresh) return { rows: fresh, expiresAt: expiry() };
 
     const rows = await client.epgNow();
     if (rows.length > 0) {
       this.epg.set(source, rows);
-      return rows;
+      return { rows, expiresAt: expiry() };
     }
     // An empty fetch serves the last good rows rather than clearing the cache,
-    // so a Dispatcharr hiccup cannot blank out the eligibility decision.
+    // so a Dispatcharr hiccup cannot blank out the eligibility decision. Its
+    // expiry is already in the past, which is the right answer: the next pass
+    // should try the fetch again rather than sleep on rows nobody refreshed.
     const stale = this.epg.stale(source);
     if (stale) this.deps.log?.('epg grid returned no rows; serving last good rows');
-    return stale ?? rows;
+    return { rows: stale ?? rows, expiresAt: expiry() };
   }
 
   /**
@@ -1049,12 +1091,15 @@ export class Runner {
     counters: { cached: number },
     heldBack: Record<string, number>,
     groupNames: Map<number, string>,
+    nextStarts: Map<string, number>,
+    gridExpiresAt: number | null,
     passedIndex?: StreamIndex,
     passedById?: Map<number, Stream>,
   ): {
     jobs: ProbeJob[];
     ages: number[];
     nextDueAt: number | null;
+    nextEligibleAt: number | null;
     oldestProbedAt: number | null;
     keepStreamIds: Set<number>;
   } {
@@ -1067,6 +1112,7 @@ export class Runner {
     const keepStreamIds = new Set<number>();
     const seenStreamIds = new Set<number>();
     let nextDueAt: number | null = null;
+    let nextEligibleAt: number | null = null;
     let oldestProbedAt: number | null = null;
 
     for (const channel of channels) {
@@ -1089,6 +1135,7 @@ export class Runner {
         programmes,
         new Date(),
         groupName,
+        nextStarts,
       );
       if (!verdict.allowed) {
         heldBack[verdict.reason] = (heldBack[verdict.reason] ?? 0) + 1;
@@ -1097,6 +1144,16 @@ export class Runner {
         // freshness number until the channel is actually probeable.
         if (policy.mode !== NEVER) {
           for (const [streamId] of candidates()) keepStreamIds.add(streamId);
+          // When the gate opens, or -- for the channels the current rows cannot
+          // date, which is most of them against a grid of what is airing now --
+          // when this pass will have rows it has not already seen. Re-running
+          // before either instant re-reads the same rows and reaches the same
+          // answer, at the cost of a full catalogue fetch. The earliest across
+          // every held-back channel is when the loop has to be awake again.
+          const opensAt = verdict.eligibleAt ?? gridExpiresAt;
+          if (opensAt !== null && (nextEligibleAt === null || opensAt < nextEligibleAt)) {
+            nextEligibleAt = opensAt;
+          }
         }
         continue;
       }
@@ -1154,6 +1211,7 @@ export class Runner {
       jobs: scored.map((entry) => entry.job),
       ages: scored.map((entry) => entry.age),
       nextDueAt,
+      nextEligibleAt,
       oldestProbedAt,
       keepStreamIds,
     };
@@ -1307,6 +1365,8 @@ export class Runner {
       deferred: number;
       backlog: number;
       nextDueAt: number | null;
+      nextEligibleAt: number | null;
+      runnableBacklog: number;
       oldestProbedAt: number | null;
     },
     heldBack: Record<string, number>,
