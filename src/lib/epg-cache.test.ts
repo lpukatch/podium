@@ -43,3 +43,24 @@ describe('EpgCache', () => {
     expect(cache.fresh('http://d', 60_000)).toEqual(['b', 'c']);
   });
 });
+
+describe('EpgCache.expiresAt', () => {
+  it('reports when the cached grid stops being fresh', () => {
+    let now = 1_000_000;
+    const cache = new EpgCache<string[]>(() => now);
+    // Nothing cached: no time to aim at, so the caller must not sleep on one.
+    expect(cache.expiresAt('http://d', 60_000)).toBeNull();
+
+    cache.set('http://d', ['a']);
+    expect(cache.expiresAt('http://d', 60_000)).toBe(1_060_000);
+
+    // A different backend is a miss here for the same reason it is a miss in
+    // `fresh`: those rows describe somewhere else.
+    expect(cache.expiresAt('http://other', 60_000)).toBeNull();
+
+    // Past its TTL the answer is in the past, which is what tells the loop to
+    // fetch rather than wait.
+    now += 90_000;
+    expect(cache.expiresAt('http://d', 60_000)).toBeLessThan(now);
+  });
+});
