@@ -17,6 +17,7 @@ const alive = (over: Partial<ProbeResult> = {}): ProbeResult => ({
   audioCodec: 'aac',
   pixelFormat: 'yuv420p',
   audioChannels: 2,
+  channelLayout: 'stereo',
   elapsedMs: 100,
   error: '',
   ...over,

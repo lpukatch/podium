@@ -148,6 +148,7 @@ describe('pruneOutside guard (finding 8.4 follow-up)', () => {
         audioCodec: 'aac',
         pixelFormat: 'yuv420p',
         audioChannels: 2,
+        channelLayout: 'stereo',
         elapsedMs: 10,
         error: '',
       });
