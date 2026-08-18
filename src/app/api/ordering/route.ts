@@ -1,11 +1,11 @@
 import { NextResponse } from 'next/server';
-import { DEFAULT_WEIGHTS } from '@/lib/scoring';
+import { DEFAULT_WEIGHTS, NEW_INSTALL_AUDIO } from '@/lib/scoring';
 import { ordering, readRulesDoc, snapshot, writeRulesDoc } from '@/lib/server/state';
 
 export const dynamic = 'force-dynamic';
 
 /** The editable weight keys exposed in the UI (the bitrate floor has its own field). */
-const WEIGHT_KEYS = ['resolution', 'bitrate', 'fps', 'codec'] as const;
+const WEIGHT_KEYS = ['resolution', 'bitrate', 'fps', 'codec', 'audio'] as const;
 type WeightKey = (typeof WEIGHT_KEYS)[number];
 
 export interface OrderingResponse {
@@ -37,6 +37,7 @@ export async function GET() {
       bitrate: pick('bitrate'),
       fps: pick('fps'),
       codec: pick('codec'),
+      audio: pick('audio'),
       preferH265: merged.preferH265,
     };
     const defaults = {
@@ -44,6 +45,9 @@ export async function GET() {
       bitrate: DEFAULT_WEIGHTS.bitrate,
       fps: DEFAULT_WEIGHTS.fps,
       codec: DEFAULT_WEIGHTS.codec,
+      // What a new install is seeded with, not the 0 that keeps upgrades still:
+      // "reset" should hand back what podium ships today.
+      audio: NEW_INSTALL_AUDIO,
       preferH265: DEFAULT_WEIGHTS.preferH265,
     };
 
@@ -89,6 +93,7 @@ export async function PUT(request: Request) {
       bitrate: num(w.bitrate),
       fps: num(w.fps),
       codec: num(w.codec),
+      audio: num(w.audio),
       prefer_h265: Boolean(w.preferH265),
     };
 

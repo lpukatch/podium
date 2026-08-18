@@ -15,6 +15,8 @@ describe('MR 5 - Minor Correctness & Observability Tests', () => {
         pixelFormat: 'yuv420p',
         audioChannels: 2,
         channelLayout: 'stereo',
+        audioBitrateKbps: 128,
+        audioSampleRate: 48_000,
         bitrateKbps: 5000,
         bitrateMeasured: true,
         elapsedMs: 100,

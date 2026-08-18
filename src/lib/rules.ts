@@ -17,6 +17,7 @@ import {
   Matcher,
 } from './matcher';
 import { DEFAULT_ORDERING, type OrderingConfig } from './ordering';
+import { NEW_INSTALL_AUDIO } from './scoring';
 
 const patternSchema = z.object({
   pattern: z.string(),
@@ -61,6 +62,7 @@ const orderingWeightsSchema = z
     bitrate: z.coerce.number().optional(),
     fps: z.coerce.number().optional(),
     codec: z.coerce.number().optional(),
+    audio: z.coerce.number().optional(),
     prefer_h265: z.boolean().optional(),
     min_bitrate_kbps: z.coerce.number().optional(),
   })
@@ -178,14 +180,29 @@ function parseOrdering(doc: RulesDoc): OrderingConfig {
       ...(w.bitrate !== undefined ? { bitrate: w.bitrate } : {}),
       ...(w.fps !== undefined ? { fps: w.fps } : {}),
       ...(w.codec !== undefined ? { codec: w.codec } : {}),
+      ...(w.audio !== undefined ? { audio: w.audio } : {}),
       ...(w.prefer_h265 !== undefined ? { preferH265: w.prefer_h265 } : {}),
       ...(w.min_bitrate_kbps !== undefined ? { minBitrateKbps: w.min_bitrate_kbps } : {}),
     },
   };
 }
 
-/** An empty ruleset. What a fresh install has before anything is imported. */
-export const EMPTY_RULES_DOC = { schema: 2, defaults: {}, channels: [] };
+/**
+ * An empty ruleset. What a fresh install has before anything is imported.
+ *
+ * It carries one opinion: `audio` at `NEW_INSTALL_AUDIO`. The weight defaults
+ * to 0 in code so that an existing rules file -- which cannot mention a term
+ * that did not exist when it was written -- keeps the exact ordering it had.
+ * Seeding it here is what makes "off for upgrades, on for new installs"
+ * expressible at all, since the two are indistinguishable by the time the
+ * weights are read.
+ */
+export const EMPTY_RULES_DOC = {
+  schema: 2,
+  defaults: {},
+  channels: [],
+  ordering: { weights: { audio: NEW_INSTALL_AUDIO } },
+};
 
 /**
  * Read a rules file, tolerating its absence.
