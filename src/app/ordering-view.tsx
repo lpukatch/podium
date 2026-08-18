@@ -352,8 +352,8 @@ export function OrderingView() {
             <p className="mt-1 text-xs text-[var(--color-muted)]">
               Audio prefers surround where a channel is carried both with and without it. New
               installs start at 0.1, which decides between streams whose video already ties without
-              letting audio outrank resolution or bitrate; installs that predate the setting stay
-              at 0 until you raise it.
+              letting audio outrank resolution or bitrate; installs that predate the setting stay at
+              0 until you raise it.
             </p>
             <button
               type="button"
