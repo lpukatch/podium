@@ -53,6 +53,13 @@ interface Progress {
    * figures stand in until the first pass of the new one.
    */
   backlog?: number;
+  /**
+   * Verdicts an outstanding re-check retired and nothing has replaced yet.
+   * Unlike `backlog` this includes channels the EPG gate is holding back,
+   * whose verdicts are retired but cannot be probed until something airs --
+   * the difference between "0 still to go" and a request that is not finished.
+   */
+  retired?: number;
   dueAt?: number | null;
   heldBack: Record<string, number>;
   lanes: Lane[];
@@ -293,6 +300,13 @@ export function ProgressView() {
   // mark -- is the honest one.
   const backlogPredatesRequest = refresh.all !== null && (p?.updatedAt ?? 0) < refresh.all;
   const waiting = backlogPredatesRequest ? (cache?.due ?? 0) : (p?.backlog ?? cache?.due ?? 0);
+  // What the re-check itself still has outstanding, with the same stand-in
+  // structure as `waiting`. Deliberately a separate number: `backlog` counts
+  // only what a pass could probe right now, so verdicts on channels the EPG
+  // gate holds back -- retired, waiting for something to air -- are invisible
+  // to it, and reading "0 streams are still to go" off it is how a request
+  // that never finishes looked finished two hours in.
+  const stillToGo = backlogPredatesRequest ? (cache?.due ?? 0) : (p?.retired ?? 0);
   const dueAt = p?.dueAt ?? cache?.nextDueAt ?? null;
   // The same orphan problem applies to the oldest probe: the cache-wide MIN
   // counts verdicts on excluded, unmatched, or removed streams the pacer never
@@ -433,7 +447,7 @@ export function ProgressView() {
                 <b>Re-checking everything</b>{' '}
                 <span className="text-[var(--color-muted)]">
                   — queued {ago(refresh.all)}. Every verdict older than that has been retired;{' '}
-                  {n(waiting)} {waiting === 1 ? 'stream is' : 'streams are'} still to go.
+                  {n(stillToGo)} {stillToGo === 1 ? 'stream is' : 'streams are'} still to go.
                 </span>
               </span>
               <span className="flex-1" />
