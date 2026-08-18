@@ -30,7 +30,7 @@ import type { ProbeResult } from './probe';
 import { RulesSource } from './rules-source';
 import { composeOrder, Runner, type RunSummary, sameOrder } from './runner';
 import { DEFAULT_STRATEGY, type RankEntry, type RankStrategy } from './scoring';
-import { RUN_HISTORY_MS, Store } from './store';
+import { type CacheEntry, RUN_HISTORY_MS, Store, ttlFor } from './store';
 
 const NOW = new Date('2026-08-03T18:00:00Z');
 
@@ -479,27 +479,35 @@ describe('store', () => {
 
   it('round-trips a probe result', () => {
     store.put(1, 'hash-a', result());
-    expect(store.get(1, 'hash-a', 60_000, 60_000)?.height).toBe(1080);
+    expect(store.entry(1, 'hash-a')?.result?.height).toBe(1080);
   });
 
   it('misses when the stream hash changes', () => {
     // The provider swapped the stream behind this id; the old verdict is void.
     store.put(1, 'hash-a', result());
-    expect(store.get(1, 'hash-b', 60_000, 60_000)).toBeNull();
+    expect(store.entry(1, 'hash-b')).toBeNull();
   });
 
   it('expires live and dead entries on separate TTLs', () => {
     store.put(1, 'h', result());
     store.put(2, 'h', result({ alive: false }));
-    // Live TTL generous, dead TTL zero: the live one survives, the dead does not.
-    expect(store.get(1, 'h', 60_000, 0)).not.toBeNull();
-    expect(store.get(2, 'h', 60_000, 0)).toBeNull();
+    // The planner's own rule: one read, measured against the lifetime that row
+    // has earned. Live TTL generous, dead TTL zero -- the live verdict is still
+    // servable, the dead one is not.
+    const live = store.entry(1, 'h');
+    const dead = store.entry(2, 'h');
+    expect(Date.now() - (live as CacheEntry).probedAt).toBeLessThan(
+      ttlFor(live as CacheEntry, 60_000, 0),
+    );
+    expect(Date.now() - (dead as CacheEntry).probedAt).toBeGreaterThanOrEqual(
+      ttlFor(dead as CacheEntry, 60_000, 0),
+    );
   });
 
-  it('reports age and null for unknown streams', () => {
+  it('reports when a stream was probed, and nothing for one that never was', () => {
     store.put(1, 'h', result());
-    expect(store.age(1, 'h')).toBeLessThan(1000);
-    expect(store.age(99, 'h')).toBeNull();
+    expect(Date.now() - (store.entry(1, 'h') as CacheEntry).probedAt).toBeLessThan(1000);
+    expect(store.entry(99, 'h')).toBeNull();
   });
 
   it('records run history newest first', () => {
@@ -544,11 +552,11 @@ describe('store', () => {
     // and still see the first one's writes.
     store.put(7, 'h', result());
     const second = new Store(join(dir, 'test.db'));
-    expect(second.get(7, 'h', 60_000, 60_000)?.height).toBe(1080);
+    expect(second.entry(7, 'h')?.result?.height).toBe(1080);
     // And a closed store's statements go with it rather than being handed out
     // again by the cache.
     second.close();
-    expect(() => second.get(7, 'h', 60_000, 60_000)).toThrow();
+    expect(() => second.entry(7, 'h')).toThrow();
   });
 
   it('prunes only rows outside the managed stream set', () => {
@@ -564,8 +572,8 @@ describe('store', () => {
     store.put(5, 'h', result());
     expect(store.pruneOutside(new Set([1, 2]))).toBe(1);
     // The managed streams survive; the orphans are gone.
-    expect(store.get(1, 'h', 60_000, 60_000)).not.toBeNull();
-    expect(store.get(2, 'h', 60_000, 60_000)).not.toBeNull();
+    expect(store.entry(1, 'h')).not.toBeNull();
+    expect(store.entry(2, 'h')).not.toBeNull();
     expect(store.cacheStats().total).toBe(2);
   });
 

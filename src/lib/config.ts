@@ -153,10 +153,18 @@ export const configSchema = z.object({
    * a kickoff further out than the cap costs one extra pass, which finds the
    * channel still held back and sleeps again until the kickoff itself. What it
    * buys is the one thing neither the cache nor the EPG can announce -- a
-   * stream the provider has just added. Raise it if that matters less to you
-   * than the passes do.
+   * stream the provider has just added.
+   *
+   * Half an hour rather than the quarter it used to be. When a wake-up was the
+   * only way to learn anything the cap had to be short, because it *was* the
+   * schedule; now the pass that follows one is the rare case where nothing had
+   * a time on it, and every real deadline -- a verdict expiring, a kickoff --
+   * is waited for exactly. The cost of raising it is bounded and dull: a
+   * stream the provider added is measured up to half an hour later than it
+   * would have been, having sat unranked at the bottom of its channel until
+   * then either way.
    */
-  PODIUM_IDLE_MAX_MS: num(15 * 60_000),
+  PODIUM_IDLE_MAX_MS: num(30 * 60_000),
   PODIUM_PAUSE_WHEN_WATCHING: bool(true),
   PODIUM_MIN_FREE_SLOTS: num(1),
   PODIUM_MAX_SLICE: num(400),

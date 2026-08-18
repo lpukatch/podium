@@ -335,6 +335,14 @@ export function ttlFor(
   return liveTtlMs;
 }
 
+/** The `probe_cache` columns `entry` reads, as SQLite hands them back. */
+interface CacheRow {
+  probed_at: number;
+  alive: number;
+  result: string;
+  dead_streak: number;
+}
+
 /** A cached verdict with the bookkeeping `ttlFor` needs. */
 export interface CacheEntry {
   probedAt: number;
@@ -423,9 +431,7 @@ export class Store {
     const row = this.sql(
       `SELECT probed_at, alive, result, dead_streak FROM probe_cache
        WHERE stream_id = ? AND stream_hash = ?`,
-    ).get(streamId, streamHash) as
-      | { probed_at: number; alive: number; result: string; dead_streak: number }
-      | undefined;
+    ).get(streamId, streamHash) as CacheRow | undefined;
     if (!row) return null;
 
     let result: ProbeResult | null = null;
@@ -441,33 +447,6 @@ export class Store {
       deadStreak: row.dead_streak ?? 0,
       result,
     };
-  }
-
-  /** A cached result, if still valid for this hash and within its TTL. */
-  get(
-    streamId: number,
-    streamHash: string,
-    liveTtlMs: number,
-    deadTtlMs: number,
-    deadTtlMaxMs: number = deadTtlMs,
-    unknownBitrateTtlMs = 0,
-  ): ProbeResult | null {
-    const row = this.entry(streamId, streamHash);
-    if (!row) return null;
-
-    const ttl = ttlFor(row, liveTtlMs, deadTtlMs, deadTtlMaxMs, unknownBitrateTtlMs);
-    // `>=`, not `>`: a TTL of 0 must mean "never serve from cache", and with a
-    // strict `>` a same-millisecond write would still be a hit.
-    if (Date.now() - row.probedAt >= ttl) return null;
-    return row.result;
-  }
-
-  /** Age of the cached entry in ms, or null when absent. Drives the pacer. */
-  age(streamId: number, streamHash: string): number | null {
-    const row = this.sql(
-      'SELECT probed_at FROM probe_cache WHERE stream_id = ? AND stream_hash = ?',
-    ).get(streamId, streamHash) as { probed_at: number } | undefined;
-    return row ? Date.now() - row.probed_at : null;
   }
 
   /**

@@ -95,7 +95,7 @@ holds a Dispatcharr credential.
 | --- | --- | --- |
 | `PODIUM_MAX_AGE_MS` | `86400000` | freshness target; the UI shows this in minutes |
 | `PODIUM_TICK_MS` | `60000` | how often a pass is considered, not how long one takes |
-| `PODIUM_IDLE_MAX_MS` | `900000` | longest sleep when nothing is due; [see below](#when-there-is-nothing-to-do) |
+| `PODIUM_IDLE_MAX_MS` | `1800000` | longest sleep when nothing is due; [see below](#when-there-is-nothing-to-do) |
 | `PODIUM_LIVE_TTL_MS` | `86400000` | how long a working stream is trusted |
 | `PODIUM_DEAD_TTL_MS` | `10800000` | how soon a stream that *just* died is rechecked |
 | `PODIUM_DEAD_TTL_MAX_MS` | `86400000` | ceiling once that has backed off; [see below](#when-there-is-nothing-to-do) |
@@ -169,13 +169,17 @@ no upcoming programme for cannot be dated at all, and falls back to when the
 next grid arrives (`PODIUM_EPG_TTL_MS`) — nothing before that can change its
 answer.
 
-Every sleep is capped by `PODIUM_IDLE_MAX_MS`. The cap only ever *shortens* a
-sleep, so it cannot make a channel probe late — a kickoff further out than the
-cap costs one extra pass, which finds the channel still held back and goes
-straight back to sleep until the kickoff itself. What the cap is really for is
-the one thing neither the EPG nor the cache can announce: a stream the provider
-has just added. If that matters less to you than the passes do, this is the knob
-to raise.
+Every sleep is capped by `PODIUM_IDLE_MAX_MS`, half an hour by default. The cap
+only ever *shortens* a sleep, so it cannot make a channel probe late — a kickoff
+further out than the cap costs one extra pass, which finds the channel still
+held back and goes straight back to sleep until the kickoff itself. What the cap
+is really for is the one thing neither the EPG nor the cache can announce: a
+stream the provider has just added, which it will then measure within the cap
+rather than immediately.
+
+Raise it if you would rather have fewer passes than prompt discovery of new
+streams; an hour lines it up with `PODIUM_EPG_TTL_MS`, which is the longest
+anything else here waits.
 
 **A stream that stays dead is asked less often.** A dead verdict starts at
 `PODIUM_DEAD_TTL_MS` and doubles per consecutive dead verdict, up to

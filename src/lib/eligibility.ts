@@ -211,7 +211,9 @@ export class Eligibility {
     // programme is usually a block that will be held back again. Waking on the
     // next start marked live is a wake-up per event rather than one per block.
     const grace = policy.graceMinutes * 60_000;
-    const nextStart = policy.requireLive ? upcoming?.nextLive.get(tvgId) : upcoming?.next.get(tvgId);
+    const nextStart = policy.requireLive
+      ? upcoming?.nextLive.get(tvgId)
+      : upcoming?.next.get(tvgId);
     const opensNext = nextStart === undefined ? undefined : nextStart + grace;
 
     const programme = programmes.get(tvgId);
