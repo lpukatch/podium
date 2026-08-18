@@ -35,7 +35,7 @@ import {
   score,
   type Weights,
 } from './scoring';
-import { type Progress, type Store, ttlFor } from './store';
+import { forcedAtFor, type Progress, type Store, ttlFor } from './store';
 
 /**
  * The shape published to Dispatcharr's `stream_stats`.
@@ -1100,6 +1100,10 @@ export class Runner {
   } {
     const config = this.deps.config();
     const { store } = this.deps;
+    // Read once for the pass, not per channel: a mark is a handful of rows and
+    // the answer cannot change under us mid-plan without making the pass
+    // inconsistent with itself.
+    const marks = store.refreshMarks();
     const { matcher } = this.deps.rules.get();
     const index = passedIndex ?? matcher.buildIndex(streams, groupNames);
     const byId = passedById ?? new Map(streams.map((s) => [s.id, s]));
@@ -1154,6 +1158,9 @@ export class Runner {
         continue;
       }
 
+      // Whatever an operator has asked to re-check covers this channel from
+      // here on: any verdict older than this instant is out of service.
+      const forcedAt = forcedAtFor(marks, channel.groupId);
       const hits: Array<[number, number]> = [];
       const cachedEntries = new Map<number, RankEntry>();
 
@@ -1168,6 +1175,18 @@ export class Runner {
         // decides how long that verdict is trusted for.
         const cached = store.entry(stream.id, stream.streamHash);
         const age = cached ? Date.now() - cached.probedAt : null;
+        // Retired by an explicit re-check request rather than by its own age.
+        // The verdict itself is untouched -- it goes on ranking the channel
+        // until a new one lands, and cancelling the request puts it straight
+        // back in service.
+        //
+        // Inclusive: the request means "re-check what you measured before I
+        // asked", and a verdict stamped the same millisecond as the request was
+        // not taken in response to it. Nothing re-probed *afterwards* can tie,
+        // because the pass that re-probes it cannot start until after the mark
+        // is written -- which is what makes a satisfied mark go inert on its own
+        // rather than needing to be cleaned up.
+        const forcedOut = cached !== null && cached.probedAt <= forcedAt;
         if (cached) {
           if (oldestProbedAt === null || cached.probedAt < oldestProbedAt) {
             oldestProbedAt = cached.probedAt;
@@ -1182,7 +1201,7 @@ export class Runner {
           // The freshness test and the unreadable-result check mirror
           // `Store.get`, which this deliberately no longer calls: a second read
           // of the same row could only disagree with the age and TTL taken here.
-          if (cached.result && Date.now() - cached.probedAt < ttl) {
+          if (!forcedOut && cached.result && Date.now() - cached.probedAt < ttl) {
             counters.cached += 1;
             const due = cached.probedAt + ttl;
             if (nextDueAt === null || due < nextDueAt) nextDueAt = due;
@@ -1208,8 +1227,14 @@ export class Runner {
             providerId: stream.providerId,
             stepOrder,
           },
-          // Never-probed sorts first; otherwise oldest first.
-          age: age ?? Number.MAX_SAFE_INTEGER,
+          // Never-probed sorts first, and a stream somebody has explicitly
+          // asked to re-check goes with it -- the request means "now", not "at
+          // its usual turn". That also decides the pace: `sliceSize` reads the
+          // oldest open age, so a requested re-check runs at the ceiling
+          // instead of trickling MIN_BATCH a tick against a deadline 24 hours
+          // out, which for a stream probed an hour ago is what its real age
+          // would ask for.
+          age: forcedOut ? Number.MAX_SAFE_INTEGER : (age ?? Number.MAX_SAFE_INTEGER),
         });
       }
 

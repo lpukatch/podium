@@ -286,6 +286,49 @@ The policy is the row of chips at the top of a group. `assigned` is what
 Dispatcharr has on the channel now; `matched` is what your rules claim — the two
 differing is how you spot a stream the provider has just added.
 
+## Re-checking on demand
+
+The freshness target is a floor, not a schedule. "Nothing older than 24 hours"
+is satisfied by a library measured at four this morning, which is not the same
+as being ready for something that is on tonight — and the streams a provider
+swaps out during the day are exactly the ones you find out about at kickoff.
+
+Two buttons say "look again anyway":
+
+| where | scope |
+| --- | --- |
+| a group's page | every stream on every channel in that group |
+| **Progress** | the whole catalogue |
+
+Both **queue** work rather than doing it. They write a single timestamp, and the
+planner then treats every verdict older than it as expired, so the next pass
+picks the streams up through the ordinary machinery: provider lanes at their own
+limits, the pass yielding the moment somebody starts watching, and event
+channels still held until their programme has actually started. Nothing about a
+re-check bypasses any of that — it only stops the cache answering for those
+streams.
+
+The worker notices within 30 seconds, even from the middle of an idle sleep.
+
+Cancelling is free. Nothing was deleted from the cache to queue the work, so
+dropping the request puts the existing verdicts straight back into service, and
+whatever was already re-probed stays re-probed.
+
+Two things to know before queueing the whole catalogue:
+
+- On a large install this is hours of probing, and the day you most want it —
+  a house full of people with the TV on — is the day it spends most of its time
+  paused for viewers. Queue it in the morning, not at half past five.
+- Event channels are the ones a morning re-check helps least. A channel in an
+  `after_epg_start` group is held back until its programme is live whether or
+  not you asked, which is the whole point of the mode: probing a feed that is
+  not up yet records a dead stream and sinks it. For those, queueing the group
+  an hour or two before kickoff is worth more than queueing everything at nine.
+
+For a single channel, the **Check now** panel on the channel itself is faster
+still — it probes on the spot and shows the ordering the results imply without
+writing anything.
+
 ## Ranking
 
 Step order first (an alias you put first wins), then a weighted score:
