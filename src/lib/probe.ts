@@ -39,6 +39,10 @@ export interface ProbeResult {
   audioChannels: number;
   /** ffprobe's layout name for that track, e.g. "stereo" or "5.1(side)". */
   channelLayout: string;
+  /** Declared bitrate of that track in kbps, 0 when the container omits it. */
+  audioBitrateKbps: number;
+  /** Sample rate of that track in Hz, e.g. 48000. */
+  audioSampleRate: number;
   elapsedMs: number;
   error: string;
   /** True when bitrate came from reading the stream rather than its metadata. */
@@ -65,6 +69,8 @@ export const DEAD: Omit<ProbeResult, 'elapsedMs' | 'error'> = {
   pixelFormat: '',
   audioChannels: 0,
   channelLayout: '',
+  audioBitrateKbps: 0,
+  audioSampleRate: 0,
 };
 
 export interface ProbeOptions {
@@ -107,6 +113,7 @@ export interface FfprobeStream {
   pix_fmt?: string;
   channels?: number;
   channel_layout?: string;
+  sample_rate?: string;
 }
 
 interface FfprobePayload {
@@ -197,6 +204,13 @@ export function pickAudio(streams: FfprobeStream[]): FfprobeStream | undefined {
   return best;
 }
 
+/** A numeric ffprobe field, or 0 when absent or unparseable. */
+function toNumber(raw: string | undefined): number {
+  if (!raw) return 0;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : 0;
+}
+
 export function parsePayload(payload: FfprobePayload): Omit<ProbeResult, 'elapsedMs' | 'error'> {
   const video = (payload.streams ?? []).find((s) => s.codec_type === 'video');
   const audio = pickAudio(payload.streams ?? []);
@@ -223,6 +237,11 @@ export function parsePayload(payload: FfprobePayload): Omit<ProbeResult, 'elapse
     pixelFormat: video.pix_fmt ?? '',
     audioChannels: audio?.channels ?? 0,
     channelLayout: audio?.channel_layout ?? '',
+    // Unlike video, audio tracks do declare a bitrate in these streams -- ac3
+    // and E-AC-3 carry it in the syncframe and aac in the ADTS header -- so
+    // this needs no sampling to be worth reading.
+    audioBitrateKbps: Math.round(toNumber(audio?.bit_rate) / 10) / 100,
+    audioSampleRate: Math.round(toNumber(audio?.sample_rate)),
   };
 }
 

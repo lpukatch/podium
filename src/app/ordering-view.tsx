@@ -15,6 +15,7 @@ interface Weights {
   bitrate: string;
   fps: string;
   codec: string;
+  audio: string;
   preferH265: boolean;
 }
 
@@ -27,12 +28,20 @@ interface OrderingState {
 interface Response {
   mode: Mode;
   providerPreference: string[];
-  weights: { resolution: number; bitrate: number; fps: number; codec: number; preferH265: boolean };
+  weights: {
+    resolution: number;
+    bitrate: number;
+    fps: number;
+    codec: number;
+    audio: number;
+    preferH265: boolean;
+  };
   defaults: {
     resolution: number;
     bitrate: number;
     fps: number;
     codec: number;
+    audio: number;
     preferH265: boolean;
   };
   providers: Provider[];
@@ -65,6 +74,7 @@ const WEIGHT_FIELDS: { key: keyof Omit<Weights, 'preferH265'>; label: string }[]
   { key: 'bitrate', label: 'Bitrate' },
   { key: 'fps', label: 'FPS' },
   { key: 'codec', label: 'Codec' },
+  { key: 'audio', label: 'Audio' },
 ];
 
 const toWeights = (w: Response['weights']): Weights => ({
@@ -72,6 +82,7 @@ const toWeights = (w: Response['weights']): Weights => ({
   bitrate: String(w.bitrate),
   fps: String(w.fps),
   codec: String(w.codec),
+  audio: String(w.audio),
   preferH265: w.preferH265,
 });
 
@@ -96,6 +107,7 @@ export function OrderingView() {
     bitrate: '',
     fps: '',
     codec: '',
+    audio: '',
     preferH265: true,
   });
   const [defaults, setDefaults] = useState<Weights>(weights);
@@ -160,6 +172,7 @@ export function OrderingView() {
             bitrate: num(weights.bitrate),
             fps: num(weights.fps),
             codec: num(weights.codec),
+            audio: num(weights.audio),
             preferH265: weights.preferH265,
           },
         }),
@@ -311,7 +324,7 @@ export function OrderingView() {
         </button>
         {advanced && (
           <div className="mt-2">
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
               {WEIGHT_FIELDS.map((f) => (
                 <label key={f.key} className="block text-xs text-[var(--color-muted)]">
                   {f.label}
@@ -333,8 +346,14 @@ export function OrderingView() {
               Prefer H.265 / HEVC over H.264
             </label>
             <p className="mt-2 text-xs text-[var(--color-muted)]">
-              Relative weights for the quality score (higher = more important). Conventionally sum
-              to 1.
+              Relative weights for the quality score (higher = more important). They are normalised
+              by their total, so what matters is their size relative to each other.
+            </p>
+            <p className="mt-1 text-xs text-[var(--color-muted)]">
+              Audio prefers surround where a channel is carried both with and without it. New
+              installs start at 0.1, which decides between streams whose video already ties without
+              letting audio outrank resolution or bitrate; installs that predate the setting stay at
+              0 until you raise it.
             </p>
             <button
               type="button"

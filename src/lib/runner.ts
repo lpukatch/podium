@@ -43,7 +43,9 @@ import { forcedAtFor, type Progress, type Store, ttlFor } from './store';
  * Key names follow what Dispatcharr's channel table renders: `resolution`,
  * `video_codec`, `audio_codec`, `source_fps` and `video_bitrate`. The bitrate is
  * `video_bitrate` (kbps) and not `bitrate_kbps` -- the frontend reads the former
- * and shows an empty badge for the latter. The remaining keys are podium-only
+ * and shows an empty badge for the latter. `audio_bitrate` and `sample_rate`
+ * fill Dispatcharr's audio group, and `channel_layout` is the string its own
+ * probe writes beside `audio_channels`. The remaining keys are podium-only
  * extras the UI ignores but that round-trip harmlessly.
  */
 export function statsPayload(
@@ -60,6 +62,8 @@ export function statsPayload(
     pixel_format: result.pixelFormat,
     audio_channels: result.audioChannels,
     channel_layout: result.channelLayout,
+    audio_bitrate: Math.round(result.audioBitrateKbps),
+    sample_rate: result.audioSampleRate,
     video_bitrate: Math.round(result.bitrateKbps),
     bitrate_measured: Boolean(result.bitrateMeasured),
     blank_detected: Boolean(result.black),

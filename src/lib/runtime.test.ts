@@ -60,6 +60,8 @@ const result = (over: Partial<ProbeResult> = {}): ProbeResult => ({
   pixelFormat: 'yuv420p',
   audioChannels: 2,
   channelLayout: 'stereo',
+  audioBitrateKbps: 128,
+  audioSampleRate: 48_000,
   elapsedMs: 100,
   error: '',
   ...over,

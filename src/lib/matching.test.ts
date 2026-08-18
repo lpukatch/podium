@@ -12,9 +12,17 @@ import { matchKey, normalize } from './normalize';
 import { resolveOrdering } from './ordering';
 import type { ProbeResult } from './probe';
 import { parseFps, parsePayload, pickAudio } from './probe';
-import { loadRules } from './rules';
+import { EMPTY_RULES_DOC, loadRules } from './rules';
 import { statsPayload } from './runner';
-import { DEFAULT_WEIGHTS, isUsable, type RankStrategy, rank, score } from './scoring';
+import {
+  audioScore,
+  DEFAULT_WEIGHTS,
+  isUsable,
+  NEW_INSTALL_AUDIO,
+  type RankStrategy,
+  rank,
+  score,
+} from './scoring';
 
 const alive = (over: Partial<ProbeResult> = {}): ProbeResult => ({
   alive: true,
@@ -27,6 +35,8 @@ const alive = (over: Partial<ProbeResult> = {}): ProbeResult => ({
   pixelFormat: 'yuv420p',
   audioChannels: 2,
   channelLayout: 'stereo',
+  audioBitrateKbps: 128,
+  audioSampleRate: 48_000,
   elapsedMs: 0,
   error: '',
   ...over,
@@ -43,6 +53,8 @@ const dead: ProbeResult = {
   pixelFormat: '',
   audioChannels: 0,
   channelLayout: '',
+  audioBitrateKbps: 0,
+  audioSampleRate: 0,
   elapsedMs: 0,
   error: 'timeout',
 };
@@ -258,6 +270,65 @@ describe('scoring', () => {
     ).toEqual([2, 1]);
   });
 
+  it('seeds a new install with an audio weight, and leaves an existing one at zero', () => {
+    // The two are indistinguishable once the weights are read, so the opinion
+    // has to live in the file a fresh install is created with. An upgrade must
+    // not reshuffle channels nobody asked to change.
+    expect(loadRules(EMPTY_RULES_DOC).ordering.weights.audio).toBe(NEW_INSTALL_AUDIO);
+    expect(loadRules({ schema: 2, defaults: {}, channels: [] }).ordering.weights.audio).toBe(
+      undefined,
+    );
+    expect(DEFAULT_WEIGHTS.audio).toBe(0);
+  });
+
+  it('scores audio on channels first, bitrate second', () => {
+    const stereo = alive({ audioChannels: 2, audioBitrateKbps: 128 });
+    const surround = alive({ audioChannels: 6, audioBitrateKbps: 128 });
+    const richer = alive({ audioChannels: 6, audioBitrateKbps: 256 });
+    expect(audioScore(surround)).toBeGreaterThan(audioScore(stereo));
+    expect(audioScore(richer)).toBeGreaterThan(audioScore(surround));
+    // 7.1 is a full score, not a bonus over 5.1.
+    expect(audioScore(alive({ audioChannels: 8, audioBitrateKbps: 256 }))).toBe(1);
+    // No audio at all, rather than audio we failed to read.
+    expect(audioScore(alive({ audioChannels: 0, audioBitrateKbps: 0 }))).toBe(0);
+  });
+
+  it('ignores audio until the weight is raised', () => {
+    // The same channel carried twice, identical video, one with 5.1. Opting in
+    // is what separates them -- by default the ordering is exactly as it was.
+    const surround = alive({ audioChannels: 6, audioBitrateKbps: 256 });
+    const stereo = alive({ audioChannels: 2, audioBitrateKbps: 128 });
+    expect(score(surround)).toBe(score(stereo));
+
+    const weights = { ...DEFAULT_WEIGHTS, audio: 0.1 };
+    expect(score(surround, weights)).toBeGreaterThan(score(stereo, weights));
+  });
+
+  it('cannot let audio overturn a real difference in video', () => {
+    // A small audio weight decides between equals; it does not promote a 720p
+    // stream over a 1080p one because the audio is better.
+    const weights = { ...DEFAULT_WEIGHTS, audio: 0.1 };
+    const sd = alive({ height: 720, bitrateKbps: 2000, audioChannels: 6, audioBitrateKbps: 256 });
+    const hd = alive({ height: 1080, bitrateKbps: 8000, audioChannels: 2, audioBitrateKbps: 128 });
+    expect(score(hd, weights)).toBeGreaterThan(score(sd, weights));
+  });
+
+  it('normalises by the weights, so a heavier set does not saturate', () => {
+    // Weights that sum to 2 are the same ranking as weights that sum to 1 --
+    // otherwise every decent stream clamps to 1.0 and stops being comparable.
+    const doubled = {
+      ...DEFAULT_WEIGHTS,
+      resolution: 0.7,
+      bitrate: 0.8,
+      fps: 0.3,
+      codec: 0.2,
+    };
+    const good = alive({ height: 1080, bitrateKbps: 8000 });
+    const better = alive({ height: 2160, bitrateKbps: 11_000 });
+    expect(score(good, doubled)).toBe(score(good));
+    expect(score(better, doubled)).toBeGreaterThan(score(good, doubled));
+  });
+
   it('treats an alive but sub-floor stream as unusable', () => {
     // ffprobe reports "1080p" for feeds delivering 193kbps. Ranking those last
     // still puts them ahead of honestly-dead streams; they belong with the dead.
@@ -305,6 +376,7 @@ describe('scoring', () => {
       bitrate: 0.4,
       fps: 0.15,
       codec: 0.1,
+      audio: 0,
       preferH265: false,
       minBitrateKbps: 500,
     };
@@ -405,12 +477,22 @@ describe('ffprobe parsing', () => {
         { codec_type: 'video', codec_name: 'h264', width: 1920, height: 1080 },
         { codec_type: 'audio', codec_name: 'aac', channels: 2, channel_layout: 'stereo' },
         { codec_type: 'audio', codec_name: 'eac3', channels: 2, channel_layout: 'stereo' },
-        { codec_type: 'audio', codec_name: 'eac3', channels: 6, channel_layout: '5.1(side)' },
+        {
+          codec_type: 'audio',
+          codec_name: 'eac3',
+          channels: 6,
+          channel_layout: '5.1(side)',
+          bit_rate: '256000',
+          sample_rate: '48000',
+        },
       ],
     });
     expect(parsed.audioChannels).toBe(6);
     expect(parsed.audioCodec).toBe('eac3');
     expect(parsed.channelLayout).toBe('5.1(side)');
+    // Read off the same track that was chosen, not the first one.
+    expect(parsed.audioBitrateKbps).toBe(256);
+    expect(parsed.audioSampleRate).toBe(48_000);
   });
 
   it('keeps the earlier track when nothing separates them', () => {
@@ -1134,5 +1216,8 @@ describe('stats payload', () => {
     expect(payload.audio_channels).toBe(2);
     // Dispatcharr's own probe writes the count and the layout as separate keys.
     expect(payload.channel_layout).toBe('stereo');
+    // Its audio stat group reads these two.
+    expect(payload.audio_bitrate).toBe(128);
+    expect(payload.sample_rate).toBe(48_000);
   });
 });

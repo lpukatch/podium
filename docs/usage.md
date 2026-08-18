@@ -332,9 +332,23 @@ writing anything.
 ## Ranking
 
 Step order first (an alias you put first wins), then a weighted score:
-resolution, bitrate, fps, codec. Dead streams sink to the bottom, and so do
-streams below `PODIUM_MIN_BITRATE_KBPS` or showing a black screen — a slate is
-not a fallback.
+resolution, bitrate, fps, codec, audio. Dead streams sink to the bottom, and so
+do streams below `PODIUM_MIN_BITRATE_KBPS` or showing a black screen — a slate
+is not a fallback. The weights are normalised by their total, so only their size
+relative to each other matters.
+
+Audio earns its weight where a provider carries the same channel twice, once
+with 5.1 and once without. Podium reads the richest audio track a stream has —
+channel count first, the track's own bitrate to separate ties — and a new
+install starts that weight at 0.1: enough to decide between feeds whose video
+already ties, never enough to promote a 720p stream over a 1080p one on the
+strength of its soundtrack. An install that predates the setting keeps it at 0,
+so upgrading never reshuffles a lineup nobody asked to change; raise it in
+**Settings → Stream ordering** to opt in.
+
+A channel whose 5.1 only appears during live coverage will change position
+between passes. That is the measurement being honest about a stream that
+genuinely changed.
 
 Bitrate is *measured*, not read from the container: live TS/HLS almost never
 declares one. Podium reads a few seconds of the stream, which also gives it the
