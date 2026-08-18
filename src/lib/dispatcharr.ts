@@ -93,6 +93,38 @@ interface Paged<T> {
   results?: T[];
 }
 
+/**
+ * Whether a grid row is a real programme rather than one Dispatcharr generated.
+ *
+ * Real rows carry the integer primary key of the `program_data` row they came
+ * from; the synthesised ones carry a string marker built from the channel and
+ * the hour. Anything unrecognised is *kept*: an id shape nobody anticipated is
+ * far more likely to be a real programme than a dummy, and dropping real rows
+ * would silently stop every gated channel from ever being probed.
+ */
+function isRealProgramme(row: unknown): boolean {
+  const id = (row as { id?: unknown })?.id;
+  return !(typeof id === 'string' && id.startsWith('dummy-'));
+}
+
+/**
+ * Keep only what the eligibility gate reads.
+ *
+ * The grid is ~8,900 rows carrying descriptions, sub-titles and artwork ids
+ * that nothing here looks at, and the worker holds a parsed copy of the whole
+ * thing between passes. Trimming at the door takes that from 3.7MB to 1.3MB on
+ * a live install, and costs one pass over rows we are already walking.
+ */
+function trimProgramme(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    tvg_id: row.tvg_id,
+    start_time: row.start_time,
+    end_time: row.end_time,
+    title: row.title,
+    is_live: row.is_live,
+  };
+}
+
 export class DispatcharrClient {
   private readonly base: string;
   private accessToken: string | null = null;
@@ -341,22 +373,47 @@ export class DispatcharrClient {
   }
 
   /**
-   * Programmes airing now, for the after_epg_start policy.
+   * The EPG window: what is airing and what is coming, for after_epg_start.
    *
-   * Uses the lightweight current-programs endpoint rather than the full grid.
-   * That endpoint skips dummy EPG sources server-side, which is the point: a
-   * channel with no real EPG gets a generated dummy programme keyed by its uuid
-   * (the same value its tvg_id falls back to), and the full grid surfaces that
-   * dummy as "airing now" -- making after_epg_start probe the channel
-   * immediately instead of waiting for a real kickoff. current-programs returns
-   * only real, currently-airing programmes (a bare array), so dummy-only
-   * channels simply have no entry and are held as "no EPG data".
+   * This used to read `current-programs`, which returns only what is airing at
+   * the instant it is called. That is unusable for a cached grid, and the bug
+   * it caused was not subtle: a countdown block ending drops out of the cached
+   * rows, the live programme that replaced it was never fetched, and the
+   * channel reads "no EPG data" until the cache expires. Measured on a live
+   * install, 38 gated channels were held back that way while their games had
+   * been under way for 28 minutes. `grid` carries ~28 hours ahead, so the same
+   * rows answer "what is airing" correctly at any instant inside the window --
+   * and, for the first time, "when does the next programme start".
+   *
+   * **Generated dummies are dropped here, and that is load-bearing.** `grid`
+   * synthesises programmes for channels with no EPG data and for sources of
+   * type `dummy` -- four-hour filler blocks keyed by the channel uuid, which is
+   * exactly what a tvg_id falls back to. Left in, they would open the gate on
+   * every channel that has no real schedule, which is precisely what
+   * after_epg_start exists to prevent. Dispatcharr builds them with a string id
+   * (`dummy-standard-{channel}-{hour}`, `dummy-custom-{channel}-{hour}`) where a
+   * real programme carries its integer row id, so the two are told apart
+   * exactly rather than by shape. Filtering on the marker rather than on
+   * `is_live` is deliberate: a *custom* dummy can set `live` true from a pattern
+   * in the channel name, so the live flag does not catch them all.
+   *
+   * Falls back to `current-programs` if `grid` is unavailable, so an older
+   * Dispatcharr keeps the behaviour it had rather than losing the gate.
    */
-  async epgNow(): Promise<Array<Record<string, unknown>>> {
-    const resp = await this.request('POST', '/api/epg/current-programs/', {});
-    if (!resp.ok) return [];
-    const body = await resp.json();
-    return Array.isArray(body) ? body : [];
+  async epgWindow(): Promise<Array<Record<string, unknown>>> {
+    const resp = await this.request('GET', '/api/epg/grid/');
+    if (resp.ok) {
+      const body = (await resp.json()) as { data?: unknown } | unknown[];
+      // `{data: [...]}` today; a bare array is accepted so a shape change on
+      // Dispatcharr's side degrades to "fewer rows", never to a crash.
+      const rows = Array.isArray(body) ? body : Array.isArray(body?.data) ? body.data : null;
+      if (rows) return rows.filter(isRealProgramme).map(trimProgramme);
+    }
+
+    const legacy = await this.request('POST', '/api/epg/current-programs/', {});
+    if (!legacy.ok) return [];
+    const body = await legacy.json();
+    return Array.isArray(body) ? body.map(trimProgramme) : [];
   }
 
   /** Channel ids currently being streamed. Resolves UUIDs if uuidMap is provided. */

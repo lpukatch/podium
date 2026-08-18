@@ -207,8 +207,40 @@ describe('eligibility', () => {
     // in the past, so it must never be its own "next start" -- that would wake
     // the loop immediately and forever.
     const rows = [...epgRows(-30), ...epgRows(120), ...epgRows(45)];
-    expect(nextProgrammeStarts(rows, NOW).get('GAME.us')).toBe(NOW.getTime() + 45 * 60_000);
-    expect(nextProgrammeStarts(epgRows(-30), NOW).has('GAME.us')).toBe(false);
+    expect(nextProgrammeStarts(rows, NOW).next.get('GAME.us')).toBe(NOW.getTime() + 45 * 60_000);
+    expect(nextProgrammeStarts(epgRows(-30), NOW).next.has('GAME.us')).toBe(false);
+  });
+
+  it('indexes the next *live* start apart from the next start of anything', () => {
+    // An event channel's grid is mostly countdown and postgame filler. Waking
+    // at the next block start is a pass per block to reach the same held-back
+    // verdict; waking at the next live start is a pass per event.
+    const rows = [...epgRows(20, false), ...epgRows(90, true), ...epgRows(200, true)];
+    const upcoming = nextProgrammeStarts(rows, NOW);
+    expect(upcoming.next.get('GAME.us')).toBe(NOW.getTime() + 20 * 60_000);
+    expect(upcoming.nextLive.get('GAME.us')).toBe(NOW.getTime() + 90 * 60_000);
+    // Nothing live listed at all leaves the live index empty rather than
+    // falling back to a block that cannot open the gate.
+    expect(nextProgrammeStarts([...epgRows(20, false)], NOW).nextLive.has('GAME.us')).toBe(false);
+  });
+
+  it('picks the index the policy is actually gated on', () => {
+    // require_live on: only a live programme can open this channel, so the
+    // filler block starting in 20 minutes is not a reason to wake.
+    const rows = [...epgRows(20, false), ...epgRows(90, true)];
+    const upcoming = nextProgrammeStarts(rows, NOW);
+    const gated = new Eligibility(parsePolicies({ 9: { mode: AFTER_EPG_START } }));
+    expect(gated.allows(9, 'GAME.us', new Map(), NOW, undefined, upcoming).eligibleAt).toBe(
+      NOW.getTime() + 95 * 60_000,
+    );
+
+    // require_live off: start times are all this policy has, so the block counts.
+    const loose = new Eligibility(
+      parsePolicies({ 9: { mode: AFTER_EPG_START, require_live: false } }),
+    );
+    expect(loose.allows(9, 'GAME.us', new Map(), NOW, undefined, upcoming).eligibleAt).toBe(
+      NOW.getTime() + 25 * 60_000,
+    );
   });
 
   it('says when a channel waiting for kickoff turns eligible', () => {
@@ -234,8 +266,8 @@ describe('eligibility', () => {
     expect(alone.reason).toBe('no live programme');
     expect(alone.eligibleAt).toBeUndefined();
 
-    // A grid that does list what comes next answers it exactly. Dispatcharr's
-    // endpoint returns only what is airing, so this is the better-EPG case.
+    // A grid that lists what comes next answers it exactly, which is what
+    // `/api/epg/grid/` gives us.
     const nextStarts = nextProgrammeStarts(epgRows(200), NOW);
     const listed = e.allows(9, 'GAME.us', programmes, NOW, undefined, nextStarts);
     expect(listed.eligibleAt).toBe(NOW.getTime() + 205 * 60_000);
@@ -1011,9 +1043,12 @@ describe('Runner.plan (managed set + oldest check)', () => {
   function plan(
     runner: Runner,
     eligibility: unknown,
-    nextStarts = new Map<string, number>(),
+    nextLive = new Map<string, number>(),
     gridExpiresAt: number | null = null,
   ) {
+    // The gated group in this fixture leaves require_live at its default, so
+    // the live index is the one its verdicts are dated from.
+    const upcoming = { next: new Map<string, number>(), nextLive };
     return (
       runner as unknown as {
         plan: (
@@ -1024,12 +1059,13 @@ describe('Runner.plan (managed set + oldest check)', () => {
           counters: { cached: number },
           heldBack: Record<string, number>,
           groupNames: Map<number, string>,
-          nextStarts: Map<string, number>,
+          upcoming: { next: Map<string, number>; nextLive: Map<string, number> },
           gridExpiresAt: number | null,
         ) => {
           oldestProbedAt: number | null;
           nextEligibleAt: number | null;
           keepStreamIds: Set<number>;
+          planned: Array<{ channel: { id: number }; cacheComplete: boolean }>;
         };
       }
     ).plan.call(
@@ -1041,7 +1077,7 @@ describe('Runner.plan (managed set + oldest check)', () => {
       { cached: 0 },
       {},
       groupNames,
-      nextStarts,
+      upcoming,
       gridExpiresAt,
     );
   }
@@ -1106,6 +1142,76 @@ describe('Runner.plan (managed set + oldest check)', () => {
       gridExpiresAt,
     );
     expect(planned.nextEligibleAt).toBe(startsAt + 5 * 60_000);
+  });
+
+  it("carries each channel's ranking material so nothing matches twice", () => {
+    // Everything the reorder needs is settled here: which streams the channel
+    // ranks on, and the verdict for each. The cache-only walk and the
+    // post-probe walk used to derive all of it again, per pass, per channel.
+    const rules = new RulesSource(rulesPath);
+    const runner = new Runner({
+      config: () => loadConfig({ DISPATCHARR_API_KEY: 'k' }),
+      store,
+      rules,
+    });
+    store.put(10, 'h', result());
+
+    const espn = plan(runner, rules.get().eligibility).planned.find((p) => p.channel.id === 1);
+    expect(espn?.cacheComplete).toBe(true);
+    expect([
+      ...(espn as unknown as { cached: Map<number, { providerId: number }> }).cached.keys(),
+    ]).toEqual([10]);
+  });
+
+  it('leaves a channel with a probe pending out of the cache-only write', () => {
+    // The double-write this closes: the cache-only walk ran over every eligible
+    // channel, including ones with probes in flight, so a channel could be
+    // PATCHed here and PATCHed again when its probe landed -- twice in one
+    // pass, off two readings of the same cache.
+    const rules = new RulesSource(rulesPath);
+    const runner = new Runner({
+      config: () => loadConfig({ DISPATCHARR_API_KEY: 'k' }),
+      store,
+      rules,
+    });
+    // ESPN carries stream 10 and nothing has been probed yet.
+    const espn = plan(runner, rules.get().eligibility).planned.find((p) => p.channel.id === 1);
+    expect(espn?.cacheComplete).toBe(false);
+  });
+
+  it('agrees with the probe path about an unmeasured bitrate', () => {
+    // "Alive, 0kbps" is a half-measurement, and PODIUM_UNKNOWN_BITRATE_TTL_MS
+    // books it in for another attempt within the half hour. The planner has
+    // always honoured that; the cache-only reorder did not, so it would rank
+    // the channel on a verdict the same pass had already decided to re-probe.
+    const rules = new RulesSource(rulesPath);
+    const runner = new Runner({
+      config: () => loadConfig({ DISPATCHARR_API_KEY: 'k' }),
+      store,
+      rules,
+    });
+    store.put(10, 'h', result({ bitrateKbps: 0 }));
+    const raw = new Database(join(dir, 'plan.db'));
+    raw
+      .prepare('UPDATE probe_cache SET probed_at = ? WHERE stream_id = 10')
+      .run(Date.now() - 60 * 60_000);
+    raw.close();
+
+    const espn = plan(runner, rules.get().eligibility).planned.find((p) => p.channel.id === 1);
+    // An hour old and unmeasured: past its lifetime, so it is a probe rather
+    // than a hit -- and the channel is not written off the stale reading.
+    expect(espn?.cacheComplete).toBe(false);
+
+    // A measured verdict of the same age is still good for the day it was given.
+    store.put(10, 'h', result());
+    const fresh = new Database(join(dir, 'plan.db'));
+    fresh
+      .prepare('UPDATE probe_cache SET probed_at = ? WHERE stream_id = 10')
+      .run(Date.now() - 60 * 60_000);
+    fresh.close();
+    expect(
+      plan(runner, rules.get().eligibility).planned.find((p) => p.channel.id === 1)?.cacheComplete,
+    ).toBe(true);
   });
 
   it('falls back to the next grid when the rows in hand cannot say', () => {

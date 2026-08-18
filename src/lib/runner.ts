@@ -18,6 +18,7 @@ import {
   NEVER,
   nextProgrammeStarts,
   type Programme,
+  type UpcomingStarts,
 } from './eligibility';
 import { EpgCache } from './epg-cache';
 import type { Matcher, StreamIndex } from './matcher';
@@ -196,6 +197,33 @@ export function assignedCandidates(
     out.push([streamId, 0]);
   }
   return out;
+}
+
+/**
+ * What a pass worked out about one channel, computed once.
+ *
+ * Matching a rule against ~22,000 streams and reading a verdict per candidate
+ * is the expensive half of planning, and it used to happen three times a pass:
+ * once in `plan`, again in the cache-only reorder walk, and again per channel
+ * as its probes came back. All three asked the same questions of the same
+ * snapshot and could only ever get the same answers -- with one exception,
+ * which was a bug rather than a feature: the cache-only walk read verdicts
+ * without `PODIUM_UNKNOWN_BITRATE_TTL_MS`, so a stream the planner had already
+ * booked for a re-probe still counted as a hit there, and the channel was
+ * written twice in one pass on two different readings of the same row.
+ */
+export interface PlannedChannel {
+  channel: Channel;
+  /**
+   * Matched streams the channel could actually be ranked on, in match order:
+   * anything the catalogue no longer carries, or that the provider has marked
+   * stale and is about to delete, is dropped here rather than at each use.
+   */
+  hits: Array<[number, number]>;
+  /** Fresh verdicts, by stream id. A hit missing from here needs a probe. */
+  cached: Map<number, RankEntry>;
+  /** Every hit already has a verdict, so this channel needs no probing. */
+  cacheComplete: boolean;
 }
 
 export interface OpenJobItem {
@@ -568,7 +596,7 @@ export class Runner {
       const programmes = currentProgrammes(epgRows as never[]);
       // Derived from the same grid, in the same breath: what is airing decides
       // the verdict, what airs next decides how long the loop may sleep on it.
-      const nextStarts = nextProgrammeStarts(epgRows as never[]);
+      const upcoming = nextProgrammeStarts(epgRows as never[]);
 
       const streamToChannel = new Map<number, number>();
       for (const channel of channels) {
@@ -621,19 +649,22 @@ export class Runner {
       };
 
       this.emit({ phase: 'planning', message: 'matching channels and checking the cache' });
-      const { jobs, ages, nextDueAt, nextEligibleAt, oldestProbedAt, keepStreamIds } = this.plan(
-        channels,
-        streams,
-        programmes,
-        eligibility,
-        counters,
-        heldBack,
-        groupNames,
-        nextStarts,
-        epg.expiresAt,
-        getIndex(),
-        streamById,
-      );
+      const { jobs, ages, nextDueAt, nextEligibleAt, oldestProbedAt, keepStreamIds, planned } =
+        this.plan(
+          channels,
+          streams,
+          programmes,
+          eligibility,
+          counters,
+          heldBack,
+          groupNames,
+          upcoming,
+          epg.expiresAt,
+          getIndex(),
+          streamById,
+        );
+      // Every later step reads this rather than matching the channel again.
+      const plannedById = new Map(planned.map((entry) => [entry.channel.id, entry]));
       const eligibleChannels = new Set(jobs.map((j) => j.channelId)).size;
       counters.backlog = jobs.length;
       counters.nextDueAt = nextDueAt;
@@ -648,18 +679,7 @@ export class Runner {
 
       // Cache-only channels never enter the scheduler, so they are reordered
       // here or they would be skipped entirely.
-      await this.reorderCachedOnly(
-        client,
-        channels,
-        streams,
-        programmes,
-        eligibility,
-        counters,
-        groupNames,
-        strategy,
-        getIndex(),
-        streamById,
-      );
+      await this.reorderCachedOnly(client, planned, counters, strategy);
 
       // A provider the pacer left out has no spare capacity this pass. Its jobs
       // must be dropped, not merely unbounded -- the scheduler falls back to
@@ -859,28 +879,15 @@ export class Runner {
             return result;
           },
           onChannelComplete: async (channelId, results) => {
-            const channel = channels.find((c) => c.id === channelId);
-            const { matcher } = this.deps.rules.get();
-            const rule = channel ? matcher.rules.get(channel.id) : undefined;
-            if (!channel) return;
-            const groupName =
-              channel.groupId === null ? undefined : groupNames.get(channel.groupId);
-            // The rule-less channels `plan` admitted arrive here too, and
-            // returning early would probe them every pass and never reorder them.
-            if (
-              !rule &&
-              !assignmentIsRule(eligibility.policyFor(channel.groupId, groupName).mode)
-            ) {
-              return;
-            }
+            // Everything about which streams this channel ranks on, and what
+            // was already known about them, was settled in `plan`. A channel
+            // absent from it was never eligible and has nothing to write.
+            const entry = plannedById.get(channelId);
+            if (!entry) return;
 
-            const index = getIndex();
             const entries: RankEntry[] = [];
             let complete = true;
-            const hits = rule
-              ? matcher.match(rule, index)
-              : assignedCandidates(channel, streamById, index.excludedGroups);
-            for (const [streamId, stepOrder] of hits) {
+            for (const [streamId, stepOrder] of entry.hits) {
               const freshlyProbed = results.find(([job]) => job.streamId === streamId);
               if (freshlyProbed) {
                 if (freshlyProbed[1] !== null) {
@@ -894,28 +901,15 @@ export class Runner {
                 continue;
               }
 
-              const stream = streamById.get(streamId);
-              if (!stream) continue;
-              const hit = store.get(
-                stream.id,
-                stream.streamHash,
-                config.PODIUM_LIVE_TTL_MS,
-                config.PODIUM_DEAD_TTL_MS,
-                config.PODIUM_DEAD_TTL_MAX_MS,
-                config.PODIUM_UNKNOWN_BITRATE_TTL_MS,
-              );
-              if (hit) {
-                entries.push({
-                  streamId,
-                  stepOrder,
-                  providerId: stream.providerId,
-                  result: hit,
-                });
+              const known = entry.cached.get(streamId);
+              if (known) {
+                entries.push(known);
                 continue;
               }
 
-              // Missing from cache and not freshly probed means it was deferred.
-              // We cannot reorder this channel until we have a verdict for every stream.
+              // Not freshly probed and not a hit when the pass planned, which
+              // means its probe was deferred. The channel cannot be ranked
+              // until every stream on it has a verdict.
               complete = false;
               break;
             }
@@ -927,7 +921,7 @@ export class Runner {
                 entries,
                 counters,
                 log,
-                channel.streams,
+                entry.channel.streams,
                 strategy,
               );
             }
@@ -982,7 +976,7 @@ export class Runner {
     const fresh = this.epg.fresh(source, config.PODIUM_EPG_TTL_MS);
     if (fresh) return { rows: fresh, expiresAt: expiry() };
 
-    const rows = await client.epgNow();
+    const rows = await client.epgWindow();
     if (rows.length > 0) {
       this.epg.set(source, rows);
       return { rows, expiresAt: expiry() };
@@ -1091,7 +1085,7 @@ export class Runner {
     counters: { cached: number },
     heldBack: Record<string, number>,
     groupNames: Map<number, string>,
-    nextStarts: Map<string, number>,
+    upcoming: UpcomingStarts,
     gridExpiresAt: number | null,
     passedIndex?: StreamIndex,
     passedById?: Map<number, Stream>,
@@ -1102,6 +1096,7 @@ export class Runner {
     nextEligibleAt: number | null;
     oldestProbedAt: number | null;
     keepStreamIds: Set<number>;
+    planned: PlannedChannel[];
   } {
     const config = this.deps.config();
     const { store } = this.deps;
@@ -1109,6 +1104,7 @@ export class Runner {
     const index = passedIndex ?? matcher.buildIndex(streams, groupNames);
     const byId = passedById ?? new Map(streams.map((s) => [s.id, s]));
     const scored: Array<{ job: ProbeJob; age: number }> = [];
+    const planned: PlannedChannel[] = [];
     const keepStreamIds = new Set<number>();
     const seenStreamIds = new Set<number>();
     let nextDueAt: number | null = null;
@@ -1135,7 +1131,7 @@ export class Runner {
         programmes,
         new Date(),
         groupName,
-        nextStarts,
+        upcoming,
       );
       if (!verdict.allowed) {
         heldBack[verdict.reason] = (heldBack[verdict.reason] ?? 0) + 1;
@@ -1158,10 +1154,14 @@ export class Runner {
         continue;
       }
 
+      const hits: Array<[number, number]> = [];
+      const cachedEntries = new Map<number, RankEntry>();
+
       for (const [streamId, stepOrder] of candidates()) {
         const stream = byId.get(streamId);
         if (!stream || stream.is_stale) continue;
         keepStreamIds.add(stream.id);
+        hits.push([stream.id, stepOrder]);
 
         // One read for all three things this needs from the cache: the age
         // that paces the slice, the verdict itself, and the dead streak that
@@ -1186,6 +1186,14 @@ export class Runner {
             counters.cached += 1;
             const due = cached.probedAt + ttl;
             if (nextDueAt === null || due < nextDueAt) nextDueAt = due;
+            // Kept for the reorder, which would otherwise read this same row
+            // back out of the database a second time.
+            cachedEntries.set(stream.id, {
+              streamId: stream.id,
+              stepOrder,
+              providerId: stream.providerId,
+              result: cached.result,
+            });
             continue;
           }
         }
@@ -1204,6 +1212,15 @@ export class Runner {
           age: age ?? Number.MAX_SAFE_INTEGER,
         });
       }
+
+      if (hits.length > 0) {
+        planned.push({
+          channel,
+          hits,
+          cached: cachedEntries,
+          cacheComplete: cachedEntries.size === hits.length,
+        });
+      }
     }
 
     scored.sort((a, b) => b.age - a.age);
@@ -1214,6 +1231,7 @@ export class Runner {
       nextEligibleAt,
       oldestProbedAt,
       keepStreamIds,
+      planned,
     };
   }
 
@@ -1223,70 +1241,33 @@ export class Runner {
    * These produce no probe jobs, so without this they would never be written
    * back and a freshly-imported install would appear to do nothing.
    */
+  /**
+   * Write the channels a pass found nothing to probe on.
+   *
+   * These produce no probe jobs, so without this they would never be written
+   * back and a freshly-imported install would appear to do nothing.
+   *
+   * Takes what `plan` already worked out rather than deriving it again. Beyond
+   * the duplicated matching, the old version ran over *every* eligible channel
+   * including the ones with probes pending, so a channel could be composed and
+   * PATCHed here and then PATCHed again from `onChannelComplete` in the same
+   * pass, off two different readings of the cache. `cacheComplete` is exactly
+   * the set with nothing pending, which is the set this was always meant to be.
+   */
   private async reorderCachedOnly(
     client: DispatcharrClient,
-    channels: Channel[],
-    streams: Stream[],
-    programmes: Map<string, Programme>,
-    eligibility: Eligibility,
+    planned: PlannedChannel[],
     counters: { reordered: number; unchanged: number },
-    groupNames: Map<number, string>,
     strategy: RankStrategy,
-    passedIndex?: StreamIndex,
-    passedById?: Map<number, Stream>,
   ): Promise<void> {
-    const config = this.deps.config();
-    const { store } = this.deps;
-    const { matcher } = this.deps.rules.get();
-    const index = passedIndex ?? matcher.buildIndex(streams, groupNames);
-    const byId = passedById ?? new Map(streams.map((s) => [s.id, s]));
     const log = this.deps.log ?? (() => {});
-
-    for (const channel of channels) {
-      if (channel.hidden_from_output) continue;
-      const rule = matcher.rules.get(channel.id);
-      const groupName = channel.groupId === null ? undefined : groupNames.get(channel.groupId);
-      // Same fallback `plan` applies, or a rule-less channel whose streams are
-      // all cache hits would never be reordered at all.
-      if (!rule && !assignmentIsRule(eligibility.policyFor(channel.groupId, groupName).mode)) {
-        continue;
-      }
-
-      const verdict = eligibility.allows(
-        channel.groupId,
-        channel.tvgId,
-        programmes,
-        new Date(),
-        groupName,
-      );
-      if (!verdict.allowed) continue;
-
-      const hits = rule
-        ? matcher.match(rule, index)
-        : assignedCandidates(channel, byId, index.excludedGroups);
-      if (hits.length === 0) continue;
-
-      const entries: RankEntry[] = [];
-      let complete = true;
-      for (const [streamId, stepOrder] of hits) {
-        const stream = byId.get(streamId);
-        if (!stream) continue;
-        const hit = store.get(
-          stream.id,
-          stream.streamHash,
-          config.PODIUM_LIVE_TTL_MS,
-          config.PODIUM_DEAD_TTL_MS,
-          config.PODIUM_DEAD_TTL_MAX_MS,
-        );
-        if (!hit) {
-          complete = false;
-          break;
-        }
-        entries.push({ streamId, stepOrder, providerId: stream.providerId, result: hit });
-      }
-      if (complete && entries.length > 0) {
-        await this.reorder(client, channel.id, entries, counters, log, channel.streams, strategy);
-      }
+    for (const { channel, hits, cached, cacheComplete } of planned) {
+      if (!cacheComplete) continue;
+      const entries = hits
+        .map(([streamId]) => cached.get(streamId))
+        .filter((entry): entry is RankEntry => entry !== undefined);
+      if (entries.length === 0) continue;
+      await this.reorder(client, channel.id, entries, counters, log, channel.streams, strategy);
     }
   }
 

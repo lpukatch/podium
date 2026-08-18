@@ -297,7 +297,86 @@ describe('resource mapping', () => {
 
   it('treats an unreadable EPG grid as empty rather than fatal', async () => {
     stubFetch(() => ({ status: 503, text: 'down' }));
-    expect(await new DispatcharrClient('http://d', { apiKey: 'k' }).epgNow()).toEqual([]);
+    expect(await new DispatcharrClient('http://d', { apiKey: 'k' }).epgWindow()).toEqual([]);
+  });
+
+  it('reads the grid, which carries what is coming as well as what is on', async () => {
+    // The whole reason for the switch: `current-programs` describes only the
+    // instant it was called, so a cached copy goes blind the moment a
+    // programme ends. These rows stay answerable for the length of the window.
+    const { calls } = stubFetch(() => ({
+      body: {
+        data: [
+          {
+            id: 42,
+            start_time: '2026-08-17T18:00:00Z',
+            end_time: '2026-08-17T21:00:00Z',
+            title: 'First Pitch',
+            is_live: true,
+            description: 'prose nothing here reads',
+            sub_title: 'nor this',
+          },
+        ],
+      },
+    }));
+    const rows = await new DispatcharrClient('http://d', { apiKey: 'k' }).epgWindow();
+    expect(calls[0]?.url).toContain('/api/epg/grid/');
+    expect(calls[0]?.method).toBe('GET');
+    // Trimmed to what the gate reads; the prose is the bulk of the payload.
+    expect(rows).toEqual([
+      {
+        tvg_id: undefined,
+        start_time: '2026-08-17T18:00:00Z',
+        end_time: '2026-08-17T21:00:00Z',
+        title: 'First Pitch',
+        is_live: true,
+      },
+    ]);
+  });
+
+  it('drops the programmes Dispatcharr generates for channels with no EPG', async () => {
+    // Shapes copied from Dispatcharr's grid view. Left in, these open the gate
+    // on every channel that has no real schedule -- the exact failure
+    // after_epg_start exists to prevent. The custom one is why the marker is
+    // the id and not `is_live`: a pattern in the channel name can set it true.
+    stubFetch(() => ({
+      body: {
+        data: [
+          { id: 7, start_time: 'a', end_time: 'b', title: 'real', is_live: true },
+          {
+            id: 'dummy-standard-31-0',
+            start_time: 'a',
+            end_time: 'b',
+            title: 'Some Channel',
+            is_live: false,
+          },
+          {
+            id: 'dummy-custom-31-12',
+            start_time: 'a',
+            end_time: 'b',
+            title: 'Main Event',
+            is_live: true,
+          },
+        ],
+      },
+    }));
+    const rows = await new DispatcharrClient('http://d', { apiKey: 'k' }).epgWindow();
+    expect(rows.map((r) => r.title)).toEqual(['real']);
+  });
+
+  it('falls back to current-programs when the grid is not there', async () => {
+    // An older Dispatcharr keeps the gate it had rather than losing it.
+    const { calls } = stubFetch((call) =>
+      call.url.includes('/api/epg/grid/')
+        ? { status: 404, text: 'no such endpoint' }
+        : { body: [{ id: 9, start_time: 'a', end_time: 'b', title: 'legacy', is_live: true }] },
+    );
+    const rows = await new DispatcharrClient('http://d', { apiKey: 'k' }).epgWindow();
+    expect(calls.map((c) => c.url.split('/api')[1])).toEqual([
+      '/epg/grid/',
+      '/epg/current-programs/',
+    ]);
+    expect(rows.map((r) => r.title)).toEqual(['legacy']);
   });
 });
 
