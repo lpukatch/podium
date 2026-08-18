@@ -169,6 +169,14 @@ export interface Progress {
    * refreshed, so a cache-wide number would report work that never happens.
    */
   backlog: number;
+  /**
+   * Verdicts a re-check request has retired and not yet replaced -- the honest
+   * "still to go" for the banner, and unlike `backlog` it includes channels
+   * the EPG gate is holding back, whose verdicts are retired but cannot be
+   * probed until something airs. Absent on a row from an older worker, and
+   * zero whenever no request is outstanding.
+   */
+  retired?: number;
   dueAt: number | null;
   heldBack: Record<string, number>;
   lanes: Array<{
@@ -738,9 +746,22 @@ export class Store {
     ).run(groupId, at);
   }
 
-  /** Cancel a request. Returns how many marks that cleared. */
-  clearRefreshMark(groupId: number): number {
-    return this.sql('DELETE FROM refresh_marks WHERE group_id = ?').run(groupId).changes;
+  /**
+   * Cancel a request, or retire one a pass found satisfied. Returns how many
+   * marks that cleared.
+   *
+   * With `at`, only that exact request goes: a pass must not drop a mark that
+   * was re-armed after the snapshot it planned against, because the newer
+   * request retired verdicts that pass never counted.
+   */
+  clearRefreshMark(groupId: number, at?: number): number {
+    if (at === undefined) {
+      return this.sql('DELETE FROM refresh_marks WHERE group_id = ?').run(groupId).changes;
+    }
+    return this.sql('DELETE FROM refresh_marks WHERE group_id = ? AND forced_at = ?').run(
+      groupId,
+      at,
+    ).changes;
   }
 
   /**

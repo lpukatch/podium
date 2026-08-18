@@ -86,6 +86,17 @@ describe('refresh marks in the store', () => {
     expect(store.refreshMarks().all).toBe(1000);
   });
 
+  it('retires a request by its instant, leaving a re-armed one alone', () => {
+    store.setRefreshMark(42, 1000);
+    // A pass that planned against the old request must not drop a newer one
+    // queued while it ran: the verdicts that one retired were never counted.
+    store.setRefreshMark(42, 2000);
+    expect(store.clearRefreshMark(42, 1000)).toBe(0);
+    expect(store.refreshMarks().byGroup.get(42)).toBe(2000);
+    expect(store.clearRefreshMark(42, 2000)).toBe(1);
+    expect(store.refreshMarks().byGroup.has(42)).toBe(false);
+  });
+
   it('drops the group marks a catalogue-wide request subsumes', () => {
     // Otherwise cancelling the big request quietly leaves the small ones
     // behind, still re-checking.
@@ -197,6 +208,7 @@ describe('the planner against a mark', () => {
           jobs: Array<{ streamId: number }>;
           ages: number[];
           planned: Array<{ channel: { id: number }; cacheComplete: boolean }>;
+          outstandingMarks: Array<{ groupId: number; forcedAt: number; remaining: number }>;
         };
       }
     ).plan.call(
@@ -211,6 +223,20 @@ describe('the planner against a mark', () => {
       { next: new Map(), nextLive: new Map() },
       null,
     );
+  }
+
+  /** retireSatisfiedMarks is private for the same reason plan() is. */
+  function retire(
+    runner: Runner,
+    marks: Array<{ groupId: number; forcedAt: number; remaining: number }>,
+  ): number {
+    return (
+      runner as unknown as {
+        retireSatisfiedMarks: (
+          marks: Array<{ groupId: number; forcedAt: number; remaining: number }>,
+        ) => number;
+      }
+    ).retireSatisfiedMarks.call(runner, marks);
   }
 
   function build() {
@@ -260,14 +286,79 @@ describe('the planner against a mark', () => {
     expect(after.planned.find((p) => p.channel.id === 1)?.cacheComplete).toBe(true);
   });
 
-  it('ignores a mark older than the verdict, so a re-check settles', () => {
+  it('retires a request every verdict has outlived, so a re-check settles', () => {
     const { rules, runner } = build();
-    store.setRefreshMark(100, Date.now() - 60_000);
+    const at = Date.now() - 60_000;
+    store.setRefreshMark(100, at);
     store.put(10, 'h', result());
     store.put(20, 'h', result());
-    // Probed after the request: the request has been satisfied, and the mark
-    // going inert on its own is why nothing has to clean it up.
-    expect(plan(runner, rules).jobs).toHaveLength(0);
+    // Probed after the request: it has been satisfied. The planner alone could
+    // let the mark sit inert, but every reader of the table -- the banner, the
+    // group chips, the cancel offer -- treats its existence as a request still
+    // running, so the pass is what clears it.
+    const planned = plan(runner, rules);
+    expect(planned.jobs).toHaveLength(0);
+    expect(planned.outstandingMarks).toEqual([{ groupId: 100, forcedAt: at, remaining: 0 }]);
+    expect(retire(runner, planned.outstandingMarks)).toBe(0);
+    expect(store.refreshMarks().byGroup.has(100)).toBe(false);
+  });
+
+  it('counts a verdict the EPG gate is holding back, and keeps the request open', () => {
+    // Group 200 becomes after_epg_start, and with no EPG rows its channel is
+    // held back: no job, so the backlog reads zero -- but its retired verdict
+    // is as outstanding as any other, and the request cannot finish until the
+    // gate opens and a pass replaces it.
+    const tmp = `${rulesPath}.tmp`;
+    writeFileSync(
+      tmp,
+      JSON.stringify({
+        schema: 2,
+        channels: [
+          { channel_id: 1, aliases: ['ESPN'] },
+          { channel_id: 2, aliases: ['TNT'] },
+        ],
+        groups: { '200': { mode: 'after_epg_start' } },
+      }),
+      'utf8',
+    );
+    renameSync(tmp, rulesPath);
+
+    const { rules, runner } = build();
+    const at = Date.now();
+    store.setRefreshMark(ALL_GROUPS, at);
+    store.put(10, 'h', result());
+    store.put(20, 'h', result());
+
+    const planned = plan(runner, rules);
+    // Stream 10 is on an allowed channel and becomes a job; stream 20 cannot
+    // be probed until something airs, yet both verdicts are still retired.
+    expect(planned.jobs.map((j) => j.streamId)).toEqual([10]);
+    expect(planned.outstandingMarks).toEqual([{ groupId: ALL_GROUPS, forcedAt: at, remaining: 2 }]);
+    expect(retire(runner, planned.outstandingMarks)).toBe(2);
+    expect(store.refreshMarks().all).toBe(at);
+  });
+
+  it('finishes two covering requests independently', () => {
+    // A channel covered by both a group mark and a catalogue-wide one keeps
+    // each open on its own, and only the satisfied one is retired. The group
+    // mark is a clear minute old so both verdicts strictly outlive it; the
+    // catalogue-wide one is stamped after the puts so neither does.
+    const { rules, runner } = build();
+    const groupAt = Date.now() - 60_000;
+    store.setRefreshMark(100, groupAt);
+    store.put(10, 'h', result()); // group 100: outlives its mark, retired by the all
+    store.put(20, 'h', result()); // group 200: only the all-mark covers it
+    const allAt = Date.now();
+    store.setRefreshMark(ALL_GROUPS, allAt);
+
+    const planned = plan(runner, rules);
+    expect(planned.outstandingMarks).toEqual([
+      { groupId: ALL_GROUPS, forcedAt: allAt, remaining: 2 },
+      { groupId: 100, forcedAt: groupAt, remaining: 0 },
+    ]);
+    expect(retire(runner, planned.outstandingMarks)).toBe(2);
+    expect(store.refreshMarks().byGroup.has(100)).toBe(false);
+    expect(store.refreshMarks().all).toBe(allAt);
   });
 
   it('paces a marked stream as work to do now, not at its usual turn', () => {

@@ -35,7 +35,7 @@ import {
   score,
   type Weights,
 } from './scoring';
-import { forcedAtFor, type Progress, type Store, ttlFor } from './store';
+import { ALL_GROUPS, forcedAtFor, type Progress, type Store, ttlFor } from './store';
 
 /**
  * The shape published to Dispatcharr's `stream_stats`.
@@ -654,20 +654,28 @@ export class Runner {
       };
 
       this.emit({ phase: 'planning', message: 'matching channels and checking the cache' });
-      const { jobs, ages, nextDueAt, nextEligibleAt, oldestProbedAt, keepStreamIds, planned } =
-        this.plan(
-          channels,
-          streams,
-          programmes,
-          eligibility,
-          counters,
-          heldBack,
-          groupNames,
-          upcoming,
-          epg.expiresAt,
-          getIndex(),
-          streamById,
-        );
+      const {
+        jobs,
+        ages,
+        nextDueAt,
+        nextEligibleAt,
+        oldestProbedAt,
+        keepStreamIds,
+        planned,
+        outstandingMarks,
+      } = this.plan(
+        channels,
+        streams,
+        programmes,
+        eligibility,
+        counters,
+        heldBack,
+        groupNames,
+        upcoming,
+        epg.expiresAt,
+        getIndex(),
+        streamById,
+      );
       // Every later step reads this rather than matching the channel again.
       const plannedById = new Map(planned.map((entry) => [entry.channel.id, entry]));
       const eligibleChannels = new Set(jobs.map((j) => j.channelId)).size;
@@ -675,6 +683,10 @@ export class Runner {
       counters.nextDueAt = nextDueAt;
       counters.nextEligibleAt = nextEligibleAt;
       counters.oldestProbedAt = oldestProbedAt;
+      // Here rather than at the end of the pass because satisfaction cannot
+      // un-do itself mid-run: probes only ever stamp later verdicts, and a
+      // viewer abort must not strand a request that had already finished.
+      const retired = this.retireSatisfiedMarks(outstandingMarks);
 
       // Verdicts for streams the worker no longer manages -- excluded, unmatched,
       // or pulled from every lineup -- would otherwise age here forever, dragging
@@ -807,6 +819,10 @@ export class Runner {
         unchanged: counters.unchanged,
         deferred: closed,
         backlog: jobs.length,
+        // Deliberately not reset by the fetching/planning emits: those run
+        // before the new count is known, and the banner reading zero for the
+        // length of a fetch is the exact lie this field exists to retire.
+        retired,
         dueAt: nextDueAt,
         oldestManagedProbedAt: oldestProbedAt,
         heldBack,
@@ -943,6 +959,7 @@ export class Runner {
         reordered: counters.reordered,
         unchanged: counters.unchanged,
         oldestManagedProbedAt: oldestProbedAt,
+        retired,
         message: `finished in ${((Date.now() - started) / 1000).toFixed(1)}s`,
         // laneSnapshot() carries the same done/dead/failed counts the mid-run
         // snapshots did, so the lane bars no longer flip meaning at completion.
@@ -1102,6 +1119,8 @@ export class Runner {
     oldestProbedAt: number | null;
     keepStreamIds: Set<number>;
     planned: PlannedChannel[];
+    /** Every mark this pass read, with the verdicts it still holds retired. */
+    outstandingMarks: Array<{ groupId: number; forcedAt: number; remaining: number }>;
   } {
     const config = this.deps.config();
     const { store } = this.deps;
@@ -1109,6 +1128,27 @@ export class Runner {
     // the answer cannot change under us mid-plan without making the pass
     // inconsistent with itself.
     const marks = store.refreshMarks();
+    // What each outstanding re-check request still holds: the verdicts it
+    // retired that no later probe has replaced. A request whose count reaches
+    // zero is finished, and `retireSatisfiedMarks` drops it. Kept per mark
+    // rather than folded into one number because the marks cover different
+    // sets of channels and finish independently.
+    const outstandingMarks = new Map<number, { forcedAt: number; remaining: number }>();
+    if (marks.all !== null) outstandingMarks.set(ALL_GROUPS, { forcedAt: marks.all, remaining: 0 });
+    for (const [groupId, forcedAt] of marks.byGroup) {
+      outstandingMarks.set(groupId, { forcedAt, remaining: 0 });
+    }
+    // Counted only while a request is outstanding: a settled install must not
+    // pay for this, and the held-back channels below only read their cache
+    // entries when there is a mark to count them against.
+    const marked = outstandingMarks.size > 0;
+    const countRetired = (groupId: number | null | undefined, probedAt: number): void => {
+      const all = outstandingMarks.get(ALL_GROUPS);
+      if (all && probedAt <= all.forcedAt) all.remaining += 1;
+      const group =
+        groupId === null || groupId === undefined ? undefined : outstandingMarks.get(groupId);
+      if (group && probedAt <= group.forcedAt) group.remaining += 1;
+    };
     const { matcher } = this.deps.rules.get();
     const index = passedIndex ?? matcher.buildIndex(streams, groupNames);
     const byId = passedById ?? new Map(streams.map((s) => [s.id, s]));
@@ -1148,7 +1188,19 @@ export class Runner {
         // keep its verdicts so they are not pruned, and leave them out of the
         // freshness number until the channel is actually probeable.
         if (policy.mode !== NEVER) {
-          for (const [streamId] of candidates()) keepStreamIds.add(streamId);
+          for (const [streamId] of candidates()) {
+            keepStreamIds.add(streamId);
+            // A verdict waiting on the gate is as retired as any other, and the
+            // request that retired it cannot finish until the gate opens and a
+            // pass replaces it -- so it is counted here, where the channel is
+            // held back, not where jobs are scored, because a held-back channel
+            // never gets that far. This is the population `backlog` cannot see.
+            if (!marked) continue;
+            const stream = byId.get(streamId);
+            if (!stream || stream.is_stale) continue;
+            const cached = store.entry(streamId, stream.streamHash);
+            if (cached) countRetired(channel.groupId, cached.probedAt);
+          }
           // When the gate opens, or -- for the channels the current rows cannot
           // date, which is most of them against a grid of what is airing now --
           // when this pass will have rows it has not already seen. Re-running
@@ -1189,9 +1241,16 @@ export class Runner {
         // asked", and a verdict stamped the same millisecond as the request was
         // not taken in response to it. Nothing re-probed *afterwards* can tie,
         // because the pass that re-probes it cannot start until after the mark
-        // is written -- which is what makes a satisfied mark go inert on its own
-        // rather than needing to be cleaned up.
+        // is written. Inertness was once the whole story -- a satisfied mark
+        // stopped matching and nothing cleaned it up -- but every reader of the
+        // marks table treats a row's existence as a request still running, so
+        // the pass now retires the ones whose tally above has emptied; see
+        // `retireSatisfiedMarks`.
         const forcedOut = cached !== null && cached.probedAt <= forcedAt;
+        // The same verdict, counted per request rather than against the folded
+        // instant above: a channel covered by both a group mark and a
+        // catalogue-wide one keeps each of them open independently.
+        if (marked && cached) countRetired(channel.groupId, cached.probedAt);
         if (cached) {
           if (oldestProbedAt === null || cached.probedAt < oldestProbedAt) {
             oldestProbedAt = cached.probedAt;
@@ -1262,7 +1321,36 @@ export class Runner {
       oldestProbedAt,
       keepStreamIds,
       planned,
+      outstandingMarks: [...outstandingMarks].map(([groupId, mark]) => ({ groupId, ...mark })),
     };
+  }
+
+  /**
+   * Drop the re-check requests this pass found satisfied, and return what the
+   * survivors still hold, for the progress page's "still to go".
+   *
+   * The delete compares the instant as well as the scope: a request queued
+   * while this pass was planning retires verdicts the tally never counted, and
+   * dropping it would declare finished a re-check that has not started. A
+   * failed clear (changes = 0) is that case, or somebody already cancelled --
+   * either way there is nothing to announce.
+   */
+  private retireSatisfiedMarks(
+    marks: Array<{ groupId: number; forcedAt: number; remaining: number }>,
+  ): number {
+    const log = this.deps.log ?? (() => {});
+    let remaining = 0;
+    for (const mark of marks) {
+      if (mark.remaining > 0) {
+        remaining += mark.remaining;
+        continue;
+      }
+      const label = mark.groupId === ALL_GROUPS ? 'the whole catalogue' : `group ${mark.groupId}`;
+      if (this.deps.store.clearRefreshMark(mark.groupId, mark.forcedAt) > 0) {
+        log(`re-check of ${label} finished`);
+      }
+    }
+    return remaining;
   }
 
   /**
