@@ -92,7 +92,61 @@ CREATE TABLE IF NOT EXISTS progress (
     updated_at  INTEGER NOT NULL,
     payload     TEXT    NOT NULL
 );
+
+-- "Re-check this, whatever the cache says."
+--
+-- A mark is one instant. Every verdict older than it is treated as expired by
+-- the planner, which is deliberately the *only* thing it does: the work then
+-- flows through the ordinary pass, so lane limits, the viewer pause and the EPG
+-- gate all keep applying to it. A button that probed on the spot instead would
+-- be a second scheduler, and the one thing this whole codebase is about is not
+-- having one of those.
+--
+-- Stamping an instant rather than clearing rows is what makes it cancellable.
+-- The verdicts are all still there, still ranking the channel, and deleting the
+-- mark puts them straight back in service -- where deleting from probe_cache
+-- would have thrown away the measurements and the ages the freshness numbers
+-- are computed from.
+CREATE TABLE IF NOT EXISTS refresh_marks (
+    -- A Dispatcharr group id, or ALL_GROUPS for the whole catalogue.
+    group_id   INTEGER PRIMARY KEY,
+    forced_at  INTEGER NOT NULL
+);
 `;
+
+/**
+ * The `group_id` a whole-catalogue refresh is stored under.
+ *
+ * Negative because Dispatcharr's ids are positive, so it cannot collide with a
+ * real group, and in the same table as the per-group marks so one read answers
+ * both questions.
+ */
+export const ALL_GROUPS = -1;
+
+/** Outstanding re-check requests. */
+export interface RefreshMarks {
+  /** The whole-catalogue mark, if one is set. */
+  all: number | null;
+  /** Per-group marks, by group id. */
+  byGroup: Map<number, number>;
+}
+
+export const NO_MARKS: RefreshMarks = { all: null, byGroup: new Map() };
+
+/**
+ * The instant a channel in this group was last told to re-check from scratch.
+ *
+ * The later of the two marks that can cover it, and 0 when neither does -- so a
+ * caller compares `probedAt <= forcedAt` unconditionally rather than branching
+ * on whether a mark exists, since no real verdict is stamped at or before the
+ * epoch. A channel with no group at all is still covered by a whole-catalogue
+ * mark; it is in the catalogue.
+ */
+export function forcedAtFor(marks: RefreshMarks, groupId: number | null | undefined): number {
+  const all = marks.all ?? 0;
+  if (groupId === null || groupId === undefined) return all;
+  return Math.max(all, marks.byGroup.get(groupId) ?? 0);
+}
 
 export interface Progress {
   runId: string | null;
@@ -656,6 +710,67 @@ export class Store {
     }
   }
 
+  /** Every outstanding re-check request. */
+  refreshMarks(): RefreshMarks {
+    const rows = this.sql('SELECT group_id, forced_at FROM refresh_marks').all() as Array<{
+      group_id: number;
+      forced_at: number;
+    }>;
+    const marks: RefreshMarks = { all: null, byGroup: new Map() };
+    for (const row of rows) {
+      if (row.group_id === ALL_GROUPS) marks.all = row.forced_at;
+      else marks.byGroup.set(row.group_id, row.forced_at);
+    }
+    return marks;
+  }
+
+  /**
+   * Ask for everything in a scope to be re-checked, from `at` onwards.
+   *
+   * Re-marking an already-marked scope moves the instant forward rather than
+   * stacking, which is what someone clicking the button twice means: re-check
+   * it as of now.
+   */
+  setRefreshMark(groupId: number, at: number = Date.now()): void {
+    this.sql(
+      `INSERT INTO refresh_marks (group_id, forced_at) VALUES (?, ?)
+       ON CONFLICT(group_id) DO UPDATE SET forced_at = excluded.forced_at`,
+    ).run(groupId, at);
+  }
+
+  /** Cancel a request. Returns how many marks that cleared. */
+  clearRefreshMark(groupId: number): number {
+    return this.sql('DELETE FROM refresh_marks WHERE group_id = ?').run(groupId).changes;
+  }
+
+  /**
+   * Drop every per-group mark, leaving any whole-catalogue one alone.
+   *
+   * Used when a whole-catalogue request arrives and subsumes them: a group mark
+   * underneath it can only retire verdicts the catalogue-wide one has already
+   * retired, and leaving it there means cancelling the big request quietly
+   * leaves the small ones behind still running.
+   */
+  clearGroupRefreshMarks(): number {
+    return this.sql('DELETE FROM refresh_marks WHERE group_id <> ?').run(ALL_GROUPS).changes;
+  }
+
+  /**
+   * A monotonic stamp over the marks, for a reader that wants to know whether a
+   * new request has arrived without caring which.
+   *
+   * This is what the worker's heartbeat watches: an idle loop can be asleep for
+   * PODIUM_IDLE_MAX_MS, and a re-check that waits that long for its first pass
+   * is not a button anybody would press twice. Only *new* requests move it --
+   * a cancel lowers it, and nothing should wake for a cancel.
+   */
+  refreshMarksVersion(): number {
+    const row = this.sql('SELECT MAX(forced_at) AS v FROM refresh_marks').get() as {
+      v: number | null;
+    };
+    return row.v ?? 0;
+  }
+
   /**
    * Aggregate probe-cache state, for metrics.
    *
@@ -685,6 +800,7 @@ export class Store {
     now = Date.now(),
     deadTtlMaxMs: number = deadTtlMs,
     unknownBitrateTtlMs = 0,
+    forcedAt = 0,
   ): CacheHealth {
     // `ttlFor` in SQL, so "when is this due" answers the same here as it does in
     // the planner. Two-argument MIN/MAX are SQLite's scalar forms, not
@@ -702,14 +818,20 @@ export class Store {
                      THEN MIN(:live, :unknown)
                    ELSE :live
                  END`;
+    // A whole-catalogue re-check request brings every older verdict due now,
+    // exactly as the planner reads it. Only the global mark is applied: this
+    // table has stream ids and no idea which channel -- let alone which group --
+    // any of them belongs to, and a per-group mark cannot be answered without
+    // matching. The number that does account for those is the pass's own
+    // `backlog`, which the progress page prefers over this one anyway.
+    const due = `CASE WHEN probed_at <= :forced THEN :now ELSE probed_at + ${ttl} END`;
     const row = this.sql(
       `SELECT COUNT(*) AS total,
               COALESCE(SUM(alive), 0)      AS alive,
               MIN(probed_at)               AS oldest,
               MAX(probed_at)               AS newest,
-              MIN(probed_at + ${ttl}) AS nextDue,
-              COALESCE(SUM(probed_at + ${ttl}
-                           <= :now), 0)    AS due,
+              MIN(${due})                  AS nextDue,
+              COALESCE(SUM(${due} <= :now), 0) AS due,
               COALESCE(SUM(probed_at >  :now - 3600000), 0)  AS hour,
               COALESCE(SUM(probed_at <= :now - 3600000
                        AND probed_at >  :now - 21600000), 0) AS sixHours,
@@ -722,6 +844,7 @@ export class Store {
       dead: deadTtlMs,
       deadMax: Math.max(deadTtlMaxMs, deadTtlMs),
       unknown: unknownBitrateTtlMs,
+      forced: forcedAt,
       now,
     }) as Record<string, number | null>;
     const total = (row.total as number) ?? 0;
@@ -838,6 +961,9 @@ export class Store {
     this.db.transaction(() => {
       this.sql('DELETE FROM probe_cache').run();
       this.sql('DELETE FROM runs').run();
+      // A mark against verdicts that no longer exist is a request that has
+      // already been granted, and leaving it would keep waking the worker.
+      this.sql('DELETE FROM refresh_marks').run();
     })();
   }
 

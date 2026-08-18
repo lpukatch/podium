@@ -109,6 +109,8 @@ interface Stats {
 }
 
 const card = 'rounded-xl border border-[var(--color-line)] bg-[var(--color-panel)]';
+const btn =
+  'rounded-lg border border-[var(--color-line)] bg-[var(--color-panel)] px-4 py-2 text-[15px] hover:border-[var(--color-accent)] disabled:opacity-50';
 const pill = 'inline-block rounded-full px-2 py-0.5 text-xs whitespace-nowrap';
 const heading = 'text-sm font-semibold uppercase tracking-wide text-[var(--color-muted)]';
 
@@ -194,6 +196,15 @@ export function ProgressView() {
   const [worker, setWorker] = useState<WorkerState>('active');
   const [heartbeatAge, setHeartbeatAge] = useState<number | null>(null);
   const [error, setError] = useState('');
+  // Outstanding re-check requests: when the whole catalogue was queued, and how
+  // many groups were queued on their own.
+  const [refresh, setRefresh] = useState<{ all: number | null; groups: number }>({
+    all: null,
+    groups: 0,
+  });
+  // Re-checking everything is hours of provider work on a large catalogue, so
+  // it asks first -- and asks with the real number in front of it.
+  const [confirming, setConfirming] = useState(false);
   // Its own second-by-second clock: the countdown to the next pass has to move
   // between polls, or it looks frozen.
   const [now, setNow] = useState(() => Date.now());
@@ -217,10 +228,28 @@ export function ProgressView() {
       setHeartbeatAge(
         typeof body.heartbeatAgeSeconds === 'number' ? body.heartbeatAgeSeconds : null,
       );
+      setRefresh(
+        (body.refresh as { all: number | null; groups: number }) ?? { all: null, groups: 0 },
+      );
     } catch (e) {
       setError(String(e));
     }
   }, []);
+
+  const queueAll = async () => {
+    await fetch('/api/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'all' }),
+    });
+    setConfirming(false);
+    await poll();
+  };
+
+  const cancelAll = async () => {
+    await fetch('/api/refresh?scope=all', { method: 'DELETE' });
+    await poll();
+  };
 
   const busy = progress ? BUSY.includes(progress.phase) : false;
 
@@ -256,7 +285,14 @@ export function ProgressView() {
   // as a stand-in. They differ: a verdict on an excluded channel expires and is
   // never refreshed, so the cache would report a backlog nothing will ever work
   // through.
-  const waiting = p?.backlog ?? cache?.due ?? 0;
+  //
+  // Except right after a catalogue-wide re-check is queued: the last pass ran
+  // before the request existed, so its backlog is a number about a different
+  // question and reads as "0 streams to go" on work that has not started. Until
+  // a pass has run since, the cache's own count -- which does account for the
+  // mark -- is the honest one.
+  const backlogPredatesRequest = refresh.all !== null && (p?.updatedAt ?? 0) < refresh.all;
+  const waiting = backlogPredatesRequest ? (cache?.due ?? 0) : (p?.backlog ?? cache?.due ?? 0);
   const dueAt = p?.dueAt ?? cache?.nextDueAt ?? null;
   // The same orphan problem applies to the oldest probe: the cache-wide MIN
   // counts verdicts on excluded, unmatched, or removed streams the pacer never
@@ -376,6 +412,77 @@ export function ProgressView() {
               .join(', ')}
           </p>
         )}
+
+        {/* Re-check everything.
+
+            The freshness target is a floor, not a schedule: "nothing older than
+            24 hours" is satisfied by a library measured at four this morning,
+            which is not the same as being ready for something on tonight. This
+            retires every verdict as of now and lets the ordinary pass work
+            through them, so nothing here bypasses the provider limits or the
+            pause while somebody is watching -- it just stops the cache
+            answering for them.
+
+            Which is also why it asks first. On a large catalogue this is hours
+            of probing, and on the day you would most want it -- a house full of
+            people with the TV on -- it is hours that keep yielding to viewers. */}
+        <div className="mt-4 border-t border-[var(--color-line)] pt-4">
+          {refresh.all !== null ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-sm">
+                <b>Re-checking everything</b>{' '}
+                <span className="text-[var(--color-muted)]">
+                  — queued {ago(refresh.all)}. Every verdict older than that has been retired;{' '}
+                  {n(waiting)} {waiting === 1 ? 'stream is' : 'streams are'} still to go.
+                </span>
+              </span>
+              <span className="flex-1" />
+              <button type="button" onClick={() => void cancelAll()} className={btn}>
+                Cancel
+              </button>
+            </div>
+          ) : confirming ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-sm">
+                Measure all {n(cache?.total ?? 0)} streams again, however fresh they are?{' '}
+                <span className="text-[var(--color-muted)]">
+                  It runs at the provider limits and pauses whenever anyone is watching, so on a
+                  busy evening it can take a long time. Cancelling puts the current verdicts back in
+                  service — nothing is thrown away.
+                </span>
+              </span>
+              <span className="flex-1" />
+              <button type="button" onClick={() => setConfirming(false)} className={btn}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void queueAll()}
+                className={`${btn} border-[var(--color-accent)] text-[var(--color-accent)]`}
+              >
+                Re-check everything
+              </button>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-sm text-[var(--color-muted)]">
+                Something on tonight? Re-check the library now rather than waiting for the freshness
+                target to expire it.
+                {refresh.groups > 0 && (
+                  <>
+                    {' '}
+                    {n(refresh.groups)} {refresh.groups === 1 ? 'group is' : 'groups are'} already
+                    queued on {refresh.groups === 1 ? 'its' : 'their'} own.
+                  </>
+                )}
+              </span>
+              <span className="flex-1" />
+              <button type="button" onClick={() => setConfirming(true)} className={btn}>
+                Re-check everything
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {cache && cache.total > 0 && stats && (

@@ -43,6 +43,8 @@ interface GroupRow {
   ruled: number;
   matchedChannels: number;
   links: number;
+  /** When this group was asked to re-check from scratch, if it still is. */
+  refreshQueuedAt: number | null;
   rows: ChannelRow[];
 }
 
@@ -158,6 +160,9 @@ export default function Page() {
   const [groups, setGroups] = useState<GroupRow[]>([]);
   const [patterns, setPatterns] = useState<PatternRule[]>([]);
   const [streamCount, setStreamCount] = useState(0);
+  // A catalogue-wide re-check covers every group, so a group that has not been
+  // asked for on its own is still being re-checked while this is set.
+  const [refreshAllAt, setRefreshAllAt] = useState<number | null>(null);
   const [error, setError] = useState<{
     error: string;
     detail?: string;
@@ -206,6 +211,7 @@ export default function Page() {
       setGroups(body.groups as GroupRow[]);
       setPatterns((body.patterns ?? []) as PatternRule[]);
       setStreamCount(body.streamCount as number);
+      setRefreshAllAt((body.refreshAllQueuedAt as number | null) ?? null);
     } catch (e) {
       setError({ error: 'Podium is not responding', detail: String(e) });
     } finally {
@@ -387,6 +393,27 @@ export default function Page() {
     await fetch(`/api/rules/${channelId}/patterns`, { method: 'DELETE' });
     await load();
     void runPreview();
+  };
+
+  /**
+   * Ask for this group to be re-checked whatever the cache says.
+   *
+   * Queues, rather than probes: the worker picks it up on its next pass, which
+   * keeps the provider limits and the pause-while-watching rule in force. See
+   * /api/refresh.
+   */
+  const queueRefresh = async (groupId: number) => {
+    await fetch('/api/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'group', groupId }),
+    });
+    await load();
+  };
+
+  const cancelRefresh = async (groupId: number) => {
+    await fetch(`/api/refresh?scope=group&groupId=${groupId}`, { method: 'DELETE' });
+    await load();
   };
 
   const setMode = async (id: number, mode: Mode) => {
@@ -840,6 +867,7 @@ export default function Page() {
               <p className="mt-2 text-sm text-[var(--color-muted)]">
                 {MODES.find((m) => m.value === group.mode)?.hint}
               </p>
+
               {group.mode === 'always' && group.ruled === 0 && group.channels > 0 && (
                 <p className="mt-2 text-sm text-[var(--color-warn)]">
                   Nothing in this group has a rule, so nothing here is being checked. Add an alias
@@ -852,6 +880,50 @@ export default function Page() {
                   Currently set by a name rule. Choosing here pins this group explicitly.
                 </p>
               )}
+              {/* Re-check on demand.
+
+                  The freshness target is the right default and the wrong one on
+                  the afternoon of a big event: every stream here can be
+                  comfortably inside the 24-hour window and still have been
+                  measured at four in the morning. This says "look again anyway".
+
+                  Not offered on an excluded group, which is not checked at all,
+                  so a mark on it would sit there queued forever. */}
+              {group.mode !== 'never' &&
+                (refreshAllAt !== null ? (
+                  <p className="mt-3 text-sm text-[var(--color-muted)]">
+                    Everything is queued for a re-check — this group included. Call it off on the
+                    Progress tab.
+                  </p>
+                ) : group.refreshQueuedAt !== null ? (
+                  <div className="mt-3 flex flex-wrap items-center gap-3">
+                    <span className="text-sm text-[var(--color-muted)]">
+                      Queued for a re-check {since(group.refreshQueuedAt)}. The worker works through
+                      it at the provider limits, and pauses while anyone is watching.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void cancelRefresh(group.id)}
+                      className={btn}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <div className="mt-3 flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => void queueRefresh(group.id)}
+                      className={btn}
+                    >
+                      Re-check this group
+                    </button>
+                    <span className="text-sm text-[var(--color-muted)]">
+                      Measures every stream here again, however fresh it is — for the hours before
+                      something you care about is on.
+                    </span>
+                  </div>
+                ))}
               <input
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}

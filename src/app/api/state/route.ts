@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { loadConfig } from '@/lib/config';
 import { ALWAYS, assignmentIsRule, Eligibility, type GroupPolicy } from '@/lib/eligibility';
 import { assignedCandidates } from '@/lib/runner';
 import {
@@ -10,6 +11,7 @@ import {
   snapshot,
   userGroups,
 } from '@/lib/server/state';
+import { NO_MARKS, type RefreshMarks, Store } from '@/lib/store';
 
 export const dynamic = 'force-dynamic';
 
@@ -28,6 +30,20 @@ export async function GET(request: Request) {
     // Resolve through Eligibility so the UI shows exactly what the worker will
     // do, including policies that come from a name pattern rather than an id.
     const resolver = new Eligibility(policy, undefined, patterns);
+
+    // Best-effort: a database this cannot open is a reason to draw the groups
+    // without their re-check state, not a reason to fail the page that is the
+    // only way to fix it.
+    let marks: RefreshMarks = NO_MARKS;
+    let store: Store | null = null;
+    try {
+      store = new Store(loadConfig().dbPath);
+      marks = store.refreshMarks();
+    } catch {
+      // left as NO_MARKS
+    } finally {
+      store?.close();
+    }
 
     const groups = userGroups(snap);
     const byGroup = new Map<number, typeof snap.channels>();
@@ -95,6 +111,11 @@ export async function GET(request: Request) {
         ruled,
         matchedChannels,
         links,
+        // When this group was last asked to re-check from scratch, if it still
+        // is. The whole-catalogue mark is reported on its own below rather than
+        // folded in here, so the UI can say which one is doing it -- cancelling
+        // a group is not how you call off a catalogue-wide run.
+        refreshQueuedAt: marks.byGroup.get(group.id) ?? null,
         rows,
       };
     });
@@ -106,6 +127,7 @@ export async function GET(request: Request) {
       patterns,
       streamCount: snap.streams.length,
       fetchedAt: snap.fetchedAt,
+      refreshAllQueuedAt: marks.all,
     });
   } catch (error) {
     // "Cannot reach Dispatcharr" is the wrong thing to say to someone who has

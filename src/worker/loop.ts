@@ -177,6 +177,14 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
   let beat: ReturnType<typeof setInterval> | null = null;
   let holding = false;
   let waited = false;
+  // A pass is in flight. `tick` reschedules itself, so nothing normally
+  // re-enters it -- but a re-check request can now arrive mid-pass and ask it
+  // to run again, and two concurrent passes would double-probe every stream
+  // and race each other's reorders into Dispatcharr, which is the whole reason
+  // for the worker lock.
+  let running = false;
+  let wakeRequested = false;
+  let lastMark = 0;
 
   /**
    * Read live, so changing the check interval in the UI takes effect on the
@@ -192,7 +200,13 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
   };
 
   const tick = async (): Promise<void> => {
-    if (stopping) return;
+    if (stopping || running) return;
+    running = true;
+    // Cleared on the way in, so a request that lands *during* this pass is
+    // still honoured below even though this pass may already have planned
+    // around it. The cost of the extra pass is one catalogue crawl; the cost
+    // of dropping it is a button that silently does nothing.
+    wakeRequested = false;
     const startedAt = Date.now();
     let summary: RunSummary | null = null;
     try {
@@ -218,11 +232,17 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
       // A failed pass must not kill the loop -- the next tick retries.
       log(`pass at ${clock(startedAt)} failed: ${String(error)}`);
     }
+    // Before the reschedule and with nothing awaited in between, so
+    // `checkWake` cannot see a pass that has finished but not yet booked its
+    // successor and start a second one on top of it.
+    running = false;
     if (!stopping) {
       const live = currentConfig();
       // The pass reports this, not the cache: it is the only place that knows
       // which expiring verdicts belong to a channel a pass would actually probe.
-      const { waitMs, idle } = nextWait(live, summary, summary?.nextDueAt ?? null);
+      const { waitMs, idle } = wakeRequested
+        ? { waitMs: 0, idle: false }
+        : nextWait(live, summary, summary?.nextDueAt ?? null);
       const nextAt = Date.now() + waitMs;
       // Told to the UI as well as the log: "when does it next run" was
       // unanswerable from the progress page before.
@@ -230,6 +250,44 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
       log(idle ? `nothing due; sleeping until ${clock(nextAt)}` : `next pass at ${clock(nextAt)}`);
       timer = setTimeout(() => void tick(), waitMs);
     }
+  };
+
+  /**
+   * Notice a re-check somebody asked for and bring the next pass forward.
+   *
+   * The marks are read from SQLite rather than pushed, because the web half and
+   * the worker are separate processes in the split deployment and only
+   * accidentally the same one in the shipped image -- the database is the only
+   * channel that works for both. It rides the heartbeat, which was already
+   * paying a write every 30s, so the whole mechanism costs one extra read of a
+   * table with at most a handful of rows in it.
+   *
+   * That 30s is the worst-case latency on the button, and it is the reason this
+   * exists at all: a settled install sleeps up to PODIUM_IDLE_MAX_MS between
+   * passes, so without it a re-check queued at 9am could sit untouched until
+   * whenever the next verdict happened to fall due.
+   */
+  const checkWake = (): void => {
+    if (stopping || !holding) return;
+    let mark: number;
+    try {
+      mark = store.refreshMarksVersion();
+    } catch {
+      // A transient read failure must not take the loop down; the next beat
+      // asks again.
+      return;
+    }
+    if (mark <= lastMark) return;
+    lastMark = mark;
+    wakeRequested = true;
+    // A pass already in flight books the follow-up itself, from the flag above.
+    if (running) return;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    log('re-check requested; starting a pass now');
+    void tick();
   };
 
   /** Take the lock and start passing, or come back in `LOCK_RETRY_MS`. */
@@ -253,7 +311,17 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
     }
 
     holding = true;
-    beat = setInterval(() => store.heartbeat(owner), 30_000);
+    // Whatever is already on the table is picked up by the first pass below, so
+    // it is not a wake-up -- only marks arriving after this are.
+    try {
+      lastMark = store.refreshMarksVersion();
+    } catch {
+      lastMark = 0;
+    }
+    beat = setInterval(() => {
+      store.heartbeat(owner);
+      checkWake();
+    }, 30_000);
     beat.unref?.();
 
     // The *effective* dry run, not the booted one. `startWorker` is handed the

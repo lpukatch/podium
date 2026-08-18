@@ -32,6 +32,7 @@ export function GET() {
 
     const progress = store.getProgress();
     const runs = store.recentRuns(30);
+    const marks = store.refreshMarks();
 
     // Whether a worker is running is the lock heartbeat's question, not
     // progress age's.
@@ -68,6 +69,7 @@ export function GET() {
       stale,
       worker,
       heartbeatAgeSeconds: heartbeatAge === null ? null : Math.round(heartbeatAge / 1000),
+      refresh: { all: marks.all, groups: marks.byGroup.size },
       runs,
       stats: {
         cache: store.cacheHealth(
@@ -76,6 +78,10 @@ export function GET() {
           Date.now(),
           config.PODIUM_DEAD_TTL_MAX_MS,
           config.PODIUM_UNKNOWN_BITRATE_TTL_MS,
+          // Without this the tiles would report a caught-up library for the
+          // however-many minutes between queueing a catalogue-wide re-check and
+          // the first pass publishing a backlog that says otherwise.
+          marks.all ?? 0,
         ),
         day: store.runStats(Date.now() - DAY_MS),
         activity: store.activity(24),
