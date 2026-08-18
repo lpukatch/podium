@@ -59,6 +59,7 @@ export function statsPayload(
     audio_codec: result.audioCodec,
     pixel_format: result.pixelFormat,
     audio_channels: result.audioChannels,
+    channel_layout: result.channelLayout,
     video_bitrate: Math.round(result.bitrateKbps),
     bitrate_measured: Boolean(result.bitrateMeasured),
     blank_detected: Boolean(result.black),

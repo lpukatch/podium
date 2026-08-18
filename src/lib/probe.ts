@@ -35,8 +35,10 @@ export interface ProbeResult {
   audioCodec: string;
   /** Pixel format from ffprobe, e.g. "yuv420p". Published for Dispatcharr's UI. */
   pixelFormat: string;
-  /** Audio channel count from ffprobe (2 = stereo). Published for Dispatcharr's UI. */
+  /** Audio channel count from ffprobe (2 = stereo, 6 = 5.1). Published for Dispatcharr's UI. */
   audioChannels: number;
+  /** ffprobe's layout name for that track, e.g. "stereo" or "5.1(side)". */
+  channelLayout: string;
   elapsedMs: number;
   error: string;
   /** True when bitrate came from reading the stream rather than its metadata. */
@@ -62,6 +64,7 @@ export const DEAD: Omit<ProbeResult, 'elapsedMs' | 'error'> = {
   audioCodec: '',
   pixelFormat: '',
   audioChannels: 0,
+  channelLayout: '',
 };
 
 export interface ProbeOptions {
@@ -93,7 +96,7 @@ export interface ProbeOptions {
   ffprobePath?: string;
 }
 
-interface FfprobeStream {
+export interface FfprobeStream {
   codec_type?: string;
   codec_name?: string;
   width?: number;
@@ -103,6 +106,7 @@ interface FfprobeStream {
   bit_rate?: string;
   pix_fmt?: string;
   channels?: number;
+  channel_layout?: string;
 }
 
 interface FfprobePayload {
@@ -172,9 +176,30 @@ export function parseFps(rate: string | undefined): number {
   return Number.isFinite(value) ? Math.round(value * 100) / 100 : 0;
 }
 
+/**
+ * The audio track a viewer will actually hear, out of everything on offer.
+ *
+ * Providers ship multi-track streams -- one of these carries HE-AAC stereo,
+ * E-AC-3 stereo and E-AC-3 5.1 on the same channel -- and taking the first one
+ * reported a "5.1 + Stereo" stream as 2-channel aac, because the stereo track
+ * happens to be listed first. Most channels means best audio, which is also
+ * ffmpeg's own default stream selection, so this is what a player picks too.
+ *
+ * Ties keep the earlier track: with nothing to separate them, the one the
+ * provider listed first is the one a player defaults to.
+ */
+export function pickAudio(streams: FfprobeStream[]): FfprobeStream | undefined {
+  let best: FfprobeStream | undefined;
+  for (const stream of streams) {
+    if (stream.codec_type !== 'audio') continue;
+    if (!best || (stream.channels ?? 0) > (best.channels ?? 0)) best = stream;
+  }
+  return best;
+}
+
 export function parsePayload(payload: FfprobePayload): Omit<ProbeResult, 'elapsedMs' | 'error'> {
   const video = (payload.streams ?? []).find((s) => s.codec_type === 'video');
-  const audio = (payload.streams ?? []).find((s) => s.codec_type === 'audio');
+  const audio = pickAudio(payload.streams ?? []);
   if (!video) return { ...DEAD };
 
   let bitrate = 0;
@@ -197,6 +222,7 @@ export function parsePayload(payload: FfprobePayload): Omit<ProbeResult, 'elapse
     audioCodec: audio?.codec_name ?? '',
     pixelFormat: video.pix_fmt ?? '',
     audioChannels: audio?.channels ?? 0,
+    channelLayout: audio?.channel_layout ?? '',
   };
 }
 

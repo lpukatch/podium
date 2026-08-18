@@ -11,7 +11,7 @@ import type { StreamLike } from './matcher';
 import { matchKey, normalize } from './normalize';
 import { resolveOrdering } from './ordering';
 import type { ProbeResult } from './probe';
-import { parseFps, parsePayload } from './probe';
+import { parseFps, parsePayload, pickAudio } from './probe';
 import { loadRules } from './rules';
 import { statsPayload } from './runner';
 import { DEFAULT_WEIGHTS, isUsable, type RankStrategy, rank, score } from './scoring';
@@ -26,6 +26,7 @@ const alive = (over: Partial<ProbeResult> = {}): ProbeResult => ({
   audioCodec: 'aac',
   pixelFormat: 'yuv420p',
   audioChannels: 2,
+  channelLayout: 'stereo',
   elapsedMs: 0,
   error: '',
   ...over,
@@ -41,6 +42,7 @@ const dead: ProbeResult = {
   audioCodec: '',
   pixelFormat: '',
   audioChannels: 0,
+  channelLayout: '',
   elapsedMs: 0,
   error: 'timeout',
 };
@@ -392,6 +394,40 @@ describe('ffprobe parsing', () => {
     expect(parsePayload({ streams: [{ codec_type: 'audio', codec_name: 'aac' }] }).alive).toBe(
       false,
     );
+  });
+
+  it('reads the richest audio track, not the first one listed', () => {
+    // A real provider stream: "TNT Sports 1 FHD (5.1 + Stereo)" carries HE-AAC
+    // stereo first, then E-AC-3 stereo, then E-AC-3 5.1. Taking the first track
+    // published a 5.1 stream to Dispatcharr as 2-channel aac.
+    const parsed = parsePayload({
+      streams: [
+        { codec_type: 'video', codec_name: 'h264', width: 1920, height: 1080 },
+        { codec_type: 'audio', codec_name: 'aac', channels: 2, channel_layout: 'stereo' },
+        { codec_type: 'audio', codec_name: 'eac3', channels: 2, channel_layout: 'stereo' },
+        { codec_type: 'audio', codec_name: 'eac3', channels: 6, channel_layout: '5.1(side)' },
+      ],
+    });
+    expect(parsed.audioChannels).toBe(6);
+    expect(parsed.audioCodec).toBe('eac3');
+    expect(parsed.channelLayout).toBe('5.1(side)');
+  });
+
+  it('keeps the earlier track when nothing separates them', () => {
+    const best = pickAudio([
+      { codec_type: 'video', codec_name: 'h264' },
+      { codec_type: 'audio', codec_name: 'eac3', channels: 2 },
+      { codec_type: 'audio', codec_name: 'aac', channels: 2 },
+    ]);
+    expect(best?.codec_name).toBe('eac3');
+  });
+
+  it('leaves audio empty when the stream carries none', () => {
+    const parsed = parsePayload({
+      streams: [{ codec_type: 'video', codec_name: 'h264', width: 1280, height: 720 }],
+    });
+    expect(parsed.audioChannels).toBe(0);
+    expect(parsed.channelLayout).toBe('');
   });
 
   it('falls back to format bitrate', () => {
@@ -1096,5 +1132,7 @@ describe('stats payload', () => {
     const payload = statsPayload(alive());
     expect(payload.pixel_format).toBe('yuv420p');
     expect(payload.audio_channels).toBe(2);
+    // Dispatcharr's own probe writes the count and the layout as separate keys.
+    expect(payload.channel_layout).toBe('stereo');
   });
 });

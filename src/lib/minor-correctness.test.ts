@@ -14,6 +14,7 @@ describe('MR 5 - Minor Correctness & Observability Tests', () => {
         audioCodec: 'aac',
         pixelFormat: 'yuv420p',
         audioChannels: 2,
+        channelLayout: 'stereo',
         bitrateKbps: 5000,
         bitrateMeasured: true,
         elapsedMs: 100,

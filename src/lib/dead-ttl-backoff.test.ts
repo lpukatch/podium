@@ -48,6 +48,7 @@ function verdict(alive: boolean): ProbeResult {
     audioCodec: alive ? 'aac' : '',
     pixelFormat: alive ? 'yuv420p' : '',
     audioChannels: alive ? 2 : 0,
+    channelLayout: alive ? 'stereo' : '',
     bitrateKbps: alive ? 5000 : 0,
     bitrateMeasured: alive,
     elapsedMs: 100,
