@@ -33,26 +33,36 @@ function clock(ms: number): string {
 }
 
 /**
- * Whether anything the pass held back could become eligible on its own.
- *
- * An excluded group stays excluded until someone changes it, so it is no
- * reason to come back early. Everything else the eligibility check reports --
- * waiting for kickoff, waiting for EPG, between events -- turns eligible with
- * the clock, so a pass that only held those back must keep the normal cadence.
- */
-function heldBackByTime(heldBack: Record<string, number>): boolean {
-  return Object.keys(heldBack).some((reason) => reason !== 'group excluded');
-}
-
-/**
  * How long to wait before the next pass.
  *
  * A pass fetches every channel and stream from Dispatcharr -- seconds of work
  * against a live install -- so running one every minute when every verdict is
  * cached and nothing has expired is load that can only ever report "nothing to
- * do". When that is the case, sleep until the earliest verdict actually falls
- * due instead, bounded by the idle cap so a stream the provider added in the
- * meantime is still picked up.
+ * do". When that is the case, sleep until the earliest moment the answer could
+ * actually differ, bounded by the idle cap so a stream the provider added in
+ * the meantime is still picked up.
+ *
+ * Two things can change that answer without anybody touching the install, and
+ * both are known to the millisecond by the pass that just ran:
+ *
+ *   - `nextDueAt`  -- the earliest cached verdict falling due for a re-probe.
+ *   - `nextEligibleAt` -- the earliest channel the gate held back turning
+ *     eligible: a kickoff arriving where the clock alone decides it, and
+ *     otherwise the next EPG grid landing, which is the only thing that can
+ *     change the rest. See `AllowResult.eligibleAt`.
+ *
+ * This used to ask a much blunter question -- "did the pass hold anything back
+ * for a reason the clock could clear?" -- and if so kept the base cadence. That
+ * is true on any install with event channels in it essentially all the time,
+ * which meant the idle sleep never once ran: measured on a live install, 450
+ * consecutive passes, 378 of them (84%) fetching 22,486 streams to do nothing,
+ * and not a single one of them sleeping. Waiting until the specific instant
+ * something turns eligible holds the same guarantee -- no channel is probed
+ * later than it would have been -- without the once-a-minute crawl.
+ *
+ * The cadence is only kept when the pass did work, when work is still pending,
+ * or when there is genuinely nothing to aim at -- no cached verdict and no grid
+ * to refresh, which is a fresh install rather than a settled one.
  */
 export function nextWait(
   config: Config,
@@ -62,12 +72,21 @@ export function nextWait(
 ): { waitMs: number; idle: boolean } {
   const base = Math.max(config.PODIUM_TICK_MS, 1_000);
   if (!summary || summary.paused) return { waitMs: base, idle: false };
-  const worked = summary.probed > 0 || summary.reordered > 0 || summary.deferred > 0;
-  if (worked || heldBackByTime(summary.heldBack)) return { waitMs: base, idle: false };
-  if (nextDueAt === null) return { waitMs: base, idle: false };
+  // `runnableBacklog` is the one that matters when a pass probed nothing but
+  // had something to probe: an aborted run, or probes that all failed, leave
+  // real work outstanding that no wake-up time above would ever describe.
+  const worked =
+    summary.probed > 0 ||
+    summary.reordered > 0 ||
+    summary.deferred > 0 ||
+    summary.runnableBacklog > 0;
+  if (worked) return { waitMs: base, idle: false };
+
+  const wakes = [nextDueAt, summary.nextEligibleAt].filter((at): at is number => at !== null);
+  if (wakes.length === 0) return { waitMs: base, idle: false };
 
   const cap = Math.max(config.PODIUM_IDLE_MAX_MS, base);
-  const waitMs = Math.min(Math.max(nextDueAt - now, base), cap);
+  const waitMs = Math.min(Math.max(Math.min(...wakes) - now, base), cap);
   return { waitMs, idle: waitMs > base };
 }
 

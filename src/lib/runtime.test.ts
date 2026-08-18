@@ -21,6 +21,7 @@ import {
   Eligibility,
   globToRegExp,
   NEVER,
+  nextProgrammeStarts,
   parseGroupPatterns,
   parsePolicies,
 } from './eligibility';
@@ -199,6 +200,88 @@ describe('eligibility', () => {
   it('indexes only the programme airing now', () => {
     expect(currentProgrammes(epgRows(120), NOW).size).toBe(0);
     expect(currentProgrammes(epgRows(-10), NOW).has('GAME.us')).toBe(true);
+  });
+
+  it('indexes the soonest programme still to come, ignoring the one airing', () => {
+    // The companion index the loop sleeps on. The programme airing now started
+    // in the past, so it must never be its own "next start" -- that would wake
+    // the loop immediately and forever.
+    const rows = [...epgRows(-30), ...epgRows(120), ...epgRows(45)];
+    expect(nextProgrammeStarts(rows, NOW).get('GAME.us')).toBe(NOW.getTime() + 45 * 60_000);
+    expect(nextProgrammeStarts(epgRows(-30), NOW).has('GAME.us')).toBe(false);
+  });
+
+  it('says when a channel waiting for kickoff turns eligible', () => {
+    const e = new Eligibility(parsePolicies({ 9: { mode: AFTER_EPG_START } }));
+    // Airing, and started this instant, so the grace period is what is left.
+    const verdict = e.allows(9, 'GAME.us', currentProgrammes(epgRows(0), NOW), NOW);
+    expect(verdict.reason).toBe('before kickoff');
+    // Kickoff plus the grace the policy waits out anyway: waking at the start
+    // itself would only re-hold it for the length of the grace period.
+    expect(verdict.eligibleAt).toBe(NOW.getTime() + 5 * 60_000);
+  });
+
+  it('waits out a countdown block, then the fixture the grid lists next', () => {
+    const e = new Eligibility(parsePolicies({ 9: { mode: AFTER_EPG_START } }));
+    const programmes = currentProgrammes(epgRows(-30, false), NOW);
+
+    // Nothing listed after it, so there is no time to give. Emphatically *not*
+    // the block's own end: the countdown ending turns this into a channel with
+    // no programme listed, which is held back just the same, and a pass sent to
+    // find that out crawls the whole catalogue to learn nothing. What opens the
+    // gate is a live programme, and only rows we do not have yet carry one.
+    const alone = e.allows(9, 'GAME.us', programmes, NOW);
+    expect(alone.reason).toBe('no live programme');
+    expect(alone.eligibleAt).toBeUndefined();
+
+    // A grid that does list what comes next answers it exactly. Dispatcharr's
+    // endpoint returns only what is airing, so this is the better-EPG case.
+    const nextStarts = nextProgrammeStarts(epgRows(200), NOW);
+    const listed = e.allows(9, 'GAME.us', programmes, NOW, undefined, nextStarts);
+    expect(listed.eligibleAt).toBe(NOW.getTime() + 205 * 60_000);
+  });
+
+  it('reopens a passed window only when the next programme starts', () => {
+    const e = new Eligibility(
+      new Map([
+        [9, { mode: AFTER_EPG_START, graceMinutes: 5, windowMinutes: 60, requireLive: true }],
+      ]),
+    );
+    const verdict = e.allows(
+      9,
+      'GAME.us',
+      currentProgrammes(epgRows(-90), NOW),
+      NOW,
+      undefined,
+      nextProgrammeStarts(epgRows(90), NOW),
+    );
+    expect(verdict.reason).toBe('event window passed');
+    expect(verdict.eligibleAt).toBe(NOW.getTime() + 95 * 60_000);
+  });
+
+  it('leaves the time unknown when nothing can answer it', () => {
+    // An excluded group needs an operator, and a channel the grid lists nothing
+    // for needs a new grid. Neither is a time the loop can sleep on.
+    const excluded = new Eligibility(parsePolicies({ 7: 'never' }));
+    expect(excluded.allows(7, 'GAME.us', new Map(), NOW).eligibleAt).toBeUndefined();
+
+    const e = new Eligibility(parsePolicies({ 9: { mode: AFTER_EPG_START } }));
+    const blank = e.allows(9, 'UNKNOWN', new Map(), NOW);
+    expect(blank.reason).toBe('no EPG data');
+    expect(blank.eligibleAt).toBeUndefined();
+
+    // Unless the grid does list something later for it, which is exactly the
+    // case that used to keep the loop awake for hours.
+    const listed = e.allows(
+      9,
+      'GAME.us',
+      new Map(),
+      NOW,
+      undefined,
+      nextProgrammeStarts(epgRows(240), NOW),
+    );
+    expect(listed.reason).toBe('no EPG data');
+    expect(listed.eligibleAt).toBe(NOW.getTime() + 245 * 60_000);
   });
 
   it('needs no EPG for an assigned group', () => {
@@ -535,6 +618,8 @@ describe('idle back-off', () => {
     deferred: 0,
     backlog: 0,
     nextDueAt: null,
+    nextEligibleAt: null,
+    runnableBacklog: 0,
     oldestProbedAt: null,
     eligibleChannels: 0,
     heldBack: {},
@@ -562,25 +647,66 @@ describe('idle back-off', () => {
     expect(nextWait(config, summary({ deferred: 9 }), NOW + 3_600_000, NOW).waitMs).toBe(60_000);
   });
 
+  it('keeps the normal cadence when probeable work is still outstanding', () => {
+    // A pass that probed nothing but *had* something to probe -- every probe
+    // failed, or a viewer appeared and aborted the run. No wake-up time
+    // describes that: the work is due now, so the answer is the base tick.
+    expect(nextWait(config, summary({ runnableBacklog: 4 }), NOW + 3_600_000, NOW).waitMs).toBe(
+      60_000,
+    );
+    // Jobs on an inactive provider are deliberately not counted there -- no lane
+    // exists for them, so no pass can ever run them and waking early to look
+    // again is the once-a-minute crawl this exists to stop.
+    expect(nextWait(config, summary({ backlog: 40 }), NOW + 3_600_000, NOW).idle).toBe(true);
+  });
+
   it('comes back promptly when someone is watching', () => {
     expect(nextWait(config, summary({ paused: true }), NOW + 3_600_000, NOW).waitMs).toBe(60_000);
     expect(nextWait(config, null, NOW + 3_600_000, NOW).waitMs).toBe(60_000);
   });
 
-  it('does not sleep through a kickoff', () => {
-    // An excluded group stays excluded, so it is no reason to wake early; a
-    // channel waiting for its programme to start turns eligible on the clock.
+  it('wakes for a kickoff before it wakes for an expiring verdict', () => {
+    // The pass held a channel back until 19:30 and nothing expires for an hour,
+    // so 19:30 is the moment the answer could differ. Sleeping to the verdict
+    // would probe that channel half an hour late; ticking every minute until
+    // then is 30 full crawls of Dispatcharr to learn nothing.
+    const { waitMs, idle } = nextWait(
+      config,
+      summary({ heldBack: { 'before kickoff': 2 }, nextEligibleAt: NOW + 300_000 }),
+      NOW + 3_600_000,
+      NOW,
+    );
+    expect(waitMs).toBe(300_000);
+    expect(idle).toBe(true);
+  });
+
+  it('wakes for an expiring verdict before it wakes for a kickoff', () => {
+    expect(
+      nextWait(
+        config,
+        summary({ heldBack: { 'before kickoff': 2 }, nextEligibleAt: NOW + 3_600_000 }),
+        NOW + 120_000,
+        NOW,
+      ).waitMs,
+    ).toBe(120_000);
+  });
+
+  it('sleeps on a kickoff with nothing cached to expire', () => {
+    expect(nextWait(config, summary({ nextEligibleAt: NOW + 400_000 }), null, NOW).waitMs).toBe(
+      400_000,
+    );
+  });
+
+  it('does not stay awake for a channel whose timing nothing can answer', () => {
+    // An excluded group stays excluded until an operator says otherwise, and a
+    // channel with no programme listed at all has no time to aim at. Neither is
+    // a reason to crawl the catalogue every minute; the idle cap is the bound.
     expect(
       nextWait(config, summary({ heldBack: { 'group excluded': 12 } }), NOW + 3_600_000, NOW).idle,
     ).toBe(true);
     expect(
-      nextWait(
-        config,
-        summary({ heldBack: { 'before kickoff (19:30Z)': 2 } }),
-        NOW + 3_600_000,
-        NOW,
-      ).waitMs,
-    ).toBe(60_000);
+      nextWait(config, summary({ heldBack: { 'no EPG data': 16 } }), NOW + 3_600_000, NOW).waitMs,
+    ).toBe(900_000);
   });
 
   it('runs at the normal interval when something is already overdue', () => {
@@ -882,7 +1008,12 @@ describe('Runner.plan (managed set + oldest check)', () => {
 
   /** plan() is private; reach it directly so the keep/oldest logic is exercised
    *  without faking the whole Dispatcharr client. */
-  function plan(runner: Runner, eligibility: unknown) {
+  function plan(
+    runner: Runner,
+    eligibility: unknown,
+    nextStarts = new Map<string, number>(),
+    gridExpiresAt: number | null = null,
+  ) {
     return (
       runner as unknown as {
         plan: (
@@ -893,9 +1024,26 @@ describe('Runner.plan (managed set + oldest check)', () => {
           counters: { cached: number },
           heldBack: Record<string, number>,
           groupNames: Map<number, string>,
-        ) => { oldestProbedAt: number | null; keepStreamIds: Set<number> };
+          nextStarts: Map<string, number>,
+          gridExpiresAt: number | null,
+        ) => {
+          oldestProbedAt: number | null;
+          nextEligibleAt: number | null;
+          keepStreamIds: Set<number>;
+        };
       }
-    ).plan.call(runner, channels, streams, new Map(), eligibility, { cached: 0 }, {}, groupNames);
+    ).plan.call(
+      runner,
+      channels,
+      streams,
+      new Map(),
+      eligibility,
+      { cached: 0 },
+      {},
+      groupNames,
+      nextStarts,
+      gridExpiresAt,
+    );
   }
 
   it('keeps eligible and time-gated streams, drops never, and ages only the eligible', () => {
@@ -930,6 +1078,55 @@ describe('Runner.plan (managed set + oldest check)', () => {
     const second = plan(runner, eligibility);
     expect(second.oldestProbedAt).not.toBeNull();
     expect(Date.now() - (second.oldestProbedAt as number)).toBeLessThan(5_000);
+  });
+
+  it('reports when the earliest held-back channel turns eligible', () => {
+    // The wiring the loop's sleep rests on. TNT is gated and has no programme
+    // in this grid; the grid lists its next one in an hour, so that plus the
+    // grace period is the moment a pass could reach a different answer -- and
+    // the only reason to be awake before then.
+    const rules = new RulesSource(rulesPath);
+    const runner = new Runner({
+      config: () => loadConfig({ DISPATCHARR_API_KEY: 'k' }),
+      store,
+      rules,
+    });
+    const startsAt = Date.now() + 3_600_000;
+    const gridExpiresAt = Date.now() + 2 * 3_600_000;
+
+    // The excluded channel is deliberately given a start too: an operator has
+    // to clear that one, so it must not pull the loop awake.
+    const planned = plan(
+      runner,
+      rules.get().eligibility,
+      new Map([
+        ['tnt.id', startsAt],
+        ['hbo.id', Date.now() + 60_000],
+      ]),
+      gridExpiresAt,
+    );
+    expect(planned.nextEligibleAt).toBe(startsAt + 5 * 60_000);
+  });
+
+  it('falls back to the next grid when the rows in hand cannot say', () => {
+    // The case that actually runs against Dispatcharr, whose grid endpoint
+    // returns only what is airing: nothing here dates TNT's next programme, and
+    // re-deriving the same rows a minute later cannot invent one. The next
+    // fetch is the earliest thing that can change the answer.
+    const rules = new RulesSource(rulesPath);
+    const runner = new Runner({
+      config: () => loadConfig({ DISPATCHARR_API_KEY: 'k' }),
+      store,
+      rules,
+    });
+    const gridExpiresAt = Date.now() + 1_800_000;
+
+    expect(plan(runner, rules.get().eligibility, new Map(), gridExpiresAt).nextEligibleAt).toBe(
+      gridExpiresAt,
+    );
+    // With no grid cached at all there is nothing to aim at, and the loop keeps
+    // its normal cadence rather than inventing a time.
+    expect(plan(runner, rules.get().eligibility, new Map(), null).nextEligibleAt).toBeNull();
   });
 });
 
