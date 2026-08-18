@@ -14,6 +14,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ProbeResult } from './probe';
 import { deadTtlFor, Store, ttlFor } from './store';
 
+/**
+ * Whether a pass would still serve this row from cache.
+ *
+ * The planner's rule, spelled out: one read, measured against the lifetime the
+ * row has earned. `Store` deliberately has no method for it -- the planner
+ * needs the age and the streak from the same read anyway, so a helper that
+ * returned only the verdict would be a second query for what it already holds.
+ */
+function servable(
+  store: Store,
+  streamId: number,
+  liveTtlMs: number,
+  deadTtlMs: number,
+  deadTtlMaxMs: number,
+): boolean {
+  const entry = store.entry(streamId, 'h');
+  if (!entry?.result) return false;
+  return Date.now() - entry.probedAt < ttlFor(entry, liveTtlMs, deadTtlMs, deadTtlMaxMs);
+}
+
 const HOUR = 3_600_000;
 const BASE = 3 * HOUR;
 const CAP = 24 * HOUR;
@@ -159,11 +179,11 @@ describe('Store dead-streak bookkeeping', () => {
 
     vi.advanceTimersByTime(4 * HOUR);
     // The just-died stream is due again; the four-times-dead one is not.
-    expect(store.get(1, 'h', 24 * HOUR, BASE, CAP)).toBeNull();
-    expect(store.get(2, 'h', 24 * HOUR, BASE, CAP)).not.toBeNull();
+    expect(servable(store, 1, 24 * HOUR, BASE, CAP)).toBe(false);
+    expect(servable(store, 2, 24 * HOUR, BASE, CAP)).toBe(true);
 
     vi.advanceTimersByTime(21 * HOUR);
-    expect(store.get(2, 'h', 24 * HOUR, BASE, CAP)).toBeNull();
+    expect(servable(store, 2, 24 * HOUR, BASE, CAP)).toBe(false);
     store.close();
   });
 
@@ -171,7 +191,7 @@ describe('Store dead-streak bookkeeping', () => {
     const store = new Store(':memory:');
     for (let i = 0; i < 6; i++) store.put(1, 'h', verdict(false));
     vi.advanceTimersByTime(4 * HOUR);
-    expect(store.get(1, 'h', 24 * HOUR, BASE, BASE)).toBeNull();
+    expect(servable(store, 1, 24 * HOUR, BASE, BASE)).toBe(false);
     store.close();
   });
 });

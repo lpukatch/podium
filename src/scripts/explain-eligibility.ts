@@ -16,7 +16,7 @@ async function main() {
   const [channels, groups, epg] = await Promise.all([
     client.channels(),
     client.groups(),
-    client.epgNow(),
+    client.epgWindow(),
   ]);
   const doc = JSON.parse(readFileSync(process.env.PODIUM_RULES!, 'utf8'));
   const { matcher } = loadRules(doc);

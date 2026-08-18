@@ -95,7 +95,7 @@ holds a Dispatcharr credential.
 | --- | --- | --- |
 | `PODIUM_MAX_AGE_MS` | `86400000` | freshness target; the UI shows this in minutes |
 | `PODIUM_TICK_MS` | `60000` | how often a pass is considered, not how long one takes |
-| `PODIUM_IDLE_MAX_MS` | `900000` | longest sleep when nothing is due; [see below](#when-there-is-nothing-to-do) |
+| `PODIUM_IDLE_MAX_MS` | `1800000` | longest sleep when nothing is due; [see below](#when-there-is-nothing-to-do) |
 | `PODIUM_LIVE_TTL_MS` | `86400000` | how long a working stream is trusted |
 | `PODIUM_DEAD_TTL_MS` | `10800000` | how soon a stream that *just* died is rechecked |
 | `PODIUM_DEAD_TTL_MAX_MS` | `86400000` | ceiling once that has backed off; [see below](#when-there-is-nothing-to-do) |
@@ -155,19 +155,31 @@ an excluded channel expires like any other and is never refreshed, so a
 cache-wide answer would wake the loop every few minutes for work that does not
 exist.
 
-The second instant is what a gated group contributes. A channel waiting on
-kickoff opens at its programme's start plus the grace period — an exact time, so
-the loop waits for it rather than polling towards it. For every other held-back
-channel the answer is when the next EPG grid arrives (`PODIUM_EPG_TTL_MS`),
-because Dispatcharr's grid endpoint returns what is airing *now* rather than a
-window of what is coming: once those rows are cached, no amount of re-reading
-them turns a channel showing a countdown block into one showing its event. A
-pass run before the grid refreshes fetches the whole catalogue to reach the
-answer it already had.
+The second instant is what a gated group contributes, and the EPG window is
+what makes it knowable. Podium reads `/api/epg/grid/`, which carries roughly a
+day ahead, so the same rows answer both "what is airing" and "when does the next
+event start". A channel waiting on kickoff opens at its programme's start plus
+the grace period; one showing a countdown block opens when the next programme
+marked *live* begins, plus that same grace. Both are exact times, so the loop
+waits for them rather than polling towards them.
 
-Every sleep is capped by `PODIUM_IDLE_MAX_MS` regardless, so a stream the
-provider added is still noticed, and a grid TTL longer than the cap costs
-nothing in gate timeliness.
+A group with `require_live` off is gated on start times alone, so it takes the
+next start of anything rather than the next live one. A channel the window lists
+no upcoming programme for cannot be dated at all, and falls back to when the
+next grid arrives (`PODIUM_EPG_TTL_MS`) — nothing before that can change its
+answer.
+
+Every sleep is capped by `PODIUM_IDLE_MAX_MS`, half an hour by default. The cap
+only ever *shortens* a sleep, so it cannot make a channel probe late — a kickoff
+further out than the cap costs one extra pass, which finds the channel still
+held back and goes straight back to sleep until the kickoff itself. What the cap
+is really for is the one thing neither the EPG nor the cache can announce: a
+stream the provider has just added, which it will then measure within the cap
+rather than immediately.
+
+Raise it if you would rather have fewer passes than prompt discovery of new
+streams; an hour lines it up with `PODIUM_EPG_TTL_MS`, which is the longest
+anything else here waits.
 
 **A stream that stays dead is asked less often.** A dead verdict starts at
 `PODIUM_DEAD_TTL_MS` and doubles per consecutive dead verdict, up to

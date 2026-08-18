@@ -108,11 +108,20 @@ export const configSchema = z.object({
    */
   PODIUM_UNKNOWN_BITRATE_TTL_MS: num(30 * 60_000),
   /**
-   * How long the EPG grid is reused across passes before re-fetching it. The
-   * grid carries each programme's start/end times, so a pass re-derives "what
-   * is airing now" from the cached rows -- this only goes stale when the grid's
-   * own window of listed programmes is shorter than the TTL, in which case it
-   * degrades to "no EPG" and refreshes at the next boundary.
+   * How long the EPG window is reused across passes before re-fetching it.
+   *
+   * The rows carry each programme's start and end, so a pass re-derives "what
+   * is airing now" from the cached copy rather than asking again. That only
+   * holds because the window reaches about a day ahead -- which it did not
+   * until Podium started reading `/api/epg/grid/`. Against the old
+   * `current-programs` source the rows described a single instant, so a
+   * programme ending simply vanished from them and the channel read "no EPG
+   * data" until this TTL expired: measured on a live install, 38 gated channels
+   * held back that way while their games had been on for 28 minutes.
+   *
+   * So this is now what it always claimed to be -- how fresh a *schedule* is,
+   * not how blind the gate is between fetches. It bounds how quickly a fixture
+   * added or moved since the last fetch is noticed, and nothing else.
    */
   PODIUM_EPG_TTL_MS: num(60 * 60_000),
 
@@ -136,11 +145,26 @@ export const configSchema = z.object({
    *
    * A pass costs a full fetch of every channel and stream from Dispatcharr, so
    * repeating it every minute once every verdict is cached is load with no
-   * information in it. When a pass finds nothing due, the loop waits until the
-   * earliest cached verdict actually expires -- but never longer than this, so
-   * streams the provider added since are still picked up promptly.
+   * information in it. When a pass finds nothing due, the loop sleeps until the
+   * earlier of the next verdict expiring and the next held-back channel opening
+   * -- but never longer than this.
+   *
+   * This only ever *shortens* a sleep, so it cannot make a channel probe late:
+   * a kickoff further out than the cap costs one extra pass, which finds the
+   * channel still held back and sleeps again until the kickoff itself. What it
+   * buys is the one thing neither the cache nor the EPG can announce -- a
+   * stream the provider has just added.
+   *
+   * Half an hour rather than the quarter it used to be. When a wake-up was the
+   * only way to learn anything the cap had to be short, because it *was* the
+   * schedule; now the pass that follows one is the rare case where nothing had
+   * a time on it, and every real deadline -- a verdict expiring, a kickoff --
+   * is waited for exactly. The cost of raising it is bounded and dull: a
+   * stream the provider added is measured up to half an hour later than it
+   * would have been, having sat unranked at the bottom of its channel until
+   * then either way.
    */
-  PODIUM_IDLE_MAX_MS: num(15 * 60_000),
+  PODIUM_IDLE_MAX_MS: num(30 * 60_000),
   PODIUM_PAUSE_WHEN_WATCHING: bool(true),
   PODIUM_MIN_FREE_SLOTS: num(1),
   PODIUM_MAX_SLICE: num(400),

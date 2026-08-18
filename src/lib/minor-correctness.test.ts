@@ -26,8 +26,7 @@ describe('MR 5 - Minor Correctness & Observability Tests', () => {
     expect(pruned).toBe(0);
 
     // Verifies all rows are preserved
-    const hit = store.get(50, 'hash-50', 100_000, 100_000);
-    expect(hit).not.toBeNull();
+    expect(store.entry(50, 'hash-50')).not.toBeNull();
   });
 
   it('records expanded run metrics in Store.finishRun', () => {

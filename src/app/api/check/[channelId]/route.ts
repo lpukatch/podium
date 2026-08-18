@@ -98,7 +98,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         ? snap.groups.find((g) => g.id === channel.groupId)?.name
         : undefined;
     const elig = new Eligibility(policies(), undefined, groupPatterns());
-    const epgRows = (await client.epgNow().catch(() => [])) as never[];
+    const epgRows = (await client.epgWindow().catch(() => [])) as never[];
     const programmes = currentProgrammes(epgRows);
     const verdict = elig.allows(channel.groupId, channel.tvgId, programmes, new Date(), groupName);
 

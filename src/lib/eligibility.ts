@@ -193,7 +193,7 @@ export class Eligibility {
     programmes: Map<string, Programme>,
     now: Date = new Date(),
     groupName?: string,
-    nextStarts?: Map<string, number>,
+    upcoming?: UpcomingStarts,
   ): AllowResult {
     const policy = this.policyFor(groupId, groupName);
     if (policy.mode === NEVER) return { allowed: false, reason: 'group excluded' };
@@ -202,15 +202,18 @@ export class Eligibility {
     if (policy.mode === ALWAYS || policy.mode === ASSIGNED) return { allowed: true, reason: '' };
 
     // The soonest this channel could open, whatever is holding it back now: the
-    // next programme the grid lists for it, plus the grace the policy waits out
-    // anyway. Waking at the start itself would only re-hold it for the length
-    // of the grace period and pay a second full pass to learn that.
+    // next programme that could actually pass this policy, plus the grace it
+    // waits out anyway. Waking at the start itself would only re-hold it for
+    // the length of the grace period and pay a second full pass to learn that.
     //
-    // Empty against a grid that only lists what is airing, which is what
-    // Dispatcharr's endpoint returns today -- hence `nextStarts` being optional
-    // and every use of it below falling through to undefined.
+    // `requireLive` picks the index, and it matters: an event channel's grid is
+    // mostly countdown and postgame filler, so the next start of *any*
+    // programme is usually a block that will be held back again. Waking on the
+    // next start marked live is a wake-up per event rather than one per block.
     const grace = policy.graceMinutes * 60_000;
-    const nextStart = nextStarts?.get(tvgId);
+    const nextStart = policy.requireLive
+      ? upcoming?.nextLive.get(tvgId)
+      : upcoming?.next.get(tvgId);
     const opensNext = nextStart === undefined ? undefined : nextStart + grace;
 
     const programme = programmes.get(tvgId);
@@ -364,32 +367,46 @@ export function currentProgrammes(rows: EpgRow[], now: Date = new Date()): Map<s
 }
 
 /**
- * The next programme start after `now` for each tvg_id in the grid.
+ * When each channel's next programme starts, and when its next *live* one does.
+ *
+ * Two indexes because the answer depends on the policy asking. A group with
+ * `requireLive` on is waiting for an event, and the next thing on an event
+ * channel is usually another countdown block -- waking for that costs a full
+ * pass to reach the same verdict. A group with it off is gated on start times
+ * alone, so any programme will do.
+ */
+export interface UpcomingStarts {
+  next: Map<string, number>;
+  nextLive: Map<string, number>;
+}
+
+/**
+ * Index the grid by what comes next for each tvg_id.
  *
  * The companion to `currentProgrammes`, and the reason a held-back channel can
  * be slept on rather than polled. `currentProgrammes` answers "what is airing",
  * which is what the gate needs; this answers "when does the next thing start",
- * which is what the gate's *waiting* needs -- a channel with no programme now,
- * or one showing a countdown block, turns eligible when the grid's next entry
- * for it begins, and the grid already says when that is.
+ * which is what the gate's *waiting* needs -- a channel showing a countdown
+ * block turns eligible when the event after it begins, and the grid says when.
  *
  * Only starts strictly in the future count, so the programme airing now is
- * never its own answer.
- *
- * Empty against Dispatcharr's own grid endpoint, which returns what is airing
- * and nothing beyond it -- callers must have an answer for that case rather
- * than treating a miss here as "never". It is cheap, and it is exact wherever
- * the rows do reach into the future.
+ * never its own answer. Empty against a source that lists only what is airing,
+ * which is what `current-programs` returns -- callers must still have an answer
+ * for a miss rather than treating it as "never".
  */
-export function nextProgrammeStarts(rows: EpgRow[], now: Date = new Date()): Map<string, number> {
-  const out = new Map<string, number>();
+export function nextProgrammeStarts(rows: EpgRow[], now: Date = new Date()): UpcomingStarts {
+  const upcoming: UpcomingStarts = { next: new Map(), nextLive: new Map() };
   const at = now.getTime();
+  const soonest = (into: Map<string, number>, tvgId: string, start: number): void => {
+    const held = into.get(tvgId);
+    if (held === undefined || start < held) into.set(tvgId, start);
+  };
   for (const row of rows) {
     if (!row.tvg_id || !row.start_time) continue;
     const start = new Date(row.start_time).getTime();
     if (Number.isNaN(start) || start <= at) continue;
-    const soonest = out.get(row.tvg_id);
-    if (soonest === undefined || start < soonest) out.set(row.tvg_id, start);
+    soonest(upcoming.next, row.tvg_id, start);
+    if (row.is_live === true) soonest(upcoming.nextLive, row.tvg_id, start);
   }
-  return out;
+  return upcoming;
 }
