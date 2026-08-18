@@ -171,6 +171,17 @@ export interface Progress {
  */
 export const STALE_LOCK_MS = 120_000;
 
+/**
+ * How much run history to keep.
+ *
+ * One row per pass, and nothing reads further back than a day: the progress
+ * page asks for the last 30 rows, a 24-hour tally and a 24-hour activity
+ * series. A month is generous enough to answer "what did it do last week" by
+ * hand and still bounds a table that would otherwise grow for the life of the
+ * install -- a pass a minute is half a million rows a year.
+ */
+export const RUN_HISTORY_MS = 30 * 86_400_000;
+
 export const IDLE_PROGRESS: Progress = {
   runId: null,
   phase: 'idle',
@@ -334,6 +345,7 @@ export interface CacheEntry {
 
 export class Store {
   private readonly db: Database.Database;
+  private readonly statements = new Map<string, Database.Statement>();
   private static initializedPaths = new Set<string>();
 
   constructor(path: string) {
@@ -368,7 +380,34 @@ export class Store {
     }
   }
 
+  /**
+   * A prepared statement, compiled once per connection and reused after that.
+   *
+   * `db.prepare` compiles SQL every time it is called, and the planner calls
+   * `entry()` once per candidate stream -- twice over, since the cache-only
+   * reorder pass walks the same channels again. On a 1,757-stream install that
+   * is ~3,500 compilations a pass, every pass, forever. Measured against a live
+   * database: 55.3ms of compiling to do 10.9ms of reading.
+   *
+   * Keyed on the SQL text and held per instance, because a statement belongs to
+   * the connection that compiled it. Only *constant* SQL goes through here --
+   * the three places that build a statement from a variable number of columns
+   * or bind holes call `db.prepare` directly, so this map cannot grow with the
+   * data.
+   */
+  private sql(text: string): Database.Statement {
+    let statement = this.statements.get(text);
+    if (!statement) {
+      statement = this.db.prepare(text);
+      this.statements.set(text, statement);
+    }
+    return statement;
+  }
+
   close(): void {
+    // better-sqlite3 finalises these with the connection; dropping the map
+    // keeps a closed store from handing out a statement that no longer exists.
+    this.statements.clear();
     this.db.close();
   }
 
@@ -381,12 +420,10 @@ export class Store {
    * round trips a minute saved.
    */
   entry(streamId: number, streamHash: string): CacheEntry | null {
-    const row = this.db
-      .prepare(
-        `SELECT probed_at, alive, result, dead_streak FROM probe_cache
-         WHERE stream_id = ? AND stream_hash = ?`,
-      )
-      .get(streamId, streamHash) as
+    const row = this.sql(
+      `SELECT probed_at, alive, result, dead_streak FROM probe_cache
+       WHERE stream_id = ? AND stream_hash = ?`,
+    ).get(streamId, streamHash) as
       | { probed_at: number; alive: number; result: string; dead_streak: number }
       | undefined;
     if (!row) return null;
@@ -427,9 +464,9 @@ export class Store {
 
   /** Age of the cached entry in ms, or null when absent. Drives the pacer. */
   age(streamId: number, streamHash: string): number | null {
-    const row = this.db
-      .prepare('SELECT probed_at FROM probe_cache WHERE stream_id = ? AND stream_hash = ?')
-      .get(streamId, streamHash) as { probed_at: number } | undefined;
+    const row = this.sql(
+      'SELECT probed_at FROM probe_cache WHERE stream_id = ? AND stream_hash = ?',
+    ).get(streamId, streamHash) as { probed_at: number } | undefined;
     return row ? Date.now() - row.probed_at : null;
   }
 
@@ -442,31 +479,34 @@ export class Store {
    * when SQL expresses it exactly.
    */
   put(streamId: number, streamHash: string, result: ProbeResult): void {
-    this.db
-      .prepare(
-        `INSERT INTO probe_cache (stream_id, stream_hash, probed_at, alive, result, dead_streak)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(stream_id, stream_hash) DO UPDATE SET
-           probed_at   = excluded.probed_at,
-           alive       = excluded.alive,
-           result      = excluded.result,
-           dead_streak = CASE WHEN excluded.alive = 1 THEN 0
-                              ELSE probe_cache.dead_streak + 1 END`,
-      )
-      .run(
-        streamId,
-        streamHash,
-        Date.now(),
-        result.alive ? 1 : 0,
-        JSON.stringify(result),
-        result.alive ? 0 : 1,
-      );
+    this.sql(
+      `INSERT INTO probe_cache (stream_id, stream_hash, probed_at, alive, result, dead_streak)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(stream_id, stream_hash) DO UPDATE SET
+         probed_at   = excluded.probed_at,
+         alive       = excluded.alive,
+         result      = excluded.result,
+         dead_streak = CASE WHEN excluded.alive = 1 THEN 0
+                            ELSE probe_cache.dead_streak + 1 END`,
+    ).run(
+      streamId,
+      streamHash,
+      Date.now(),
+      result.alive ? 1 : 0,
+      JSON.stringify(result),
+      result.alive ? 0 : 1,
+    );
   }
 
   startRun(runId: string): void {
-    this.db
-      .prepare('INSERT OR REPLACE INTO runs (run_id, started_at) VALUES (?, ?)')
-      .run(runId, Date.now());
+    const now = Date.now();
+    this.sql('INSERT OR REPLACE INTO runs (run_id, started_at) VALUES (?, ?)').run(runId, now);
+    // Trimmed here rather than in `prune()`, which only runs when a worker
+    // starts: a container that stays up for months would never trim this table
+    // at all. Against `runs_started_at` this is an index seek that matches
+    // nothing on every pass but the first of the day, so paying it per pass
+    // costs less than the bookkeeping to pay it less often.
+    this.sql('DELETE FROM runs WHERE started_at < ?').run(now - RUN_HISTORY_MS);
   }
 
   finishRun(runId: string, fields: RunUpdate = {}): void {
@@ -488,6 +528,7 @@ export class Store {
       .filter(([key]) => fields[key] !== undefined)
       .map(([key, col]) => [col, fields[key]] as const);
     const setClause = entries.map(([col]) => `${col} = ?`).join(', ');
+    // Not cached: the statement is built from whichever fields were supplied.
     this.db
       .prepare(
         `UPDATE runs SET finished_at = ?${setClause ? `, ${setClause}` : ''} WHERE run_id = ?`,
@@ -512,6 +553,7 @@ export class Store {
     for (let i = 0; i < streamIds.length; i += 400) {
       const chunk = streamIds.slice(i, i + 400);
       const holes = chunk.map(() => '?').join(',');
+      // Not cached: one bind hole per id, so the text varies with the chunk.
       const rows = this.db
         .prepare(
           `SELECT stream_id, probed_at, alive, result FROM probe_cache
@@ -541,9 +583,9 @@ export class Store {
   recentRuns(limit = 20): RunRow[] {
     // rowid breaks ties: two runs started in the same millisecond would
     // otherwise come back in arbitrary order.
-    return this.db
-      .prepare('SELECT * FROM runs ORDER BY started_at DESC, rowid DESC LIMIT ?')
-      .all(limit) as RunRow[];
+    return this.sql('SELECT * FROM runs ORDER BY started_at DESC, rowid DESC LIMIT ?').all(
+      limit,
+    ) as RunRow[];
   }
 
   /**
@@ -555,35 +597,34 @@ export class Store {
    */
   acquireLock(owner: string, staleAfterMs = STALE_LOCK_MS): { ok: boolean; heldBy?: string } {
     const now = Date.now();
-    const row = this.db.prepare('SELECT owner, heartbeat FROM worker_lock WHERE id = 1').get() as
+    const row = this.sql('SELECT owner, heartbeat FROM worker_lock WHERE id = 1').get() as
       | { owner: string; heartbeat: number }
       | undefined;
 
     if (row && row.owner !== owner && now - row.heartbeat < staleAfterMs) {
       return { ok: false, heldBy: row.owner };
     }
-    this.db
-      .prepare(
-        `INSERT INTO worker_lock (id, owner, heartbeat) VALUES (1, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET owner = excluded.owner, heartbeat = excluded.heartbeat`,
-      )
-      .run(owner, now);
+    this.sql(
+      `INSERT INTO worker_lock (id, owner, heartbeat) VALUES (1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET owner = excluded.owner, heartbeat = excluded.heartbeat`,
+    ).run(owner, now);
     return { ok: true };
   }
 
   heartbeat(owner: string): void {
-    this.db
-      .prepare('UPDATE worker_lock SET heartbeat = ? WHERE id = 1 AND owner = ?')
-      .run(Date.now(), owner);
+    this.sql('UPDATE worker_lock SET heartbeat = ? WHERE id = 1 AND owner = ?').run(
+      Date.now(),
+      owner,
+    );
   }
 
   releaseLock(owner: string): void {
-    this.db.prepare('DELETE FROM worker_lock WHERE id = 1 AND owner = ?').run(owner);
+    this.sql('DELETE FROM worker_lock WHERE id = 1 AND owner = ?').run(owner);
   }
 
   /** Every stored setting. */
   settings(): Record<string, string> {
-    const rows = this.db.prepare('SELECT key, value FROM settings').all() as Array<{
+    const rows = this.sql('SELECT key, value FROM settings').all() as Array<{
       key: string;
       value: string;
     }>;
@@ -595,11 +636,11 @@ export class Store {
    * handed back to whatever the environment provides.
    */
   setSettings(values: Record<string, string | null>): void {
-    const upsert = this.db.prepare(
+    const upsert = this.sql(
       `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
     );
-    const remove = this.db.prepare('DELETE FROM settings WHERE key = ?');
+    const remove = this.sql('DELETE FROM settings WHERE key = ?');
     const now = Date.now();
     this.db.transaction(() => {
       for (const [key, value] of Object.entries(values)) {
@@ -611,23 +652,21 @@ export class Store {
 
   /** When settings last changed, so readers can cheaply detect an edit. */
   settingsVersion(): number {
-    const row = this.db.prepare('SELECT MAX(updated_at) AS v FROM settings').get() as {
+    const row = this.sql('SELECT MAX(updated_at) AS v FROM settings').get() as {
       v: number | null;
     };
     return row.v ?? 0;
   }
 
   setProgress(progress: Omit<Progress, 'updatedAt'>): void {
-    this.db
-      .prepare(
-        `INSERT INTO progress (id, updated_at, payload) VALUES (1, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at, payload = excluded.payload`,
-      )
-      .run(Date.now(), JSON.stringify(progress));
+    this.sql(
+      `INSERT INTO progress (id, updated_at, payload) VALUES (1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at, payload = excluded.payload`,
+    ).run(Date.now(), JSON.stringify(progress));
   }
 
   getProgress(): Progress {
-    const row = this.db.prepare('SELECT updated_at, payload FROM progress WHERE id = 1').get() as
+    const row = this.sql('SELECT updated_at, payload FROM progress WHERE id = 1').get() as
       | { updated_at: number; payload: string }
       | undefined;
     if (!row) return IDLE_PROGRESS;
@@ -646,14 +685,12 @@ export class Store {
    * behind that target the install actually is.
    */
   cacheStats(): { total: number; alive: number; dead: number; oldestProbedAt: number | null } {
-    const row = this.db
-      .prepare(
-        `SELECT COUNT(*) AS total,
-                COALESCE(SUM(alive), 0) AS alive,
-                MIN(probed_at) AS oldest
-         FROM probe_cache`,
-      )
-      .get() as { total: number; alive: number; oldest: number | null };
+    const row = this.sql(
+      `SELECT COUNT(*) AS total,
+              COALESCE(SUM(alive), 0) AS alive,
+              MIN(probed_at) AS oldest
+       FROM probe_cache`,
+    ).get() as { total: number; alive: number; oldest: number | null };
     return {
       total: row.total,
       alive: row.alive,
@@ -686,30 +723,28 @@ export class Store {
                      THEN MIN(:live, :unknown)
                    ELSE :live
                  END`;
-    const row = this.db
-      .prepare(
-        `SELECT COUNT(*) AS total,
-                COALESCE(SUM(alive), 0)      AS alive,
-                MIN(probed_at)               AS oldest,
-                MAX(probed_at)               AS newest,
-                MIN(probed_at + ${ttl}) AS nextDue,
-                COALESCE(SUM(probed_at + ${ttl}
-                             <= :now), 0)    AS due,
-                COALESCE(SUM(probed_at >  :now - 3600000), 0)  AS hour,
-                COALESCE(SUM(probed_at <= :now - 3600000
-                         AND probed_at >  :now - 21600000), 0) AS sixHours,
-                COALESCE(SUM(probed_at <= :now - 21600000
-                         AND probed_at >  :now - 86400000), 0) AS day,
-                COALESCE(SUM(probed_at <= :now - 86400000), 0) AS older
-         FROM probe_cache`,
-      )
-      .get({
-        live: liveTtlMs,
-        dead: deadTtlMs,
-        deadMax: Math.max(deadTtlMaxMs, deadTtlMs),
-        unknown: unknownBitrateTtlMs,
-        now,
-      }) as Record<string, number | null>;
+    const row = this.sql(
+      `SELECT COUNT(*) AS total,
+              COALESCE(SUM(alive), 0)      AS alive,
+              MIN(probed_at)               AS oldest,
+              MAX(probed_at)               AS newest,
+              MIN(probed_at + ${ttl}) AS nextDue,
+              COALESCE(SUM(probed_at + ${ttl}
+                           <= :now), 0)    AS due,
+              COALESCE(SUM(probed_at >  :now - 3600000), 0)  AS hour,
+              COALESCE(SUM(probed_at <= :now - 3600000
+                       AND probed_at >  :now - 21600000), 0) AS sixHours,
+              COALESCE(SUM(probed_at <= :now - 21600000
+                       AND probed_at >  :now - 86400000), 0) AS day,
+              COALESCE(SUM(probed_at <= :now - 86400000), 0) AS older
+       FROM probe_cache`,
+    ).get({
+      live: liveTtlMs,
+      dead: deadTtlMs,
+      deadMax: Math.max(deadTtlMaxMs, deadTtlMs),
+      unknown: unknownBitrateTtlMs,
+      now,
+    }) as Record<string, number | null>;
     const total = (row.total as number) ?? 0;
     const alive = (row.alive as number) ?? 0;
     return {
@@ -731,17 +766,15 @@ export class Store {
 
   /** Run totals over a window -- "what has it done today", not since install. */
   runStats(sinceMs: number): RunStats {
-    const row = this.db
-      .prepare(
-        `SELECT COUNT(*) AS passes,
-                COALESCE(SUM(probed > 0 OR reordered > 0), 0) AS working,
-                COALESCE(SUM(probed), 0)    AS probed,
-                COALESCE(SUM(dead), 0)      AS dead,
-                COALESCE(SUM(reordered), 0) AS reordered,
-                COALESCE(SUM(error IS NOT NULL), 0) AS failed
-         FROM runs WHERE started_at >= ?`,
-      )
-      .get(sinceMs) as Record<string, number>;
+    const row = this.sql(
+      `SELECT COUNT(*) AS passes,
+              COALESCE(SUM(probed > 0 OR reordered > 0), 0) AS working,
+              COALESCE(SUM(probed), 0)    AS probed,
+              COALESCE(SUM(dead), 0)      AS dead,
+              COALESCE(SUM(reordered), 0) AS reordered,
+              COALESCE(SUM(error IS NOT NULL), 0) AS failed
+       FROM runs WHERE started_at >= ?`,
+    ).get(sinceMs) as Record<string, number>;
     return {
       passes: row.passes ?? 0,
       working: row.working ?? 0,
@@ -760,16 +793,14 @@ export class Store {
    */
   activity(hours = 24, now = Date.now()): ActivityBucket[] {
     const start = Math.floor(now / 3_600_000) * 3_600_000 - (hours - 1) * 3_600_000;
-    const rows = this.db
-      .prepare(
-        // CAST, because a bound JS number arrives as a REAL and float division
-        // would give 5.43 rather than the bucket index 5.
-        `SELECT CAST((started_at - :start) / 3600000 AS INTEGER) AS bucket,
+    const rows = this.sql(
+      // CAST, because a bound JS number arrives as a REAL and float division
+      // would give 5.43 rather than the bucket index 5.
+      `SELECT CAST((started_at - :start) / 3600000 AS INTEGER) AS bucket,
                 COALESCE(SUM(probed), 0) AS probed,
                 COALESCE(SUM(dead), 0)   AS dead
          FROM runs WHERE started_at >= :start GROUP BY bucket`,
-      )
-      .all({ start }) as Array<{ bucket: number; probed: number; dead: number }>;
+    ).all({ start }) as Array<{ bucket: number; probed: number; dead: number }>;
     const byBucket = new Map(rows.map((r) => [r.bucket, r]));
     return Array.from({ length: hours }, (_, i) => ({
       from: start + i * 3_600_000,
@@ -788,18 +819,16 @@ export class Store {
     reordered: number;
     skipped: number;
   } {
-    const row = this.db
-      .prepare(
-        `SELECT COUNT(*) AS runs,
-                COALESCE(SUM(error IS NOT NULL), 0) AS failed,
-                COALESCE(SUM(probed), 0)    AS probed,
-                COALESCE(SUM(cached), 0)    AS cached,
-                COALESCE(SUM(dead), 0)      AS dead,
-                COALESCE(SUM(reordered), 0) AS reordered,
-                COALESCE(SUM(skipped), 0)   AS skipped
-         FROM runs`,
-      )
-      .get() as Record<string, number>;
+    const row = this.sql(
+      `SELECT COUNT(*) AS runs,
+              COALESCE(SUM(error IS NOT NULL), 0) AS failed,
+              COALESCE(SUM(probed), 0)    AS probed,
+              COALESCE(SUM(cached), 0)    AS cached,
+              COALESCE(SUM(dead), 0)      AS dead,
+              COALESCE(SUM(reordered), 0) AS reordered,
+              COALESCE(SUM(skipped), 0)   AS skipped
+       FROM runs`,
+    ).get() as Record<string, number>;
     return {
       runs: row.runs ?? 0,
       failed: row.failed ?? 0,
@@ -813,7 +842,7 @@ export class Store {
 
   /** Who holds the worker lock, and how fresh their heartbeat is. */
   lockState(): { owner: string; heartbeat: number } | null {
-    const row = this.db.prepare('SELECT owner, heartbeat FROM worker_lock WHERE id = 1').get() as
+    const row = this.sql('SELECT owner, heartbeat FROM worker_lock WHERE id = 1').get() as
       | { owner: string; heartbeat: number }
       | undefined;
     return row ?? null;
@@ -821,16 +850,15 @@ export class Store {
 
   /** Drop cache rows untouched for a month, so the file cannot grow forever. */
   prune(olderThanMs = 30 * 86_400_000): number {
-    return this.db
-      .prepare('DELETE FROM probe_cache WHERE probed_at < ?')
-      .run(Date.now() - olderThanMs).changes;
+    return this.sql('DELETE FROM probe_cache WHERE probed_at < ?').run(Date.now() - olderThanMs)
+      .changes;
   }
 
   /** Hard reset for all historical and cached data. */
   resetData(): void {
     this.db.transaction(() => {
-      this.db.prepare('DELETE FROM probe_cache').run();
-      this.db.prepare('DELETE FROM runs').run();
+      this.sql('DELETE FROM probe_cache').run();
+      this.sql('DELETE FROM runs').run();
     })();
   }
 
@@ -856,8 +884,7 @@ export class Store {
   ): number {
     if (keep.size === 0) return 0;
     const totalCount =
-      (this.db.prepare('SELECT COUNT(*) as cnt FROM probe_cache').get() as { cnt: number })?.cnt ??
-      0;
+      (this.sql('SELECT COUNT(*) as cnt FROM probe_cache').get() as { cnt: number })?.cnt ?? 0;
     // A `keep` set suddenly a fraction of the cache is far more likely to be a
     // rules file that momentarily parsed short, or a truncated channel fetch,
     // than a genuine decision to stop managing 80% of the library. Deleting on
@@ -875,12 +902,12 @@ export class Store {
     }
     const run = this.db.transaction((ids: number[]) => {
       this.db.exec('CREATE TEMP TABLE IF NOT EXISTS _podium_keep (id INTEGER PRIMARY KEY)');
-      this.db.prepare('DELETE FROM _podium_keep').run();
-      const insert = this.db.prepare('INSERT INTO _podium_keep (id) VALUES (?)');
+      this.sql('DELETE FROM _podium_keep').run();
+      const insert = this.sql('INSERT INTO _podium_keep (id) VALUES (?)');
       for (const id of ids) insert.run(id);
-      return this.db
-        .prepare('DELETE FROM probe_cache WHERE stream_id NOT IN (SELECT id FROM _podium_keep)')
-        .run().changes;
+      return this.sql(
+        'DELETE FROM probe_cache WHERE stream_id NOT IN (SELECT id FROM _podium_keep)',
+      ).run().changes;
     });
     return run([...keep]);
   }

@@ -1,3 +1,4 @@
+import Database from 'better-sqlite3';
 import { mkdtempSync, renameSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -28,7 +29,7 @@ import type { ProbeResult } from './probe';
 import { RulesSource } from './rules-source';
 import { composeOrder, Runner, type RunSummary, sameOrder } from './runner';
 import { DEFAULT_STRATEGY, type RankEntry, type RankStrategy } from './scoring';
-import { Store } from './store';
+import { RUN_HISTORY_MS, Store } from './store';
 
 const NOW = new Date('2026-08-03T18:00:00Z');
 
@@ -402,6 +403,39 @@ describe('store', () => {
     expect(store.prune(-1)).toBe(1);
   });
 
+  it('trims run history as it records, not only when a worker starts', () => {
+    // One row per pass and nothing reads past a day, so an install that stays
+    // up keeps a table it never trims -- half a million rows a year. `prune()`
+    // runs at worker start, which such an install does not do.
+    const old = new Database(join(dir, 'test.db'));
+    old
+      .prepare('INSERT INTO runs (run_id, started_at) VALUES (?, ?)')
+      .run('ancient', Date.now() - RUN_HISTORY_MS - 60_000);
+    old
+      .prepare('INSERT INTO runs (run_id, started_at) VALUES (?, ?)')
+      .run('recent', Date.now() - 60_000);
+    old.close();
+
+    store.startRun('now');
+    const kept = store.recentRuns(10).map((run) => run.run_id);
+    expect(kept).toContain('now');
+    expect(kept).toContain('recent');
+    expect(kept).not.toContain('ancient');
+  });
+
+  it('keeps prepared statements to itself, so two handles cannot share one', () => {
+    // The cache is per instance because a statement belongs to the connection
+    // that compiled it. A second store on the same file must compile its own
+    // and still see the first one's writes.
+    store.put(7, 'h', result());
+    const second = new Store(join(dir, 'test.db'));
+    expect(second.get(7, 'h', 60_000, 60_000)?.height).toBe(1080);
+    // And a closed store's statements go with it rather than being handed out
+    // again by the cache.
+    second.close();
+    expect(() => second.get(7, 'h', 60_000, 60_000)).toThrow();
+  });
+
   it('prunes only rows outside the managed stream set', () => {
     // 1 and 2 are still managed; 3 was excluded/disabled and 4 left every lineup.
     store.put(1, 'h', result());
@@ -410,6 +444,10 @@ describe('store', () => {
     store.put(4, 'h', result());
 
     expect(store.pruneOutside(new Set([1, 2]))).toBe(2);
+    // Twice on one handle: the keep-set scratch table is reused across calls,
+    // and so are the statements that fill it.
+    store.put(5, 'h', result());
+    expect(store.pruneOutside(new Set([1, 2]))).toBe(1);
     // The managed streams survive; the orphans are gone.
     expect(store.get(1, 'h', 60_000, 60_000)).not.toBeNull();
     expect(store.get(2, 'h', 60_000, 60_000)).not.toBeNull();
