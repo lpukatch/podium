@@ -7,10 +7,12 @@
  * between runs, so most of that work is repeated for nothing.
  *
  * Dispatcharr gives every stream a `stream_hash`. Keying the cache on
- * `(streamId, streamHash)` means a stream is re-probed only when the provider
- * actually changes it, or when the cached verdict ages out. Dead streams get a
- * much shorter TTL than live ones -- a dead stream is the thing most likely to
- * have come back, and the thing most worth rechecking.
+ * `(streamId, streamHash, variantId)` means a stream is re-probed only when
+ * the provider actually changes it, or when the cached verdict ages out --
+ * and, since a stream with several logins is probed once per login, only the
+ * *variant* whose verdict aged out is re-probed, not the whole stream. Dead
+ * variants get a much shorter TTL than live ones -- a dead login is the thing
+ * most likely to have come back, and the thing most worth rechecking.
  *
  * That last part is only true of a stream that *just* died. A stream dead on
  * twenty consecutive checks is not coming back between now and the next one,
@@ -31,18 +33,26 @@ import Database from 'better-sqlite3';
 import { mkdirSync } from 'fs';
 import { dirname } from 'path';
 import type { ProbeResult } from './probe';
+import { pickBestVariant, type VariantVerdict } from './variants';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS probe_cache (
     stream_id    INTEGER NOT NULL,
     stream_hash  TEXT    NOT NULL,
+    -- 0 = the stored (default-login) URL; otherwise a Dispatcharr profile id
+    -- whose pattern rewrites that URL to another login. A profile's pattern
+    -- being edited does not change stream_hash, so a variant row can hold a
+    -- verdict for a different effective URL until its TTL expires -- bounded
+    -- by the live lifetime and self-healing.
+    variant_id   INTEGER NOT NULL DEFAULT 0,
     probed_at    INTEGER NOT NULL,
     alive        INTEGER NOT NULL,
     result       TEXT    NOT NULL,
     -- Consecutive dead verdicts, reset to 0 by any alive one. Drives the
-    -- backoff in deadTtlFor().
+    -- backoff in deadTtlFor(). Per variant: one login dying says nothing
+    -- about when another login should be rechecked.
     dead_streak  INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (stream_id, stream_hash)
+    PRIMARY KEY (stream_id, stream_hash, variant_id)
 );
 CREATE INDEX IF NOT EXISTS probe_cache_probed_at ON probe_cache (probed_at);
 
@@ -444,10 +454,60 @@ export class Store {
           // column already exists
         }
       }
+      this.splitProbeCacheByVariant();
       if (path !== ':memory:') {
         Store.initializedPaths.add(path);
       }
     }
+  }
+
+  /**
+   * Widen `probe_cache` from one verdict per stream to one per (stream,
+   * variant), the upgrade path for per-login probing.
+   *
+   * SQLite cannot alter a primary key, so this is the recreate-and-copy the
+   * ALTER idiom above cannot express: a new table with `variant_id` in the
+   * key, the old rows copied across as variant 0 -- the stored URL, which is
+   * the only thing they were ever a verdict for -- then the swap. Everything
+   * survives, streaks included.
+   *
+   * Immediate rather than deferred, with the shape re-checked inside: the web
+   * process and the worker both construct a Store at boot, and a deferred
+   * transaction's check-then-write could interleave with the other process's
+   * identical migration against the same file. The immediate lock serialises
+   * them and the loser's re-check sees the winner's table.
+   */
+  private splitProbeCacheByVariant(): void {
+    const hasVariantColumn = () =>
+      (this.db.pragma('table_info(probe_cache)') as Array<{ name: string }>).some(
+        (col) => col.name === 'variant_id',
+      );
+    if (hasVariantColumn()) return;
+
+    this.db
+      .transaction(() => {
+        if (hasVariantColumn()) return;
+        this.db.exec(`
+          CREATE TABLE probe_cache_split (
+              stream_id    INTEGER NOT NULL,
+              stream_hash  TEXT    NOT NULL,
+              variant_id   INTEGER NOT NULL DEFAULT 0,
+              probed_at    INTEGER NOT NULL,
+              alive        INTEGER NOT NULL,
+              result       TEXT    NOT NULL,
+              dead_streak  INTEGER NOT NULL DEFAULT 0,
+              PRIMARY KEY (stream_id, stream_hash, variant_id)
+          );
+          INSERT INTO probe_cache_split
+              (stream_id, stream_hash, variant_id, probed_at, alive, result, dead_streak)
+            SELECT stream_id, stream_hash, 0, probed_at, alive, result, dead_streak
+            FROM probe_cache;
+          DROP TABLE probe_cache;
+          ALTER TABLE probe_cache_split RENAME TO probe_cache;
+          CREATE INDEX IF NOT EXISTS probe_cache_probed_at ON probe_cache (probed_at);
+        `);
+      })
+      .immediate();
   }
 
   /**
@@ -489,11 +549,11 @@ export class Store {
    * for the TTL as well. At ~1,700 managed streams a pass that is thousands of
    * round trips a minute saved.
    */
-  entry(streamId: number, streamHash: string): CacheEntry | null {
+  entry(streamId: number, streamHash: string, variantId = 0): CacheEntry | null {
     const row = this.sql(
       `SELECT probed_at, alive, result, dead_streak FROM probe_cache
-       WHERE stream_id = ? AND stream_hash = ?`,
-    ).get(streamId, streamHash) as CacheRow | undefined;
+       WHERE stream_id = ? AND stream_hash = ? AND variant_id = ?`,
+    ).get(streamId, streamHash, variantId) as CacheRow | undefined;
     if (!row) return null;
 
     let result: ProbeResult | null = null;
@@ -512,6 +572,36 @@ export class Store {
   }
 
   /**
+   * Every stored verdict for a stream, by variant -- by login.
+   *
+   * The read the planner wants: a stream is served from cache only when all
+   * its variants are fresh, and only the stale ones become probe jobs, so it
+   * needs the whole set rather than `entry`'s one-of-them.
+   */
+  variants(streamId: number, streamHash: string): Map<number, CacheEntry> {
+    const rows = this.sql(
+      `SELECT variant_id, probed_at, alive, result, dead_streak FROM probe_cache
+       WHERE stream_id = ? AND stream_hash = ?`,
+    ).all(streamId, streamHash) as Array<CacheRow & { variant_id: number }>;
+    const out = new Map<number, CacheEntry>();
+    for (const row of rows) {
+      let result: ProbeResult | null = null;
+      try {
+        result = JSON.parse(row.result) as ProbeResult;
+      } catch {
+        // As `entry`: the age and streak are still good.
+      }
+      out.set(row.variant_id, {
+        probedAt: row.probed_at,
+        alive: Boolean(row.alive),
+        deadStreak: row.dead_streak ?? 0,
+        result,
+      });
+    }
+    return out;
+  }
+
+  /**
    * Record a verdict, maintaining the consecutive-dead count.
    *
    * The streak is updated in the same statement that writes the verdict rather
@@ -519,11 +609,11 @@ export class Store {
    * here, but a count that can silently skip on a retry is not worth the risk
    * when SQL expresses it exactly.
    */
-  put(streamId: number, streamHash: string, result: ProbeResult): void {
+  put(streamId: number, streamHash: string, result: ProbeResult, variantId = 0): void {
     this.sql(
-      `INSERT INTO probe_cache (stream_id, stream_hash, probed_at, alive, result, dead_streak)
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(stream_id, stream_hash) DO UPDATE SET
+      `INSERT INTO probe_cache (stream_id, stream_hash, variant_id, probed_at, alive, result, dead_streak)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(stream_id, stream_hash, variant_id) DO UPDATE SET
          probed_at   = excluded.probed_at,
          alive       = excluded.alive,
          result      = excluded.result,
@@ -532,6 +622,7 @@ export class Store {
     ).run(
       streamId,
       streamHash,
+      variantId,
       Date.now(),
       result.alive ? 1 : 0,
       JSON.stringify(result),
@@ -583,6 +674,11 @@ export class Store {
    * Batched rather than one `get` per stream: the editor wants the last probe
    * time and result for every stream on a channel at once, and a query per
    * stream would be dozens of round trips for one page render.
+   *
+   * A stream with several logins has a row per login; the verdict reported is
+   * the best one, the same choice the pass reports (see `pickBestVariant`).
+   * The default weights serve: this reader is for display, and the ranking
+   * pass supplies its own.
    */
   verdicts(
     streamIds: number[],
@@ -597,24 +693,37 @@ export class Store {
       // Not cached: one bind hole per id, so the text varies with the chunk.
       const rows = this.db
         .prepare(
-          `SELECT stream_id, probed_at, alive, result FROM probe_cache
+          `SELECT stream_id, variant_id, probed_at, alive, result FROM probe_cache
            WHERE stream_id IN (${holes})`,
         )
         .all(...chunk) as Array<{
         stream_id: number;
+        variant_id: number;
         probed_at: number;
         alive: number;
         result: string;
       }>;
+      const byStream = new Map<number, Array<{ variantId: number; row: (typeof rows)[number] }>>();
       for (const row of rows) {
-        try {
-          out.set(row.stream_id, {
-            probedAt: row.probed_at,
-            alive: Boolean(row.alive),
-            result: JSON.parse(row.result) as ProbeResult,
-          });
-        } catch {
-          // An unreadable row is simply an unknown verdict.
+        const list = byStream.get(row.stream_id) ?? [];
+        list.push({ variantId: row.variant_id, row });
+        byStream.set(row.stream_id, list);
+      }
+      for (const [streamId, entries] of byStream) {
+        const verdicts: VariantVerdict[] = [];
+        for (const { variantId, row } of entries) {
+          try {
+            verdicts.push({ variantId, result: JSON.parse(row.result) as ProbeResult });
+          } catch {
+            // An unreadable row is simply an unknown verdict.
+          }
+        }
+        const best = pickBestVariant(verdicts);
+        if (best) {
+          // The newest verdict any login contributed: "when did we last look
+          // at this stream through any of its logins".
+          const probedAt = Math.max(...entries.map((e) => e.row.probed_at));
+          out.set(streamId, { probedAt, alive: best.alive, result: best });
         }
       }
     }
@@ -798,13 +907,18 @@ export class Store {
    * `oldestProbedAt` is the freshness signal that matters: the pacer targets
    * "every stream checked within max_age", so the oldest entry is how far
    * behind that target the install actually is.
+   *
+   * Counted per *stream* (a stream with several logins is several rows but
+   * one entry on every page that reads this): alive when any login is, as old
+   * as its least-recently-checked login.
    */
   cacheStats(): { total: number; alive: number; dead: number; oldestProbedAt: number | null } {
     const row = this.sql(
       `SELECT COUNT(*) AS total,
               COALESCE(SUM(alive), 0) AS alive,
               MIN(probed_at) AS oldest
-       FROM probe_cache`,
+       FROM (SELECT MAX(alive) AS alive, MIN(probed_at) AS probed_at
+             FROM probe_cache GROUP BY stream_id)`,
     ).get() as { total: number; alive: number; oldest: number | null };
     return {
       total: row.total,
@@ -846,20 +960,25 @@ export class Store {
     // matching. The number that does account for those is the pass's own
     // `backlog`, which the progress page prefers over this one anyway.
     const due = `CASE WHEN probed_at <= :forced THEN :now ELSE probed_at + ${ttl} END`;
+    // One row per *stream*, not per verdict: a stream with several logins is a
+    // row per login underneath, and counting those would read as more streams.
+    // A stream is alive when any login is, as old as its least-recently-checked
+    // login, and due as soon as its earliest-due login is.
     const row = this.sql(
       `SELECT COUNT(*) AS total,
               COALESCE(SUM(alive), 0)      AS alive,
               MIN(probed_at)               AS oldest,
               MAX(probed_at)               AS newest,
-              MIN(${due})                  AS nextDue,
-              COALESCE(SUM(${due} <= :now), 0) AS due,
+              MIN(due)                     AS nextDue,
+              COALESCE(SUM(due <= :now), 0) AS due,
               COALESCE(SUM(probed_at >  :now - 3600000), 0)  AS hour,
               COALESCE(SUM(probed_at <= :now - 3600000
                        AND probed_at >  :now - 21600000), 0) AS sixHours,
               COALESCE(SUM(probed_at <= :now - 21600000
                        AND probed_at >  :now - 86400000), 0) AS day,
               COALESCE(SUM(probed_at <= :now - 86400000), 0) AS older
-       FROM probe_cache`,
+       FROM (SELECT MAX(alive) AS alive, MIN(probed_at) AS probed_at, MIN(${due}) AS due
+             FROM probe_cache GROUP BY stream_id)`,
     ).get({
       live: liveTtlMs,
       dead: deadTtlMs,

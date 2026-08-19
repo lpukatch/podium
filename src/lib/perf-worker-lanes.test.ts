@@ -12,27 +12,48 @@ describe('selectLaneSlice (Finding 07b & Acceptance Criteria)', () => {
 
     for (let i = 0; i < 100; i++) {
       jobs.push({
-        job: { streamId: i, channelId: i, url: 'http://c', providerId: 3, stepOrder: 1 },
+        job: {
+          streamId: i,
+          channelId: i,
+          url: 'http://c',
+          providerId: 3,
+          profileId: 0,
+          stepOrder: 1,
+        },
         age: 1000 + i,
       });
     }
     for (let i = 0; i < 150; i++) {
       jobs.push({
-        job: { streamId: 1000 + i, channelId: i, url: 'http://a', providerId: 1, stepOrder: 1 },
+        job: {
+          streamId: 1000 + i,
+          channelId: i,
+          url: 'http://a',
+          providerId: 1,
+          profileId: 0,
+          stepOrder: 1,
+        },
         age: 1000 + i,
       });
     }
     for (let i = 0; i < 250; i++) {
       jobs.push({
-        job: { streamId: 2000 + i, channelId: i, url: 'http://b', providerId: 2, stepOrder: 1 },
+        job: {
+          streamId: 2000 + i,
+          channelId: i,
+          url: 'http://b',
+          providerId: 2,
+          profileId: 0,
+          stepOrder: 1,
+        },
         age: 1000 + i,
       });
     }
 
     const limits = new Map([
-      [3, 1], // Provider C
-      [1, 3], // Provider A
-      [2, 5], // Provider B
+      ['3:0', 1], // Provider C
+      ['1:0', 3], // Provider A
+      ['2:0', 5], // Provider B
     ]);
 
     const targetSlice = 360;
@@ -57,26 +78,112 @@ describe('selectLaneSlice (Finding 07b & Acceptance Criteria)', () => {
   it('handles remaining quota when one provider runs out of jobs', () => {
     const jobs: Array<{ job: ProbeJob; age: number }> = [
       {
-        job: { streamId: 1, channelId: 1, url: 'http://c', providerId: 3, stepOrder: 1 },
+        job: {
+          streamId: 1,
+          channelId: 1,
+          url: 'http://c',
+          providerId: 3,
+          profileId: 0,
+          stepOrder: 1,
+        },
         age: 500,
       },
       {
-        job: { streamId: 2, channelId: 2, url: 'http://b', providerId: 2, stepOrder: 1 },
+        job: {
+          streamId: 2,
+          channelId: 2,
+          url: 'http://b',
+          providerId: 2,
+          profileId: 0,
+          stepOrder: 1,
+        },
         age: 400,
       },
       {
-        job: { streamId: 3, channelId: 3, url: 'http://b', providerId: 2, stepOrder: 1 },
+        job: {
+          streamId: 3,
+          channelId: 3,
+          url: 'http://b',
+          providerId: 2,
+          profileId: 0,
+          stepOrder: 1,
+        },
         age: 300,
       },
     ];
 
     const limits = new Map([
-      [3, 1],
-      [2, 5],
+      ['3:0', 1],
+      ['2:0', 5],
     ]);
 
     const selected = selectLaneSlice(jobs, 3, limits);
     expect(selected.length).toBe(3);
+  });
+
+  it('shares a slice across the login lanes of one provider by their own capacity', () => {
+    // Provider A with two logins: the default at 3 connections, a second at 1.
+    // Provider B single login at 4. The lanes compete individually, so the
+    // provider logins together take the share its total capacity deserves
+    // (4 of 8 = half the slice), split 3:1 within it.
+    const jobs: Array<{ job: ProbeJob; age: number }> = [];
+    for (let i = 0; i < 60; i++) {
+      jobs.push({
+        job: {
+          streamId: i,
+          channelId: i,
+          url: 'http://a1',
+          providerId: 1,
+          profileId: 0,
+          stepOrder: 1,
+        },
+        age: 1000 + i,
+      });
+    }
+    for (let i = 0; i < 20; i++) {
+      jobs.push({
+        job: {
+          streamId: 100 + i,
+          channelId: i,
+          url: 'http://a2',
+          providerId: 1,
+          profileId: 9,
+          stepOrder: 1,
+        },
+        age: 1000 + i,
+      });
+    }
+    for (let i = 0; i < 60; i++) {
+      jobs.push({
+        job: {
+          streamId: 200 + i,
+          channelId: i,
+          url: 'http://b',
+          providerId: 2,
+          profileId: 0,
+          stepOrder: 1,
+        },
+        age: 1000 + i,
+      });
+    }
+
+    const limits = new Map([
+      ['1:0', 3],
+      ['1:9', 1],
+      ['2:0', 4],
+    ]);
+    const selected = selectLaneSlice(jobs, 80, limits);
+    expect(selected.length).toBe(80);
+
+    const byLane = new Map<string, number>();
+    for (const item of selected) {
+      const key = `${item.job.providerId}:${item.job.profileId}`;
+      byLane.set(key, (byLane.get(key) ?? 0) + 1);
+    }
+    // Ratio 3 : 1 : 4 of 8 total capacity, out of a slice of 80.
+    expect(byLane.get('1:0')).toBe(30);
+    expect(byLane.get('1:9')).toBe(10);
+    expect(byLane.get('2:0')).toBe(40);
   });
 });
 
@@ -86,13 +193,13 @@ describe('Effective Concurrency & Utilisation (Finding 07a & Acceptance Criteria
     const log = (msg: string) => logs.push(msg);
 
     const jobs: ProbeJob[] = [
-      { streamId: 1, channelId: 10, url: 'u1', providerId: 1, stepOrder: 1 },
-      { streamId: 2, channelId: 11, url: 'u2', providerId: 2, stepOrder: 1 },
+      { streamId: 1, channelId: 10, url: 'u1', providerId: 1, profileId: 0, stepOrder: 1 },
+      { streamId: 2, channelId: 11, url: 'u2', providerId: 2, profileId: 0, stepOrder: 1 },
     ];
 
     const limits = new Map([
-      [1, 5],
-      [2, 5],
+      ['1:0', 5],
+      ['2:0', 5],
     ]);
 
     await runLanes(jobs, {
@@ -115,16 +222,16 @@ describe('Effective Concurrency & Utilisation (Finding 07a & Acceptance Criteria
     const logs: string[] = [];
     // Provider C=1, A=3, B=5 against PODIUM_MAX_CONCURRENT_PROBES=6.
     const jobs: ProbeJob[] = [
-      { streamId: 1, channelId: 10, url: 'u1', providerId: 5, stepOrder: 1 },
-      { streamId: 2, channelId: 11, url: 'u2', providerId: 6, stepOrder: 1 },
-      { streamId: 3, channelId: 12, url: 'u3', providerId: 7, stepOrder: 1 },
+      { streamId: 1, channelId: 10, url: 'u1', providerId: 5, profileId: 0, stepOrder: 1 },
+      { streamId: 2, channelId: 11, url: 'u2', providerId: 6, profileId: 0, stepOrder: 1 },
+      { streamId: 3, channelId: 12, url: 'u3', providerId: 7, profileId: 0, stepOrder: 1 },
     ];
 
     await runLanes(jobs, {
       limits: new Map([
-        [5, 1],
-        [6, 3],
-        [7, 5],
+        ['5:0', 1],
+        ['6:0', 3],
+        ['7:0', 5],
       ]),
       maxConcurrent: 6,
       probe: async () => ({ alive: true }),
@@ -135,22 +242,25 @@ describe('Effective Concurrency & Utilisation (Finding 07a & Acceptance Criteria
     // 1/3/5 -> 1/2/3. The old min(limit, maxConcurrent) returned 1/3/5, i.e. it
     // never bound at all and reported nothing, which is what left a lane
     // advertising limit=5 while never exceeding 3 unexplained.
-    expect(logs.find((l) => l.startsWith('lane 6:'))).toContain('effective limit=2');
-    expect(logs.find((l) => l.startsWith('lane 7:'))).toContain('effective limit=3');
+    expect(logs.find((l) => l.startsWith('lane 6:0:'))).toContain('effective limit=2');
+    expect(logs.find((l) => l.startsWith('lane 7:0:'))).toContain('effective limit=3');
     // A lane already at or below its share is not annotated.
-    expect(logs.find((l) => l.startsWith('lane 5:'))).not.toContain('effective limit=');
+    expect(logs.find((l) => l.startsWith('lane 5:0:'))).not.toContain('effective limit=');
   });
 
   it('leaves lanes alone when the cap does not bind', async () => {
     const logs: string[] = [];
-    await runLanes([{ streamId: 1, channelId: 1, url: 'u', providerId: 1, stepOrder: 1 }], {
-      limits: new Map([[1, 3]]),
-      maxConcurrent: 10,
-      probe: async () => ({ alive: true }),
-      onChannelComplete: async () => {},
-      log: (msg) => logs.push(msg),
-    });
-    expect(logs.find((l) => l.startsWith('lane 1:'))).not.toContain('effective limit=');
+    await runLanes(
+      [{ streamId: 1, channelId: 1, url: 'u', providerId: 1, profileId: 0, stepOrder: 1 }],
+      {
+        limits: new Map([['1:0', 3]]),
+        maxConcurrent: 10,
+        probe: async () => ({ alive: true }),
+        onChannelComplete: async () => {},
+        log: (msg) => logs.push(msg),
+      },
+    );
+    expect(logs.find((l) => l.startsWith('lane 1:0:'))).not.toContain('effective limit=');
   });
 });
 

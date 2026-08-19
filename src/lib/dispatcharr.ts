@@ -8,7 +8,8 @@
  *                                       an *ordered* `streams: [id, ...]`
  *     GET   /api/channels/streams/      paged; name, url, m3u_account, stream_hash
  *     GET   /api/channels/groups/       paged
- *     GET   /api/m3u/accounts/          carries max_streams -- the lane limits
+ *     GET   /api/m3u/accounts/          carries max_streams -- the lane limits --
+ *                                       and profiles, the account's extra logins
  *     POST  /api/epg/current-programs/  real programmes airing now (skips dummy EPG)
  *     GET   /proxy/ts/status            {channels: [...], count} -- who is watching
  *     PATCH /api/channels/channels/{id}/  reorder by writing `streams`
@@ -73,13 +74,72 @@ export interface Stream {
   is_stale?: boolean;
 }
 
+/**
+ * One login under an M3U account -- a "profile" in Dispatcharr.
+ *
+ * The stored stream URL carries the *default* profile's credentials; every
+ * other profile reaches the same upstream by rewriting that URL with the
+ * pattern pair, exactly as Dispatcharr does at playback.
+ */
+export interface ProviderProfile {
+  id: number;
+  name: string;
+  isDefault: boolean;
+  isActive: boolean;
+  /** That login's own connection cap; null = unset, callers fall back to the account max. */
+  maxStreams: number | null;
+  currentViewers: number;
+  searchPattern: string;
+  replacePattern: string;
+}
+
 export interface Provider {
   id: number;
   name: string;
   maxStreams: number;
+  /**
+   * The account's logins, including inactive ones -- `isActive` is the
+   * caller's filter, not this mapping's, so an odd state (a disabled default,
+   * say) stays visible rather than silently changing the variant count.
+   */
+  profiles: ProviderProfile[];
 }
 
 export class DispatcharrError extends Error {}
+
+/**
+ * Rewrite a stream URL with a profile's pattern pair, the way Dispatcharr does
+ * at playback (`transform_url` in its live proxy).
+ *
+ * The patterns are authored JS-style -- `$1` and `$<name>` work in
+ * `String.replace` natively -- and the `g` flag mirrors Python's `re.sub`,
+ * which replaces every occurrence rather than just the first.
+ *
+ * Null means "no variant from this profile": an empty or invalid pattern is a
+ * configuration error, not a request to probe the same URL twice. A pattern
+ * that simply doesn't match returns the input unchanged, exactly as
+ * Dispatcharr falls back; the caller's dedupe drops it there.
+ */
+export function transformUrl(
+  url: string,
+  searchPattern: string,
+  replacePattern: string,
+): string | null {
+  if (!searchPattern) return null;
+  let search: RegExp;
+  try {
+    search = new RegExp(searchPattern, 'g');
+  } catch {
+    return null;
+  }
+  try {
+    return url.replace(search, replacePattern);
+  } catch {
+    // A replacement that throws is the same class of authoring error as a
+    // pattern that does not compile.
+    return null;
+  }
+}
 
 export interface DispatcharrAuth {
   apiKey?: string;
@@ -359,7 +419,23 @@ export class DispatcharrClient {
   }
 
   async providers(): Promise<Provider[]> {
-    type Row = { id: number; name?: string; max_streams?: number | null; is_active?: boolean };
+    type ProfileRow = {
+      id: number;
+      name?: string;
+      is_default?: boolean;
+      is_active?: boolean;
+      max_streams?: number | null;
+      current_viewers?: number;
+      search_pattern?: string;
+      replace_pattern?: string;
+    };
+    type Row = {
+      id: number;
+      name?: string;
+      max_streams?: number | null;
+      is_active?: boolean;
+      profiles?: ProfileRow[];
+    };
     const rows = await this.paged<Row>('/api/m3u/accounts/');
     return rows
       .filter((row) => row.is_active !== false)
@@ -369,6 +445,18 @@ export class DispatcharrClient {
         // 0 or null in Dispatcharr means "unlimited"; we still cap it, because an
         // unbounded lane just moves the bottleneck onto the network.
         maxStreams: row.max_streams ? Number(row.max_streams) : 4,
+        profiles: (row.profiles ?? []).map((profile) => ({
+          id: profile.id,
+          name: profile.name || String(profile.id),
+          isDefault: Boolean(profile.is_default),
+          isActive: profile.is_active !== false,
+          // Null is preserved rather than defaulted here: a profile cap of 0
+          // means "use the account's cap", a decision the lane builder makes.
+          maxStreams: profile.max_streams ? Number(profile.max_streams) : null,
+          currentViewers: profile.current_viewers ?? 0,
+          searchPattern: profile.search_pattern ?? '',
+          replacePattern: profile.replace_pattern ?? '',
+        })),
       }));
   }
 

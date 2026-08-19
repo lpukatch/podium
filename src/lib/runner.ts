@@ -10,7 +10,7 @@
  */
 
 import type { Config } from './config';
-import { type Channel, DispatcharrClient, type Provider, type Stream } from './dispatcharr';
+import { type Channel, DispatcharrClient, type Stream } from './dispatcharr';
 import {
   assignmentIsRule,
   currentProgrammes,
@@ -26,7 +26,7 @@ import { resolveOrdering } from './ordering';
 import { Pacer, type PacerConfig, viewersByProvider } from './pacer';
 import { type ProbeResult, probe } from './probe';
 import type { RulesSource } from './rules-source';
-import { AbortFlag, type ProbeJob, runLanes } from './scheduler';
+import { AbortFlag, laneKey, type ProbeJob, runLanes } from './scheduler';
 import {
   DEFAULT_WEIGHTS,
   type RankEntry,
@@ -36,6 +36,12 @@ import {
   type Weights,
 } from './scoring';
 import { ALL_GROUPS, forcedAtFor, type Progress, type Store, ttlFor } from './store';
+import {
+  buildVariants,
+  pickBestVariant,
+  type StreamVariant,
+  type VariantVerdict,
+} from './variants';
 
 /**
  * The shape published to Dispatcharr's `stream_stats`.
@@ -225,9 +231,16 @@ export interface PlannedChannel {
    * stale and is about to delete, is dropped here rather than at each use.
    */
   hits: Array<[number, number]>;
-  /** Fresh verdicts, by stream id. A hit missing from here needs a probe. */
-  cached: Map<number, RankEntry>;
-  /** Every hit already has a verdict, so this channel needs no probing. */
+  /**
+   * Cache-fresh variant verdicts, by stream, then by variant -- by login. A
+   * stream whose verdict is only partly fresh appears here with the fresh
+   * subset: a channel completing mid-pass ranks from these plus whatever its
+   * probes just returned.
+   */
+  fresh: Map<number, Map<number, ProbeResult>>;
+  /** Hits whose every variant was fresh -- nothing was queued for them. */
+  settled: Set<number>;
+  /** Every hit is settled, so this channel needs no probing. */
   cacheComplete: boolean;
 }
 
@@ -239,22 +252,22 @@ export interface OpenJobItem {
 export function selectLaneSlice<T extends OpenJobItem>(
   openJobs: T[],
   totalSlice: number,
-  limits: Map<number, number>,
+  limits: Map<string, number>,
 ): T[] {
   if (openJobs.length === 0 || totalSlice <= 0) return [];
 
-  const byProvider = new Map<number, T[]>();
+  const byLane = new Map<string, T[]>();
   for (const item of openJobs) {
-    const pid = item.job.providerId;
-    const list = byProvider.get(pid) ?? [];
+    const key = laneKey(item.job.providerId, item.job.profileId);
+    const list = byLane.get(key) ?? [];
     list.push(item);
-    byProvider.set(pid, list);
+    byLane.set(key, list);
   }
 
   let totalCapacity = 0;
-  for (const [pid, list] of byProvider) {
+  for (const [key, list] of byLane) {
     if (list.length > 0) {
-      const limit = limits.get(pid) ?? 1;
+      const limit = limits.get(key) ?? 1;
       totalCapacity += limit;
     }
   }
@@ -262,23 +275,23 @@ export function selectLaneSlice<T extends OpenJobItem>(
   if (totalCapacity === 0) return [];
 
   const selected: T[] = [];
-  const remainingByProvider = new Map<number, T[]>();
+  const remainingByLane = new Map<string, T[]>();
   let remainingQuota = totalSlice;
 
-  for (const [pid, list] of byProvider) {
-    const limit = limits.get(pid) ?? 1;
+  for (const [key, list] of byLane) {
+    const limit = limits.get(key) ?? 1;
     const share = Math.ceil(totalSlice * (limit / totalCapacity));
     const count = Math.min(share, list.length, remainingQuota);
     selected.push(...list.slice(0, count));
     remainingQuota -= count;
     if (list.length > count) {
-      remainingByProvider.set(pid, list.slice(count));
+      remainingByLane.set(key, list.slice(count));
     }
   }
 
-  if (remainingQuota > 0 && remainingByProvider.size > 0) {
+  if (remainingQuota > 0 && remainingByLane.size > 0) {
     const leftover: T[] = [];
-    for (const list of remainingByProvider.values()) {
+    for (const list of remainingByLane.values()) {
       leftover.push(...list);
     }
     leftover.sort((a, b) => b.age - a.age);
@@ -286,6 +299,51 @@ export function selectLaneSlice<T extends OpenJobItem>(
   }
 
   return selected;
+}
+
+export interface StreamSettler {
+  /** Record one queued probe landing -- a verdict, or null when it never ran. */
+  landed(job: ProbeJob, result: ProbeResult | null): void;
+}
+
+export interface StreamSettlerDeps {
+  weights: Weights;
+  /**
+   * Fires once per stream, when the last probe queued for it this pass lands.
+   * A stream whose every queued probe failed or was skipped settles with no
+   * verdict, exactly as a lone failed probe always did.
+   */
+  onSettled: (streamId: number, best: ProbeResult | null) => void;
+}
+
+/**
+ * Collapses a pass's per-variant probe results into the one verdict per stream
+ * everything downstream works on.
+ *
+ * A stream with several logins is probed once per login, but the counters, the
+ * stats published to Dispatcharr and the ranking all speak per stream -- so
+ * they wait for the stream's last queued variant to land rather than firing
+ * per probe. For a stream with one login (most of them) that is the moment the
+ * probe returns, which is the behaviour that predates profiles.
+ */
+export function makeStreamSettler(jobs: ProbeJob[], deps: StreamSettlerDeps): StreamSettler {
+  const pending = new Map<number, { left: number; landed: VariantVerdict[] }>();
+  for (const job of jobs) {
+    const entry = pending.get(job.streamId) ?? { left: 0, landed: [] };
+    entry.left += 1;
+    pending.set(job.streamId, entry);
+  }
+  return {
+    landed(job: ProbeJob, result: ProbeResult | null): void {
+      const entry = pending.get(job.streamId);
+      if (!entry) return;
+      entry.left -= 1;
+      if (result !== null) entry.landed.push({ variantId: job.profileId, result });
+      if (entry.left > 0) return;
+      pending.delete(job.streamId);
+      deps.onSettled(job.streamId, pickBestVariant(entry.landed, deps.weights));
+    },
+  };
 }
 
 export interface RunSummary {
@@ -568,7 +626,6 @@ export class Runner {
         channels.filter((c) => Boolean(c.uuid)).map((c) => [c.uuid!, c.id]),
       );
       const activity = await this.readActivity(client, log, uuidMap);
-      const baseLimits = this.baseLimits(providers);
 
       if (pacer.pausedByActivity(activity)) {
         log(
@@ -610,18 +667,62 @@ export class Runner {
         }
       }
 
-      const limits = pacer.laneLimits(
-        baseLimits,
+      // Per-login lanes. A provider with one active login keeps exactly the
+      // lane it always had -- the account cap, shrunk by the viewer count its
+      // streams report. A provider with several gets one lane per login, each
+      // capped by that login's own max_streams and shrunk by its own viewers:
+      // the same pooling Dispatcharr itself does at playback.
+      const streamViewers = viewersByProvider(
+        streams.map((s) => ({
+          providerId: s.providerId,
+          currentViewers: s.currentViewers,
+          channelId: streamToChannel.get(s.id),
+        })),
         activity,
-        viewersByProvider(
-          streams.map((s) => ({
-            providerId: s.providerId,
-            currentViewers: s.currentViewers,
-            channelId: streamToChannel.get(s.id),
-          })),
-          activity,
-        ),
       );
+      const laneBase = new Map<string, number>();
+      const laneViewers = new Map<string, number>();
+      // Lane key -> provider id, so the per-lane bookkeeping below can still be
+      // displayed per provider: the progress bars were per provider before
+      // profiles split the lanes, and one login is not a row anyone asked for.
+      const laneProvider = new Map<string, number>();
+      for (const provider of providers) {
+        const defaultKey = laneKey(provider.id, 0);
+        laneProvider.set(defaultKey, provider.id);
+        const active = provider.profiles.filter((p) => p.isActive);
+        if (active.length <= 1) {
+          laneBase.set(defaultKey, provider.maxStreams);
+          laneViewers.set(defaultKey, streamViewers.get(provider.id) ?? 0);
+          continue;
+        }
+        const defaultProfile = provider.profiles.find((p) => p.isDefault);
+        // Variant 0 is the stored URL, which authenticates as the default
+        // login -- that login's cap governs it, falling back to the account's.
+        laneBase.set(defaultKey, defaultProfile?.maxStreams ?? provider.maxStreams);
+        laneViewers.set(defaultKey, defaultProfile?.currentViewers ?? 0);
+        for (const profile of active) {
+          if (profile.isDefault) continue;
+          const key = laneKey(provider.id, profile.id);
+          laneProvider.set(key, provider.id);
+          laneBase.set(key, profile.maxStreams ?? provider.maxStreams);
+          laneViewers.set(key, profile.currentViewers);
+        }
+      }
+      const limits = pacer.laneLimits(laneBase, activity, laneViewers);
+
+      // Every stream's probe targets for the pass: the stored URL, plus one
+      // rewritten URL per extra active login the account carries.
+      const providerById = new Map(providers.map((p) => [p.id, p]));
+      const variantsByStream = new Map<number, StreamVariant[]>();
+      for (const stream of streams) {
+        const provider = providerById.get(stream.providerId);
+        variantsByStream.set(
+          stream.id,
+          provider
+            ? buildVariants(stream.url, provider)
+            : [{ variantId: 0, profileId: 0, url: stream.url }],
+        );
+      }
 
       log(
         `fetched ${channels.length} channels, ${streams.length} streams; ` +
@@ -675,11 +776,16 @@ export class Runner {
         epg.expiresAt,
         getIndex(),
         streamById,
+        variantsByStream,
       );
       // Every later step reads this rather than matching the channel again.
       const plannedById = new Map(planned.map((entry) => [entry.channel.id, entry]));
       const eligibleChannels = new Set(jobs.map((j) => j.channelId)).size;
-      counters.backlog = jobs.length;
+      // Jobs are per variant -- per login -- while every number a person reads
+      // is per stream. A stream with two logins is two probes and one backlog
+      // entry.
+      const backlogStreams = new Set(jobs.map((j) => j.streamId)).size;
+      counters.backlog = backlogStreams;
       counters.nextDueAt = nextDueAt;
       counters.nextEligibleAt = nextEligibleAt;
       counters.oldestProbedAt = oldestProbedAt;
@@ -696,12 +802,12 @@ export class Runner {
 
       // Cache-only channels never enter the scheduler, so they are reordered
       // here or they would be skipped entirely.
-      await this.reorderCachedOnly(client, planned, counters, strategy);
+      await this.reorderCachedOnly(client, planned, counters, strategy, streamById);
 
-      // A provider the pacer left out has no spare capacity this pass. Its jobs
+      // A lane the pacer left out has no spare capacity this pass. Its jobs
       // must be dropped, not merely unbounded -- the scheduler falls back to
-      // DEFAULT_LANE_LIMIT for an unknown provider, so leaving them in would
-      // quietly probe a saturated provider at 1 concurrent instead of skipping
+      // DEFAULT_LANE_LIMIT for an unknown lane, so leaving them in would
+      // quietly probe a saturated login at 1 concurrent instead of skipping
       // it. They stay in the backlog and are picked up on a later tick.
       //
       // A provider that is not in the catalogue at all is a different case and
@@ -711,10 +817,16 @@ export class Runner {
       // run. Counting those as deferred makes every pass look like it did work,
       // which stops the loop ever taking its idle sleep -- a permanent
       // once-a-minute full crawl of Dispatcharr to defer the same streams again.
+      //
+      // All three counts are per stream: a stream whose default login is
+      // saturated but whose second login has room is open, not deferred, and
+      // its remaining variant comes back on a later pass.
       const knownProviders = new Set(providers.map((p) => p.id));
       const open: ProbeJob[] = [];
       const openAges: number[] = [];
-      let unrunnable = 0;
+      const openStreams = new Set<number>();
+      const deferredStreams = new Set<number>();
+      const unrunnableStreams = new Set<number>();
       const noCapacity = new Set<number>();
       const unknownProviders = new Set<number>();
       for (let i = 0; i < jobs.length; i++) {
@@ -723,30 +835,32 @@ export class Runner {
         // `ages` is built in lockstep with `jobs`, so a defined job means a
         // defined age; guard both to satisfy the index-access check together.
         if (job === undefined || age === undefined) continue;
-        if (limits.has(job.providerId)) {
+        if (limits.has(laneKey(job.providerId, job.profileId))) {
           open.push(job);
           openAges.push(age);
+          openStreams.add(job.streamId);
         } else if (knownProviders.has(job.providerId)) {
           noCapacity.add(job.providerId);
+          deferredStreams.add(job.streamId);
         } else {
-          unrunnable += 1;
+          unrunnableStreams.add(job.streamId);
           unknownProviders.add(job.providerId);
         }
       }
-      const closed = jobs.length - open.length - unrunnable;
-      counters.deferred = closed;
+      for (const streamId of openStreams) deferredStreams.delete(streamId);
+      counters.deferred = deferredStreams.size;
       // Before the slice, deliberately: what the pacer chose to leave for later
       // is still work this install could do right now, and the loop must not
       // sleep past it.
-      counters.runnableBacklog = open.length;
-      if (closed > 0) {
+      counters.runnableBacklog = openStreams.size;
+      if (counters.deferred > 0) {
         log(
-          `deferring ${closed} streams on provider(s) ${[...noCapacity].join(', ')}: no spare capacity`,
+          `deferring ${counters.deferred} streams on provider(s) ${[...noCapacity].join(', ')}: no spare capacity`,
         );
       }
-      if (unrunnable > 0) {
+      if (unrunnableStreams.size > 0) {
         log(
-          `ignoring ${unrunnable} streams on inactive or unknown provider(s) ` +
+          `ignoring ${unrunnableStreams.size} streams on inactive or unknown provider(s) ` +
             `${[...unknownProviders].join(', ')}: no lane exists for them`,
         );
       }
@@ -779,46 +893,86 @@ export class Runner {
       const openItems = open.map((job, i) => ({ job, age: openAges[i] ?? 0 }));
       const selectedItems = selectLaneSlice(openItems, Math.max(slice, 0), limits);
       const selected = selectedItems.map((item) => item.job);
+      const selectedStreams = new Set(selected.map((job) => job.streamId)).size;
       log(
-        `${jobs.length} streams need probing, taking ${selected.length} this pass ` +
-          `(${counters.cached} served from cache)`,
+        `${backlogStreams} streams need probing (${jobs.length} probe targets), ` +
+          `taking ${selected.length} this pass (${counters.cached} served from cache)`,
       );
 
-      const queued = new Map<number, number>();
-      for (const job of selected) queued.set(job.providerId, (queued.get(job.providerId) ?? 0) + 1);
+      const queued = new Map<string, number>();
+      for (const job of selected) {
+        const key = laneKey(job.providerId, job.profileId);
+        queued.set(key, (queued.get(key) ?? 0) + 1);
+      }
       // Tracked here rather than read from RunStats: the scheduler only hands
       // those back once the whole run is over, and the lane bars are the part
       // of the progress view worth watching *during* a run.
-      const laneDone = new Map<number, number>();
+      const laneDone = new Map<string, number>();
       // `done` counts every probe that returned a verdict -- alive or dead -- so
       // it reads as progress. `dead` is the subset that came back dead, surfaced
       // on its own because a dead stream is information, not a failure. `failed`
       // is the probe itself blowing up, which is the only thing worth calling one.
-      const laneDead = new Map<number, number>();
-      const laneFailed = new Map<number, number>();
+      const laneDead = new Map<string, number>();
+      const laneFailed = new Map<string, number>();
       // In-flight channel names per lane. A lane at limit=5 can have five at
       // once, and seeing them side by side is the clearest evidence that the
-      // providers really are running independently.
-      const laneCurrent = new Map<number, Map<number, string>>();
+      // providers really are running independently. Keyed per lane, because
+      // two logins of one provider can probe the same stream at once.
+      const laneCurrent = new Map<string, Map<number, string>>();
       const channelNames = new Map(channels.map((c) => [c.id, c.name]));
-      const laneSnapshot = () =>
-        [...queued.entries()].map(([id, n]) => ({
-          id,
-          name: providerNames.get(id) ?? String(id),
-          limit: limits.get(id) ?? 0,
-          done: laneDone.get(id) ?? 0,
-          dead: laneDead.get(id) ?? 0,
-          failed: laneFailed.get(id) ?? 0,
-          queued: n,
-          current: [...(laneCurrent.get(id)?.values() ?? [])],
-        }));
+      // Aggregated per provider, not per login: the bars were per provider
+      // before profiles split the lanes, and one login is not a row anyone
+      // asked for. The limit shown is the provider's capacity across its
+      // logins -- several lanes' worth.
+      const laneSnapshot = () => {
+        const rows = new Map<
+          number,
+          {
+            id: number;
+            name: string;
+            limit: number;
+            done: number;
+            dead: number;
+            failed: number;
+            queued: number;
+            current: string[];
+          }
+        >();
+        for (const key of queued.keys()) {
+          const pid = laneProvider.get(key);
+          if (pid === undefined) continue;
+          let row = rows.get(pid);
+          if (!row) {
+            row = {
+              id: pid,
+              name: providerNames.get(pid) ?? String(pid),
+              limit: 0,
+              done: 0,
+              dead: 0,
+              failed: 0,
+              queued: 0,
+              current: [],
+            };
+            rows.set(pid, row);
+          }
+          row.limit += limits.get(key) ?? 0;
+          row.queued += queued.get(key) ?? 0;
+          row.done += laneDone.get(key) ?? 0;
+          row.dead += laneDead.get(key) ?? 0;
+          row.failed += laneFailed.get(key) ?? 0;
+          for (const name of laneCurrent.get(key)?.values() ?? []) {
+            if (!row.current.includes(name)) row.current.push(name);
+          }
+        }
+        return [...rows.values()];
+      };
       this.emit({
         phase: 'probing',
-        total: selected.length,
+        total: selectedStreams,
         cached: counters.cached,
         unchanged: counters.unchanged,
-        deferred: closed,
-        backlog: jobs.length,
+        deferred: counters.deferred,
+        backlog: backlogStreams,
         // Deliberately not reset by the fetching/planning emits: those run
         // before the new count is known, and the banner reading zero for the
         // length of a fetch is the exact lie this field exists to retire.
@@ -826,8 +980,27 @@ export class Runner {
         dueAt: nextDueAt,
         oldestManagedProbedAt: oldestProbedAt,
         heldBack,
-        message: `probing ${selected.length} streams`,
+        message: `probing ${selectedStreams} streams`,
         lanes: laneSnapshot(),
+      });
+
+      // The pass's per-stream verdicts: counters and the stats published to
+      // Dispatcharr speak per stream, so they wait for the stream's last
+      // queued variant to land rather than firing per probe. For a stream
+      // with one login -- most of them -- that is the moment the probe returns.
+      const settler = makeStreamSettler(selected, {
+        weights: strategy.weights,
+        onSettled: (streamId, best) => {
+          if (!best) return;
+          counters.probed += 1;
+          if (!best.alive) counters.dead += 1;
+          if (config.PODIUM_WRITE_STATS && !config.PODIUM_DRY_RUN) {
+            // Best-effort: publishing stats must never fail a probe.
+            client.setStreamStats(streamId, statsPayload(best, strategy.weights)).catch((err) => {
+              log(`stats publish failed for stream ${streamId}: ${String(err)}`);
+            });
+          }
+        },
       });
 
       const abort = new AbortFlag();
@@ -841,10 +1014,11 @@ export class Runner {
           staggerMs: config.PODIUM_LANE_STAGGER_MS,
           log,
           probe: async (job) => {
-            let inflight = laneCurrent.get(job.providerId);
+            const key = laneKey(job.providerId, job.profileId);
+            let inflight = laneCurrent.get(key);
             if (!inflight) {
               inflight = new Map();
-              laneCurrent.set(job.providerId, inflight);
+              laneCurrent.set(key, inflight);
             }
             inflight.set(job.streamId, channelNames.get(job.channelId) ?? `#${job.channelId}`);
             this.emit({ lanes: laneSnapshot() });
@@ -864,29 +1038,24 @@ export class Runner {
               // probe() returns DEAD rather than throwing, so this is defensive
               // -- but if it ever does, count it as a failure (a dead stream is
               // not one) and let the scheduler settle the channel without it.
-              laneFailed.set(job.providerId, (laneFailed.get(job.providerId) ?? 0) + 1);
+              // The stream settles without this variant too, or its verdict
+              // would wait on a probe that already gave up.
+              laneFailed.set(key, (laneFailed.get(key) ?? 0) + 1);
               this.emit({ lanes: laneSnapshot() });
+              settler.landed(job, null);
               throw error;
             } finally {
               inflight.delete(job.streamId);
             }
             const stream = streamById.get(job.streamId);
-            if (stream?.streamHash) store.put(job.streamId, stream.streamHash, result);
-            counters.probed += 1;
-            if (!result.alive) counters.dead += 1;
-            if (config.PODIUM_WRITE_STATS && !config.PODIUM_DRY_RUN) {
-              // Best-effort: publishing stats must never fail a probe.
-              client
-                .setStreamStats(job.streamId, statsPayload(result, strategy.weights))
-                .catch((err) => {
-                  log(`stats publish failed for stream ${job.streamId}: ${String(err)}`);
-                });
+            if (stream?.streamHash) {
+              store.put(job.streamId, stream.streamHash, result, job.profileId);
             }
             // `done` advances for every verdict (alive or dead); `dead` is the
             // breakdown of the ones that came back dead.
-            laneDone.set(job.providerId, (laneDone.get(job.providerId) ?? 0) + 1);
-            if (!result.alive)
-              laneDead.set(job.providerId, (laneDead.get(job.providerId) ?? 0) + 1);
+            laneDone.set(key, (laneDone.get(key) ?? 0) + 1);
+            if (!result.alive) laneDead.set(key, (laneDead.get(key) ?? 0) + 1);
+            settler.landed(job, result);
             this.emit({
               probed: counters.probed,
               dead: counters.dead,
@@ -906,31 +1075,44 @@ export class Runner {
             const entry = plannedById.get(channelId);
             if (!entry) return;
 
+            // Per stream: the variants this pass just probed, plus those that
+            // were fresh when the pass planned and were not re-probed. A
+            // stream has a verdict when any of its variants does -- the same
+            // single-stream view Dispatcharr holds.
+            const probedByStream = new Map<number, VariantVerdict[]>();
+            const probedVariants = new Map<number, Set<number>>();
+            for (const [job, result] of results) {
+              if (result === null) continue;
+              const list = probedByStream.get(job.streamId) ?? [];
+              list.push({ variantId: job.profileId, result });
+              probedByStream.set(job.streamId, list);
+              const variants = probedVariants.get(job.streamId) ?? new Set<number>();
+              variants.add(job.profileId);
+              probedVariants.set(job.streamId, variants);
+            }
+
             const entries: RankEntry[] = [];
             let complete = true;
             for (const [streamId, stepOrder] of entry.hits) {
-              const freshlyProbed = results.find(([job]) => job.streamId === streamId);
-              if (freshlyProbed) {
-                if (freshlyProbed[1] !== null) {
-                  entries.push({
-                    streamId,
-                    stepOrder,
-                    providerId: freshlyProbed[0].providerId,
-                    result: freshlyProbed[1] as ProbeResult,
-                  });
-                }
+              const verdicts: VariantVerdict[] = [...(probedByStream.get(streamId) ?? [])];
+              const seen = probedVariants.get(streamId);
+              for (const [variantId, result] of entry.fresh.get(streamId) ?? []) {
+                if (!seen?.has(variantId)) verdicts.push({ variantId, result });
+              }
+              const best = pickBestVariant(verdicts, strategy.weights);
+              if (best) {
+                entries.push({
+                  streamId,
+                  stepOrder,
+                  providerId: streamById.get(streamId)?.providerId ?? 0,
+                  result: best,
+                });
                 continue;
               }
 
-              const known = entry.cached.get(streamId);
-              if (known) {
-                entries.push(known);
-                continue;
-              }
-
-              // Not freshly probed and not a hit when the pass planned, which
-              // means its probe was deferred. The channel cannot be ranked
-              // until every stream on it has a verdict.
+              // No variant of this stream returned anything, which means its
+              // probes were deferred. The channel cannot be ranked until every
+              // stream on it has a verdict.
               complete = false;
               break;
             }
@@ -968,8 +1150,15 @@ export class Runner {
       });
 
       const lanes: RunSummary['lanes'] = {};
-      for (const [id, lane] of stats.lanes) {
-        lanes[String(id)] = { limit: lane.limit, done: lane.done, failed: lane.failed };
+      for (const [key, lane] of stats.lanes) {
+        // Aggregated per provider, on the same rule the progress bars use.
+        const id = String(laneProvider.get(key) ?? key);
+        const row = lanes[id] ?? { limit: 0, done: 0, failed: 0 };
+        lanes[id] = {
+          limit: row.limit + lane.limit,
+          done: row.done + lane.done,
+          failed: row.failed + lane.failed,
+        };
       }
       return this.finish(runId, started, counters, heldBack, eligibleChannels, lanes, false);
     } catch (error) {
@@ -1070,11 +1259,6 @@ export class Runner {
     );
   }
 
-  /** Dispatcharr's own `max_streams` per provider -- it is the authority. */
-  private baseLimits(providers: Provider[]): Map<number, number> {
-    return new Map(providers.map((p) => [p.id, p.maxStreams]));
-  }
-
   /**
    * Decide what to probe, staleest first, honouring group policy.
    *
@@ -1111,6 +1295,7 @@ export class Runner {
     gridExpiresAt: number | null,
     passedIndex?: StreamIndex,
     passedById?: Map<number, Stream>,
+    variantsByStream?: Map<number, StreamVariant[]>,
   ): {
     jobs: ProbeJob[];
     ages: number[];
@@ -1152,10 +1337,17 @@ export class Runner {
     const { matcher } = this.deps.rules.get();
     const index = passedIndex ?? matcher.buildIndex(streams, groupNames);
     const byId = passedById ?? new Map(streams.map((s) => [s.id, s]));
+    // A stream's probe targets: the stored URL, plus a rewritten one per extra
+    // login. Absent (a caller with no providers to hand), the stored URL alone
+    // -- the one target a stream had before profiles existed.
+    const variantsOf = (stream: Stream): StreamVariant[] =>
+      variantsByStream?.get(stream.id) ?? [{ variantId: 0, profileId: 0, url: stream.url }];
     const scored: Array<{ job: ProbeJob; age: number }> = [];
     const planned: PlannedChannel[] = [];
     const keepStreamIds = new Set<number>();
-    const seenStreamIds = new Set<number>();
+    // Per (stream, variant): a stream claimed by several channels queues each
+    // of its variants once, not once per claim.
+    const seenVariants = new Set<string>();
     let nextDueAt: number | null = null;
     let nextEligibleAt: number | null = null;
     let oldestProbedAt: number | null = null;
@@ -1198,8 +1390,14 @@ export class Runner {
             if (!marked) continue;
             const stream = byId.get(streamId);
             if (!stream || stream.is_stale) continue;
-            const cached = store.entry(streamId, stream.streamHash);
-            if (cached) countRetired(channel.groupId, cached.probedAt);
+            // Once per stream, however many logins hold verdicts: a stream is
+            // one thing still to re-check, as old as its least-recently-checked
+            // login -- the oldest verdict is the one any mark covers.
+            let oldest: number | null = null;
+            for (const entry of store.variants(streamId, stream.streamHash).values()) {
+              if (oldest === null || entry.probedAt < oldest) oldest = entry.probedAt;
+            }
+            if (oldest !== null) countRetired(channel.groupId, oldest);
           }
           // When the gate opens, or -- for the channels the current rows cannot
           // date, which is most of them against a grid of what is airing now --
@@ -1219,7 +1417,8 @@ export class Runner {
       // here on: any verdict older than this instant is out of service.
       const forcedAt = forcedAtFor(marks, channel.groupId);
       const hits: Array<[number, number]> = [];
-      const cachedEntries = new Map<number, RankEntry>();
+      const freshEntries = new Map<number, Map<number, ProbeResult>>();
+      const settledStreams = new Set<number>();
 
       for (const [streamId, stepOrder] of candidates()) {
         const stream = byId.get(streamId);
@@ -1227,34 +1426,21 @@ export class Runner {
         keepStreamIds.add(stream.id);
         hits.push([stream.id, stepOrder]);
 
-        // One read for all three things this needs from the cache: the age
-        // that paces the slice, the verdict itself, and the dead streak that
-        // decides how long that verdict is trusted for.
-        const cached = store.entry(stream.id, stream.streamHash);
-        const age = cached ? Date.now() - cached.probedAt : null;
-        // Retired by an explicit re-check request rather than by its own age.
-        // The verdict itself is untouched -- it goes on ranking the channel
-        // until a new one lands, and cancelling the request puts it straight
-        // back in service.
-        //
-        // Inclusive: the request means "re-check what you measured before I
-        // asked", and a verdict stamped the same millisecond as the request was
-        // not taken in response to it. Nothing re-probed *afterwards* can tie,
-        // because the pass that re-probes it cannot start until after the mark
-        // is written. Inertness was once the whole story -- a satisfied mark
-        // stopped matching and nothing cleaned it up -- but every reader of the
-        // marks table treats a row's existence as a request still running, so
-        // the pass now retires the ones whose tally above has emptied; see
-        // `retireSatisfiedMarks`.
-        const forcedOut = cached !== null && cached.probedAt <= forcedAt;
-        // The same verdict, counted per request rather than against the folded
-        // instant above: a channel covered by both a group mark and a
-        // catalogue-wide one keeps each of them open independently.
-        if (marked && cached) countRetired(channel.groupId, cached.probedAt);
-        if (cached) {
-          if (oldestProbedAt === null || cached.probedAt < oldestProbedAt) {
-            oldestProbedAt = cached.probedAt;
-          }
+        // One read for everything this needs from the cache: the ages that
+        // pace the slice, the verdicts themselves, and the dead streaks that
+        // decide how long each is trusted for -- one row per login. A stream
+        // is served from cache only when *every* login's verdict is fresh;
+        // the rest become one probe job each, for just the stale logins.
+        const streamVariants = variantsOf(stream);
+        const cachedVariants = store.variants(stream.id, stream.streamHash);
+        const freshVariants = new Map<number, ProbeResult>();
+        // As old as its least-recently-checked login: the honest freshness,
+        // and the verdict any re-check mark covers.
+        let oldest: number | null = null;
+        for (const variant of streamVariants) {
+          const cached = cachedVariants.get(variant.variantId);
+          if (!cached) continue;
+          if (oldest === null || cached.probedAt < oldest) oldest = cached.probedAt;
           const ttl = ttlFor(
             cached,
             config.PODIUM_LIVE_TTL_MS,
@@ -1265,49 +1451,72 @@ export class Runner {
           // The freshness test and the unreadable-result check mirror
           // `Store.get`, which this deliberately no longer calls: a second read
           // of the same row could only disagree with the age and TTL taken here.
-          if (!forcedOut && cached.result && Date.now() - cached.probedAt < ttl) {
-            counters.cached += 1;
+          //
+          // Retired by an explicit re-check request rather than by its own
+          // age, and inclusive for the same reason it always was: the request
+          // means "re-check what you measured before I asked", and a verdict
+          // stamped the same millisecond as the request was not taken in
+          // response to it. The verdict itself is untouched -- it goes on
+          // ranking the channel until a new one lands, and cancelling the
+          // request puts it straight back in service.
+          if (cached.result && Date.now() - cached.probedAt < ttl && cached.probedAt > forcedAt) {
+            freshVariants.set(variant.variantId, cached.result);
             const due = cached.probedAt + ttl;
             if (nextDueAt === null || due < nextDueAt) nextDueAt = due;
-            // Kept for the reorder, which would otherwise read this same row
-            // back out of the database a second time.
-            cachedEntries.set(stream.id, {
-              streamId: stream.id,
-              stepOrder,
-              providerId: stream.providerId,
-              result: cached.result,
-            });
-            continue;
           }
         }
 
-        if (seenStreamIds.has(stream.id)) continue;
-        seenStreamIds.add(stream.id);
-        scored.push({
-          job: {
-            streamId: stream.id,
-            channelId: channel.id,
-            url: stream.url,
-            providerId: stream.providerId,
-            stepOrder,
-          },
-          // Never-probed sorts first, and a stream somebody has explicitly
-          // asked to re-check goes with it -- the request means "now", not "at
-          // its usual turn". That also decides the pace: `sliceSize` reads the
-          // oldest open age, so a requested re-check runs at the ceiling
-          // instead of trickling MIN_BATCH a tick against a deadline 24 hours
-          // out, which for a stream probed an hour ago is what its real age
-          // would ask for.
-          age: forcedOut ? Number.MAX_SAFE_INTEGER : (age ?? Number.MAX_SAFE_INTEGER),
-        });
+        if (oldest !== null && (oldestProbedAt === null || oldest < oldestProbedAt)) {
+          oldestProbedAt = oldest;
+        }
+        // Counted per request rather than against the folded instant above: a
+        // channel covered by both a group mark and a catalogue-wide one keeps
+        // each of them open independently -- and once per stream, however many
+        // logins hold verdicts, because a stream is one thing still to go.
+        if (marked && oldest !== null) countRetired(channel.groupId, oldest);
+        const forcedOut = oldest !== null && oldest <= forcedAt;
+
+        if (freshVariants.size > 0) freshEntries.set(stream.id, freshVariants);
+        if (freshVariants.size === streamVariants.length) {
+          counters.cached += 1;
+          settledStreams.add(stream.id);
+          continue;
+        }
+
+        const age = oldest === null ? null : Date.now() - oldest;
+        for (const variant of streamVariants) {
+          if (freshVariants.has(variant.variantId)) continue;
+          const dedupe = `${stream.id}:${variant.variantId}`;
+          if (seenVariants.has(dedupe)) continue;
+          seenVariants.add(dedupe);
+          scored.push({
+            job: {
+              streamId: stream.id,
+              channelId: channel.id,
+              url: variant.url,
+              providerId: stream.providerId,
+              profileId: variant.profileId,
+              stepOrder,
+            },
+            // Never-probed sorts first, and a stream somebody has explicitly
+            // asked to re-check goes with it -- the request means "now", not
+            // "at its usual turn". That also decides the pace: `sliceSize`
+            // reads the oldest open age, so a requested re-check runs at the
+            // ceiling instead of trickling MIN_BATCH a tick against a deadline
+            // 24 hours out, which for a stream probed an hour ago is what its
+            // real age would ask for.
+            age: forcedOut ? Number.MAX_SAFE_INTEGER : (age ?? Number.MAX_SAFE_INTEGER),
+          });
+        }
       }
 
       if (hits.length > 0) {
         planned.push({
           channel,
           hits,
-          cached: cachedEntries,
-          cacheComplete: cachedEntries.size === hits.length,
+          fresh: freshEntries,
+          settled: settledStreams,
+          cacheComplete: settledStreams.size === hits.length,
         });
       }
     }
@@ -1377,13 +1586,27 @@ export class Runner {
     planned: PlannedChannel[],
     counters: { reordered: number; unchanged: number },
     strategy: RankStrategy,
+    byId: Map<number, Stream>,
   ): Promise<void> {
     const log = this.deps.log ?? (() => {});
-    for (const { channel, hits, cached, cacheComplete } of planned) {
+    for (const { channel, hits, fresh, cacheComplete } of planned) {
       if (!cacheComplete) continue;
-      const entries = hits
-        .map(([streamId]) => cached.get(streamId))
-        .filter((entry): entry is RankEntry => entry !== undefined);
+      const entries: RankEntry[] = [];
+      for (const [streamId, stepOrder] of hits) {
+        const verdicts = fresh.get(streamId);
+        if (!verdicts) continue;
+        const best = pickBestVariant(
+          [...verdicts].map(([variantId, result]) => ({ variantId, result })),
+          strategy.weights,
+        );
+        if (!best) continue;
+        entries.push({
+          streamId,
+          stepOrder,
+          providerId: byId.get(streamId)?.providerId ?? 0,
+          result: best,
+        });
+      }
       if (entries.length === 0) continue;
       await this.reorder(client, channel.id, entries, counters, log, channel.streams, strategy);
     }

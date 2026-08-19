@@ -64,7 +64,10 @@ of Podium is about spending that budget well.
 limits. Checking channel-by-channel means one saturated provider stalls
 everything while the others sit idle, so Podium treats a *stream* as the unit of
 work and gives each provider its own lane. That takes hours off a full pass on a
-multi-provider catalogue.
+multi-provider catalogue. Extra logins saved as profiles on a Dispatcharr M3U
+account get lanes of their own too: every stream is probed through each active
+login and reported as one verdict — alive if any login can play it — so a
+rate-limited default login no longer reads as a dead stream.
 
 **Caches against `stream_hash`.** Provider stream sets barely change between
 runs, so most probing is repeated for nothing. Podium re-probes only when

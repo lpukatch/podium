@@ -35,7 +35,22 @@ export interface ProbeJob {
   channelId: number;
   url: string;
   providerId: number;
+  /**
+   * Which login this probe runs through: 0 for the default (the stored URL),
+   * otherwise a Dispatcharr profile id.
+   */
+  profileId: number;
   stepOrder: number;
+}
+
+/**
+ * The lane a job runs in: one lane per provider *login*, since each login has
+ * its own connection cap. `provider:0` is the default login, and a provider
+ * with a single login has exactly one lane -- the shape everything had before
+ * profiles existed.
+ */
+export function laneKey(providerId: number, profileId: number): string {
+  return `${providerId}:${profileId}`;
 }
 
 export interface LaneStats {
@@ -50,7 +65,8 @@ export interface LaneStats {
 }
 
 export interface RunStats {
-  lanes: Map<number, LaneStats>;
+  /** By lane key (`provider:profile`) -- see `laneKey`. */
+  lanes: Map<string, LaneStats>;
   channelsTotal: number;
   channelsDone: number;
   skipped: number;
@@ -66,7 +82,8 @@ export class AbortFlag {
 }
 
 export interface SchedulerOptions<T> {
-  limits: Map<number, number>;
+  /** Lane key (`provider:profile`) -> concurrency limit. See `laneKey`. */
+  limits: Map<string, number>;
   /**
    * Ceiling on probes in flight across every lane at once. 0 leaves it
    * uncapped.
@@ -84,8 +101,8 @@ export interface SchedulerOptions<T> {
   staggerMs?: number;
   abort?: AbortFlag;
   log?: (message: string) => void;
-  onSlotAcquire?: (providerId: number) => void;
-  onSlotRelease?: (providerId: number) => void;
+  onSlotAcquire?: (lane: string) => void;
+  onSlotRelease?: (lane: string) => void;
 }
 
 /** A counting semaphore. One per provider lane. */
@@ -130,7 +147,7 @@ export async function runLanes<T>(
   options: SchedulerOptions<T>,
 ): Promise<RunStats> {
   const startedAt = Date.now();
-  const lanes = new Map<number, LaneStats>();
+  const lanes = new Map<string, LaneStats>();
   const stats: RunStats = {
     lanes,
     channelsTotal: 0,
@@ -152,15 +169,16 @@ export async function runLanes<T>(
       : null;
 
   // One semaphore per lane. This -- not a global worker pool -- is what
-  // decouples the providers from each other.
-  const semaphores = new Map<number, Semaphore>();
+  // decouples the providers from each other, and the profiles within them.
+  const semaphores = new Map<string, Semaphore>();
   for (const job of jobs) {
-    let lane = lanes.get(job.providerId);
+    const key = laneKey(job.providerId, job.profileId);
+    let lane = lanes.get(key);
     if (!lane) {
-      const limit = limits.get(job.providerId) ?? DEFAULT_LANE_LIMIT;
+      const limit = limits.get(key) ?? DEFAULT_LANE_LIMIT;
       lane = { limit, queued: 0, done: 0, failed: 0, busyMs: 0, startedAt: null, endedAt: null };
-      lanes.set(job.providerId, lane);
-      semaphores.set(job.providerId, new Semaphore(limit));
+      lanes.set(key, lane);
+      semaphores.set(key, new Semaphore(limit));
     }
     lane.queued += 1;
   }
@@ -207,6 +225,8 @@ export async function runLanes<T>(
         : '';
     const capForFloor = lane.effectiveLimit ?? lane.limit;
     log?.(
+      // `id` is a lane key, `provider:profile` -- the profile half is the
+      // login the probes in this lane authenticate as.
       `lane ${id}: ${lane.queued} streams, limit=${lane.limit}${effStr}, ` +
         `serial floor ${((lane.queued * 30) / capForFloor / 3600).toFixed(2)}h`,
     );
@@ -239,8 +259,9 @@ export async function runLanes<T>(
   }
 
   async function runJob(job: ProbeJob): Promise<void> {
-    const lane = lanes.get(job.providerId)!;
-    const semaphore = semaphores.get(job.providerId)!;
+    const key = laneKey(job.providerId, job.profileId);
+    const lane = lanes.get(key)!;
+    const semaphore = semaphores.get(key)!;
 
     if (abort.aborted) {
       stats.skipped += 1;
@@ -249,7 +270,7 @@ export async function runLanes<T>(
     }
 
     await semaphore.acquire();
-    options.onSlotAcquire?.(job.providerId);
+    options.onSlotAcquire?.(key);
     let result: T | null = null;
     try {
       if (abort.aborted) {
@@ -279,7 +300,7 @@ export async function runLanes<T>(
         overall?.release();
       }
     } finally {
-      options.onSlotRelease?.(job.providerId);
+      options.onSlotRelease?.(key);
       semaphore.release();
     }
 

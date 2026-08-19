@@ -276,8 +276,8 @@ describe('Pacer.pausedByActivity', () => {
       // viewer counts -- which is exactly what lets the caller skip fetching
       // the streams those counts come from.
       if (p.pausedByActivity(activity)) {
-        expect(p.laneLimits(new Map([[1, 3]]), activity, new Map()).size).toBe(0);
-        expect(p.laneLimits(new Map([[1, 3]]), activity, new Map([[1, 99]])).size).toBe(0);
+        expect(p.laneLimits(new Map([['1:0', 3]]), activity, new Map()).size).toBe(0);
+        expect(p.laneLimits(new Map([['1:0', 3]]), activity, new Map([['1:0', 99]])).size).toBe(0);
       }
     }
   });

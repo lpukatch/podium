@@ -355,6 +355,17 @@ declares one. Podium reads a few seconds of the stream, which also gives it the
 black-screen check from the same read, so it costs one provider connection
 rather than two.
 
+**Extra logins on one provider are probed too.** A Dispatcharr M3U account can
+carry several profiles — separate logins to the same upstream, each with its own
+connection cap. Podium probes a stream through every active login (rewriting
+the URL with each profile's pattern, exactly as Dispatcharr does at playback)
+and reports one verdict per stream: alive if any login can play it, carrying
+the measurements of the best one that could. Each login gets its own lane at
+its own cap, so two logins probe twice as fast without either exceeding its
+limit — and a stream is no longer called dead just because the default login is
+rate-limited. Nothing to configure; it turns itself on when a second profile
+appears on the account.
+
 There is deliberately no loop detection. Catching a loop means watching for at
 least one loop period — around 120s per stream against the ~1s the other checks
 cost — for a failure far rarer than dead, black or throttled.

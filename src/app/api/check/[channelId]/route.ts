@@ -11,7 +11,7 @@ import { Mutex } from '@/lib/mutex';
 import { resolveOrdering } from '@/lib/ordering';
 import { type ProbeResult, probe } from '@/lib/probe';
 import { assignedCandidates, composeOrder, splitAssigned, statsPayload } from '@/lib/runner';
-import { type ProbeJob, runLanes } from '@/lib/scheduler';
+import { laneKey, type ProbeJob, runLanes } from '@/lib/scheduler';
 import { isUsable, type RankEntry, rank, score } from '@/lib/scoring';
 import {
   groupPatterns,
@@ -23,6 +23,7 @@ import {
   snapshot,
 } from '@/lib/server/state';
 import { Store } from '@/lib/store';
+import { buildVariants, pickBestVariant, type VariantVerdict } from '@/lib/variants';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
@@ -167,7 +168,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     const providerNames = new Map(snap.providers.map((p) => [p.id, p.name]));
     // Same strategy the worker resolves, so the preview matches what it writes.
     const strategy = resolveOrdering(ordering(), providerNames, config.PODIUM_MIN_BITRATE_KBPS);
-    const baseLimits = new Map(snap.providers.map((p) => [p.id, p.maxStreams]));
+    const providerById = new Map(snap.providers.map((p) => [p.id, p]));
 
     // The courtesy reserve, on the same rule the worker uses (Pacer.laneLimits):
     // hold a slot back for a human only when a human is actually watching, since
@@ -186,9 +187,27 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       .catch(() => true);
     const reserve = watching ? config.PODIUM_MIN_FREE_SLOTS : 0;
 
-    const limits = new Map<number, number>();
-    for (const [pid, limit] of baseLimits) {
-      limits.set(pid, Math.max(0, limit - reserve - (workerBusy ? 1 : 0)));
+    // Per-login lane limits, the shape the worker paces itself against: one
+    // lane per login for a multi-login provider, one lane for everybody else,
+    // each shrunk by the courtesy reserve and -- when the worker is probing --
+    // the one slot this check yields to it.
+    const limits = new Map<string, number>();
+    const shrink = (limit: number) => Math.max(0, limit - reserve - (workerBusy ? 1 : 0));
+    for (const provider of snap.providers) {
+      const active = provider.profiles.filter((p) => p.isActive);
+      if (active.length <= 1) {
+        limits.set(laneKey(provider.id, 0), shrink(provider.maxStreams));
+        continue;
+      }
+      const def = provider.profiles.find((p) => p.isDefault);
+      limits.set(laneKey(provider.id, 0), shrink(def?.maxStreams ?? provider.maxStreams));
+      for (const profile of active) {
+        if (profile.isDefault) continue;
+        limits.set(
+          laneKey(provider.id, profile.id),
+          shrink(profile.maxStreams ?? provider.maxStreams),
+        );
+      }
     }
 
     const jobs: ProbeJob[] = [];
@@ -199,14 +218,26 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     for (const [streamId, stepOrder] of boundedHits) {
       const stream = streamById.get(streamId);
       if (!stream) continue;
-      if ((limits.get(stream.providerId) ?? 0) <= 0) continue;
-      jobs.push({
-        streamId,
-        channelId: id,
-        url: stream.url,
-        providerId: stream.providerId,
-        stepOrder,
-      });
+      // Every login the stream could play through, each gated on its own
+      // lane: a saturated default login does not stop the second one being
+      // checked. The 50-stream cap counts streams, not logins. A stream with
+      // no runnable login is simply unprobed, feeding `unprobed` below
+      // exactly as a capacity-skipped stream always did.
+      const provider = providerById.get(stream.providerId);
+      const variants = provider
+        ? buildVariants(stream.url, provider)
+        : [{ variantId: 0, profileId: 0, url: stream.url }];
+      for (const variant of variants) {
+        if ((limits.get(laneKey(stream.providerId, variant.profileId)) ?? 0) <= 0) continue;
+        jobs.push({
+          streamId,
+          channelId: id,
+          url: variant.url,
+          providerId: stream.providerId,
+          profileId: variant.profileId,
+          stepOrder,
+        });
+      }
     }
 
     if (jobs.length === 0 && boundedHits.length > 0) {
@@ -220,7 +251,11 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       );
     }
 
-    const results = new Map<number, ProbeResult>();
+    // Per stream, the verdicts its logins returned. The check reports one row
+    // per stream -- the best login it has -- the same single-stream view
+    // Dispatcharr holds, so per-variant results are combined below rather
+    // than reported.
+    const variantResults = new Map<number, VariantVerdict[]>();
     const probeOptions = {
       limits,
       probe: async (job: ProbeJob) => {
@@ -233,19 +268,16 @@ export async function POST(request: Request, context: { params: Promise<{ channe
           detectBlack: config.PODIUM_DETECT_BLACK,
           blackRatio: config.PODIUM_BLACK_RATIO,
         });
-        results.set(job.streamId, result);
         // Do not pollute shared cache if channel is held back by group policy
         if (verdict.allowed) {
           const stream = streamById.get(job.streamId);
-          if (stream?.streamHash) store?.put(job.streamId, stream.streamHash, result);
+          if (stream?.streamHash) {
+            store?.put(job.streamId, stream.streamHash, result, job.profileId);
+          }
         }
-        // Publish to Dispatcharr for the same reason -- best-effort, since
-        // failing to publish must not fail the check.
-        if (config.PODIUM_WRITE_STATS && !config.PODIUM_DRY_RUN) {
-          client
-            .setStreamStats(job.streamId, statsPayload(result, strategy.weights))
-            .catch(() => {});
-        }
+        const list = variantResults.get(job.streamId) ?? [];
+        list.push({ variantId: job.profileId, result });
+        variantResults.set(job.streamId, list);
         return result;
       },
       onChannelComplete: async () => {},
@@ -254,14 +286,32 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     // check waits rather than stacking provider slots on top of this one.
     await onDemand.run(() => runLanes<ProbeResult>(jobs, probeOptions));
 
-    const entries: RankEntry[] = jobs
-      .filter((j) => results.has(j.streamId))
-      .map((j) => ({
-        streamId: j.streamId,
-        stepOrder: j.stepOrder,
-        providerId: j.providerId,
-        result: results.get(j.streamId) as ProbeResult,
-      }));
+    const results = new Map<number, ProbeResult>();
+    for (const [streamId, verdicts] of variantResults) {
+      const best = pickBestVariant(verdicts, strategy.weights);
+      if (!best) continue;
+      results.set(streamId, best);
+      // Published once per stream from the combined verdict, after the run --
+      // per-probe publishing would have each login's stats overwrite the last,
+      // and leave an arbitrary login's numbers standing.
+      if (config.PODIUM_WRITE_STATS && !config.PODIUM_DRY_RUN) {
+        client.setStreamStats(streamId, statsPayload(best, strategy.weights)).catch(() => {});
+      }
+    }
+
+    const jobMeta = new Map(jobs.map((job) => [job.streamId, job]));
+    const entries: RankEntry[] = [...results.entries()]
+      .map(([streamId, result]) => {
+        const job = jobMeta.get(streamId);
+        if (!job) return null;
+        return {
+          streamId,
+          stepOrder: job.stepOrder,
+          providerId: job.providerId,
+          result,
+        } satisfies RankEntry;
+      })
+      .filter((entry): entry is RankEntry => entry !== null);
     const ranked = rank(entries, strategy);
 
     // Whether the rule claims a stream is a question about the rule, so it is

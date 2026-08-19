@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DispatcharrClient, DispatcharrError, PAGE_CONCURRENCY, PAGE_SIZE } from './dispatcharr';
+import {
+  DispatcharrClient,
+  DispatcharrError,
+  PAGE_CONCURRENCY,
+  PAGE_SIZE,
+  transformUrl,
+} from './dispatcharr';
 
 /**
  * A stub for global fetch that records every call.
@@ -212,6 +218,39 @@ describe('auth', () => {
   });
 });
 
+describe('transformUrl', () => {
+  // The rewrite Dispatcharr itself applies at playback, when a second login
+  // reaches the same upstream as the default one the stored URLs carry.
+  const url = 'http://crx.watch/live/coffee/684540451/1234.ts';
+
+  it('swaps credentials with a $1 backreference', () => {
+    expect(transformUrl(url, 'coffee/684540451', 'ahh/999')).toBe(
+      'http://crx.watch/live/ahh/999/1234.ts',
+    );
+  });
+
+  it('supports named groups and $<name> replacements', () => {
+    expect(transformUrl(url, 'live/(?<user>[^/]+)/(?<pass>[^/]+)', 'live/$<pass>/$<user>')).toBe(
+      'http://crx.watch/live/684540451/coffee/1234.ts',
+    );
+  });
+
+  it('replaces every occurrence, like the re.sub Dispatcharr runs', () => {
+    expect(transformUrl('a/a/a', 'a', 'b')).toBe('b/b/b');
+  });
+
+  it('returns the input unchanged when the pattern does not match', () => {
+    // Dispatcharr falls back to the original URL; the variant builder's
+    // dedupe is what drops the no-op rewrite.
+    expect(transformUrl(url, 'nomatch', 'x')).toBe(url);
+  });
+
+  it('returns null for an empty, invalid, or throwing pattern', () => {
+    expect(transformUrl(url, '', '$1')).toBeNull();
+    expect(transformUrl(url, 'coffee(', 'x')).toBeNull();
+  });
+});
+
 describe('resource mapping', () => {
   it('prefers the effective_* fields on a channel', async () => {
     stubFetch(() => ({
@@ -256,6 +295,64 @@ describe('resource mapping', () => {
     }));
     const providers = await new DispatcharrClient('http://d', { apiKey: 'k' }).providers();
     expect(providers.map((p) => p.maxStreams)).toEqual([3, 4, 4]);
+  });
+
+  it('maps the profiles an account carries -- its extra logins', async () => {
+    stubFetch(() => ({
+      body: [
+        {
+          id: 6,
+          name: 'A',
+          max_streams: 3,
+          profiles: [
+            {
+              id: 6,
+              name: 'Default',
+              is_default: true,
+              is_active: true,
+              max_streams: 3,
+              current_viewers: 1,
+              search_pattern: '^(.*)$',
+              replace_pattern: '$1',
+            },
+            {
+              id: 9,
+              name: 'Second login',
+              is_default: false,
+              is_active: true,
+              max_streams: 2,
+              search_pattern: 'coffee/684540451',
+              replace_pattern: 'coffee2/xyz',
+            },
+            { id: 10, name: 'Disabled', is_default: false, is_active: false, max_streams: 0 },
+          ],
+        },
+        { id: 7, name: 'B', max_streams: 5 },
+      ],
+    }));
+    const providers = await new DispatcharrClient('http://d', { apiKey: 'k' }).providers();
+
+    const a = providers[0]!;
+    const b = providers[1]!;
+    // Inactive profiles are kept with their flag: whether a login is usable is
+    // a question for the variant builder, not the mapping.
+    expect(a.profiles.map((p) => [p.id, p.isActive])).toEqual([
+      [6, true],
+      [9, true],
+      [10, false],
+    ]);
+    expect(a.profiles[0]).toMatchObject({
+      isDefault: true,
+      maxStreams: 3,
+      currentViewers: 1,
+      searchPattern: '^(.*)$',
+      replacePattern: '$1',
+    });
+    expect(a.profiles[1]).toMatchObject({ maxStreams: 2, currentViewers: 0 });
+    // A profile cap of 0 means "use the account's cap" -- preserved as null.
+    expect(a.profiles[2]!.maxStreams).toBeNull();
+    // An account with no profiles (or an older Dispatcharr) gets [], not a crash.
+    expect(b.profiles).toEqual([]);
   });
 
   it('reads active channel ids in every shape the proxy returns', async () => {
