@@ -14,11 +14,11 @@ import { loadConfig } from './config';
 import type { Channel, Provider, Stream } from './dispatcharr';
 import type { ProbeResult } from './probe';
 import { RulesSource } from './rules-source';
-import { makeStreamSettler, Runner } from './runner';
+import { laneBudgets, makeStreamSettler, Runner } from './runner';
 import type { ProbeJob } from './scheduler';
 import { DEFAULT_WEIGHTS } from './scoring';
 import { Store } from './store';
-import { buildVariants } from './variants';
+import { buildVariants, type ProviderLogin, providerLogins } from './variants';
 
 const result = (over: Partial<ProbeResult> = {}): ProbeResult => ({
   alive: true,
@@ -159,7 +159,7 @@ describe('the planner with several logins', () => {
 
   it('queues one job per login that lacks a fresh verdict, and only those', () => {
     const { rules, runner } = build();
-    const variantsByStream = new Map([[10, buildVariants(URL, provider())]]);
+    const variantsByStream = new Map([[10, buildVariants(URL, providerLogins(provider()))]]);
 
     // Never probed at all: both logins.
     let planned = plan(runner, rules, variantsByStream);
@@ -185,7 +185,7 @@ describe('the planner with several logins', () => {
 
   it('re-probes only the login whose verdict expired', () => {
     const { rules, runner } = build();
-    const variantsByStream = new Map([[10, buildVariants(URL, provider())]]);
+    const variantsByStream = new Map([[10, buildVariants(URL, providerLogins(provider()))]]);
 
     const stale = Date.now() - 25 * 3_600_000; // past the live TTL
     // Write both variants with the second one aged out, via a raw SQL stamp --
@@ -213,7 +213,7 @@ describe('the planner with several logins', () => {
 
   it('counts a marked stream once, however many logins hold verdicts', () => {
     const { rules, runner } = build();
-    const variantsByStream = new Map([[10, buildVariants(URL, provider())]]);
+    const variantsByStream = new Map([[10, buildVariants(URL, providerLogins(provider()))]]);
 
     // Both logins probed a minute before the request, stamped explicitly: a
     // tie with `Date.now()` would make the outcome depend on the clock.
@@ -231,7 +231,11 @@ describe('the planner with several logins', () => {
         )
         .run(10, 'h', variantId, before, 1, JSON.stringify(result()));
     }
-    store.setRefreshMark(100, Date.now());
+    // Stamped between the two verdicts and the re-probes below, rather than at
+    // `Date.now()`: `put` writes the current instant, and on a fast machine it
+    // can tie with the mark -- which reads as "measured before I asked" and
+    // leaves the mark open regardless of what this is testing.
+    store.setRefreshMark(100, before + 30_000);
     // One stream still to go -- not one per login.
     let planned = plan(runner, rules, variantsByStream);
     expect(planned.outstandingMarks[0]?.remaining).toBe(1);
@@ -304,5 +308,102 @@ describe('the stream settler', () => {
     settler.landed(job(10, 9), null);
     expect(settled).toHaveLength(1);
     expect(settled[0]?.[1]).toBeNull();
+  });
+
+  it('settles the streams an abort left half-probed, on what did land', () => {
+    // The scheduler skips a queued job outright once the run aborts, without
+    // ever calling the probe -- so nothing lands for it and nothing ever
+    // will. Draining settles the stream on its other login rather than
+    // leaving a cached verdict uncounted and unpublished.
+    const settled: Array<[number, ProbeResult | null]> = [];
+    const settler = makeStreamSettler([job(10, 0), job(10, 9), job(11, 0)], {
+      weights: DEFAULT_WEIGHTS,
+      onSettled: (streamId, best) => settled.push([streamId, best]),
+    });
+
+    settler.landed(job(10, 0), result({ height: 720 }));
+    expect(settled).toHaveLength(0);
+
+    settler.drain();
+    expect(settled.map(([streamId]) => streamId)).toEqual([10, 11]);
+    expect(settled[0]?.[1]?.height).toBe(720);
+    // Stream 11 never got a probe in at all, so it has no verdict to report.
+    expect(settled[1]?.[1]).toBeNull();
+  });
+
+  it('drains only once, so a settled stream is never counted twice', () => {
+    const settled: number[] = [];
+    const settler = makeStreamSettler([job(10, 0)], {
+      weights: DEFAULT_WEIGHTS,
+      onSettled: (streamId) => settled.push(streamId),
+    });
+    settler.landed(job(10, 0), result());
+    settler.drain();
+    settler.drain();
+    expect(settled).toEqual([10]);
+  });
+});
+
+describe('lane budgets', () => {
+  const login = (over: Partial<ProviderLogin> = {}): ProviderLogin => ({
+    id: 0,
+    name: 'Default',
+    rewrite: null,
+    maxStreams: 3,
+    currentViewers: 0,
+    isDefault: true,
+    ...over,
+  });
+
+  it('gives each login its own cap, keyed by lane', () => {
+    const budgets = laneBudgets(
+      new Map([[5, [login(), login({ id: 9, isDefault: false, maxStreams: 2 })]]]),
+      new Map(),
+    );
+    expect([...budgets.base]).toEqual([
+      ['5:0', 3],
+      ['5:9', 2],
+    ]);
+    expect([...budgets.provider.values()]).toEqual([5, 5]);
+  });
+
+  it('subtracts the viewers each login reports', () => {
+    const budgets = laneBudgets(
+      new Map([
+        [5, [login({ currentViewers: 1 }), login({ id: 9, isDefault: false, currentViewers: 2 })]],
+      ]),
+      new Map([[5, 3]]),
+    );
+    expect([...budgets.viewers]).toEqual([
+      ['5:0', 1],
+      ['5:9', 2],
+    ]);
+  });
+
+  it('charges viewers no login claims to the default lane', () => {
+    // `current_viewers` is a database column, not Dispatcharr's live
+    // connection accounting, so an install where it stays zero would
+    // otherwise probe straight through somebody watching. The provider-wide
+    // count from the activity probe is the floor.
+    const budgets = laneBudgets(
+      new Map([[5, [login(), login({ id: 9, isDefault: false })]]]),
+      new Map([[5, 2]]),
+    );
+    expect(budgets.viewers.get('5:0')).toBe(2);
+    expect(budgets.viewers.get('5:9')).toBe(0);
+  });
+
+  it('never charges a lane for viewers already accounted for', () => {
+    const budgets = laneBudgets(new Map([[5, [login({ currentViewers: 2 })]]]), new Map([[5, 1]]));
+    expect(budgets.viewers.get('5:0')).toBe(2);
+  });
+
+  it('spreads unattributed viewers when the account has no default login', () => {
+    const budgets = laneBudgets(
+      new Map([[5, [login({ id: 8, isDefault: false }), login({ id: 9, isDefault: false })]]]),
+      new Map([[5, 3]]),
+    );
+    expect(budgets.viewers.get('5:8')).toBe(2);
+    expect(budgets.viewers.get('5:9')).toBe(2);
   });
 });

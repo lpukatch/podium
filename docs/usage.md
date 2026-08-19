@@ -366,6 +366,17 @@ limit — and a stream is no longer called dead just because the default login i
 rate-limited. Nothing to configure; it turns itself on when a second profile
 appears on the account.
 
+Two details are worth knowing. The default profile's own search and replace are
+applied as well, not assumed to be the identity pair Dispatcharr creates it
+with — so a default profile edited to swap a LAN address for a WAN one is
+probed at the address it actually plays. And on an Xtream Codes account,
+Dispatcharr rebuilds the playback URL from the account's current credentials
+rather than transforming the stored one; Podium transforms the stored URL, so
+if credentials are rotated without an M3U refresh it probes the old ones until
+the next sync. A login whose pattern does not compile, or that rewrites onto a
+URL another login already probes, is skipped with a line in the worker log
+naming it — check there first if a second login does not seem to be running.
+
 There is deliberately no loop detection. Catching a loop means watching for at
 least one loop period — around 120s per stream against the ~1s the other checks
 cost — for a failure far rarer than dead, black or throttled.

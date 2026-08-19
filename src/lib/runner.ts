@@ -38,8 +38,11 @@ import {
 import { ALL_GROUPS, forcedAtFor, type Progress, type Store, ttlFor } from './store';
 import {
   buildVariants,
+  type ProviderLogin,
   pickBestVariant,
+  providerLogins,
   type StreamVariant,
+  type VariantIssue,
   type VariantVerdict,
 } from './variants';
 
@@ -301,9 +304,76 @@ export function selectLaneSlice<T extends OpenJobItem>(
   return selected;
 }
 
+export interface LaneBudgets {
+  /** Lane key -> that login's connection cap. */
+  base: Map<string, number>;
+  /** Lane key -> connections already spoken for by live viewers. */
+  viewers: Map<string, number>;
+  /**
+   * Lane key -> provider id, so the per-lane bookkeeping can still be
+   * displayed per provider: the progress bars were per provider before
+   * profiles split the lanes, and one login is not a row anyone asked for.
+   */
+  provider: Map<string, number>;
+}
+
+/**
+ * What each login may use this pass, before the pacer takes its reserve.
+ *
+ * The viewer arithmetic is the part worth explaining. There are two counts of
+ * the same thing and they disagree in exactly the case that matters.
+ * `current_viewers` is per login, which is what a per-login lane wants, but it
+ * is a database column rather than Dispatcharr's live connection accounting --
+ * an install where it is not maintained reports zero while somebody is
+ * watching, and a lane that believes it would take the viewer's slot.
+ * `streamViewers` is derived from the stream rows and the activity probe, is
+ * per provider, and is the count this has always paced against.
+ *
+ * So: trust the per-login figures for what they claim, and give whatever the
+ * provider-wide count sees beyond them to the default lane -- the login
+ * Dispatcharr tries first, and so the one an unattributed viewer is most
+ * likely on. When every profile reports zero, that hands the whole
+ * provider-wide count to the default lane, which is precisely the behaviour
+ * before profiles existed. A provider with no default login at all (its
+ * default profile deactivated) has no lane to attribute the remainder to, so
+ * it is spread over the logins it does have rather than dropped.
+ */
+export function laneBudgets(
+  loginsByProvider: Map<number, ProviderLogin[]>,
+  streamViewers: Map<number, number>,
+): LaneBudgets {
+  const budgets: LaneBudgets = { base: new Map(), viewers: new Map(), provider: new Map() };
+  for (const [providerId, logins] of loginsByProvider) {
+    if (logins.length === 0) continue;
+    const claimed = logins.reduce((sum, login) => sum + login.currentViewers, 0);
+    const unattributed = Math.max(0, (streamViewers.get(providerId) ?? 0) - claimed);
+    const fallback = logins.find((login) => login.isDefault) ?? null;
+    // Spread over every login when there is no default to carry it, rounded
+    // up: half a viewer still occupies a whole connection.
+    const share = fallback ? 0 : Math.ceil(unattributed / logins.length);
+    for (const login of logins) {
+      const key = laneKey(providerId, login.id);
+      budgets.provider.set(key, providerId);
+      budgets.base.set(key, login.maxStreams);
+      budgets.viewers.set(key, login.currentViewers + (login === fallback ? unattributed : share));
+    }
+  }
+  return budgets;
+}
+
 export interface StreamSettler {
   /** Record one queued probe landing -- a verdict, or null when it never ran. */
   landed(job: ProbeJob, result: ProbeResult | null): void;
+  /**
+   * Settle every stream still waiting on a probe that will never land.
+   *
+   * The scheduler skips queued jobs outright once the run aborts, without ever
+   * calling the probe, so a stream whose second login was skipped would sit
+   * half-landed forever: its first login's verdict cached but never counted
+   * and never published. Called after the run, it settles those on whatever
+   * did land.
+   */
+  drain(): void;
 }
 
 export interface StreamSettlerDeps {
@@ -342,6 +412,12 @@ export function makeStreamSettler(jobs: ProbeJob[], deps: StreamSettlerDeps): St
       if (entry.left > 0) return;
       pending.delete(job.streamId);
       deps.onSettled(job.streamId, pickBestVariant(entry.landed, deps.weights));
+    },
+    drain(): void {
+      for (const [streamId, entry] of pending) {
+        deps.onSettled(streamId, pickBestVariant(entry.landed, deps.weights));
+      }
+      pending.clear();
     },
   };
 }
@@ -680,47 +756,55 @@ export class Runner {
         })),
         activity,
       );
-      const laneBase = new Map<string, number>();
-      const laneViewers = new Map<string, number>();
-      // Lane key -> provider id, so the per-lane bookkeeping below can still be
-      // displayed per provider: the progress bars were per provider before
-      // profiles split the lanes, and one login is not a row anyone asked for.
-      const laneProvider = new Map<string, number>();
-      for (const provider of providers) {
-        const defaultKey = laneKey(provider.id, 0);
-        laneProvider.set(defaultKey, provider.id);
-        const active = provider.profiles.filter((p) => p.isActive);
-        if (active.length <= 1) {
-          laneBase.set(defaultKey, provider.maxStreams);
-          laneViewers.set(defaultKey, streamViewers.get(provider.id) ?? 0);
-          continue;
-        }
-        const defaultProfile = provider.profiles.find((p) => p.isDefault);
-        // Variant 0 is the stored URL, which authenticates as the default
-        // login -- that login's cap governs it, falling back to the account's.
-        laneBase.set(defaultKey, defaultProfile?.maxStreams ?? provider.maxStreams);
-        laneViewers.set(defaultKey, defaultProfile?.currentViewers ?? 0);
-        for (const profile of active) {
-          if (profile.isDefault) continue;
-          const key = laneKey(provider.id, profile.id);
-          laneProvider.set(key, provider.id);
-          laneBase.set(key, profile.maxStreams ?? provider.maxStreams);
-          laneViewers.set(key, profile.currentViewers);
-        }
-      }
+      const loginsByProvider = new Map(providers.map((p) => [p.id, providerLogins(p)]));
+      const {
+        base: laneBase,
+        viewers: laneViewers,
+        provider: laneProvider,
+      } = laneBudgets(loginsByProvider, streamViewers);
       const limits = pacer.laneLimits(laneBase, activity, laneViewers);
 
-      // Every stream's probe targets for the pass: the stored URL, plus one
-      // rewritten URL per extra active login the account carries.
-      const providerById = new Map(providers.map((p) => [p.id, p]));
+      // Every stream's probe targets for the pass: one per login that reaches a
+      // distinct URL, the stored URL among them for all but the oddest account.
+      //
+      // Where a login yields no target of its own the reason is folded by
+      // profile and logged once below, rather than per stream. A pattern that
+      // cannot be compiled or does not match is the failure mode where this
+      // whole feature quietly does nothing, so it is worth a line each pass.
       const variantsByStream = new Map<number, StreamVariant[]>();
+      const variantIssues = new Map<
+        string,
+        { providerId: number; name: string; issue: VariantIssue; count: number }
+      >();
       for (const stream of streams) {
-        const provider = providerById.get(stream.providerId);
+        const logins = loginsByProvider.get(stream.providerId);
         variantsByStream.set(
           stream.id,
-          provider
-            ? buildVariants(stream.url, provider)
+          logins
+            ? buildVariants(stream.url, logins, (login, issue) => {
+                const key = `${stream.providerId}:${login.id}:${issue}`;
+                const seen = variantIssues.get(key);
+                if (seen) seen.count += 1;
+                else
+                  variantIssues.set(key, {
+                    providerId: stream.providerId,
+                    name: login.name,
+                    issue,
+                    count: 1,
+                  });
+              })
             : [{ variantId: 0, profileId: 0, url: stream.url }],
+        );
+      }
+      for (const { providerId, name, issue, count } of variantIssues.values()) {
+        const why =
+          issue === 'unusable-pattern'
+            ? 'its search/replace pattern is empty or not a regex Podium can compile'
+            : 'its rewrite lands on a URL another login already probes ' +
+              '(the pattern matched nothing, or two logins share an address)';
+        log(
+          `login "${name}" on provider ${providerId} contributed no probe target ` +
+            `for ${count} stream(s): ${why}`,
         );
       }
 
@@ -799,6 +883,27 @@ export class Runner {
       // the freshness numbers past the target for work the pacer never does.
       const pruned = store.pruneOutside(keepStreamIds, undefined, log);
       if (pruned > 0) log(`pruned ${pruned} orphan cache rows`);
+
+      // The same sweep along the other axis: rows for a login that has been
+      // deleted or deactivated in Dispatcharr. `variantsByStream` is the live
+      // set by construction -- every login the catalogue can still be probed
+      // through -- so anything outside it is a verdict nothing will refresh,
+      // and the per-stream readers would go on folding it in as though it
+      // were current.
+      //
+      // Guarded on the provider list, not just the stream list: a catalogue
+      // that came back with no accounts at all leaves every stream falling
+      // back to the stored URL, and sweeping on that reading would delete
+      // every second login's history over one bad fetch.
+      if (providers.length > 0 && streams.length > 0) {
+        const liveVariants = new Set<number>();
+        for (const variants of variantsByStream.values()) {
+          for (const variant of variants) liveVariants.add(variant.variantId);
+        }
+        const staleLogins = store.pruneVariants(liveVariants);
+        if (staleLogins > 0)
+          log(`pruned ${staleLogins} cache rows for logins that no longer exist`);
+      }
 
       // Cache-only channels never enter the scheduler, so they are reordered
       // here or they would be skipped entirely.
@@ -1132,6 +1237,9 @@ export class Runner {
         });
       } finally {
         clearInterval(watcher);
+        // Streams the abort left half-probed settle on what did land, so a
+        // verdict already written to the cache is still counted and published.
+        settler.drain();
       }
       counters.skipped = stats.skipped;
       this.emit({

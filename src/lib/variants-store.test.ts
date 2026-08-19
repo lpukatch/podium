@@ -176,4 +176,44 @@ describe('per-variant rows', () => {
     expect(store.cacheStats().alive).toBe(1);
     store.close();
   });
+
+  it('drops rows for logins that no longer exist, and keeps the live ones', () => {
+    // A profile deleted or deactivated in Dispatcharr leaves rows nothing will
+    // refresh -- and the per-stream readers fold every row for a stream
+    // together, so an abandoned alive verdict would keep the stream reading
+    // alive and its frozen timestamp would pin the freshness numbers.
+    const store = new Store(':memory:');
+    store.put(40, 'h', verdict(true), 0);
+    store.put(40, 'h', verdict(true), 5);
+    store.put(41, 'h', verdict(true), 9);
+
+    expect(store.pruneVariants(new Set([0, 5]))).toBe(1);
+    expect([...store.variants(40, 'h').keys()].sort()).toEqual([0, 5]);
+    expect(store.variants(41, 'h').size).toBe(0);
+    store.close();
+  });
+
+  it('deletes nothing when the live set is empty', () => {
+    // An empty set means the provider fetch came back with nothing to compare
+    // against, which is a state to leave alone rather than a wipe.
+    const store = new Store(':memory:');
+    store.put(40, 'h', verdict(true), 0);
+    expect(store.pruneVariants(new Set())).toBe(0);
+    expect(store.variants(40, 'h').size).toBe(1);
+    store.close();
+  });
+
+  it('stops counting a removed login the moment its rows go', () => {
+    const store = new Store(':memory:');
+    store.put(40, 'h', verdict(false, { error: 'banned' }), 0);
+    store.put(40, 'h', verdict(true), 5);
+    expect(store.cacheStats().alive).toBe(1);
+
+    store.pruneVariants(new Set([0]));
+    const stats = store.cacheStats();
+    expect(stats.total).toBe(1);
+    expect(stats.alive).toBe(0);
+    expect(stats.dead).toBe(1);
+    store.close();
+  });
 });

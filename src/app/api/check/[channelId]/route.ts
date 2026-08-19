@@ -23,7 +23,12 @@ import {
   snapshot,
 } from '@/lib/server/state';
 import { Store } from '@/lib/store';
-import { buildVariants, pickBestVariant, type VariantVerdict } from '@/lib/variants';
+import {
+  buildVariants,
+  pickBestVariant,
+  providerLogins,
+  type VariantVerdict,
+} from '@/lib/variants';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
@@ -168,7 +173,6 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     const providerNames = new Map(snap.providers.map((p) => [p.id, p.name]));
     // Same strategy the worker resolves, so the preview matches what it writes.
     const strategy = resolveOrdering(ordering(), providerNames, config.PODIUM_MIN_BITRATE_KBPS);
-    const providerById = new Map(snap.providers.map((p) => [p.id, p]));
 
     // The courtesy reserve, on the same rule the worker uses (Pacer.laneLimits):
     // hold a slot back for a human only when a human is actually watching, since
@@ -187,26 +191,15 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       .catch(() => true);
     const reserve = watching ? config.PODIUM_MIN_FREE_SLOTS : 0;
 
-    // Per-login lane limits, the shape the worker paces itself against: one
-    // lane per login for a multi-login provider, one lane for everybody else,
-    // each shrunk by the courtesy reserve and -- when the worker is probing --
-    // the one slot this check yields to it.
+    // Per-login lane limits, from the same reading of the account the worker
+    // uses: one lane per active login, each shrunk by the courtesy reserve
+    // and -- when the worker is probing -- the one slot this check yields to it.
+    const loginsByProvider = new Map(snap.providers.map((p) => [p.id, providerLogins(p)]));
     const limits = new Map<string, number>();
     const shrink = (limit: number) => Math.max(0, limit - reserve - (workerBusy ? 1 : 0));
-    for (const provider of snap.providers) {
-      const active = provider.profiles.filter((p) => p.isActive);
-      if (active.length <= 1) {
-        limits.set(laneKey(provider.id, 0), shrink(provider.maxStreams));
-        continue;
-      }
-      const def = provider.profiles.find((p) => p.isDefault);
-      limits.set(laneKey(provider.id, 0), shrink(def?.maxStreams ?? provider.maxStreams));
-      for (const profile of active) {
-        if (profile.isDefault) continue;
-        limits.set(
-          laneKey(provider.id, profile.id),
-          shrink(profile.maxStreams ?? provider.maxStreams),
-        );
+    for (const [providerId, logins] of loginsByProvider) {
+      for (const login of logins) {
+        limits.set(laneKey(providerId, login.id), shrink(login.maxStreams));
       }
     }
 
@@ -220,12 +213,14 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       if (!stream) continue;
       // Every login the stream could play through, each gated on its own
       // lane: a saturated default login does not stop the second one being
-      // checked. The 50-stream cap counts streams, not logins. A stream with
-      // no runnable login is simply unprobed, feeding `unprobed` below
-      // exactly as a capacity-skipped stream always did.
-      const provider = providerById.get(stream.providerId);
-      const variants = provider
-        ? buildVariants(stream.url, provider)
+      // checked. The 50-stream cap counts streams, not logins -- the extra
+      // probes run in lanes of their own, concurrently, so a second login
+      // costs the check connections rather than wall time. A stream with no
+      // runnable login is simply unprobed, feeding `unprobed` below exactly
+      // as a capacity-skipped stream always did.
+      const logins = loginsByProvider.get(stream.providerId);
+      const variants = logins
+        ? buildVariants(stream.url, logins)
         : [{ variantId: 0, profileId: 0, url: stream.url }];
       for (const variant of variants) {
         if ((limits.get(laneKey(stream.providerId, variant.profileId)) ?? 0) <= 0) continue;

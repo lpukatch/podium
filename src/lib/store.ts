@@ -1156,4 +1156,29 @@ export class Store {
     });
     return run([...keep]);
   }
+
+  /**
+   * Drop cache rows for logins that no longer exist, the per-variant companion
+   * to `pruneOutside`.
+   *
+   * A profile deleted or deactivated in Dispatcharr leaves rows nothing will
+   * ever refresh, and the readers that speak per stream -- `verdicts`,
+   * `cacheStats` -- fold every row for a stream together. An abandoned row is
+   * therefore not merely inert: an alive verdict from a login that is gone
+   * keeps the stream reading alive on the pages, and its frozen `probed_at`
+   * pins `oldestProbedAt` at that moment until the 30-day sweep. Both are
+   * wrong the instant the profile goes.
+   *
+   * `keep` is every login id the catalogue still carries, variant 0 included
+   * where any provider still probes the stored URL. Empty deletes nothing: it
+   * means the provider fetch came back with nothing to compare against, which
+   * is a state to leave alone rather than a request to wipe the cache.
+   */
+  pruneVariants(keep: Set<number>): number {
+    if (keep.size === 0) return 0;
+    const holes = [...keep].map(() => '?').join(',');
+    return this.db
+      .prepare(`DELETE FROM probe_cache WHERE variant_id NOT IN (${holes})`)
+      .run(...keep).changes;
+  }
 }

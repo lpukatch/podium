@@ -86,7 +86,7 @@ export interface ProviderProfile {
   name: string;
   isDefault: boolean;
   isActive: boolean;
-  /** That login's own connection cap; null = unset, callers fall back to the account max. */
+  /** That login's own connection cap; null = unlimited, callers fall back to the account max. */
   maxStreams: number | null;
   currentViewers: number;
   searchPattern: string;
@@ -450,8 +450,10 @@ export class DispatcharrClient {
           name: profile.name || String(profile.id),
           isDefault: Boolean(profile.is_default),
           isActive: profile.is_active !== false,
-          // Null is preserved rather than defaulted here: a profile cap of 0
-          // means "use the account's cap", a decision the lane builder makes.
+          // 0 is Dispatcharr's "unlimited", as it is on the account. Preserved
+          // as null rather than resolved here: what an unlimited login should
+          // actually be capped at is the lane builder's decision, and it makes
+          // the same conservative one the account gets.
           maxStreams: profile.max_streams ? Number(profile.max_streams) : null,
           currentViewers: profile.current_viewers ?? 0,
           searchPattern: profile.search_pattern ?? '',
