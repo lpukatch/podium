@@ -127,21 +127,46 @@ describe('refresh marks in the store', () => {
   });
 
   it('brings every older verdict due, the way the progress page reads it', () => {
-    const now = Date.now();
     store.put(10, 'h', result());
     const live = 24 * 3_600_000;
+    // Read the verdict's own timestamp rather than a clock sampled before the
+    // write. `put` stamps `probed_at` with its own `Date.now()`, so on a slow
+    // enough machine the row lands two or more milliseconds after anything
+    // captured beforehand -- which put the verdict NEWER than the mark below
+    // and inverted the whole assertion. `due` is `probed_at <= forced`, so the
+    // margin was exactly one millisecond, and CI eventually spent it.
+    const probedAt = store.verdicts([10]).get(10)?.probedAt ?? 0;
+    expect(probedAt).toBeGreaterThan(0);
 
-    const before = store.cacheHealth(live, 3_600_000, now);
+    const before = store.cacheHealth(live, 3_600_000, probedAt);
     expect(before.due).toBe(0);
-    expect(before.nextDueAt).toBeGreaterThan(now);
+    expect(before.nextDueAt).toBeGreaterThan(probedAt);
 
     // Same query, with a catalogue-wide mark stamped after that verdict.
-    const after = store.cacheHealth(live, 3_600_000, now, 3_600_000, 0, now + 1);
+    const after = store.cacheHealth(live, 3_600_000, probedAt, 3_600_000, 0, probedAt + 1);
     expect(after.due).toBe(1);
-    expect(after.nextDueAt).toBe(now);
+    expect(after.nextDueAt).toBe(probedAt);
     // The verdict itself is untouched -- this is a view, not a delete.
     expect(after.total).toBe(1);
     expect(after.alive).toBe(1);
+  });
+
+  it('leaves a verdict newer than the mark alone', () => {
+    // The other side of the boundary, and the case whose absence let the race
+    // above look like a passing test: a mark only brings verdicts recorded
+    // before it due, so one recorded after it must stay cached.
+    store.put(10, 'h', result());
+    const probedAt = store.verdicts([10]).get(10)?.probedAt ?? 0;
+    const health = store.cacheHealth(
+      24 * 3_600_000,
+      3_600_000,
+      probedAt,
+      3_600_000,
+      0,
+      probedAt - 1,
+    );
+    expect(health.due).toBe(0);
+    expect(health.nextDueAt).toBeGreaterThan(probedAt);
   });
 });
 
