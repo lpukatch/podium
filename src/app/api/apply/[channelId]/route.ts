@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { requireCredentials } from '@/lib/config';
 import { DispatcharrClient } from '@/lib/dispatcharr';
 import { currentProgrammes, describeVerdict, Eligibility } from '@/lib/eligibility';
-import { composeOrder } from '@/lib/runner';
+import { catalogueRows, composeOrder } from '@/lib/runner';
 import {
   groupPatterns,
   noteStreamOrder,
@@ -102,6 +102,20 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     // write -- which is what made an applied removal look like it had not
     // happened until Refresh.
     noteStreamOrder(id, targetOrder);
+    // Keep the persisted catalogue honest about what was just written: it is
+    // the worker's snapshot until the next pass, and an apply the worker did
+    // not make would otherwise not show up in the metrics until a full pass
+    // later. The web snapshot's stream/provider maps are minutes stale at
+    // worst, which provider attribution does not care about.
+    store.updateChannelOrder(
+      id,
+      catalogueRows(
+        { id, name: channel.name },
+        targetOrder,
+        new Map(snap.streams.map((s) => [s.id, s])),
+        new Map(snap.providers.map((p) => [p.id, p.name])),
+      ),
+    );
 
     return NextResponse.json({
       status: 'applied',

@@ -553,3 +553,60 @@ export async function probe(url: string, options: ProbeOptions = {}): Promise<Pr
     });
   });
 }
+
+/** The bounded set `deadReason` maps ffmpeg's stderr onto. */
+export const DEAD_REASONS = [
+  'auth',
+  'not_found',
+  'server_error',
+  'timeout',
+  'unreachable',
+  'unsupported',
+  'rejected',
+  'probe_error',
+  'other',
+] as const;
+export type DeadReason = (typeof DEAD_REASONS)[number];
+
+/**
+ * Why a dead verdict is dead, in a handful of buckets.
+ *
+ * `result.error` is the last line of ffmpeg's stderr, which is unbounded text
+ * and useless as a Prometheus label -- every URL produces its own. The point of
+ * folding it is that "this provider's streams do not exist" (`not_found`) and
+ * "this provider's servers are falling over" (`server_error`) and "our
+ * credentials are wrong" (`auth`) are three completely different answers to
+ * "how good is this provider", and a single `dead` count cannot tell them apart.
+ *
+ * `probe_error` is deliberately separate: a missing ffprobe or an unparseable
+ * payload is our failure, not the provider's, and smearing it across providers
+ * would make whichever one happened to be probed look broken.
+ */
+export function deadReason(error: string): DeadReason {
+  const text = error.toLowerCase();
+  if (text === '') return 'other';
+  // Ours before theirs: these strings are written by this file, not by ffmpeg.
+  if (text.startsWith('spawn failed') || text.startsWith('unparseable')) return 'probe_error';
+  if (text === 'empty url' || text.startsWith('refusing a url')) return 'rejected';
+  // Ahead of the status codes because "Protocol not found" is ffmpeg failing to
+  // handle the URL scheme, not a 404, and the substring would say otherwise.
+  if (/protocol not found|could not find codec/.test(text)) return 'unsupported';
+  // Status codes first -- a 403 body can mention any word below.
+  if (/\b(401|403)\b|unauthorized|forbidden/.test(text)) return 'auth';
+  if (/\b(404|410)\b|not found/.test(text)) return 'not_found';
+  if (/\b5\d\d\b|bad gateway|service unavailable|server error/.test(text)) return 'server_error';
+  if (/timed? ?out|etimedout/.test(text)) return 'timeout';
+  if (
+    /connection refused|econnrefused|connection reset|network is unreachable|no route to host|name or service not known|failed to resolve|temporary failure in name resolution/.test(
+      text,
+    )
+  )
+    return 'unreachable';
+  if (
+    /invalid data found|protocol not found|unknown format|could not find codec|does not contain any stream|end of file|immediate exit/.test(
+      text,
+    )
+  )
+    return 'unsupported';
+  return 'other';
+}

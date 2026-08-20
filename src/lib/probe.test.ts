@@ -3,7 +3,14 @@ import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { parseSampleStderr, probe, rejectUrl, sampleStream } from './probe';
+import {
+  DEAD_REASONS,
+  deadReason,
+  parseSampleStderr,
+  probe,
+  rejectUrl,
+  sampleStream,
+} from './probe';
 
 /** ffmpeg is installed in CI; skip the integration tests where it is not. */
 function hasFfmpeg(): boolean {
@@ -277,5 +284,59 @@ describe('a sample cut short keeps what it read', () => {
     // 0.4s of black out of a window that never finished is a floor, not a
     // verdict -- so the probe declines to call it either way.
     expect(result.black).toBeUndefined();
+  });
+});
+
+describe('deadReason', () => {
+  // The left column is real ffmpeg stderr, as `probe` stores it.
+  const cases: Array<[string, string]> = [
+    ['Server returned 401 Unauthorized', 'auth'],
+    ['Server returned 403 Forbidden', 'auth'],
+    ['Server returned 404 Not Found', 'not_found'],
+    ['Server returned 410 Gone', 'not_found'],
+    ['Server returned 502 Bad Gateway', 'server_error'],
+    ['Server returned 503 Service Unavailable', 'server_error'],
+    ['timeout', 'timeout'],
+    ['Operation timed out', 'timeout'],
+    ['Connection refused', 'unreachable'],
+    ['Name or service not known', 'unreachable'],
+    ['Connection reset by peer', 'unreachable'],
+    ['Invalid data found when processing input', 'unsupported'],
+    ['Protocol not found', 'unsupported'],
+    ['spawn failed: ENOENT', 'probe_error'],
+    ['unparseable: SyntaxError: Unexpected token', 'probe_error'],
+    ['empty url', 'rejected'],
+    ['refusing a url that begins with "-"', 'rejected'],
+    ['', 'other'],
+    ['something nobody has seen before', 'other'],
+  ];
+  for (const [error, expected] of cases) {
+    it(`reads ${JSON.stringify(error)} as ${expected}`, () => {
+      expect(deadReason(error)).toBe(expected);
+    });
+  }
+
+  it('never returns a reason outside the declared set', () => {
+    // The set is a Prometheus label value, so an unbounded return would be a
+    // cardinality leak rather than a wrong answer -- worth pinning explicitly.
+    for (const [error] of cases) {
+      expect(DEAD_REASONS).toContain(deadReason(error));
+    }
+    expect(DEAD_REASONS).toContain(deadReason('\u0000 garbage 999 !!'));
+  });
+
+  it('reads a status code ahead of any word in the body', () => {
+    // A 403 page whose text happens to say "not found" is still an auth
+    // failure, and the ordering in `deadReason` is what makes that hold.
+    expect(deadReason('Server returned 403 Forbidden (not found)')).toBe('auth');
+  });
+
+  it('does not mistake a year or a port for a status code', () => {
+    expect(deadReason('failed at 2024 something')).toBe('other');
+  });
+
+  it('is what `rejectUrl` refusals classify as', () => {
+    expect(deadReason(rejectUrl(''))).toBe('rejected');
+    expect(deadReason(rejectUrl('-report'))).toBe('rejected');
   });
 });

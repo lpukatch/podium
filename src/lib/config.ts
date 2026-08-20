@@ -178,6 +178,16 @@ export const configSchema = z.object({
    */
   PODIUM_DRY_RUN: bool(true),
   PODIUM_RUN_ONCE: bool(false),
+  /**
+   * Expose the per-channel source series on /api/metrics -- the ordered list
+   * of every managed channel's streams with provider and verdict.
+   *
+   * On by default because it is the view the provider dashboard is for; off is
+   * the escape hatch for a Prometheus watching its cardinality; the per-channel
+   * families are the only ones that scale with the catalogue (managed channels
+   * x slots x four families, where every other family here is per provider).
+   */
+  PODIUM_METRICS_CHANNELS: bool(true),
   LOG_LEVEL: z.string().default('info'),
 });
 
