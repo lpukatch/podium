@@ -6,8 +6,16 @@
 import { describe, expect, it } from 'vitest';
 import type { Provider, ProviderProfile } from './dispatcharr';
 import type { ProbeResult } from './probe';
+import { laneKey } from './scheduler';
 import { DEFAULT_WEIGHTS } from './scoring';
-import { buildVariants, pickBestVariant, providerLogins, type VariantVerdict } from './variants';
+import {
+  buildVariants,
+  drawVariant,
+  POOLED_VARIANT,
+  pickBestVariant,
+  providerLogins,
+  type VariantVerdict,
+} from './variants';
 
 function profile(over: Partial<ProviderProfile> = {}): ProviderProfile {
   return {
@@ -162,7 +170,7 @@ describe('buildVariants', () => {
     expect(variants).toEqual([
       { variantId: 0, profileId: 0, url: URL },
       {
-        variantId: 2,
+        variantId: 0,
         profileId: 2,
         url: 'http://crx.watch/live/coffee2/secret/1234.ts',
       },
@@ -232,7 +240,7 @@ describe('buildVariants', () => {
         }),
       ),
     );
-    expect(variants.map((v) => v.variantId)).toEqual([0, 5, 8]);
+    expect(variants.map((v) => v.profileId)).toEqual([0, 5, 8]);
   });
 
   it('reports why each login contributed no target, so a broken pattern is not silent', () => {
@@ -281,8 +289,62 @@ describe('buildVariants', () => {
     );
     // Its own id, not 0: 0 is the default login's lane, and this account has
     // no default to charge the connection to.
-    expect(variants).toEqual([{ variantId: 4, profileId: 4, url: URL }]);
+    expect(variants).toEqual([{ variantId: 0, profileId: 4, url: URL }]);
     expect(issues).toEqual(['unusable-pattern']);
+  });
+});
+
+describe('drawVariant', () => {
+  const menu = () => buildVariants(URL, providerLogins(provider()));
+  const slots = (dflt: number, second: number) =>
+    new Map([
+      [laneKey(6, 0), dflt],
+      [laneKey(6, 2), second],
+    ]);
+
+  it('splits the catalogue between the logins in proportion to their free slots', () => {
+    // The whole point of the pool: 3 slots against 2 means three streams in
+    // five go to the default login, not one stream probed twice.
+    const drawn = Array.from({ length: 10 }, (_, seq) => drawVariant(menu(), 6, slots(3, 2), seq));
+    expect(drawn.filter((v) => v.profileId === 0)).toHaveLength(6);
+    expect(drawn.filter((v) => v.profileId === 2)).toHaveLength(4);
+  });
+
+  it('draws one target, never the whole menu', () => {
+    expect(menu()).toHaveLength(2);
+    const drawn = drawVariant(menu(), 6, slots(3, 2), 4);
+    expect(drawn.profileId).toBe(2);
+    expect(drawn.url).toBe('http://crx.watch/live/coffee2/secret/1234.ts');
+  });
+
+  it('caches against the stream, so every draw carries the same variant id', () => {
+    // A verdict describes the stream, not the login that fetched it. Keying
+    // the cache per login is what made a second profile double the work.
+    for (const seq of [0, 1, 2, 3, 4]) {
+      expect(drawVariant(menu(), 6, slots(3, 2), seq).variantId).toBe(POOLED_VARIANT);
+    }
+  });
+
+  it('skips a login whose connections are all taken by people watching', () => {
+    // The pacer hands the free slots, not the caps, so a login with nothing
+    // spare simply does not come up in the draw.
+    const drawn = Array.from({ length: 6 }, (_, seq) => drawVariant(menu(), 6, slots(3, 0), seq));
+    expect(drawn.every((v) => v.profileId === 0)).toBe(true);
+  });
+
+  it('hands back an unrunnable target when the provider has no lane open at all', () => {
+    // Deliberately a job the caller cannot run: it lets the pass count the
+    // stream as deferred for want of capacity rather than silently drop it.
+    const drawn = drawVariant(menu(), 6, slots(0, 0), 0);
+    expect(drawn.profileId).toBe(0);
+  });
+
+  it('is unaffected by lanes belonging to another provider', () => {
+    const other = new Map([
+      [laneKey(99, 0), 50],
+      [laneKey(6, 2), 1],
+    ]);
+    expect(drawVariant(menu(), 6, other, 0).profileId).toBe(2);
   });
 });
 
@@ -327,7 +389,7 @@ describe('buildVariants on an Xtream Codes account', () => {
       STORED,
       providerLogins(xcProvider(searchPattern, replacePattern)),
     );
-    return variants.find((v) => v.variantId === 9)?.url ?? null;
+    return variants.find((v) => v.profileId === 9)?.url ?? null;
   };
 
   it('swaps credentials exactly as the rebuild does', () => {
@@ -341,7 +403,7 @@ describe('buildVariants on an Xtream Codes account', () => {
       'http://provider.example:8080/iptv/live/user1/pass1/12345.ts',
       providerLogins(xcProvider('/live/user1/pass1/', '/live/user2/pass2/')),
     );
-    expect(variants.find((v) => v.variantId === 9)?.url).toBe(
+    expect(variants.find((v) => v.profileId === 9)?.url).toBe(
       'http://provider.example:8080/iptv/live/user2/pass2/12345.ts',
     );
   });
@@ -374,7 +436,7 @@ describe('buildVariants on an Xtream Codes account', () => {
     // standard account really does rewrite the stored URL.
     const std = { ...xcProvider('/live/', '/stream/'), accountType: 'STD' };
     const variants = buildVariants(STORED, providerLogins(std));
-    expect(variants.find((v) => v.variantId === 9)?.url).toBe(
+    expect(variants.find((v) => v.profileId === 9)?.url).toBe(
       'http://provider.example:8080/stream/user1/pass1/12345.ts',
     );
   });

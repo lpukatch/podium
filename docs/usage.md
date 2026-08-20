@@ -355,16 +355,25 @@ declares one. Podium reads a few seconds of the stream, which also gives it the
 black-screen check from the same read, so it costs one provider connection
 rather than two.
 
-**Extra logins on one provider are probed too.** A Dispatcharr M3U account can
+**Extra logins on one provider add capacity.** A Dispatcharr M3U account can
 carry several profiles — separate logins to the same upstream, each with its own
-connection cap. Podium probes a stream through every active login (rewriting
-the URL with each profile's pattern, exactly as Dispatcharr does at playback)
-and reports one verdict per stream: alive if any login can play it, carrying
-the measurements of the best one that could. Each login gets its own lane at
-its own cap, so two logins probe twice as fast without either exceeding its
-limit — and a stream is no longer called dead just because the default login is
-rate-limited. Nothing to configure; it turns itself on when a second profile
-appears on the account.
+connection cap. Podium treats them as a pool. Each login gets its own lane at
+its own cap, and every stream is drawn by *one* of them (rewriting the URL with
+that profile's pattern, exactly as Dispatcharr does at playback), so a login
+capped at 3 beside one capped at 2 gets through the catalogue five streams at a
+time without either exceeding its limit. The split follows the free slots each
+login has left, so a login busy with people watching TV draws proportionally
+fewer. Nothing to configure; it turns itself on when a second profile appears
+on the account.
+
+The verdict is cached against the stream, not against the login that fetched
+it, because the logins reach the same upstream and a probe through any of them
+measures the same stream. Probing every stream through every login instead —
+which is what Podium did when profile support first landed — was measured on a
+live install at 2134 probes for 1067 streams, with 98 streams checked on both
+logins returning 98 identical verdicts: it made the provider's sweep *slower*
+than it had been on one login, because capacity rose 1.67× while the work
+doubled.
 
 A few details are worth knowing. The default profile's own search and replace
 are applied as well, not assumed to be the identity pair Dispatcharr creates it
@@ -388,8 +397,11 @@ account's credentials change without an M3U refresh it probes the old ones
 until the next sync.
 
 A login whose pattern does not compile, or that rewrites onto a URL another
-login already probes, is skipped with a line in the worker log naming it —
-check there first if a second login does not seem to be running.
+login already covers, contributes no lane and is skipped with a line in the
+worker log naming it — check there first if a second login does not seem to be
+adding any capacity. Skipping it is the safe reading: a login that reaches the
+same URL as another is the same credentials twice, not a second line, and
+drawing on it would put more connections against that line than it allows.
 
 There is deliberately no loop detection. Catching a loop means watching for at
 least one loop period — around 120s per stream against the ~1s the other checks
