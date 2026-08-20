@@ -29,6 +29,7 @@ import type { RulesSource } from './rules-source';
 import { AbortFlag, laneKey, type ProbeJob, runLanes } from './scheduler';
 import {
   DEFAULT_WEIGHTS,
+  isUsable,
   type RankEntry,
   type RankStrategy,
   rank,
@@ -95,12 +96,22 @@ export function sameOrder(a: number[], b: number[]): boolean {
  * The stream ids to write back to a channel, from a ranked list and the streams
  * it currently carries.
  *
- * Podium reorders the streams already on a channel; it never assigns streams the
- * rule matched but the channel does not carry. A match across the whole provider
- * catalogue is a ranking candidate, not an assignment -- writing it would
- * silently change the lineup and let one stream land on every channel whose rule
- * claims it. So `ranked` is intersected with `assigned`: only streams already on
- * the channel move.
+ * By default podium reorders the streams already on a channel and never assigns
+ * one the rule matched but the channel does not carry: a match across the whole
+ * provider catalogue is a ranking candidate, not an assignment, and writing it
+ * unasked would silently change the lineup. So `ranked` is intersected with
+ * `assigned` and only streams already on the channel move.
+ *
+ * `assign` opts out of that intersection -- see PODIUM_AUTO_ASSIGN, which is the
+ * feature the aliases exist for: one flat `ESPN` alias, a new provider, and its
+ * streams join the channel on the next pass. Its `eligible` set is the caller's
+ * judgement of what is fit to add (probed, and usable); `max` caps how many
+ * matched streams the channel ends up carrying.
+ *
+ * The cap only ever limits ADDITIONS. A channel already at or over `max` keeps
+ * every stream it has and gains nothing -- truncating `ranked` would unassign
+ * whatever fell off the end, and nothing here is allowed to remove a stream
+ * that Dispatcharr, or a person, deliberately put on a channel.
  *
  * Streams on the channel the rule did not match are strays. Unless
  * `removeUnmatched` is set they are kept, after the ranked ones, so a reorder
@@ -110,9 +121,30 @@ export function composeOrder(
   ranked: number[],
   assigned: number[] = [],
   removeUnmatched = false,
+  assign?: { eligible: Set<number>; max: number },
 ): number[] {
   const onChannel = new Set(assigned);
-  const matched = ranked.filter((id) => onChannel.has(id));
+  let keep = (id: number): boolean => onChannel.has(id);
+
+  if (assign) {
+    // Budget is measured against what the channel already carries from this
+    // rule, so a channel at the cap adds nothing and a nearly-full one tops up
+    // to it. Never negative: `max` lowered below a channel's current holding
+    // must read as "no room", not as room to remove.
+    const held = ranked.filter((id) => onChannel.has(id)).length;
+    let budget = Math.max(0, assign.max - held);
+    const adding = new Set<number>();
+    // `ranked` is best-first, so the budget buys the best candidates.
+    for (const id of ranked) {
+      if (budget === 0) break;
+      if (onChannel.has(id) || !assign.eligible.has(id)) continue;
+      adding.add(id);
+      budget -= 1;
+    }
+    keep = (id: number): boolean => onChannel.has(id) || adding.has(id);
+  }
+
+  const matched = ranked.filter(keep);
   if (removeUnmatched) return matched;
   const matchedSet = new Set(matched);
   return [...matched, ...assigned.filter((id) => !matchedSet.has(id))];
@@ -484,6 +516,8 @@ export interface RunSummary {
   reordered: number;
   /** Channels already in the ranked order, so nothing was written. */
   unchanged: number;
+  /** Streams put onto a channel that did not carry them -- see PODIUM_AUTO_ASSIGN. */
+  assigned: number;
   skipped: number;
   /** Streams a saturated provider left for a later pass -- still real work. */
   deferred: number;
@@ -656,6 +690,7 @@ export class Runner {
         dead: 0,
         reordered: 0,
         unchanged: 0,
+        assigned: 0,
         skipped: 0,
         deferred: 0,
         backlog: 0,
@@ -709,6 +744,8 @@ export class Runner {
       dead: 0,
       reordered: 0,
       unchanged: 0,
+      /** Streams this pass put onto a channel that did not carry them. */
+      assigned: 0,
       skipped: 0,
       deferred: 0,
       backlog: 0,
@@ -1795,7 +1832,7 @@ export class Runner {
   private async reorderCachedOnly(
     client: DispatcharrClient,
     planned: PlannedChannel[],
-    counters: { reordered: number; unchanged: number },
+    counters: { reordered: number; unchanged: number; assigned: number },
     strategy: RankStrategy,
     byId: Map<number, Stream>,
     providerNames: Map<number, string>,
@@ -1832,7 +1869,7 @@ export class Runner {
     client: DispatcharrClient,
     channelId: number,
     entries: RankEntry[],
-    counters: { reordered: number; unchanged: number },
+    counters: { reordered: number; unchanged: number; assigned: number },
     log: (m: string) => void,
     assigned: number[] = [],
     strategy: RankStrategy,
@@ -1843,12 +1880,35 @@ export class Runner {
     },
   ): Promise<void> {
     if (entries.length === 0) return;
+    const config = this.deps.config();
     const ranked = rank(entries, strategy);
-    // Only streams already on the channel may move: a match the channel does not
-    // carry is a ranking candidate, not an assignment, and writing it would
-    // silently change the lineup. Strays are kept after the ranked ones unless
-    // asked to drop them. See composeOrder.
-    const ordered = composeOrder(ranked, assigned, this.deps.config().PODIUM_REMOVE_UNMATCHED);
+    // What this pass would be willing to put on the channel: matched, probed,
+    // and good enough to watch. A dead or black candidate is still ranked --
+    // it has to be, or it could never sink past the streams above it -- but
+    // assigning one would add a source nobody can play, so eligibility is
+    // decided here, on the verdicts, rather than inside composeOrder.
+    let assign: { eligible: Set<number>; max: number } | undefined;
+    if (config.PODIUM_AUTO_ASSIGN) {
+      // A stream someone took off this channel by hand stays off it. It is
+      // still matched and still healthy, so nothing else here would stop the
+      // next pass putting it straight back and making the removal look like it
+      // never happened.
+      const blocked = this.deps.store.assignBlocks(channelId);
+      assign = {
+        eligible: new Set(
+          entries
+            .filter((entry) => isUsable(entry.result, strategy.weights))
+            .filter((entry) => !blocked.has(entry.streamId))
+            .map((entry) => entry.streamId),
+        ),
+        max: config.PODIUM_AUTO_ASSIGN_MAX,
+      };
+    }
+    // Only streams already on the channel may move, unless auto-assign is on:
+    // a match the channel does not carry is otherwise a ranking candidate, not
+    // an assignment. Strays are kept after the ranked ones unless asked to drop
+    // them. See composeOrder.
+    const ordered = composeOrder(ranked, assigned, config.PODIUM_REMOVE_UNMATCHED, assign);
 
     // Dispatcharr already serves exactly this order, so the PATCH would write
     // the row it just read back. On a settled install every verdict is a cache
@@ -1860,8 +1920,29 @@ export class Runner {
       return;
     }
 
-    if (this.deps.config().PODIUM_DRY_RUN) {
-      log(`[dry-run] channel ${channelId} -> ${ordered.join(',')}`);
+    // Named rather than counted, because "assigned 3" tells you nothing about
+    // whether the alias picked the right three.
+    const describe = (ids: number[]): string =>
+      ids
+        .map(
+          (id) =>
+            `${id}[${snapshot.providerNames.get(snapshot.byId.get(id)?.providerId ?? -1) ?? '?'}]`,
+        )
+        .join(', ');
+    const additions = (baseline: number[], order: number[]): number[] => {
+      const before = new Set(baseline);
+      return order.filter((id) => !before.has(id));
+    };
+
+    if (config.PODIUM_DRY_RUN) {
+      // Auto-assign's rehearsal: turning it on with dry run still set is the
+      // only way to see what it would put on a channel before it does, so the
+      // preview has to name the additions and not just print the new order.
+      const would = additions(assigned, ordered);
+      log(
+        `[dry-run] channel ${channelId} -> ${ordered.join(',')}` +
+          (would.length > 0 ? ` (would assign ${would.length}: ${describe(would)})` : ''),
+      );
       return;
     }
     try {
@@ -1876,20 +1957,31 @@ export class Runner {
       // back to the pass-start order rather than blocking the write.
       const live = await client.channel(channelId).catch(() => null);
       let writeOrder = ordered;
+      // What the write is actually measured against: the live array when we
+      // managed to re-read it, the pass-start one when we did not.
+      let baseline = assigned;
       if (live) {
-        const fresh = composeOrder(
-          ranked,
-          live.streams,
-          this.deps.config().PODIUM_REMOVE_UNMATCHED,
-        );
+        const fresh = composeOrder(ranked, live.streams, config.PODIUM_REMOVE_UNMATCHED, assign);
         if (sameOrder(fresh, live.streams)) {
           counters.unchanged += 1;
           return;
         }
         writeOrder = fresh;
+        baseline = live.streams;
+      }
+      // Counted and named before the write, because adding a stream to a
+      // channel is the one thing here that changes what a viewer is offered
+      // rather than the order they are offered it in. A pass that quietly
+      // assigns is a pass nobody can audit afterwards.
+      const added = additions(baseline, writeOrder);
+      if (added.length > 0) {
+        log(
+          `channel ${channelId} (${snapshot.channelName}): assigning ${added.length} stream(s) ${describe(added)}`,
+        );
       }
       await client.setStreamOrder(channelId, writeOrder);
       counters.reordered += 1;
+      counters.assigned += added.length;
       // The snapshot taken at pass start still shows the fetched order; patch
       // this channel now so slot 0 is what was just decided, not what the pass
       // began with hours ago. Built from `writeOrder` -- the live-reconciled
@@ -1917,6 +2009,7 @@ export class Runner {
       dead: number;
       reordered: number;
       unchanged: number;
+      assigned: number;
       skipped: number;
       deferred: number;
       backlog: number;

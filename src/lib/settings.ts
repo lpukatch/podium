@@ -106,6 +106,22 @@ export const FIELDS: FieldSpec[] = [
     section: 'behaviour',
   },
   {
+    key: 'PODIUM_AUTO_ASSIGN',
+    kind: 'boolean',
+    label: 'Assign matched streams',
+    help: 'Off only reorders what a channel already carries, so a new provider is probed but never used. On lets a pass add a matched stream to a channel — write one flat alias, add a provider, and its streams join on the next pass. Only healthy streams are added, never more than the cap, and nothing is ever removed. A loose alias now writes rather than being discarded, so check a channel first; turning this on with dry run still set logs what it would assign without doing it.',
+    section: 'behaviour',
+  },
+  {
+    key: 'PODIUM_AUTO_ASSIGN_MAX',
+    kind: 'number',
+    label: 'Most streams to assign per channel',
+    help: 'Ceiling on how many matched streams a channel ends up carrying because of the setting above. Counts what is already there, so a full channel gains nothing — and lowering this never unassigns anything.',
+    section: 'behaviour',
+    min: 1,
+    max: 100,
+  },
+  {
     key: 'PODIUM_WRITE_STATS',
     kind: 'boolean',
     label: 'Publish stats to Dispatcharr',

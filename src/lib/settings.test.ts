@@ -263,6 +263,48 @@ describe('settings persistence', () => {
     expect(store.settingsVersion()).toBeGreaterThan(0);
   });
 
+  it('turns auto-assign on through the stored value', () => {
+    // The setting is meant to be flipped in the UI on a running install, so the
+    // whole path matters: exposed as a field, accepted by the validator, and
+    // visible to the worker's per-pass config resolution. A field missing from
+    // FIELDS is silently unsettable -- it just never appears on the page.
+    expect(FIELD_KEYS).toContain('PODIUM_AUTO_ASSIGN');
+    expect(FIELD_KEYS).toContain('PODIUM_AUTO_ASSIGN_MAX');
+
+    const env = { DISPATCHARR_API_KEY: 'k' };
+    expect(loadConfig(resolveEnv(env, store.settings())).PODIUM_AUTO_ASSIGN).toBe(false);
+
+    const { errors } = validateSettings({
+      PODIUM_AUTO_ASSIGN: 'true',
+      PODIUM_AUTO_ASSIGN_MAX: '4',
+    });
+    expect(errors).toEqual([]);
+    store.setSettings({ PODIUM_AUTO_ASSIGN: 'true', PODIUM_AUTO_ASSIGN_MAX: '4' });
+
+    const config = loadConfig(resolveEnv(env, store.settings()));
+    expect(config.PODIUM_AUTO_ASSIGN).toBe(true);
+    expect(config.PODIUM_AUTO_ASSIGN_MAX).toBe(4);
+  });
+
+  it('refuses a per-channel cap outside its bounds', () => {
+    // Not clamped: a typo that would put 999 streams on a channel should come
+    // back as an error on the form, not be quietly reinterpreted.
+    expect(validateSettings({ PODIUM_AUTO_ASSIGN_MAX: '0' }).errors).toEqual([
+      { key: 'PODIUM_AUTO_ASSIGN_MAX', message: 'must be at least 1' },
+    ]);
+    expect(validateSettings({ PODIUM_AUTO_ASSIGN_MAX: '999' }).errors).toEqual([
+      { key: 'PODIUM_AUTO_ASSIGN_MAX', message: 'must be at most 100' },
+    ]);
+  });
+
+  it('shows both auto-assign fields on the settings page', () => {
+    const keys = describeSettings({ DISPATCHARR_API_KEY: 'k' }, store.settings())
+      .filter((f) => f.section === 'behaviour')
+      .map((f) => f.key);
+    expect(keys).toContain('PODIUM_AUTO_ASSIGN');
+    expect(keys).toContain('PODIUM_AUTO_ASSIGN_MAX');
+  });
+
   it('turns dry run off through the stored value', () => {
     // The end-to-end point of the whole feature.
     expect(

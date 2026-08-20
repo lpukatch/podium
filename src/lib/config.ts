@@ -80,6 +80,40 @@ export const configSchema = z.object({
    */
   PODIUM_REMOVE_UNMATCHED: bool(false),
 
+  /**
+   * Whether a pass may put a matched stream onto a channel that does not carry
+   * it yet.
+   *
+   * The point of the whole app: write one flat `ESPN` alias, add a provider,
+   * and its ESPN streams join the channel on the next pass instead of waiting
+   * for someone to wire each one up in Dispatcharr by hand. Without this an
+   * alias only ever *reorders* what Dispatcharr already assigned, so a new
+   * provider is probed on every pass and can never actually be used.
+   *
+   * Off by default, because it is the one setting that makes a pass add streams
+   * to a lineup rather than reorder one, and an install upgrading in place must
+   * not start rewriting its channels because it pulled a new image. Turn it on
+   * deliberately, and read `PODIUM_AUTO_ASSIGN_MAX` first.
+   *
+   * The risk it carries is a loose alias: `ESPN` claims ESPN2 and ESPN Deportes
+   * too, and with this on that claim becomes a write. Assignment is limited to
+   * streams whose verdict is *usable*, capped per channel, and never removes
+   * anything -- but an alias that matches the wrong stream will now assign the
+   * wrong stream. Check a channel in the UI before turning this on globally.
+   */
+  PODIUM_AUTO_ASSIGN: bool(false),
+  /**
+   * Ceiling on how many matched streams a channel may carry because of
+   * auto-assignment.
+   *
+   * A flat alias against five providers is a handful of streams; a flat alias
+   * against a 22,000-stream catalogue can be hundreds, and a channel carrying
+   * hundreds of sources is unusable in Dispatcharr's own UI. The cap limits
+   * only what a pass ADDS: a channel already over it keeps everything it has
+   * and simply gains nothing, because unassigning is not this setting's job.
+   */
+  PODIUM_AUTO_ASSIGN_MAX: num(10),
+
   /** Cache TTLs. Dead streams are rechecked far more often than live ones. */
   PODIUM_LIVE_TTL_MS: num(24 * 3_600_000),
   PODIUM_DEAD_TTL_MS: num(3 * 3_600_000),

@@ -116,6 +116,43 @@ holds a Dispatcharr credential.
 | --- | --- | --- |
 | `PODIUM_DRY_RUN` | `true` | never writes while set; set `false` to let it reorder |
 | `PODIUM_REMOVE_UNMATCHED` | `false` | `true` unassigns unclaimed streams |
+| `PODIUM_AUTO_ASSIGN` | `false` | `true` lets a pass put matched streams onto channels that do not carry them |
+| `PODIUM_AUTO_ASSIGN_MAX` | `10` | ceiling on how many matched streams a channel may gain this way |
+
+### Auto-assign
+
+By default an alias only ever **reorders** what Dispatcharr already put on a
+channel. A stream the alias matched but the channel does not carry is a ranking
+candidate, not an assignment — podium probes it and then discards it from the
+write.
+
+That makes adding a provider a two-step job: wire its streams onto channels in
+Dispatcharr, then let podium rank them. `PODIUM_AUTO_ASSIGN` collapses it to
+one. Write a flat `ESPN` alias, add a provider, and on the next pass its ESPN
+streams join the channel in rank order.
+
+What it will and will not do:
+
+- **Only usable streams.** A candidate is assigned only if its verdict passes
+  the same `isUsable` bar the ranker uses — alive, not a black screen, not
+  under the bitrate floor. Dead candidates still get ranked (they have to, to
+  sink) but are never added.
+- **Only up to the cap.** `PODIUM_AUTO_ASSIGN_MAX` counts the matched streams a
+  channel ends up carrying. A channel already at or over it gains nothing.
+- **Never removes anything.** The cap limits additions only; lowering it will
+  not unassign streams a channel already has. Dropping streams remains
+  `PODIUM_REMOVE_UNMATCHED`'s job.
+- **Never resurrects a manual removal.** Taking a stream off a channel through
+  the unassign endpoint records the decision, and no later pass assigns it back
+  to that channel. Without that the button would be useless with this on.
+- **Nothing under `PODIUM_DRY_RUN`.** Same as every other write.
+
+The risk is a loose alias. `ESPN` also matches ESPN2 and ESPN Deportes, and with
+auto-assign on that claim becomes a write rather than a discarded candidate. The
+cap and the usable-only rule bound the damage, but they do not make a wrong
+alias right — check a channel or two in the UI before turning this on across an
+install. `podium_streams_assigned_total` counts what it has done, and every
+assignment is logged with the stream ids and their providers.
 | `PODIUM_WRITE_STATS` | `true` | publish results to Dispatcharr `stream_stats` |
 
 ## Concurrency
