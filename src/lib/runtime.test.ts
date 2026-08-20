@@ -1719,7 +1719,19 @@ describe('reorder live re-fetch', () => {
     });
 
     it('assigns nothing when the setting is off', async () => {
-      const { written, counters } = await reorder([1], [1], [entries[0]!, newProvider(901)]);
+      // Explicitly off, not merely defaulted off: this is the reorder-only
+      // behaviour an operator opts back into, and it has to keep working.
+      const off = new Runner({
+        config: () =>
+          loadConfig({
+            DISPATCHARR_API_KEY: 'k',
+            PODIUM_DRY_RUN: 'false',
+            PODIUM_AUTO_ASSIGN: 'false',
+          }),
+        store,
+        rules: new RulesSource(join(dir, 'rules.json')),
+      });
+      const { written, counters } = await reorder([1], [1], [entries[0]!, newProvider(901)], off);
       expect(written).toEqual([]);
       expect(counters.assigned).toBe(0);
     });

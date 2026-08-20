@@ -90,18 +90,23 @@ export const configSchema = z.object({
    * alias only ever *reorders* what Dispatcharr already assigned, so a new
    * provider is probed on every pass and can never actually be used.
    *
-   * Off by default, because it is the one setting that makes a pass add streams
-   * to a lineup rather than reorder one, and an install upgrading in place must
-   * not start rewriting its channels because it pulled a new image. Turn it on
-   * deliberately, and read `PODIUM_AUTO_ASSIGN_MAX` first.
+   * On by default: an alias that finds a better stream and then cannot use it
+   * is not what anyone writing the alias meant. The alternative default made
+   * every new provider a two-step job -- wire it up in Dispatcharr, then let
+   * podium rank it -- and left podium probing streams it had no way to reach.
+   *
+   * Note what that means on an upgrade: an install pulling a new image gets
+   * this on, and its next pass may add streams to channels. Nothing is removed
+   * and no channel goes past `PODIUM_AUTO_ASSIGN_MAX`, but the lineups do
+   * change. Set it false to keep reorder-only behaviour.
    *
    * The risk it carries is a loose alias: `ESPN` claims ESPN2 and ESPN Deportes
    * too, and with this on that claim becomes a write. Assignment is limited to
    * streams whose verdict is *usable*, capped per channel, and never removes
    * anything -- but an alias that matches the wrong stream will now assign the
-   * wrong stream. Check a channel in the UI before turning this on globally.
+   * wrong stream. `PODIUM_DRY_RUN` logs what it would assign without doing it.
    */
-  PODIUM_AUTO_ASSIGN: bool(false),
+  PODIUM_AUTO_ASSIGN: bool(true),
   /**
    * Ceiling on how many matched streams a channel may carry because of
    * auto-assignment.

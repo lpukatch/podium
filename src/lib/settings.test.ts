@@ -263,7 +263,7 @@ describe('settings persistence', () => {
     expect(store.settingsVersion()).toBeGreaterThan(0);
   });
 
-  it('turns auto-assign on through the stored value', () => {
+  it('turns auto-assign off, and back on, through the stored value', () => {
     // The setting is meant to be flipped in the UI on a running install, so the
     // whole path matters: exposed as a field, accepted by the validator, and
     // visible to the worker's per-pass config resolution. A field missing from
@@ -272,7 +272,15 @@ describe('settings persistence', () => {
     expect(FIELD_KEYS).toContain('PODIUM_AUTO_ASSIGN_MAX');
 
     const env = { DISPATCHARR_API_KEY: 'k' };
-    expect(loadConfig(resolveEnv(env, store.settings())).PODIUM_AUTO_ASSIGN).toBe(false);
+    const resolve = () => loadConfig(resolveEnv(env, store.settings()));
+    // On unless something says otherwise -- assigning is the point of an alias.
+    expect(resolve().PODIUM_AUTO_ASSIGN).toBe(true);
+
+    // Off is the one that has to work through the stored value: an operator who
+    // wants reorder-only behaviour has to be able to say so without a redeploy.
+    expect(validateSettings({ PODIUM_AUTO_ASSIGN: 'false' }).errors).toEqual([]);
+    store.setSettings({ PODIUM_AUTO_ASSIGN: 'false' });
+    expect(resolve().PODIUM_AUTO_ASSIGN).toBe(false);
 
     const { errors } = validateSettings({
       PODIUM_AUTO_ASSIGN: 'true',
@@ -281,9 +289,19 @@ describe('settings persistence', () => {
     expect(errors).toEqual([]);
     store.setSettings({ PODIUM_AUTO_ASSIGN: 'true', PODIUM_AUTO_ASSIGN_MAX: '4' });
 
-    const config = loadConfig(resolveEnv(env, store.settings()));
+    const config = resolve();
     expect(config.PODIUM_AUTO_ASSIGN).toBe(true);
     expect(config.PODIUM_AUTO_ASSIGN_MAX).toBe(4);
+  });
+
+  it('lets the environment turn auto-assign off without a stored value', () => {
+    // The GitOps half of the same choice: an install that configures podium by
+    // environment alone must still be able to opt out of the new default.
+    expect(
+      loadConfig(
+        resolveEnv({ DISPATCHARR_API_KEY: 'k', PODIUM_AUTO_ASSIGN: 'false' }, store.settings()),
+      ).PODIUM_AUTO_ASSIGN,
+    ).toBe(false);
   });
 
   it('refuses a per-channel cap outside its bounds', () => {

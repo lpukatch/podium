@@ -116,20 +116,26 @@ holds a Dispatcharr credential.
 | --- | --- | --- |
 | `PODIUM_DRY_RUN` | `true` | never writes while set; set `false` to let it reorder |
 | `PODIUM_REMOVE_UNMATCHED` | `false` | `true` unassigns unclaimed streams |
-| `PODIUM_AUTO_ASSIGN` | `false` | `true` lets a pass put matched streams onto channels that do not carry them |
+| `PODIUM_AUTO_ASSIGN` | `true` | lets a pass put matched streams onto channels that do not carry them; `false` is reorder-only |
 | `PODIUM_AUTO_ASSIGN_MAX` | `10` | ceiling on how many matched streams a channel may gain this way |
 
 ### Auto-assign
 
-By default an alias only ever **reorders** what Dispatcharr already put on a
-channel. A stream the alias matched but the channel does not carry is a ranking
-candidate, not an assignment — podium probes it and then discards it from the
-write.
+An alias names the streams a channel should be ranked on. With
+`PODIUM_AUTO_ASSIGN` on — the default — it also names the streams a channel
+should *carry*: write a flat `ESPN` alias, add a provider, and on the next pass
+its ESPN streams join the channel in rank order.
 
-That makes adding a provider a two-step job: wire its streams onto channels in
-Dispatcharr, then let podium rank them. `PODIUM_AUTO_ASSIGN` collapses it to
-one. Write a flat `ESPN` alias, add a provider, and on the next pass its ESPN
-streams join the channel in rank order.
+With it off, an alias only ever **reorders** what Dispatcharr already put on the
+channel. A stream the alias matched but the channel does not carry stays a
+ranking candidate that podium probes and then discards from the write, which
+makes adding a provider a two-step job: wire its streams onto channels in
+Dispatcharr, then let podium rank them.
+
+> **Upgrading?** This defaults on, so the first pass after an upgrade may add
+> streams to channels. Nothing is removed and no channel goes past the cap, but
+> lineups do change. Set `PODIUM_AUTO_ASSIGN=false` to keep the old behaviour,
+> or turn it off on the settings page.
 
 What it will and will not do:
 

@@ -109,7 +109,7 @@ export const FIELDS: FieldSpec[] = [
     key: 'PODIUM_AUTO_ASSIGN',
     kind: 'boolean',
     label: 'Assign matched streams',
-    help: 'Off only reorders what a channel already carries, so a new provider is probed but never used. On lets a pass add a matched stream to a channel — write one flat alias, add a provider, and its streams join on the next pass. Only healthy streams are added, never more than the cap, and nothing is ever removed. A loose alias now writes rather than being discarded, so check a channel first; turning this on with dry run still set logs what it would assign without doing it.',
+    help: 'On lets a pass add a matched stream to a channel — write one flat alias, add a provider, and its streams join on the next pass. Off only reorders what a channel already carries, so a new provider is probed but never used. Only healthy streams are added, never more than the cap, and nothing is ever removed. A loose alias writes rather than being discarded, so check a channel first; with dry run set, the log names what it would assign without doing it.',
     section: 'behaviour',
   },
   {
