@@ -16,7 +16,10 @@ export function GET() {
   try {
     const config = loadConfig();
     store = new Store(config.dbPath);
-    const body = renderMetrics(store, { maxAgeMs: config.PODIUM_MAX_AGE_MS });
+    const body = renderMetrics(store, {
+      maxAgeMs: config.PODIUM_MAX_AGE_MS,
+      channelMetrics: config.PODIUM_METRICS_CHANNELS,
+    });
     return new NextResponse(body, {
       status: 200,
       headers: { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' },

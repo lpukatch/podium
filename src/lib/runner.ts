@@ -35,6 +35,7 @@ import {
   score,
   type Weights,
 } from './scoring';
+import type { CatalogueRow } from './store';
 import { ALL_GROUPS, forcedAtFor, type Progress, type Store, ttlFor } from './store';
 import {
   buildVariants,
@@ -115,6 +116,35 @@ export function composeOrder(
   if (removeUnmatched) return matched;
   const matchedSet = new Set(matched);
   return [...matched, ...assigned.filter((id) => !matchedSet.has(id))];
+}
+
+/**
+ * Catalogue snapshot rows for one channel's streams in a given order. Exported
+ * because the apply/unassign routes write orders too and their snapshots must
+ * stay as current as the worker's. An id the fetched catalogue never returned
+ * is skipped rather than guessed at: a row with no provider would say more
+ * than the data does.
+ */
+export function catalogueRows(
+  channel: { id: number; name: string },
+  order: number[],
+  byId: Map<number, Stream>,
+  providerNames: Map<number, string>,
+): CatalogueRow[] {
+  const rows: CatalogueRow[] = [];
+  order.forEach((streamId, slot) => {
+    const stream = byId.get(streamId);
+    if (!stream) return;
+    rows.push({
+      channelId: channel.id,
+      channelName: channel.name,
+      slot,
+      streamId,
+      providerId: stream.providerId,
+      providerName: providerNames.get(stream.providerId) ?? String(stream.providerId),
+    });
+  });
+  return rows;
 }
 
 /**
@@ -870,6 +900,7 @@ export class Runner {
         keepStreamIds,
         planned,
         outstandingMarks,
+        managedChannels,
       } = this.plan(
         channels,
         streams,
@@ -900,6 +931,18 @@ export class Runner {
       // viewer abort must not strand a request that had already finished.
       const retired = this.retireSatisfiedMarks(outstandingMarks);
 
+      // Persist the managed catalogue as fetched, before any probing or
+      // reordering changes it: this is the join the probe cache cannot express
+      // (stream -> provider -> channel slot), and the reorder paths patch it
+      // per channel as their writes land. Rows resolve here rather than inside
+      // plan() because providerNames is this scope's, not plan()'s.
+      store.replaceCatalogue(
+        managedChannels.flatMap((channel) =>
+          catalogueRows(channel, channel.streams, streamById, providerNames),
+        ),
+        runId,
+      );
+
       // Verdicts for streams the worker no longer manages -- excluded, unmatched,
       // or pulled from every lineup -- would otherwise age here forever, dragging
       // the freshness numbers past the target for work the pacer never does.
@@ -929,7 +972,7 @@ export class Runner {
 
       // Cache-only channels never enter the scheduler, so they are reordered
       // here or they would be skipped entirely.
-      await this.reorderCachedOnly(client, planned, counters, strategy, streamById);
+      await this.reorderCachedOnly(client, planned, counters, strategy, streamById, providerNames);
 
       // A lane the pacer left out has no spare capacity this pass. Its jobs
       // must be dropped, not merely unbounded -- the scheduler falls back to
@@ -1253,6 +1296,11 @@ export class Runner {
                 log,
                 entry.channel.streams,
                 strategy,
+                {
+                  channelName: entry.channel.name,
+                  byId: streamById,
+                  providerNames,
+                },
               );
             }
           },
@@ -1457,6 +1505,13 @@ export class Runner {
     planned: PlannedChannel[];
     /** Every mark this pass read, with the verdicts it still holds retired. */
     outstandingMarks: Array<{ groupId: number; forcedAt: number; remaining: number }>;
+    /**
+     * Every channel this pass considers itself the steward of -- the exact
+     * population the loop below iterates, held back channels included. The
+     * caller persists it as the catalogue snapshot; collecting it here means
+     * the snapshot and the pass can never disagree about what is managed.
+     */
+    managedChannels: Channel[];
   } {
     const config = this.deps.config();
     const { store } = this.deps;
@@ -1496,6 +1551,7 @@ export class Runner {
     const scored: Array<{ job: ProbeJob; age: number }> = [];
     const planned: PlannedChannel[] = [];
     const keepStreamIds = new Set<number>();
+    const managedChannels: Channel[] = [];
     // Per (stream, variant): a stream claimed by several channels queues each
     // of its variants once, not once per claim.
     const seenVariants = new Set<string>();
@@ -1512,6 +1568,9 @@ export class Runner {
       // the groups set to `after_epg_start` or `assigned`, where the channel's
       // own assignment stands in for the rule -- see `assignedCandidates`.
       if (!rule && !assignmentIsRule(policy.mode)) continue;
+      // Never groups are excluded outright below whatever their rules say, so
+      // they are not managed either; everything reaching this line is.
+      if (policy.mode !== NEVER) managedChannels.push(channel);
       // Lazily, because matching is the expensive part of the pass and an
       // excluded channel must not pay for it.
       const candidates = (): Array<[number, number]> =>
@@ -1682,6 +1741,7 @@ export class Runner {
       keepStreamIds,
       planned,
       outstandingMarks: [...outstandingMarks].map(([groupId, mark]) => ({ groupId, ...mark })),
+      managedChannels,
     };
   }
 
@@ -1738,6 +1798,7 @@ export class Runner {
     counters: { reordered: number; unchanged: number },
     strategy: RankStrategy,
     byId: Map<number, Stream>,
+    providerNames: Map<number, string>,
   ): Promise<void> {
     const log = this.deps.log ?? (() => {});
     for (const { channel, hits, fresh, cacheComplete } of planned) {
@@ -1759,7 +1820,11 @@ export class Runner {
         });
       }
       if (entries.length === 0) continue;
-      await this.reorder(client, channel.id, entries, counters, log, channel.streams, strategy);
+      await this.reorder(client, channel.id, entries, counters, log, channel.streams, strategy, {
+        channelName: channel.name,
+        byId,
+        providerNames,
+      });
     }
   }
 
@@ -1771,6 +1836,11 @@ export class Runner {
     log: (m: string) => void,
     assigned: number[] = [],
     strategy: RankStrategy,
+    snapshot: {
+      channelName: string;
+      byId: Map<number, Stream>;
+      providerNames: Map<number, string>;
+    },
   ): Promise<void> {
     if (entries.length === 0) return;
     const ranked = rank(entries, strategy);
@@ -1820,6 +1890,19 @@ export class Runner {
       }
       await client.setStreamOrder(channelId, writeOrder);
       counters.reordered += 1;
+      // The snapshot taken at pass start still shows the fetched order; patch
+      // this channel now so slot 0 is what was just decided, not what the pass
+      // began with hours ago. Built from `writeOrder` -- the live-reconciled
+      // one -- not the pass-start `ordered`.
+      this.deps.store.updateChannelOrder(
+        channelId,
+        catalogueRows(
+          { id: channelId, name: snapshot.channelName },
+          writeOrder,
+          snapshot.byId,
+          snapshot.providerNames,
+        ),
+      );
     } catch (error) {
       log(`reorder failed for channel ${channelId}: ${String(error)}`);
     }

@@ -10,6 +10,8 @@
  * registry buys nothing.
  */
 
+import { DEAD_REASONS, type DeadReason, deadReason, type ProbeResult } from './probe';
+import { DEFAULT_WEIGHTS, isUsable, score } from './scoring';
 import { type Progress, STALE_LOCK_MS, type Store } from './store';
 
 type Labels = Record<string, string>;
@@ -50,11 +52,36 @@ const PHASES: Array<Progress['phase']> = [
   'failed',
 ];
 
+/** One-hot verdict states, in isUsable's precedence order. */
+const STATES = ['alive', 'dead', 'black', 'low_bitrate', 'unmeasured'] as const;
+type ProviderStreamState = (typeof STATES)[number];
+
+/**
+ * The middle value, or the mean of the two middle ones. Callers guarantee a
+ * non-empty list; sorting a copy because the samples are collected in
+ * catalogue order and the caller may still want them that way.
+ */
+function median(samples: number[]): number {
+  const sorted = [...samples].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+/** Resolution buckets by measured height. */
+const RESOLUTIONS = ['uhd', 'fhd', 'hd', 'sd', 'unknown'] as const;
+type ProviderResolution = (typeof RESOLUTIONS)[number];
+
 export interface MetricsOptions {
   /** Freshness target, so compliance can be expressed as a ratio. */
   maxAgeMs: number;
   /** Beyond this with no heartbeat, the worker is considered absent. */
   staleLockMs?: number;
+  /**
+   * Expose the per-channel source series. Off unless asked, so a caller that
+   * does not care never pays the cardinality; the route passes
+   * `PODIUM_METRICS_CHANNELS`, which defaults on.
+   */
+  channelMetrics?: boolean;
   now?: number;
 }
 
@@ -215,6 +242,268 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
       'gauge',
       now - oldestAt > options.maxAgeMs ? 1 : 0,
     );
+  }
+
+  // --- provider quality -----------------------------------------------------
+  // The catalogue snapshot joined against the probe cache, folded the same way
+  // the UI folds it (`verdicts`: best variant per stream, default weights), so
+  // the numbers here are the numbers every podium page already shows. Empty
+  // until the first pass that fetches a catalogue -- an unconfigured install
+  // reports nothing rather than zeros, because there is no catalogue to sum.
+  const { rows, writtenAt } = store.catalogue();
+  if (writtenAt !== null) {
+    out.add(
+      'podium_catalogue_age_seconds',
+      'Seconds since a pass last wrote the whole catalogue snapshot.',
+      'gauge',
+      Math.round((now - writtenAt) / 1000),
+    );
+  }
+  if (rows.length > 0) {
+    const verdicts = store.verdicts([...new Set(rows.map((r) => r.streamId))]);
+
+    // The same precedence `isUsable` applies when ranking: dead first, then a
+    // black screen, then an honest-but-starved bitrate. 'alive' is therefore
+    // exactly "would rank as usable", not merely "answered ffprobe".
+    const stateOf = (result: ProbeResult | undefined): ProviderStreamState => {
+      if (!result) return 'unmeasured';
+      if (!result.alive) return 'dead';
+      if (result.black) return 'black';
+      if (result.bitrateKbps > 0 && result.bitrateKbps < DEFAULT_WEIGHTS.minBitrateKbps)
+        return 'low_bitrate';
+      return 'alive';
+    };
+    const resolutionOf = (
+      result: ProbeResult | undefined,
+      state: ProviderStreamState,
+    ): ProviderResolution => {
+      // A dead or unmeasured stream has no resolution worth reporting: a dead
+      // verdict can carry the dimensions it died with, which would read as
+      // "this provider has a 1080p stream" for a stream that answers nothing.
+      if (state === 'dead' || state === 'unmeasured') return 'unknown';
+      const h = result?.height ?? 0;
+      if (h >= 2160) return 'uhd';
+      if (h >= 1080) return 'fhd';
+      if (h >= 720) return 'hd';
+      if (h > 0) return 'sd';
+      return 'unknown';
+    };
+
+    // Distinct streams and distinct channels per provider, not catalogue rows.
+    // A stream matched onto twelve channels is one stream of one quality, and
+    // counting it twelve times would rank a provider by how broadly its names
+    // happen to match rather than by how good its streams are. Rank-1 below is
+    // the deliberate exception: there, one channel is genuinely one contest.
+    const streamIds = new Map<string, Set<number>>();
+    const channelIds = new Map<string, Set<number>>();
+    for (const row of rows) {
+      let streams = streamIds.get(row.providerName);
+      if (!streams) {
+        streams = new Set();
+        streamIds.set(row.providerName, streams);
+        channelIds.set(row.providerName, new Set());
+      }
+      streams.add(row.streamId);
+      channelIds.get(row.providerName)?.add(row.channelId);
+    }
+
+    // One channel is one contest for slot 0, so this one counts channels.
+    const rank1 = new Map<string, { total: number; healthy: number }>();
+    for (const row of rows) {
+      if (row.slot !== 0) continue;
+      const entry = rank1.get(row.providerName) ?? { total: 0, healthy: 0 };
+      entry.total += 1;
+      const verdict = verdicts.get(row.streamId)?.result;
+      if (verdict && isUsable(verdict)) entry.healthy += 1;
+      rank1.set(row.providerName, entry);
+    }
+
+    for (const [provider, providerStreams] of streamIds) {
+      const labels = { provider };
+      const states = new Map<ProviderStreamState, number>(STATES.map((s) => [s, 0]));
+      const resolutions = new Map<ProviderResolution, number>(RESOLUTIONS.map((r) => [r, 0]));
+      const deadReasons = new Map<DeadReason, number>(DEAD_REASONS.map((r) => [r, 0]));
+      // Keyed by bucket so a provider can be compared at a like resolution:
+      // 4500 kbps is generous at 720p and thin at 1080p, and one median across
+      // a mixed line-up scores a provider on its channel mix, not its quality.
+      const bitrates = new Map<ProviderResolution | 'all', number[]>();
+      const ages: number[] = [];
+      const scores: number[] = [];
+
+      for (const streamId of providerStreams) {
+        const cached = verdicts.get(streamId);
+        const verdict = cached?.result;
+        const state = stateOf(verdict);
+        states.set(state, (states.get(state) ?? 0) + 1);
+        const resolution = resolutionOf(verdict, state);
+        resolutions.set(resolution, (resolutions.get(resolution) ?? 0) + 1);
+        if (cached) ages.push(now - cached.probedAt);
+        if (state === 'dead') {
+          const reason = deadReason(verdict?.error ?? '');
+          deadReasons.set(reason, (deadReasons.get(reason) ?? 0) + 1);
+        }
+        // Only the streams that would actually rank contribute a score: `score`
+        // returns 0 for everything else, and a median dragged toward 0 by dead
+        // streams would double-count what the state family already says.
+        if (verdict && isUsable(verdict)) scores.push(score(verdict));
+        // Only a bitrate the probe actually read counts toward the stats: a
+        // declared one is exactly the number this section exists not to trust.
+        if (verdict?.bitrateMeasured && verdict.bitrateKbps > 0) {
+          for (const bucket of ['all', resolution] as const) {
+            const list = bitrates.get(bucket) ?? [];
+            list.push(verdict.bitrateKbps);
+            bitrates.set(bucket, list);
+          }
+        }
+      }
+
+      for (const state of STATES) {
+        out.add(
+          'podium_provider_streams',
+          'Distinct managed streams by last known verdict state. Precedence: dead > black > low_bitrate > alive; unmeasured means no verdict yet.',
+          'gauge',
+          states.get(state) ?? 0,
+          { ...labels, state },
+        );
+      }
+      for (const reason of DEAD_REASONS) {
+        out.add(
+          'podium_provider_dead_streams',
+          "Dead streams by why they died. probe_error is ours (no ffprobe, bad payload), not the provider's.",
+          'gauge',
+          deadReasons.get(reason) ?? 0,
+          { ...labels, reason },
+        );
+      }
+      for (const resolution of RESOLUTIONS) {
+        out.add(
+          'podium_provider_resolution_streams',
+          'Distinct managed streams by measured resolution, whether or not they are usable: a black 1080p slate still counts as fhd, and the state family is what says it is broken.',
+          'gauge',
+          resolutions.get(resolution) ?? 0,
+          { ...labels, resolution },
+        );
+      }
+      // Zero-filled so the same provider appears even with nothing measured:
+      // a provider whose every stream declares its bitrate is precisely the
+      // one this metric exists to flag, and an absent series cannot do that.
+      out.add(
+        'podium_provider_bitrate_measured',
+        'Streams whose bitrate was measured rather than declared.',
+        'gauge',
+        bitrates.get('all')?.length ?? 0,
+        labels,
+      );
+      for (const [bucket, samples] of bitrates) {
+        out.add(
+          'podium_provider_bitrate_kbps',
+          "Median measured bitrate across this provider's managed streams, overall and within one resolution bucket.",
+          'gauge',
+          median(samples),
+          { ...labels, resolution: bucket, stat: 'median' },
+        );
+      }
+      if (scores.length > 0) {
+        out.add(
+          'podium_provider_score',
+          "Median podium score across this provider's usable streams -- the same 0..1 number that decides ranking. Quality of what works; the state family carries how much of it works.",
+          'gauge',
+          Math.round(median(scores) * 1000) / 1000,
+          { ...labels, stat: 'median' },
+        );
+      }
+      // Without this, a provider compared on the families above is compared on
+      // verdicts of unknown age -- and age is not evenly spread, because a lane
+      // pinned at its provider's `max_streams` gets round-tripped least often.
+      // "Provider B looks excellent" and "Provider B has not been checked since
+      // Tuesday" produce identical numbers up there, and differ only here.
+      if (ages.length > 0) {
+        out.add(
+          'podium_provider_verdict_age_seconds',
+          'Age of the verdicts this provider is being judged on. A provider whose lane runs at its limit is probed least often, so its numbers are the stalest.',
+          'gauge',
+          Math.round(median(ages) / 1000),
+          { ...labels, stat: 'median' },
+        );
+        out.add(
+          'podium_provider_verdict_age_seconds',
+          'Age of the verdicts this provider is being judged on. A provider whose lane runs at its limit is probed least often, so its numbers are the stalest.',
+          'gauge',
+          Math.round(Math.max(...ages) / 1000),
+          { ...labels, stat: 'max' },
+        );
+      }
+      // The denominator rank-1 needs. Wins over *all* channels measures how big
+      // a provider's catalogue is; wins over the channels it actually contested
+      // measures whether its streams are better, which is the question. Lives at
+      // provider level on purpose -- deriving it from the per-channel series
+      // would break for anyone who turned those off over cardinality.
+      out.add(
+        'podium_provider_channels',
+        'Distinct channels carrying at least one of this provider streams, at any slot -- the denominator for rank-1 wins.',
+        'gauge',
+        channelIds.get(provider)?.size ?? 0,
+        labels,
+      );
+      const top = rank1.get(provider);
+      out.add(
+        'podium_provider_rank1_channels',
+        'Channels whose slot-0 stream belongs to this provider.',
+        'gauge',
+        top?.total ?? 0,
+        labels,
+      );
+      out.add(
+        'podium_provider_rank1_healthy',
+        'Slot-0 channels whose verdict ranks as usable.',
+        'gauge',
+        top?.healthy ?? 0,
+        labels,
+      );
+    }
+
+    if (options.channelMetrics) {
+      for (const row of rows) {
+        // `channel_name` rides the info series alone. Repeating it on the value
+        // series below would double their bytes to say what a join already
+        // says, and would churn every one of them on a rename in Dispatcharr.
+        const channel = { channel_id: String(row.channelId), slot: String(row.slot) };
+        const verdict = verdicts.get(row.streamId)?.result;
+        out.add(
+          'podium_channel_source_info',
+          "One series per (channel, slot): which provider's stream sits there. Carries the channel name for joining onto the series below.",
+          'gauge',
+          1,
+          {
+            channel_id: channel.channel_id,
+            channel_name: row.channelName,
+            slot: channel.slot,
+            provider: row.providerName,
+          },
+        );
+        out.add(
+          'podium_channel_source_state',
+          'Verdict state of the stream in this slot.',
+          'gauge',
+          1,
+          { ...channel, state: stateOf(verdict) },
+        );
+        out.add(
+          'podium_channel_source_height_pixels',
+          "Measured video height of this slot's best verdict.",
+          'gauge',
+          verdict?.height ?? 0,
+          channel,
+        );
+        out.add(
+          'podium_channel_source_bitrate_kbps',
+          "Bitrate of this slot's best verdict; 0 when unknown.",
+          'gauge',
+          verdict?.bitrateKbps ?? 0,
+          channel,
+        );
+      }
+    }
   }
 
   return out.toString();

@@ -122,6 +122,36 @@ CREATE TABLE IF NOT EXISTS refresh_marks (
     group_id   INTEGER PRIMARY KEY,
     forced_at  INTEGER NOT NULL
 );
+
+-- The managed catalogue as of the last pass that fetched it: one row per
+-- (channel, slot), slot being the index in the channel's streams array, so
+-- slot 0 is what Dispatcharr plays first. Provider attribution lives here and
+-- nowhere else -- probe_cache keys on stream id alone, and the id -> provider
+-- mapping only exists in the Dispatcharr catalogue the runner fetches and used
+-- to hold in memory for the length of a pass. Without a persisted copy there is
+-- no way to ask "how good are this provider's streams" after the fact, which is
+-- the question the metrics endpoint exists to answer.
+--
+-- A single replace-all snapshot, not per-run history: one current view, rewritten
+-- per pass and patched per reorder, so it never grows.
+CREATE TABLE IF NOT EXISTS catalogue (
+    channel_id    INTEGER NOT NULL,
+    channel_name  TEXT    NOT NULL,
+    slot          INTEGER NOT NULL,
+    stream_id     INTEGER NOT NULL,
+    provider_id   INTEGER NOT NULL,
+    provider_name TEXT    NOT NULL,
+    PRIMARY KEY (channel_id, slot)
+);
+
+-- When the snapshot above was last written as a whole, and by which pass. The
+-- per-channel patches a reorder makes do not touch it: the age this carries is
+-- "how long since a full catalogue refresh", which is the staleness signal.
+CREATE TABLE IF NOT EXISTS catalogue_state (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    written_at INTEGER NOT NULL,
+    run_id     TEXT
+);
 `;
 
 /**
@@ -332,6 +362,16 @@ export interface ActivityBucket {
   from: number;
   probed: number;
   dead: number;
+}
+
+/** One (channel, slot) entry of the persisted catalogue snapshot. */
+export interface CatalogueRow {
+  channelId: number;
+  channelName: string;
+  slot: number;
+  streamId: number;
+  providerId: number;
+  providerName: string;
 }
 
 export interface RunUpdate {
@@ -1096,6 +1136,86 @@ export class Store {
       .changes;
   }
 
+  /**
+   * Replace the whole catalogue snapshot with the state the last pass fetched.
+   *
+   * Empty rows write NOTHING, on purpose, for the same reason `pruneOutside`
+   * refuses an empty keep set: a truncated channel fetch or a rules file that
+   * momentarily parsed short looks identical to "nothing is managed", and wiping
+   * a good snapshot on that loses the provider view until the next full pass.
+   * A genuinely unmanaged install never writes a snapshot at all, which reads
+   * as absent series -- the honest answer for a catalogue that was never built.
+   * A snapshot that should have been replaced but was not shows up as a climbing
+   * `catalogue_state.written_at`, which is what the staleness gauge reads.
+   */
+  replaceCatalogue(rows: CatalogueRow[], runId: string | null): void {
+    if (rows.length === 0) return;
+    this.db.transaction(() => {
+      this.sql('DELETE FROM catalogue').run();
+      const insert = this.sql(
+        `INSERT INTO catalogue
+           (channel_id, channel_name, slot, stream_id, provider_id, provider_name)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      );
+      for (const r of rows) {
+        insert.run(r.channelId, r.channelName, r.slot, r.streamId, r.providerId, r.providerName);
+      }
+      this.sql(
+        `INSERT INTO catalogue_state (id, written_at, run_id) VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET written_at = excluded.written_at, run_id = excluded.run_id`,
+      ).run(Date.now(), runId);
+    })();
+  }
+
+  /**
+   * Rewrite one channel's slots after a successful reorder write-back, so the
+   * snapshot reflects what podium just decided rather than what it fetched hours
+   * ago at pass start. Only `reorder()` and the apply/unassign routes call this,
+   * each with the exact array it handed Dispatcharr.
+   */
+  updateChannelOrder(channelId: number, rows: CatalogueRow[]): void {
+    this.db.transaction(() => {
+      this.sql('DELETE FROM catalogue WHERE channel_id = ?').run(channelId);
+      const insert = this.sql(
+        `INSERT INTO catalogue
+           (channel_id, channel_name, slot, stream_id, provider_id, provider_name)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      );
+      for (const r of rows) {
+        insert.run(r.channelId, r.channelName, r.slot, r.streamId, r.providerId, r.providerName);
+      }
+    })();
+  }
+
+  /** The catalogue snapshot and when it was last written as a whole. */
+  catalogue(): { rows: CatalogueRow[]; writtenAt: number | null } {
+    const rows = this.sql(
+      `SELECT channel_id, channel_name, slot, stream_id, provider_id, provider_name
+       FROM catalogue ORDER BY channel_id, slot`,
+    ).all() as Array<{
+      channel_id: number;
+      channel_name: string;
+      slot: number;
+      stream_id: number;
+      provider_id: number;
+      provider_name: string;
+    }>;
+    const state = this.sql('SELECT written_at FROM catalogue_state WHERE id = 1').get() as
+      | { written_at: number }
+      | undefined;
+    return {
+      rows: rows.map((r) => ({
+        channelId: r.channel_id,
+        channelName: r.channel_name,
+        slot: r.slot,
+        streamId: r.stream_id,
+        providerId: r.provider_id,
+        providerName: r.provider_name,
+      })),
+      writtenAt: state?.written_at ?? null,
+    };
+  }
+
   /** Hard reset for all historical and cached data. */
   resetData(): void {
     this.db.transaction(() => {
@@ -1104,6 +1224,8 @@ export class Store {
       // A mark against verdicts that no longer exist is a request that has
       // already been granted, and leaving it would keep waking the worker.
       this.sql('DELETE FROM refresh_marks').run();
+      this.sql('DELETE FROM catalogue').run();
+      this.sql('DELETE FROM catalogue_state').run();
     })();
   }
 

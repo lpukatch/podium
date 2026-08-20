@@ -124,6 +124,62 @@ holds a Dispatcharr credential.
 | --- | --- | --- |
 | `PODIUM_MAX_CONCURRENT_PROBES` | `6` | ceiling across all lanes; `0` removes it |
 
+## Metrics
+
+`/api/metrics` serves Prometheus text format, derived from the database on each
+scrape. The per-provider families are always present once a pass has written a
+catalogue snapshot.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `PODIUM_METRICS_CHANNELS` | `true` | also expose the per-channel source series — every managed channel's slots with provider and verdict; the only families that scale with the catalogue, so the switch exists for a Prometheus watching its cardinality |
+
+### Comparing providers
+
+| Family | Labels | What it says |
+| --- | --- | --- |
+| `podium_provider_streams` | `provider`, `state` | distinct managed streams by verdict: `alive` (would rank as usable), `dead`, `black`, `low_bitrate`, `unmeasured` |
+| `podium_provider_dead_streams` | `provider`, `reason` | why the dead ones died — `auth`, `not_found`, `server_error`, `timeout`, `unreachable`, `unsupported`, `rejected`, `probe_error`, `other` |
+| `podium_provider_resolution_streams` | `provider`, `resolution` | distinct streams by measured height, whether or not usable |
+| `podium_provider_bitrate_kbps` | `provider`, `resolution`, `stat` | median measured bitrate, overall (`resolution="all"`) and per bucket |
+| `podium_provider_bitrate_measured` | `provider` | how many of those medians rest on a real measurement |
+| `podium_provider_score` | `provider`, `stat` | median podium score over the provider's usable streams — the same 0..1 the ranker uses |
+| `podium_provider_verdict_age_seconds` | `provider`, `stat` | how old the verdicts above are |
+| `podium_provider_channels` | `provider` | distinct channels the provider appears on, at any slot |
+| `podium_provider_rank1_channels` | `provider` | channels where it holds slot 0 |
+| `podium_provider_rank1_healthy` | `provider` | of those, how many rank as usable |
+
+The headline ratio is win rate, which needs the coverage denominator:
+
+```promql
+podium_provider_rank1_channels / podium_provider_channels
+```
+
+Against the total channel count instead, you would be measuring how big a
+provider's catalogue is rather than how good its streams are.
+
+Three things to hold in mind when reading these:
+
+- **Check the ages first.** A lane pinned at its provider's `max_streams` gets
+  round-tripped least often, so the providers you most want to judge carry the
+  stalest verdicts. `podium_provider_verdict_age_seconds` is the only family
+  that distinguishes "this provider looks excellent" from "this provider has
+  not been checked since Tuesday".
+- **Bitrate is only comparable within a resolution.** 4500 kbps is generous at
+  720p and thin at 1080p, so `resolution="all"` scores a provider partly on its
+  channel mix. Compare like buckets.
+- **The population is survivors.** The catalogue holds only streams currently
+  assigned to a channel, and podium removes streams itself — via
+  `PODIUM_REMOVE_UNMATCHED` and the unassign endpoint. A provider's dead rate is
+  therefore suppressed by however much cleanup it has already had. These
+  families answer "best among the streams that are still in play", not "best
+  supplier in the abstract".
+
+`probe_error` on `podium_provider_dead_streams` is deliberately its own bucket:
+a missing ffprobe or an unparseable payload is a local failure, and folding it
+in with the rest would make whichever provider happened to be probed at the
+time look broken.
+
 Lane limits come from each provider's own `max_streams` in Dispatcharr. There
 is no override: a second place to set the limit could only ever disagree with
 the one the provider actually enforces.

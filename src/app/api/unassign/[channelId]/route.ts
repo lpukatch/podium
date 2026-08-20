@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server';
 import { requireCredentials } from '@/lib/config';
 import { DispatcharrClient } from '@/lib/dispatcharr';
-import { withoutStream } from '@/lib/runner';
-import { noteStreamOrder, config as serverConfig } from '@/lib/server/state';
+import { catalogueRows, withoutStream } from '@/lib/runner';
+import { noteStreamOrder, config as serverConfig, snapshot } from '@/lib/server/state';
+import { Store } from '@/lib/store';
 
 export const dynamic = 'force-dynamic';
 
@@ -26,6 +27,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     return NextResponse.json({ error: 'bad channel id' }, { status: 400 });
   }
 
+  let store: Store | null = null;
   try {
     const body = (await request.json()) as { streamId?: number };
     const streamId = Number(body.streamId);
@@ -65,9 +67,26 @@ export async function POST(request: Request, context: { params: Promise<{ channe
 
     await client.setStreamOrder(id, order);
     noteStreamOrder(id, order);
+    // Same reasoning as the apply route: the persisted catalogue must show the
+    // order that was just written, not the one the next full pass would fetch.
+    // Opened per request rather than held for the process, matching how every
+    // other Store consumer in the web process behaves.
+    store = new Store(config.dbPath);
+    const snap = await snapshot();
+    store.updateChannelOrder(
+      id,
+      catalogueRows(
+        { id, name: channel.name },
+        order,
+        new Map(snap.streams.map((s) => [s.id, s])),
+        new Map(snap.providers.map((p) => [p.id, p.name])),
+      ),
+    );
 
     return NextResponse.json({ status: 'removed', channelId: id, streamId, previous, order });
   } catch (error) {
     return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+  } finally {
+    store?.close();
   }
 }
