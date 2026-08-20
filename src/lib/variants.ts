@@ -10,7 +10,12 @@
  * reflects every login it could play through rather than only one of them.
  */
 
-import { type Provider, type ProviderProfile, transformUrl } from './dispatcharr';
+import {
+  type Provider,
+  type ProviderProfile,
+  transformUrl,
+  xtreamPlaybackUrl,
+} from './dispatcharr';
 import type { ProbeResult } from './probe';
 import { bitrateUnknown, DEFAULT_WEIGHTS, isUsable, score, type Weights } from './scoring';
 
@@ -26,6 +31,14 @@ import { bitrateUnknown, DEFAULT_WEIGHTS, isUsable, score, type Weights } from '
  */
 export interface ProviderLogin {
   id: number;
+  /**
+   * The profile's own id in Dispatcharr, which `id` discards for the default
+   * login. Kept because `/proxy/ts/status` names the login a viewer is on by
+   * this id, and charging that viewer to the right lane needs the two to be
+   * matchable. Null only for an account Dispatcharr reports no profiles for,
+   * which has no profile to name.
+   */
+  dispatcharrProfileId: number | null;
   name: string;
   /** null when this login plays the stored URL unchanged. */
   rewrite: { search: string; replace: string } | null;
@@ -35,6 +48,11 @@ export interface ProviderLogin {
   currentViewers: number;
   /** True for the login the stored URL's credentials belong to. */
   isDefault: boolean;
+  /**
+   * True when the account is Xtream Codes, whose playback URL is rebuilt from
+   * transformed credentials rather than rewritten. See `xtreamPlaybackUrl`.
+   */
+  xtreamCodes: boolean;
 }
 
 /**
@@ -53,16 +71,19 @@ export interface ProviderLogin {
  * remaining active profiles get the lanes and the stored URL gets none.
  */
 export function providerLogins(provider: Provider): ProviderLogin[] {
+  const xtreamCodes = provider.accountType === 'XC';
   const active = provider.profiles.filter((p) => p.isActive);
   if (active.length === 0) {
     return [
       {
         id: 0,
+        dispatcharrProfileId: null,
         name: 'default',
         rewrite: null,
         maxStreams: provider.maxStreams,
         currentViewers: 0,
         isDefault: true,
+        xtreamCodes,
       },
     ];
   }
@@ -73,6 +94,7 @@ export function providerLogins(provider: Provider): ProviderLogin[] {
   if (defaultProfile) {
     out.push({
       id: 0,
+      dispatcharrProfileId: defaultProfile.id,
       name: defaultProfile.name,
       // Applied rather than assumed: the default profile's pattern is an
       // identity rewrite when Dispatcharr creates it, but the M3U profile
@@ -81,17 +103,20 @@ export function providerLogins(provider: Provider): ProviderLogin[] {
       maxStreams: cap(defaultProfile),
       currentViewers: defaultProfile.currentViewers,
       isDefault: true,
+      xtreamCodes,
     });
   }
   for (const profile of active) {
     if (profile.isDefault) continue;
     out.push({
       id: profile.id,
+      dispatcharrProfileId: profile.id,
       name: profile.name,
       rewrite: { search: profile.searchPattern, replace: profile.replacePattern },
       maxStreams: cap(profile),
       currentViewers: profile.currentViewers,
       isDefault: false,
+      xtreamCodes,
     });
   }
   return out;
@@ -110,9 +135,10 @@ export interface StreamVariant {
 /**
  * Why a login contributed no target of its own.
  *
- * `unusable-pattern` is a configuration error -- an empty search pattern, or
- * one JS cannot compile (Python's `regex` accepts a few spellings JS does not,
- * `(?P<name>...)` among them). `duplicate-url` is a rewrite that landed on a
+ * `unusable-pattern` is a configuration error -- an empty search pattern, one
+ * JS cannot compile even after the Python spellings are translated, or a
+ * replacement carrying an escape `re.sub` would reject. `duplicate-url` is a
+ * rewrite that landed on a
  * URL another login already probes, which is either a pattern that did not
  * match anything or two profiles genuinely sharing an address.
  */
@@ -146,9 +172,19 @@ export function buildVariants(
     let target = url;
     let issue: VariantIssue | null = null;
     if (login.rewrite) {
-      const rewritten = transformUrl(url, login.rewrite.search, login.rewrite.replace);
-      if (rewritten === null) issue = 'unusable-pattern';
-      else target = rewritten;
+      const { search, replace } = login.rewrite;
+      if (login.xtreamCodes && (!search || !replace)) {
+        // An XC account transforms only when both halves of the pair are set;
+        // with either missing Dispatcharr plays the account's own credentials,
+        // which is the stored URL. Called out rather than left to the dedupe,
+        // because a half-filled pattern is a profile that silently does
+        // nothing.
+        issue = 'unusable-pattern';
+      } else {
+        const rewritten = transformUrl(url, search, replace);
+        if (rewritten === null) issue = 'unusable-pattern';
+        else target = login.xtreamCodes ? xtreamPlaybackUrl(url, rewritten) : rewritten;
+      }
     }
     if (seen.has(target)) {
       onIssue?.(login, issue ?? 'duplicate-url');

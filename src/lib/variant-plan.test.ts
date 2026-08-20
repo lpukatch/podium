@@ -46,6 +46,7 @@ const provider = (over: Partial<Provider> = {}): Provider => ({
   id: 5,
   name: 'Provider A',
   maxStreams: 3,
+  accountType: 'STD',
   profiles: [
     {
       id: 5,
@@ -347,11 +348,13 @@ describe('the stream settler', () => {
 describe('lane budgets', () => {
   const login = (over: Partial<ProviderLogin> = {}): ProviderLogin => ({
     id: 0,
+    dispatcharrProfileId: 5,
     name: 'Default',
     rewrite: null,
     maxStreams: 3,
     currentViewers: 0,
     isDefault: true,
+    xtreamCodes: false,
     ...over,
   });
 
@@ -391,6 +394,54 @@ describe('lane budgets', () => {
     );
     expect(budgets.viewers.get('5:0')).toBe(2);
     expect(budgets.viewers.get('5:9')).toBe(0);
+  });
+
+  it('charges a viewer to the login they are actually watching through', () => {
+    // `/proxy/ts/status` names the profile Dispatcharr picked for each live
+    // session. Without it the whole provider-wide count lands on the default
+    // lane, and the second login probes at its full cap straight through
+    // somebody already using it.
+    const budgets = laneBudgets(
+      new Map([
+        [5, [login(), login({ id: 9, dispatcharrProfileId: 9, isDefault: false, maxStreams: 2 })]],
+      ]),
+      new Map([[5, 1]]),
+      new Map([[9, 1]]),
+    );
+    expect(budgets.viewers.get('5:0')).toBe(0);
+    expect(budgets.viewers.get('5:9')).toBe(1);
+  });
+
+  it('charges the default lane by its profile id, which its lane key discards', () => {
+    const budgets = laneBudgets(
+      new Map([[5, [login(), login({ id: 9, dispatcharrProfileId: 9, isDefault: false })]]]),
+      new Map([[5, 1]]),
+      // Profile 5 is the default login, whose lane is `5:0`.
+      new Map([[5, 1]]),
+    );
+    expect(budgets.viewers.get('5:0')).toBe(1);
+    expect(budgets.viewers.get('5:9')).toBe(0);
+  });
+
+  it('still gives the default lane a session no login was named for', () => {
+    // Two watching, one of them on a profile the payload named. The other is
+    // unattributed and falls to the default, as it always did.
+    const budgets = laneBudgets(
+      new Map([[5, [login(), login({ id: 9, dispatcharrProfileId: 9, isDefault: false })]]]),
+      new Map([[5, 2]]),
+      new Map([[9, 1]]),
+    );
+    expect(budgets.viewers.get('5:0')).toBe(1);
+    expect(budgets.viewers.get('5:9')).toBe(1);
+  });
+
+  it('takes whichever viewer count is higher, never the lower', () => {
+    const budgets = laneBudgets(
+      new Map([[5, [login({ currentViewers: 2 })]]]),
+      new Map(),
+      new Map([[5, 1]]),
+    );
+    expect(budgets.viewers.get('5:0')).toBe(2);
   });
 
   it('never charges a lane for viewers already accounted for', () => {

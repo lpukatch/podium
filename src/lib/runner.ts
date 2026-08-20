@@ -320,32 +320,51 @@ export interface LaneBudgets {
 /**
  * What each login may use this pass, before the pacer takes its reserve.
  *
- * The viewer arithmetic is the part worth explaining. There are two counts of
- * the same thing and they disagree in exactly the case that matters.
- * `current_viewers` is per login, which is what a per-login lane wants, but it
- * is a database column rather than Dispatcharr's live connection accounting --
- * an install where it is not maintained reports zero while somebody is
- * watching, and a lane that believes it would take the viewer's slot.
- * `streamViewers` is derived from the stream rows and the activity probe, is
- * per provider, and is the count this has always paced against.
+ * The viewer arithmetic is the part worth explaining. There are three counts
+ * of the same thing and they disagree in exactly the cases that matter.
  *
- * So: trust the per-login figures for what they claim, and give whatever the
- * provider-wide count sees beyond them to the default lane -- the login
- * Dispatcharr tries first, and so the one an unattributed viewer is most
- * likely on. When every profile reports zero, that hands the whole
- * provider-wide count to the default lane, which is precisely the behaviour
- * before profiles existed. A provider with no default login at all (its
- * default profile deactivated) has no lane to attribute the remainder to, so
- * it is spread over the logins it does have rather than dropped.
+ * `viewersByProfile` is the good one: `/proxy/ts/status` names the M3U profile
+ * Dispatcharr chose for each live session, so a viewer is charged to the lane
+ * they are really occupying. `current_viewers` on the profile row claims to
+ * say the same thing, but it is a database column rather than Dispatcharr's
+ * live connection accounting -- on the builds checked it is never written, so
+ * it reads zero while somebody is watching. Whichever reports more viewers for
+ * a login wins, so an install where either is maintained is counted honestly
+ * and one where neither is falls through to the third.
+ *
+ * That third is `streamViewers`, derived from the stream rows and the activity
+ * probe. It is per provider, it is what this has always paced against, and it
+ * sees viewers the other two miss. Whatever it counts beyond what the logins
+ * claim goes to the default lane -- the login Dispatcharr tries first, and so
+ * the one an unattributed viewer is most likely on. When nothing is attributed
+ * at all that hands the whole provider-wide count to the default lane, which
+ * is precisely the behaviour before profiles existed. A provider with no
+ * default login (its default profile deactivated) has no lane to carry the
+ * remainder, so it is spread over the logins it does have rather than dropped.
  */
 export function laneBudgets(
   loginsByProvider: Map<number, ProviderLogin[]>,
   streamViewers: Map<number, number>,
+  viewersByProfile?: Map<number, number>,
 ): LaneBudgets {
   const budgets: LaneBudgets = { base: new Map(), viewers: new Map(), provider: new Map() };
   for (const [providerId, logins] of loginsByProvider) {
     if (logins.length === 0) continue;
-    const claimed = logins.reduce((sum, login) => sum + login.currentViewers, 0);
+    // Per login, the larger of what the profile row claims and what the live
+    // sessions show. Neither under-counts on an install that maintains it, and
+    // a login named by no session simply keeps its own figure.
+    const attributed = new Map<ProviderLogin, number>(
+      logins.map((login) => [
+        login,
+        Math.max(
+          login.currentViewers,
+          (login.dispatcharrProfileId === null
+            ? undefined
+            : viewersByProfile?.get(login.dispatcharrProfileId)) ?? 0,
+        ),
+      ]),
+    );
+    const claimed = [...attributed.values()].reduce((sum, n) => sum + n, 0);
     const unattributed = Math.max(0, (streamViewers.get(providerId) ?? 0) - claimed);
     const fallback = logins.find((login) => login.isDefault) ?? null;
     // Spread over every login when there is no default to carry it, rounded
@@ -355,7 +374,10 @@ export function laneBudgets(
       const key = laneKey(providerId, login.id);
       budgets.provider.set(key, providerId);
       budgets.base.set(key, login.maxStreams);
-      budgets.viewers.set(key, login.currentViewers + (login === fallback ? unattributed : share));
+      budgets.viewers.set(
+        key,
+        (attributed.get(login) ?? 0) + (login === fallback ? unattributed : share),
+      );
     }
   }
   return budgets;
@@ -761,7 +783,7 @@ export class Runner {
         base: laneBase,
         viewers: laneViewers,
         provider: laneProvider,
-      } = laneBudgets(loginsByProvider, streamViewers);
+      } = laneBudgets(loginsByProvider, streamViewers, activity.viewersByProfile);
       const limits = pacer.laneLimits(laneBase, activity, laneViewers);
 
       // Every stream's probe targets for the pass: one per login that reaches a
@@ -1321,13 +1343,34 @@ export class Runner {
     client: DispatcharrClient,
     log: (m: string) => void,
     uuidMap?: Map<string, number>,
-  ): Promise<{ channelIds: Set<number>; idle: boolean; probeFailed: boolean }> {
+  ): Promise<{
+    channelIds: Set<number>;
+    idle: boolean;
+    probeFailed: boolean;
+    /** Live sessions per M3U profile id, for the lanes to charge them to. */
+    viewersByProfile: Map<number, number>;
+  }> {
     try {
-      const ids = await client.activeChannelIds(uuidMap);
-      return { channelIds: new Set(ids), idle: ids.length === 0, probeFailed: false };
+      const sessions = await client.activeSessions(uuidMap);
+      const viewersByProfile = new Map<number, number>();
+      for (const session of sessions) {
+        if (session.profileId === null) continue;
+        viewersByProfile.set(session.profileId, (viewersByProfile.get(session.profileId) ?? 0) + 1);
+      }
+      return {
+        channelIds: new Set(sessions.map((session) => session.channelId)),
+        idle: sessions.length === 0,
+        probeFailed: false,
+        viewersByProfile,
+      };
     } catch (error) {
       log(`activity probe failed (${String(error)}) -- assuming busy`);
-      return { channelIds: new Set([-1]), idle: false, probeFailed: true };
+      return {
+        channelIds: new Set([-1]),
+        idle: false,
+        probeFailed: true,
+        viewersByProfile: new Map(),
+      };
     }
   }
 

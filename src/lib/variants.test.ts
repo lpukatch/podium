@@ -28,6 +28,7 @@ function provider(over: Partial<Provider> = {}): Provider {
     id: 6,
     name: 'Provider A',
     maxStreams: 3,
+    accountType: 'STD',
     profiles: [
       profile({
         id: 6,
@@ -71,11 +72,15 @@ describe('providerLogins', () => {
     expect(logins).toEqual([
       {
         id: 0,
+        // The default login's own profile id survives, even though its lane
+        // and cache rows are keyed 0.
+        dispatcharrProfileId: 6,
         name: 'Second login',
         rewrite: { search: 'coffee/684540451', replace: 'coffee2/secret' },
         maxStreams: 2,
         currentViewers: 0,
         isDefault: true,
+        xtreamCodes: false,
       },
     ]);
   });
@@ -84,11 +89,13 @@ describe('providerLogins', () => {
     expect(providerLogins(provider({ profiles: [] }))).toEqual([
       {
         id: 0,
+        dispatcharrProfileId: null,
         name: 'default',
         rewrite: null,
         maxStreams: 3,
         currentViewers: 0,
         isDefault: true,
+        xtreamCodes: false,
       },
     ]);
   });
@@ -236,9 +243,8 @@ describe('buildVariants', () => {
         provider({
           profiles: [
             profile({ id: 6, isDefault: true, searchPattern: '^(.*)$', replacePattern: '$1' }),
-            // Python's `regex` accepts this spelling of a named group; JS does
-            // not, so the pattern will not compile here.
-            profile({ id: 2, searchPattern: '(?P<host>crx)', replacePattern: 'x' }),
+            // A pattern that cannot compile
+            profile({ id: 2, searchPattern: 'unbalanced(', replacePattern: 'x' }),
             profile({ id: 3, searchPattern: 'nomatch-anywhere', replacePattern: 'x' }),
           ],
         }),
@@ -262,11 +268,13 @@ describe('buildVariants', () => {
       [
         {
           id: 4,
+          dispatcharrProfileId: 4,
           name: 'Only login',
           rewrite: { search: 'unbalanced(', replace: 'x' },
           maxStreams: 1,
           currentViewers: 0,
           isDefault: false,
+          xtreamCodes: false,
         },
       ],
       (_login, issue) => issues.push(issue),
@@ -275,6 +283,100 @@ describe('buildVariants', () => {
     // no default to charge the connection to.
     expect(variants).toEqual([{ variantId: 4, profileId: 4, url: URL }]);
     expect(issues).toEqual(['unusable-pattern']);
+  });
+});
+
+describe('buildVariants on an Xtream Codes account', () => {
+  // XC accounts never transform the stored URL at playback: Dispatcharr
+  // rebuilds it from credentials pulled out of a transformed canonical URL.
+  // These pin the two steps that are not rewrites -- verified against
+  // `get_transformed_credentials` in Dispatcharr 0.29.0.
+  const STORED = 'http://provider.example:8080/live/user1/pass1/12345.ts';
+
+  const xcProvider = (searchPattern: string, replacePattern: string): Provider => ({
+    id: 5,
+    name: 'Provider A',
+    maxStreams: 3,
+    accountType: 'XC',
+    profiles: [
+      {
+        id: 5,
+        name: 'Default',
+        isDefault: true,
+        isActive: true,
+        maxStreams: 3,
+        currentViewers: 0,
+        searchPattern: '^(.*)$',
+        replacePattern: '$1',
+      },
+      {
+        id: 9,
+        name: 'Second login',
+        isDefault: false,
+        isActive: true,
+        maxStreams: 2,
+        currentViewers: 0,
+        searchPattern,
+        replacePattern,
+      },
+    ],
+  });
+
+  const secondTarget = (searchPattern: string, replacePattern: string) => {
+    const variants = buildVariants(
+      STORED,
+      providerLogins(xcProvider(searchPattern, replacePattern)),
+    );
+    return variants.find((v) => v.variantId === 9)?.url ?? null;
+  };
+
+  it('swaps credentials exactly as the rebuild does', () => {
+    expect(secondTarget('/live/user1/pass1/', '/live/user2/pass2/')).toBe(
+      'http://provider.example:8080/live/user2/pass2/12345.ts',
+    );
+  });
+
+  it('keeps a sub-path on the server, which precedes the credentials', () => {
+    const variants = buildVariants(
+      'http://provider.example:8080/iptv/live/user1/pass1/12345.ts',
+      providerLogins(xcProvider('/live/user1/pass1/', '/live/user2/pass2/')),
+    );
+    expect(variants.find((v) => v.variantId === 9)?.url).toBe(
+      'http://provider.example:8080/iptv/live/user2/pass2/12345.ts',
+    );
+  });
+
+  it('undoes a rename of the live segment, which the rebuild re-inserts', () => {
+    // Dispatcharr reads the credentials by position and writes a literal
+    // `/live/` back, so this profile reaches the default login's address.
+    expect(secondTarget('/live/', '/stream/')).toBeNull();
+  });
+
+  it('gives no target to a pattern that breaks the URL shape', () => {
+    // The extraction fails and Dispatcharr plays the account's own
+    // credentials. Probing the rewritten address would spend a connection on
+    // a URL nobody can watch through.
+    expect(secondTarget('^.*$', 'http://elsewhere.example/playlist.m3u8')).toBeNull();
+    expect(secondTarget('/live/user1/', '/')).toBeNull();
+  });
+
+  it('gives no target to a half-filled pattern pair', () => {
+    // The XC path transforms only when both halves are set.
+    const issues: Array<[number, string]> = [];
+    buildVariants(STORED, providerLogins(xcProvider('/live/user1/pass1/', '')), (login, issue) =>
+      issues.push([login.id, issue]),
+    );
+    expect(issues).toEqual([[9, 'unusable-pattern']]);
+  });
+
+  it('still rewrites the stored URL on a standard M3U account', () => {
+    // The same pattern that is undone above is honoured here, because a
+    // standard account really does rewrite the stored URL.
+    const std = { ...xcProvider('/live/', '/stream/'), accountType: 'STD' };
+    const variants = buildVariants(STORED, providerLogins(std));
+    expect(variants.find((v) => v.variantId === 9)?.url).toBe(
+      'http://provider.example:8080/stream/user1/pass1/12345.ts',
+    );
   });
 });
 

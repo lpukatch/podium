@@ -98,6 +98,13 @@ export interface Provider {
   name: string;
   maxStreams: number;
   /**
+   * `XC` for an Xtream Codes account, `STD` for a plain M3U one. It decides
+   * how a profile's pattern reaches playback: an XC account rebuilds the URL
+   * from transformed *credentials*, where a standard one rewrites the stored
+   * URL itself. See `xtreamPlaybackUrl`.
+   */
+  accountType: string;
+  /**
    * The account's logins, including inactive ones -- `isActive` is the
    * caller's filter, not this mapping's, so an odd state (a disabled default,
    * say) stays visible rather than silently changing the variant count.
@@ -105,15 +112,149 @@ export interface Provider {
   profiles: ProviderProfile[];
 }
 
+/**
+ * One live playback session, as `/proxy/ts/status` reports it.
+ *
+ * `profileId` is null when the payload does not name a login -- an entry that
+ * is a bare channel id, or a build that does not carry `m3u_profile_id`. The
+ * pacer treats those as unattributed rather than assuming a lane.
+ */
+export interface ActiveSession {
+  channelId: number;
+  profileId: number | null;
+}
+
 export class DispatcharrError extends Error {}
+
+/**
+ * Translate a profile's search pattern into one JS can compile.
+ *
+ * Dispatcharr matches with Python's `regex` module, which takes JS spellings
+ * natively but also accepts two Python-only ones the RegExp constructor
+ * rejects. Both are mechanical rewrites of the same construct.
+ */
+function toJsSearch(searchPattern: string): string {
+  return searchPattern
+    .replace(/\(\?P</g, '(?<')
+    .replace(/\(\?P=([A-Za-z_][A-Za-z0-9_]*)\)/g, '\\k<$1>');
+}
+
+/**
+ * Translate a profile's replace pattern into one `String.replace` reads the
+ * way Python's `re.sub` reads the original.
+ *
+ * Dispatcharr converts `$<name>` to `\g<name>` and `$1` to `\1` before handing
+ * the pattern to `re.sub`, so a profile may be authored in either style and
+ * both must land on the same URL here. That cuts three ways:
+ *
+ *   - JS spellings (`$1`, `$<name>`) pass through, since `String.replace`
+ *     already reads them as Dispatcharr's conversion of them does.
+ *   - Python spellings (`\1`, `\g<1>`, `\g<name>`) become their JS
+ *     equivalents. Left alone they are literal text to `String.replace`, which
+ *     is how a working second login ends up probing a URL like
+ *     `\1/live/user2/pass2/1234.ts` and reading dead on every stream.
+ *   - Every *other* `$` is escaped. `re.sub` gives `$&`, `` $` ``, `$'` and
+ *     `$$` no meaning, so a password containing one is copied through
+ *     verbatim; `String.replace` would substitute instead.
+ *
+ * Null for an escape `re.sub` rejects outright ("bad escape"), which is the
+ * same class of authoring error as a pattern that will not compile.
+ */
+function toJsReplacement(replacePattern: string): string | null {
+  let out = '';
+  let i = 0;
+  while (i < replacePattern.length) {
+    const rest = replacePattern.slice(i + 1);
+    const ch = replacePattern.charAt(i);
+
+    if (ch === '$') {
+      const ref = /^(?:\d{1,2}|<[A-Za-z_][A-Za-z0-9_]*>)/.exec(rest);
+      out += ref ? `$${ref[0]}` : '$$';
+      i += 1 + (ref ? ref[0].length : 0);
+      continue;
+    }
+    if (ch !== '\\') {
+      out += ch;
+      i += 1;
+      continue;
+    }
+
+    // An escaped backslash is a literal one, and must be consumed whole or its
+    // second half would read as the start of a backreference.
+    if (rest.startsWith('\\')) {
+      out += '\\';
+      i += 2;
+      continue;
+    }
+    const ref = /^(?:g<([A-Za-z_][A-Za-z0-9_]*)>|g<(\d{1,2})>|([1-9]\d?))/.exec(rest);
+    if (!ref) return null;
+    const [whole, name, bracketed, bare] = ref;
+    out += name !== undefined ? `$<${name}>` : `$${bracketed ?? bare}`;
+    i += 1 + whole.length;
+  }
+  return out;
+}
+
+/**
+ * The URL an Xtream Codes login really plays, which is not simply the
+ * rewritten stored URL.
+ *
+ * On an XC account Dispatcharr never transforms the stored URL at playback.
+ * It builds a canonical `{server}/live/{user}/{pass}/1234.ts` from the
+ * account's own credentials, applies the profile's pattern to *that*, pulls
+ * the username and password back out of the result by position, and rebuilds
+ * the URL around the stream's own id (`_resolve_live_stream_url` and
+ * `get_transformed_credentials`). The stored URL has the same shape, so a
+ * pattern that swaps credentials lands on the same address either way -- but
+ * two of the steps are not rewrites at all, and those are what this reproduces:
+ *
+ *   - The extraction is positional, and the rebuild re-inserts a literal
+ *     `/live/`. A pattern that renames that segment is undone.
+ *   - If the transformed URL no longer parses as `.../{user}/{pass}/{file}`,
+ *     Dispatcharr abandons the profile and plays the *account's* credentials.
+ *     Returning the stored URL is how that is said here: the caller's dedupe
+ *     then drops the login behind the default it has collapsed onto, rather
+ *     than spending a connection probing an address nobody plays.
+ *
+ * Applied to every stream on an XC account. Dispatcharr takes this path only
+ * for streams carrying a provider `stream_id`, which for an XC catalogue is
+ * all of them bar a hand-added one; on such a stream the two paths differ only
+ * for a pattern already misshaping the URL.
+ */
+export function xtreamPlaybackUrl(storedUrl: string, rewritten: string): string {
+  let target: URL;
+  let stored: URL;
+  try {
+    target = new URL(rewritten);
+    stored = new URL(storedUrl);
+  } catch {
+    return storedUrl;
+  }
+  const parts = target.pathname.split('/').filter(Boolean);
+  const storedParts = stored.pathname.split('/').filter(Boolean);
+  const file = storedParts[storedParts.length - 1];
+  // Dispatcharr checks its canonical `1234.ts` survived; the stored URL's own
+  // file name is the same check against the same rewrite.
+  if (parts.length < 4 || file === undefined || parts[parts.length - 1] !== file) {
+    return storedUrl;
+  }
+  const username = parts[parts.length - 3];
+  const password = parts[parts.length - 2];
+  // Whatever preceded `/live/{user}/{pass}/{file}` is a sub-path on the server
+  // and is kept; the segment naming `live` itself is not.
+  const basePath = parts.slice(0, parts.length - 4);
+  const base = `${target.protocol}//${target.host}${basePath.length > 0 ? `/${basePath.join('/')}` : ''}`;
+  return `${base}/live/${username}/${password}/${file}`;
+}
 
 /**
  * Rewrite a stream URL with a profile's pattern pair, the way Dispatcharr does
  * at playback (`transform_url` in its live proxy).
  *
- * The patterns are authored JS-style -- `$1` and `$<name>` work in
- * `String.replace` natively -- and the `g` flag mirrors Python's `re.sub`,
- * which replaces every occurrence rather than just the first.
+ * The patterns may be authored in either JS or Python spelling -- Dispatcharr
+ * accepts both, so `toJsSearch` and `toJsReplacement` normalise them before
+ * `String.replace` sees them. The `g` flag mirrors Python's `re.sub`, which
+ * replaces every occurrence rather than just the first.
  *
  * Null means "no variant from this profile": an empty or invalid pattern is a
  * configuration error, not a request to probe the same URL twice. A pattern
@@ -128,12 +269,14 @@ export function transformUrl(
   if (!searchPattern) return null;
   let search: RegExp;
   try {
-    search = new RegExp(searchPattern, 'g');
+    search = new RegExp(toJsSearch(searchPattern), 'g');
   } catch {
     return null;
   }
+  const replacement = toJsReplacement(replacePattern);
+  if (replacement === null) return null;
   try {
-    return url.replace(search, replacePattern);
+    return url.replace(search, replacement);
   } catch {
     // A replacement that throws is the same class of authoring error as a
     // pattern that does not compile.
@@ -434,6 +577,7 @@ export class DispatcharrClient {
       name?: string;
       max_streams?: number | null;
       is_active?: boolean;
+      account_type?: string;
       profiles?: ProfileRow[];
     };
     const rows = await this.paged<Row>('/api/m3u/accounts/');
@@ -445,6 +589,7 @@ export class DispatcharrClient {
         // 0 or null in Dispatcharr means "unlimited"; we still cap it, because an
         // unbounded lane just moves the bottleneck onto the network.
         maxStreams: row.max_streams ? Number(row.max_streams) : 4,
+        accountType: row.account_type ?? 'STD',
         profiles: (row.profiles ?? []).map((profile) => ({
           id: profile.id,
           name: profile.name || String(profile.id),
@@ -506,10 +651,16 @@ export class DispatcharrClient {
     return Array.isArray(body) ? body.map(trimProgramme) : [];
   }
 
-  /** Channel ids currently being streamed. Resolves UUIDs if uuidMap is provided. */
-  async activeChannelIds(
+  /**
+   * Every live playback session, with the login it is playing through.
+   *
+   * `m3u_profile_id` is the field that matters here: Dispatcharr picks a
+   * profile per session and reports which one, so a viewer can be charged to
+   * the lane they are actually occupying rather than guessed at.
+   */
+  async activeSessions(
     uuidMap?: Map<string, number> | Record<string, number>,
-  ): Promise<number[]> {
+  ): Promise<ActiveSession[]> {
     const resp = await this.request('GET', '/proxy/ts/status');
     if (!resp.ok) throw new DispatcharrError(`activity probe -> ${resp.status}`);
     const body = (await resp.json()) as { channels?: unknown[]; count?: number };
@@ -518,45 +669,63 @@ export class DispatcharrClient {
       Array.isArray(body.channels) ? body.channels.length : 0,
     );
     const entries = Array.isArray(body.channels) ? body.channels : [];
-    const ids: number[] = [];
+    const resolve = (val: unknown): number | null => {
+      if (typeof val === 'number') return val;
+      if (typeof val !== 'string' || val.trim() === '') return null;
+      if (!val.includes('-') && !Number.isNaN(Number(val))) return Number(val);
+      if (!uuidMap) return null;
+      const mapped = uuidMap instanceof Map ? uuidMap.get(val) : uuidMap[val];
+      return typeof mapped === 'number' ? mapped : null;
+    };
+
+    const sessions: ActiveSession[] = [];
     for (const entry of entries) {
-      if (typeof entry === 'number') {
-        ids.push(entry);
-      } else if (typeof entry === 'string') {
-        if (entry.trim() !== '' && !Number.isNaN(Number(entry))) {
-          ids.push(Number(entry));
-        } else if (uuidMap) {
-          const mapped = uuidMap instanceof Map ? uuidMap.get(entry) : uuidMap[entry];
-          if (typeof mapped === 'number') ids.push(mapped);
-        }
-      } else if (entry && typeof entry === 'object') {
-        const row = entry as Record<string, unknown>;
-        for (const key of ['channel_id', 'id', 'channel']) {
-          const val = row[key];
-          if (typeof val === 'number') {
-            ids.push(val);
-            break;
-          } else if (typeof val === 'string') {
-            if (val.trim() !== '' && !val.includes('-') && !Number.isNaN(Number(val))) {
-              ids.push(Number(val));
-              break;
-            } else if (uuidMap) {
-              const mapped = uuidMap instanceof Map ? uuidMap.get(val) : uuidMap[val];
-              if (typeof mapped === 'number') {
-                ids.push(mapped);
-                break;
-              }
-            }
-          }
-        }
+      if (typeof entry === 'number' || typeof entry === 'string') {
+        // A bare id carries no login, so it stays unattributed. The uuid form
+        // is looser than the object form below, which rejects a bare number
+        // string only when it looks like a uuid.
+        const channelId =
+          typeof entry === 'number'
+            ? entry
+            : entry.trim() !== '' && !Number.isNaN(Number(entry))
+              ? Number(entry)
+              : resolve(entry);
+        if (channelId !== null) sessions.push({ channelId, profileId: null });
+        continue;
       }
+      if (!entry || typeof entry !== 'object') continue;
+      const row = entry as Record<string, unknown>;
+      let channelId: number | null = null;
+      for (const key of ['channel_id', 'id', 'channel']) {
+        channelId = resolve(row[key]);
+        if (channelId !== null) break;
+      }
+      if (channelId === null) continue;
+      const rawProfile = row.m3u_profile_id;
+      const profileId =
+        typeof rawProfile === 'number'
+          ? rawProfile
+          : typeof rawProfile === 'string' &&
+              rawProfile.trim() !== '' &&
+              !Number.isNaN(Number(rawProfile))
+            ? Number(rawProfile)
+            : null;
+      sessions.push({ channelId, profileId });
     }
-    if (rawCount > 0 && ids.length === 0) {
+
+    if (rawCount > 0 && sessions.length === 0) {
       throw new DispatcharrError(
         `active channel probe status payload had ${rawCount} active entry/entries but 0 channel IDs resolved`,
       );
     }
-    return ids;
+    return sessions;
+  }
+
+  /** Channel ids currently being streamed. Resolves UUIDs if uuidMap is provided. */
+  async activeChannelIds(
+    uuidMap?: Map<string, number> | Record<string, number>,
+  ): Promise<number[]> {
+    return (await this.activeSessions(uuidMap)).map((session) => session.channelId);
   }
 
   /**

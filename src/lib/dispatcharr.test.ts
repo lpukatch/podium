@@ -235,6 +235,55 @@ describe('transformUrl', () => {
     );
   });
 
+  it('supports Python-style named groups (?P<name>) and \\g<name> replacements', () => {
+    expect(
+      transformUrl(url, 'live/(?P<user>[^/]+)/(?P<pass>[^/]+)', 'live/\\g<pass>/\\g<user>'),
+    ).toBe('http://crx.watch/live/684540451/coffee/1234.ts');
+  });
+
+  it('reads a Python-style backreference, rather than copying it through', () => {
+    // Dispatcharr converts `$1` to `\\1` before handing the pattern to re.sub,
+    // so a profile authored either way must land on the same URL. Copied
+    // through instead, a working second login probes a URL beginning `\\1` and
+    // reads dead on every stream it has.
+    const grouped = '^(.*)/live/[^/]+/[^/]+/(.*)$';
+    const expected = 'http://crx.watch/live/ahh/999/1234.ts';
+    expect(transformUrl(url, grouped, '$1/live/ahh/999/$2')).toBe(expected);
+    expect(transformUrl(url, grouped, '\\1/live/ahh/999/\\2')).toBe(expected);
+    expect(transformUrl(url, grouped, '\\g<1>/live/ahh/999/\\g<2>')).toBe(expected);
+  });
+
+  it('backreferences a Python-style named group with (?P=name)', () => {
+    expect(transformUrl('http://a/x-crx-crx/1.ts', '(?P<h>crx)-(?P=h)', 'ok')).toBe(
+      'http://a/x-ok/1.ts',
+    );
+  });
+
+  it('keeps a $ that re.sub would treat as an ordinary character', () => {
+    // Dispatcharr converts only `$1` and `$<name>`; `$&`, `` $` ``, `$'` and
+    // `$$` reach re.sub with no meaning and are copied through. String.replace
+    // would substitute instead, mangling a password that contains one.
+    expect(transformUrl(url, 'coffee', 'p$&ss')).toBe(
+      'http://crx.watch/live/p$&ss/684540451/1234.ts',
+    );
+    expect(transformUrl(url, 'coffee', 'p$$ss')).toBe(
+      'http://crx.watch/live/p$$ss/684540451/1234.ts',
+    );
+  });
+
+  it('keeps an escaped backslash whole, so its tail is not read as a group', () => {
+    expect(transformUrl(url, 'coffee', 'a\\\\1b')).toBe(
+      'http://crx.watch/live/a\\1b/684540451/1234.ts',
+    );
+  });
+
+  it('refuses an escape re.sub would reject outright', () => {
+    // Python raises "bad escape" and Dispatcharr falls back to the stored URL.
+    // Null is how this reports that: the login keeps a lane, on the URL it
+    // would really play, and the pass logs the pattern as unusable.
+    expect(transformUrl(url, 'coffee', 'a\\db')).toBeNull();
+  });
+
   it('replaces every occurrence, like the re.sub Dispatcharr runs', () => {
     expect(transformUrl('a/a/a', 'a', 'b')).toBe('b/b/b');
   });
@@ -379,6 +428,31 @@ describe('resource mapping', () => {
     const uuidMap = new Map([['f08f5325-8fc2-4668-b765-37f90877828a', 46802]]);
     const ids = await new DispatcharrClient('http://d', { apiKey: 'k' }).activeChannelIds(uuidMap);
     expect(ids).toEqual([46802]);
+  });
+
+  it('names the login each live session is playing through', async () => {
+    // Dispatcharr picks a profile per session and reports it as
+    // `m3u_profile_id`. It is what lets a viewer be charged to the lane they
+    // are really occupying rather than guessed onto the default one.
+    stubFetch(() => ({
+      body: {
+        channels: [
+          { channel_id: 8, m3u_profile_id: 9 },
+          { channel_id: 10, m3u_profile_id: '5' },
+          { channel_id: 11 },
+          12,
+        ],
+        count: 4,
+      },
+    }));
+    const sessions = await new DispatcharrClient('http://d', { apiKey: 'k' }).activeSessions();
+    expect(sessions).toEqual([
+      { channelId: 8, profileId: 9 },
+      { channelId: 10, profileId: 5 },
+      // No login named: unattributed, not assumed onto a lane.
+      { channelId: 11, profileId: null },
+      { channelId: 12, profileId: null },
+    ]);
   });
 
   it('raises a DispatcharrError on shape mismatch when channels are active but cannot be resolved', async () => {
