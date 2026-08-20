@@ -25,6 +25,8 @@ import {
 import { Store } from '@/lib/store';
 import {
   buildVariants,
+  drawVariant,
+  POOLED_VARIANT,
   pickBestVariant,
   providerLogins,
   type VariantVerdict,
@@ -208,31 +210,32 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     const boundedHits = hits.slice(0, maxCheckStreams);
     const truncated = hits.length > boundedHits.length;
 
+    const drawSeq = new Map<number, number>();
     for (const [streamId, stepOrder] of boundedHits) {
       const stream = streamById.get(streamId);
       if (!stream) continue;
-      // Every login the stream could play through, each gated on its own
-      // lane: a saturated default login does not stop the second one being
-      // checked. The 50-stream cap counts streams, not logins -- the extra
-      // probes run in lanes of their own, concurrently, so a second login
-      // costs the check connections rather than wall time. A stream with no
-      // runnable login is simply unprobed, feeding `unprobed` below exactly
-      // as a capacity-skipped stream always did.
+      // One login draws each stream, weighted by the free connections each has
+      // left -- the same pool the worker uses, so a check of a 40-stream
+      // channel on a two-login account runs five wide instead of probing
+      // twenty streams twice. A stream whose drawn lane has no room is simply
+      // unprobed, feeding `unprobed` below exactly as a capacity-skipped
+      // stream always did.
       const logins = loginsByProvider.get(stream.providerId);
-      const variants = logins
+      const menu = logins
         ? buildVariants(stream.url, logins)
-        : [{ variantId: 0, profileId: 0, url: stream.url }];
-      for (const variant of variants) {
-        if ((limits.get(laneKey(stream.providerId, variant.profileId)) ?? 0) <= 0) continue;
-        jobs.push({
-          streamId,
-          channelId: id,
-          url: variant.url,
-          providerId: stream.providerId,
-          profileId: variant.profileId,
-          stepOrder,
-        });
-      }
+        : [{ variantId: POOLED_VARIANT, profileId: 0, url: stream.url }];
+      const seq = drawSeq.get(stream.providerId) ?? 0;
+      drawSeq.set(stream.providerId, seq + 1);
+      const variant = drawVariant(menu, stream.providerId, limits, seq);
+      if ((limits.get(laneKey(stream.providerId, variant.profileId)) ?? 0) <= 0) continue;
+      jobs.push({
+        streamId,
+        channelId: id,
+        url: variant.url,
+        providerId: stream.providerId,
+        profileId: variant.profileId,
+        stepOrder,
+      });
     }
 
     if (jobs.length === 0 && boundedHits.length > 0) {
@@ -246,10 +249,10 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       );
     }
 
-    // Per stream, the verdicts its logins returned. The check reports one row
-    // per stream -- the best login it has -- the same single-stream view
-    // Dispatcharr holds, so per-variant results are combined below rather
-    // than reported.
+    // Per stream, the verdict its drawn login returned -- one apiece under
+    // pooling. Kept as a list, and folded through `pickBestVariant` below, so
+    // a cache still holding per-login rows from before the pool combines
+    // correctly instead of reporting an arbitrary one of them.
     const variantResults = new Map<number, VariantVerdict[]>();
     const probeOptions = {
       limits,
@@ -267,11 +270,13 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         if (verdict.allowed) {
           const stream = streamById.get(job.streamId);
           if (stream?.streamHash) {
-            store?.put(job.streamId, stream.streamHash, result, job.profileId);
+            // Keyed on the stream, not the login that drew it -- see
+            // `StreamVariant`, and the worker's matching write.
+            store?.put(job.streamId, stream.streamHash, result, POOLED_VARIANT);
           }
         }
         const list = variantResults.get(job.streamId) ?? [];
-        list.push({ variantId: job.profileId, result });
+        list.push({ variantId: POOLED_VARIANT, result });
         variantResults.set(job.streamId, list);
         return result;
       },

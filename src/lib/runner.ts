@@ -40,6 +40,8 @@ import type { CatalogueRow } from './store';
 import { ALL_GROUPS, forcedAtFor, type Progress, type Store, ttlFor } from './store';
 import {
   buildVariants,
+  drawVariant,
+  POOLED_VARIANT,
   type ProviderLogin,
   pickBestVariant,
   providerLogins,
@@ -471,14 +473,14 @@ export interface StreamSettlerDeps {
 }
 
 /**
- * Collapses a pass's per-variant probe results into the one verdict per stream
- * everything downstream works on.
+ * Collapses a pass's probe results into the one verdict per stream everything
+ * downstream works on.
  *
- * A stream with several logins is probed once per login, but the counters, the
- * stats published to Dispatcharr and the ranking all speak per stream -- so
- * they wait for the stream's last queued variant to land rather than firing
- * per probe. For a stream with one login (most of them) that is the moment the
- * probe returns, which is the behaviour that predates profiles.
+ * Pooling queues one probe per stream, so this fires the moment that probe
+ * returns. It stays general over several probes per stream because that is
+ * what makes the guarantee it exists for -- one settlement, one stats write,
+ * one ranking input per stream -- a property of this function rather than of
+ * how the planner happens to queue work.
  */
 export function makeStreamSettler(jobs: ProbeJob[], deps: StreamSettlerDeps): StreamSettler {
   const pending = new Map<number, { left: number; landed: VariantVerdict[] }>();
@@ -853,8 +855,16 @@ export class Runner {
       } = laneBudgets(loginsByProvider, streamViewers, activity.viewersByProfile);
       const limits = pacer.laneLimits(laneBase, activity, laneViewers);
 
-      // Every stream's probe targets for the pass: one per login that reaches a
-      // distinct URL, the stored URL among them for all but the oddest account.
+      // Every stream's probe target for the pass: exactly one, drawn from the
+      // logins that reach a distinct URL and weighted by the free connections
+      // each of them has left after the pacer took the viewers out. Two logins
+      // at 3 and 2 therefore split the provider's streams 3:2 and get through
+      // the catalogue five at a time -- see `drawVariant`.
+      //
+      // The counter is per provider and advances per stream, so the split is
+      // exact rather than statistical. Which login draws a given stream is not
+      // stable between passes and does not need to be: the verdict is cached
+      // against the stream, not the login that fetched it.
       //
       // Where a login yields no target of its own the reason is folded by
       // profile and logged once below, rather than per stream. A pattern that
@@ -865,25 +875,26 @@ export class Runner {
         string,
         { providerId: number; name: string; issue: VariantIssue; count: number }
       >();
+      const drawSeq = new Map<number, number>();
       for (const stream of streams) {
         const logins = loginsByProvider.get(stream.providerId);
-        variantsByStream.set(
-          stream.id,
-          logins
-            ? buildVariants(stream.url, logins, (login, issue) => {
-                const key = `${stream.providerId}:${login.id}:${issue}`;
-                const seen = variantIssues.get(key);
-                if (seen) seen.count += 1;
-                else
-                  variantIssues.set(key, {
-                    providerId: stream.providerId,
-                    name: login.name,
-                    issue,
-                    count: 1,
-                  });
-              })
-            : [{ variantId: 0, profileId: 0, url: stream.url }],
-        );
+        const menu = logins
+          ? buildVariants(stream.url, logins, (login, issue) => {
+              const key = `${stream.providerId}:${login.id}:${issue}`;
+              const seen = variantIssues.get(key);
+              if (seen) seen.count += 1;
+              else
+                variantIssues.set(key, {
+                  providerId: stream.providerId,
+                  name: login.name,
+                  issue,
+                  count: 1,
+                });
+            })
+          : [{ variantId: POOLED_VARIANT, profileId: 0, url: stream.url }];
+        const seq = drawSeq.get(stream.providerId) ?? 0;
+        drawSeq.set(stream.providerId, seq + 1);
+        variantsByStream.set(stream.id, [drawVariant(menu, stream.providerId, limits, seq)]);
       }
       for (const { providerId, name, issue, count } of variantIssues.values()) {
         const why =
@@ -955,9 +966,9 @@ export class Runner {
       // Every later step reads this rather than matching the channel again.
       const plannedById = new Map(planned.map((entry) => [entry.channel.id, entry]));
       const eligibleChannels = new Set(jobs.map((j) => j.channelId)).size;
-      // Jobs are per variant -- per login -- while every number a person reads
-      // is per stream. A stream with two logins is two probes and one backlog
-      // entry.
+      // Counted per stream, which is also one per job under pooling. Kept as a
+      // set rather than a length so a planner that ever queues a stream twice
+      // cannot inflate the backlog a person reads.
       const backlogStreams = new Set(jobs.map((j) => j.streamId)).size;
       counters.backlog = backlogStreams;
       counters.nextDueAt = nextDueAt;
@@ -1025,9 +1036,10 @@ export class Runner {
       // which stops the loop ever taking its idle sleep -- a permanent
       // once-a-minute full crawl of Dispatcharr to defer the same streams again.
       //
-      // All three counts are per stream: a stream whose default login is
-      // saturated but whose second login has room is open, not deferred, and
-      // its remaining variant comes back on a later pass.
+      // All three counts are per stream. The draw already steers streams to
+      // the logins with room, so what reaches here deferred is a provider with
+      // no open lane at all -- see `drawVariant`, which hands back an
+      // unrunnable target precisely so the stream is counted here.
       const knownProviders = new Set(providers.map((p) => p.id));
       const open: ProbeJob[] = [];
       const openAges: number[] = [];
@@ -1256,7 +1268,12 @@ export class Runner {
             }
             const stream = streamById.get(job.streamId);
             if (stream?.streamHash) {
-              store.put(job.streamId, stream.streamHash, result, job.profileId);
+              // Keyed on the stream, not on `job.profileId`: the login that
+              // drew this stream is a scheduling detail, and keying on it would
+              // split one stream's freshness across as many rows as the account
+              // has logins -- each expiring on its own clock and each costing a
+              // probe to refresh. See `StreamVariant`.
+              store.put(job.streamId, stream.streamHash, result, POOLED_VARIANT);
             }
             // `done` advances for every verdict (alive or dead); `dead` is the
             // breakdown of the ones that came back dead.
@@ -1637,9 +1654,10 @@ export class Runner {
             if (!marked) continue;
             const stream = byId.get(streamId);
             if (!stream || stream.is_stale) continue;
-            // Once per stream, however many logins hold verdicts: a stream is
-            // one thing still to re-check, as old as its least-recently-checked
-            // login -- the oldest verdict is the one any mark covers.
+            // Once per stream, and as old as its oldest cached verdict --
+            // which is the stream's own under pooling, and the oldest of the
+            // per-login rows on a cache the sweep has not reached yet. Either
+            // way the oldest is the verdict any mark covers.
             let oldest: number | null = null;
             for (const entry of store.variants(streamId, stream.streamHash).values()) {
               if (oldest === null || entry.probedAt < oldest) oldest = entry.probedAt;
@@ -1675,9 +1693,10 @@ export class Runner {
 
         // One read for everything this needs from the cache: the ages that
         // pace the slice, the verdicts themselves, and the dead streaks that
-        // decide how long each is trusted for -- one row per login. A stream
-        // is served from cache only when *every* login's verdict is fresh;
-        // the rest become one probe job each, for just the stale logins.
+        // decide how long each is trusted for. Pooling makes that one row and
+        // one job per stream; the loop stays written over the set so a cache
+        // still holding per-login rows dates the stream by the oldest of them
+        // rather than by whichever came back first.
         const streamVariants = variantsOf(stream);
         const cachedVariants = store.variants(stream.id, stream.streamHash);
         const freshVariants = new Map<number, ProbeResult>();
@@ -1718,8 +1737,8 @@ export class Runner {
         }
         // Counted per request rather than against the folded instant above: a
         // channel covered by both a group mark and a catalogue-wide one keeps
-        // each of them open independently -- and once per stream, however many
-        // logins hold verdicts, because a stream is one thing still to go.
+        // each of them open independently -- and once per stream, whatever the
+        // cache holds for it, because a stream is one thing still to go.
         if (marked && oldest !== null) countRetired(channel.groupId, oldest);
         const forcedOut = oldest !== null && oldest <= forcedAt;
 

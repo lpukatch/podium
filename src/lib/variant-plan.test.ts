@@ -1,9 +1,10 @@
 /**
  * Planning and settling with several logins per provider.
  *
- * A stream with two logins is two probe targets and one of everything a person
- * reads: one backlog entry, one cache verdict combined from the best login,
- * one stats write when its last queued probe lands. These pin that collapse.
+ * The logins are a pool: a stream is drawn by one of them per pass, cached
+ * against the stream rather than the login that fetched it, and counted once
+ * everywhere a person reads it. These pin that -- the draw's proportions, and
+ * that a second login adds capacity without adding work.
  */
 
 import { mkdtempSync, renameSync, rmSync, writeFileSync } from 'fs';
@@ -15,10 +16,16 @@ import type { Channel, Provider, Stream } from './dispatcharr';
 import type { ProbeResult } from './probe';
 import { RulesSource } from './rules-source';
 import { laneBudgets, makeStreamSettler, Runner } from './runner';
-import type { ProbeJob } from './scheduler';
+import { laneKey, type ProbeJob } from './scheduler';
 import { DEFAULT_WEIGHTS } from './scoring';
 import { Store } from './store';
-import { buildVariants, type ProviderLogin, providerLogins } from './variants';
+import {
+  buildVariants,
+  drawVariant,
+  POOLED_VARIANT,
+  type ProviderLogin,
+  providerLogins,
+} from './variants';
 
 const result = (over: Partial<ProbeResult> = {}): ProbeResult => ({
   alive: true,
@@ -158,97 +165,93 @@ describe('the planner with several logins', () => {
     return { rules, runner };
   }
 
-  it('queues one job per login that lacks a fresh verdict, and only those', () => {
+  /** The one target the pool draws for stream 10, as the runner would. */
+  const drawn = (slots: Map<string, number>, seq = 0) =>
+    new Map([[10, [drawVariant(buildVariants(URL, providerLogins(provider())), 5, slots, seq)]]]);
+
+  const bothOpen = new Map([
+    [laneKey(5, 0), 3],
+    [laneKey(5, 9), 2],
+  ]);
+
+  it('queues one job for the stream, through the login that drew it', () => {
     const { rules, runner } = build();
-    const variantsByStream = new Map([[10, buildVariants(URL, providerLogins(provider()))]]);
+    // Seq 3 lands past the default login's three slots, so the second login
+    // draws this one -- and the job carries that login's rewritten URL.
+    const variantsByStream = drawn(bothOpen, 3);
 
-    // Never probed at all: both logins.
     let planned = plan(runner, rules, variantsByStream);
-    expect(planned.jobs.map((job) => job.profileId).sort()).toEqual([0, 9]);
-    expect(planned.jobs.find((job) => job.profileId === 9)?.url).toBe(
-      'http://crx.watch/live/coffee2/secret/1234.ts',
-    );
-
-    // The default login fresh, the second one missing: only the second is due.
-    store.put(10, 'h', result(), 0);
-    planned = plan(runner, rules, variantsByStream);
     expect(planned.jobs.map((job) => job.profileId)).toEqual([9]);
+    expect(planned.jobs[0]?.url).toBe('http://crx.watch/live/coffee2/secret/1234.ts');
 
-    // Both fresh: nothing to probe, the stream served from cache whole.
-    store.put(10, 'h', result(), 9);
+    // One verdict settles the stream, whichever login fetched it: the cache is
+    // keyed on the stream, so the next pass has nothing to do.
+    store.put(10, 'h', result(), POOLED_VARIANT);
     const counters = { cached: 0 };
     planned = plan(runner, rules, variantsByStream, counters);
     expect(planned.jobs).toHaveLength(0);
     expect(counters.cached).toBe(1);
     expect(planned.planned[0]?.cacheComplete).toBe(true);
-    expect([...(planned.planned[0]?.fresh.get(10) ?? [])].map(([id]) => id).sort()).toEqual([0, 9]);
   });
 
-  it('re-probes only the login whose verdict expired', () => {
+  it('does not re-probe because a different login drew the stream last time', () => {
+    // The point of pooling: a verdict fetched through the default login is a
+    // verdict for the stream, so a pass that would have drawn the second login
+    // still finds nothing due. Keying the cache per login is what made a
+    // second profile double the work.
     const { rules, runner } = build();
-    const variantsByStream = new Map([[10, buildVariants(URL, providerLogins(provider()))]]);
+    store.put(10, 'h', result(), POOLED_VARIANT);
+    for (const seq of [0, 1, 2, 3, 4]) {
+      expect(plan(runner, rules, drawn(bothOpen, seq)).jobs).toHaveLength(0);
+    }
+  });
 
+  it('re-probes the stream once its verdict expires', () => {
+    const { rules, runner } = build();
     const stale = Date.now() - 25 * 3_600_000; // past the live TTL
-    // Write both variants with the second one aged out, via a raw SQL stamp --
-    // put() always writes "now", and the point here is the age.
-    const raw = (
+    // Stamped by raw SQL: put() always writes "now", and the age is the point.
+    (
       store as unknown as {
         db: { prepare: (sql: string) => { run: (...args: unknown[]) => void } };
       }
-    ).db;
-    for (const [variantId, probedAt] of [
-      [0, Date.now()],
-      [9, stale],
-    ] as Array<[number, number]>) {
-      raw
-        .prepare(
-          `INSERT INTO probe_cache (stream_id, stream_hash, variant_id, probed_at, alive, result, dead_streak)
+    ).db
+      .prepare(
+        `INSERT INTO probe_cache (stream_id, stream_hash, variant_id, probed_at, alive, result, dead_streak)
          VALUES (?, ?, ?, ?, ?, ?, 0)`,
-        )
-        .run(10, 'h', variantId, probedAt, 1, JSON.stringify(result()));
-    }
+      )
+      .run(10, 'h', POOLED_VARIANT, stale, 1, JSON.stringify(result()));
 
-    const planned = plan(runner, rules, variantsByStream);
-    expect(planned.jobs.map((job) => job.profileId)).toEqual([9]);
+    const planned = plan(runner, rules, drawn(bothOpen));
+    expect(planned.jobs.map((job) => job.streamId)).toEqual([10]);
   });
 
-  it('counts a marked stream once, however many logins hold verdicts', () => {
+  it('counts a marked stream once, and clears it on one verdict', () => {
     const { rules, runner } = build();
-    const variantsByStream = new Map([[10, buildVariants(URL, providerLogins(provider()))]]);
-
-    // Both logins probed a minute before the request, stamped explicitly: a
-    // tie with `Date.now()` would make the outcome depend on the clock.
+    // Probed a minute before the request, stamped explicitly: a tie with
+    // `Date.now()` would make the outcome depend on the clock.
     const before = Date.now() - 60_000;
-    const raw = (
+    (
       store as unknown as {
         db: { prepare: (sql: string) => { run: (...args: unknown[]) => void } };
       }
-    ).db;
-    for (const variantId of [0, 9]) {
-      raw
-        .prepare(
-          `INSERT INTO probe_cache (stream_id, stream_hash, variant_id, probed_at, alive, result, dead_streak)
+    ).db
+      .prepare(
+        `INSERT INTO probe_cache (stream_id, stream_hash, variant_id, probed_at, alive, result, dead_streak)
          VALUES (?, ?, ?, ?, ?, ?, 0)`,
-        )
-        .run(10, 'h', variantId, before, 1, JSON.stringify(result()));
-    }
-    // Stamped between the two verdicts and the re-probes below, rather than at
+      )
+      .run(10, 'h', POOLED_VARIANT, before, 1, JSON.stringify(result()));
+    // Stamped between the verdict and the re-probe below, rather than at
     // `Date.now()`: `put` writes the current instant, and on a fast machine it
     // can tie with the mark -- which reads as "measured before I asked" and
     // leaves the mark open regardless of what this is testing.
     store.setRefreshMark(100, before + 30_000);
-    // One stream still to go -- not one per login.
-    let planned = plan(runner, rules, variantsByStream);
+
+    let planned = plan(runner, rules, drawn(bothOpen));
     expect(planned.outstandingMarks[0]?.remaining).toBe(1);
 
-    // Replacing one login's verdict is not replacing the stream's re-check.
-    store.put(10, 'h', result(), 0);
-    planned = plan(runner, rules, variantsByStream);
-    expect(planned.outstandingMarks[0]?.remaining).toBe(1);
-
-    // The second login landing is what empties it.
-    store.put(10, 'h', result(), 9);
-    planned = plan(runner, rules, variantsByStream);
+    // A single fresh verdict is the whole of the stream's re-check.
+    store.put(10, 'h', result(), POOLED_VARIANT);
+    planned = plan(runner, rules, drawn(bothOpen));
     expect(planned.outstandingMarks[0]?.remaining).toBe(0);
   });
 });

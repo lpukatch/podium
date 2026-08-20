@@ -8,11 +8,13 @@
  *
  * Dispatcharr gives every stream a `stream_hash`. Keying the cache on
  * `(streamId, streamHash, variantId)` means a stream is re-probed only when
- * the provider actually changes it, or when the cached verdict ages out --
- * and, since a stream with several logins is probed once per login, only the
- * *variant* whose verdict aged out is re-probed, not the whole stream. Dead
- * variants get a much shorter TTL than live ones -- a dead login is the thing
- * most likely to have come back, and the thing most worth rechecking.
+ * the provider actually changes it, or when the cached verdict ages out.
+ * `variantId` is always 0 now that the logins on an account are pooled rather
+ * than each probed in turn -- a verdict describes the stream, not the login
+ * that fetched it -- and the column survives only to key the rows the earlier
+ * per-login probing wrote, which `pruneVariants` sweeps. Dead streams get a
+ * much shorter TTL than live ones: a dead stream is the thing most likely to
+ * have come back, and the thing most worth rechecking.
  *
  * That last part is only true of a stream that *just* died. A stream dead on
  * twenty consecutive checks is not coming back between now and the next one,
@@ -527,7 +529,12 @@ export class Store {
 
   /**
    * Widen `probe_cache` from one verdict per stream to one per (stream,
-   * variant), the upgrade path for per-login probing.
+   * variant).
+   *
+   * Kept although pooling has since put every verdict back on variant 0: an
+   * install upgrading across both changes still has to pass through this table
+   * shape, and the rows it leaves behind are swept by `pruneVariants` rather
+   * than by another migration.
    *
    * SQLite cannot alter a primary key, so this is the recreate-and-copy the
    * ALTER idiom above cannot express: a new table with `variant_id` in the
@@ -740,10 +747,11 @@ export class Store {
    * time and result for every stream on a channel at once, and a query per
    * stream would be dozens of round trips for one page render.
    *
-   * A stream with several logins has a row per login; the verdict reported is
-   * the best one, the same choice the pass reports (see `pickBestVariant`).
-   * The default weights serve: this reader is for display, and the ranking
-   * pass supplies its own.
+   * One row per stream under pooling. A cache still holding the per-login
+   * rows an earlier version wrote is folded through `pickBestVariant`, the
+   * same choice the pass reports, so the upgrade reads correctly before the
+   * sweep catches up. The default weights serve: this reader is for display,
+   * and the ranking pass supplies its own.
    */
   verdicts(
     streamIds: number[],
@@ -1025,10 +1033,10 @@ export class Store {
     // matching. The number that does account for those is the pass's own
     // `backlog`, which the progress page prefers over this one anyway.
     const due = `CASE WHEN probed_at <= :forced THEN :now ELSE probed_at + ${ttl} END`;
-    // One row per *stream*, not per verdict: a stream with several logins is a
-    // row per login underneath, and counting those would read as more streams.
-    // A stream is alive when any login is, as old as its least-recently-checked
-    // login, and due as soon as its earliest-due login is.
+    // One row per *stream*, not per verdict. That is one and the same thing
+    // under pooling; it still matters for a cache holding the per-login rows an
+    // earlier version wrote, where counting verdicts would read as more streams
+    // than exist.
     const row = this.sql(
       `SELECT COUNT(*) AS total,
               COALESCE(SUM(alive), 0)      AS alive,
