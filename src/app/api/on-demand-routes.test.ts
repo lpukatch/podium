@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Eligibility } from '@/lib/eligibility';
+import { Matcher } from '@/lib/matcher';
+import { parseProviders } from '@/lib/rules';
 import { composeOrder, splitAssigned, withoutStream } from '@/lib/runner';
 
 describe('composeOrder safety (Finding 02 & Acceptance Criteria)', () => {
@@ -151,3 +153,34 @@ describe('Identical calculation with strays (Finding 8.6)', () => {
     expect(identical).toBe(true);
   });
 });
+
+describe('Channel provider restrictions in matcher', () => {
+  it('respects provider restrictions when specified on rule', () => {
+    const rule = {
+      channelId: 1,
+      name: 'Test Channel',
+      aliases: ['Test'],
+      contains: [],
+      exclude: [],
+      patterns: [],
+      providers: parseProviders([6]),
+      stepOrder: 0,
+      excludeRegions: null,
+    };
+
+    const matcher = new Matcher(new Map([[1, rule]]));
+    const streams = [
+      { id: 101, name: 'Test', providerId: 6 },
+      { id: 102, name: 'Test', providerId: 12 },
+    ];
+    const index = matcher.buildIndex(streams);
+    const matches = matcher.match(rule, index);
+    expect(matches).toEqual([[101, 0]]);
+
+    // When unrestricted (null / all providers)
+    const unrestrictedRule = { ...rule, providers: null };
+    const allMatches = matcher.match(unrestrictedRule, index);
+    expect(allMatches.map(([id]) => id)).toEqual([101, 102]);
+  });
+});
+

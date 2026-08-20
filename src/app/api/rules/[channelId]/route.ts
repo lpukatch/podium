@@ -22,6 +22,7 @@ export async function PUT(request: Request, context: { params: Promise<{ channel
     aliases?: string[];
     contains?: string[];
     exclude?: string[];
+    providers?: unknown;
   };
   const clean = (values: string[] | undefined) =>
     (values ?? []).map((v) => v.trim()).filter(Boolean);
@@ -41,6 +42,13 @@ export async function PUT(request: Request, context: { params: Promise<{ channel
   entry.aliases = clean(body.aliases);
   entry.contains = clean(body.contains);
   entry.exclude = clean(body.exclude);
+  if (body.providers !== undefined) {
+    if (Array.isArray(body.providers) && body.providers.length > 0) {
+      entry.providers = body.providers.map(Number).filter(Number.isFinite);
+    } else {
+      delete entry.providers;
+    }
+  }
 
   writeRulesDoc(doc);
   return NextResponse.json({ status: 'saved' });
