@@ -72,6 +72,11 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     // Opened per request rather than held for the process, matching how every
     // other Store consumer in the web process behaves.
     store = new Store(config.dbPath);
+    // Taking a stream off a channel is an instruction, not a ranking outcome:
+    // record it so a later pass with PODIUM_AUTO_ASSIGN on does not assign the
+    // very stream that was just removed. Written before the catalogue patch so
+    // a crash in between leaves the block, not the resurrection.
+    store.blockAssignment(id, streamId);
     const snap = await snapshot();
     store.updateChannelOrder(
       id,

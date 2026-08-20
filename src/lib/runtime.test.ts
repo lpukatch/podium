@@ -660,6 +660,7 @@ describe('idle back-off', () => {
     dead: 0,
     reordered: 0,
     unchanged: 100,
+    assigned: 0,
     skipped: 0,
     deferred: 0,
     backlog: 0,
@@ -792,6 +793,64 @@ describe('composeOrder', () => {
     // The rule matched only streams the channel does not carry. There is nothing
     // to reorder, so the channel is left exactly as it is.
     expect(composeOrder([999], [10, 20])).toEqual([10, 20]);
+  });
+
+  describe('auto-assign', () => {
+    const assign = (eligible: number[], max = 10) => ({ eligible: new Set(eligible), max });
+
+    it('adds an eligible match the channel does not carry', () => {
+      // The whole point: a flat alias matched 999 on a provider nobody wired up,
+      // and with auto-assign on the pass puts it where its rank says it goes.
+      expect(composeOrder([999, 10, 20], [10, 20], false, assign([999]))).toEqual([999, 10, 20]);
+    });
+
+    it('leaves a matched but unusable stream off', () => {
+      // 999 ranked (it has to, or it could never sink) but is dead/black/starved,
+      // so it is not in `eligible` and adding it would give a viewer a source
+      // that does not play.
+      expect(composeOrder([10, 999, 20], [10, 20], false, assign([]))).toEqual([10, 20]);
+    });
+
+    it('caps how many it adds, best first', () => {
+      // Three eligible candidates, room for two: the top two by rank win and the
+      // third waits for a pass where something above it has fallen over.
+      expect(composeOrder([901, 902, 903, 10], [10], false, assign([901, 902, 903], 3))).toEqual([
+        901, 902, 10,
+      ]);
+    });
+
+    it('counts what the channel already carries against the cap', () => {
+      // Two matched streams already on the channel and a cap of 3 leaves room
+      // for exactly one more, not three.
+      expect(composeOrder([901, 902, 10, 20], [10, 20], false, assign([901, 902], 3))).toEqual([
+        901, 10, 20,
+      ]);
+    });
+
+    it('never removes a stream to get under the cap', () => {
+      // The channel already carries four matched streams against a cap of 2.
+      // Truncating would unassign two of them -- the one thing this must not do.
+      expect(composeOrder([10, 20, 30, 40], [10, 20, 30, 40], false, assign([901], 2))).toEqual([
+        10, 20, 30, 40,
+      ]);
+    });
+
+    it('still appends strays after the ranked ones', () => {
+      expect(composeOrder([999, 10], [10, 30], false, assign([999]))).toEqual([999, 10, 30]);
+    });
+
+    it('drops strays but keeps the assignment when removeUnmatched is set', () => {
+      expect(composeOrder([999, 10], [10, 30], true, assign([999]))).toEqual([999, 10]);
+    });
+
+    it('is exactly the old behaviour when no assign options are passed', () => {
+      expect(composeOrder([999, 10, 20], [10, 20, 30])).toEqual([10, 20, 30]);
+      expect(composeOrder([999], [10, 20])).toEqual([10, 20]);
+    });
+
+    it('adds nothing when the cap is zero', () => {
+      expect(composeOrder([999, 10], [10], false, assign([999], 0))).toEqual([10]);
+    });
   });
 });
 
@@ -1494,11 +1553,37 @@ describe('reorder live re-fetch', () => {
     { streamId: 2, stepOrder: 0, providerId: 5, result: result({ height: 2160 }) },
   ];
 
+  // Every stream any of these cases can rank, so `catalogueRows` can attribute
+  // whatever gets written. Passing a real snapshot matters: without it the
+  // catalogue update at the end of `reorder` throws inside the try, the write
+  // has already happened, and the assertions below pass over a swallowed error.
+  const byId = new Map(
+    [1, 2, 3, 30, 901, 902, 903].map((id) => [id, { id, providerId: 5 } as unknown as Stream]),
+  );
+  type ReorderSnapshot = {
+    channelName: string;
+    byId: Map<number, Stream>;
+    providerNames: Map<number, string>;
+  };
+  const snapshot: ReorderSnapshot = {
+    channelName: 'ESPN',
+    byId,
+    providerNames: new Map([[5, 'Provider A']]),
+  };
+
   const reorder = (
     liveStreams: number[] | null,
     assigned: number[],
-  ): Promise<{ written: number[][]; counters: { reordered: number; unchanged: number } }> => {
+    rankEntries: RankEntry[] = entries,
+    runnerOverride: Runner = runner,
+    sink?: (m: string) => void,
+  ): Promise<{
+    written: number[][];
+    counters: { reordered: number; unchanged: number; assigned: number };
+    failures: string[];
+  }> => {
     const written: number[][] = [];
+    const failures: string[] = [];
     const fake = {
       channel: async () =>
         liveStreams === null
@@ -1508,28 +1593,48 @@ describe('reorder live re-fetch', () => {
         written.push(order);
       },
     } as unknown as DispatcharrClient;
-    const counters = { reordered: 0, unchanged: 0 };
+    const counters = { reordered: 0, unchanged: 0, assigned: 0 };
     return (
-      runner as unknown as {
+      runnerOverride as unknown as {
         reorder: (
           client: DispatcharrClient,
           channelId: number,
           entries: RankEntry[],
-          counters: { reordered: number; unchanged: number },
+          counters: { reordered: number; unchanged: number; assigned: number },
           log: (m: string) => void,
           assigned: number[],
           strategy: RankStrategy,
+          snapshot: ReorderSnapshot,
         ) => Promise<void>;
       }
     )
-      .reorder(fake, 1, entries, counters, () => {}, assigned, DEFAULT_STRATEGY)
-      .then(() => ({ written, counters }));
+      .reorder(
+        fake,
+        1,
+        rankEntries,
+        counters,
+        // reorder swallows its own failures into the log; surface them so a
+        // broken write path cannot masquerade as a passing assertion.
+        (m: string) => {
+          if (m.includes('reorder failed')) failures.push(m);
+          sink?.(m);
+        },
+        assigned,
+        DEFAULT_STRATEGY,
+        snapshot,
+      )
+      .then(() => ({ written, counters, failures }));
   };
 
   it('writes the ranked order with strays appended', async () => {
-    const { written, counters } = await reorder([1, 2, 3], [1, 2, 3]);
+    const { written, counters, failures } = await reorder([1, 2, 3], [1, 2, 3]);
+    expect(failures).toEqual([]);
     expect(written).toEqual([[2, 1, 3]]);
     expect(counters.reordered).toBe(1);
+    // Nothing was added, so this stays a reorder and not an assignment.
+    expect(counters.assigned).toBe(0);
+    // ...and the catalogue snapshot records what was actually written.
+    expect(store.catalogue().rows.map((r) => r.streamId)).toEqual([2, 1, 3]);
   });
 
   it('recomputes against the live order and preserves a concurrent addition', async () => {
@@ -1544,5 +1649,151 @@ describe('reorder live re-fetch', () => {
     const { written, counters } = await reorder([2, 1], [1, 2]);
     expect(written).toEqual([]);
     expect(counters.unchanged).toBe(1);
+  });
+
+  describe('with PODIUM_AUTO_ASSIGN on', () => {
+    const assigning = (over: Record<string, string> = {}) =>
+      new Runner({
+        config: () =>
+          loadConfig({
+            DISPATCHARR_API_KEY: 'k',
+            PODIUM_DRY_RUN: 'false',
+            PODIUM_AUTO_ASSIGN: 'true',
+            ...over,
+          }),
+        store,
+        rules: new RulesSource(join(dir, 'rules.json')),
+      });
+
+    // A new provider's stream: matched by the alias, probed, healthy, and on no
+    // channel. This is the case the whole setting exists for.
+    const newProvider = (id: number, height = 2160): RankEntry => ({
+      streamId: id,
+      stepOrder: 0,
+      providerId: 5,
+      result: result({ height }),
+    });
+
+    it('puts a matched stream onto a channel that never carried it', async () => {
+      const { written, counters, failures } = await reorder(
+        [1],
+        [1],
+        [entries[0]!, newProvider(901)],
+        assigning(),
+      );
+      expect(failures).toEqual([]);
+      // 901 is 2160p against 1080p, so it takes slot 0 the moment it lands.
+      expect(written).toEqual([[901, 1]]);
+      expect(counters.assigned).toBe(1);
+      expect(counters.reordered).toBe(1);
+    });
+
+    it('records the newly assigned stream in the catalogue straight away', async () => {
+      await reorder([1], [1], [entries[0]!, newProvider(901)], assigning());
+      // So the provider shows up in the metrics on the next scrape rather than
+      // after the next full pass -- the gap that made a new provider invisible.
+      expect(store.catalogue().rows.map((r) => [r.slot, r.streamId])).toEqual([
+        [0, 901],
+        [1, 1],
+      ]);
+    });
+
+    it('refuses to assign a stream whose verdict is not usable', async () => {
+      const dead = { ...newProvider(901), result: result({ alive: false }) };
+      const { written, counters } = await reorder([1], [1], [entries[0]!, dead], assigning());
+      // Nothing to write: 901 is not fit to add and 1 is already where it goes.
+      expect(written).toEqual([]);
+      expect(counters.assigned).toBe(0);
+    });
+
+    it('honours the cap across a pass', async () => {
+      const { written, counters } = await reorder(
+        [1],
+        [1],
+        [entries[0]!, newProvider(901), newProvider(902), newProvider(903)],
+        assigning({ PODIUM_AUTO_ASSIGN_MAX: '2' }),
+      );
+      // Cap 2, one slot already held by stream 1, so exactly one is added.
+      expect(written).toEqual([[901, 1]]);
+      expect(counters.assigned).toBe(1);
+    });
+
+    it('assigns nothing when the setting is off', async () => {
+      // Explicitly off, not merely defaulted off: this is the reorder-only
+      // behaviour an operator opts back into, and it has to keep working.
+      const off = new Runner({
+        config: () =>
+          loadConfig({
+            DISPATCHARR_API_KEY: 'k',
+            PODIUM_DRY_RUN: 'false',
+            PODIUM_AUTO_ASSIGN: 'false',
+          }),
+        store,
+        rules: new RulesSource(join(dir, 'rules.json')),
+      });
+      const { written, counters } = await reorder([1], [1], [entries[0]!, newProvider(901)], off);
+      expect(written).toEqual([]);
+      expect(counters.assigned).toBe(0);
+    });
+
+    it('writes nothing at all under dry run, but says what it would assign', async () => {
+      const lines: string[] = [];
+      const runnerDry = new Runner({
+        config: () =>
+          loadConfig({
+            DISPATCHARR_API_KEY: 'k',
+            PODIUM_DRY_RUN: 'true',
+            PODIUM_AUTO_ASSIGN: 'true',
+          }),
+        store,
+        rules: new RulesSource(join(dir, 'rules.json')),
+        log: (m: string) => lines.push(m),
+      });
+      const { written, counters } = await reorder(
+        [1],
+        [1],
+        [entries[0]!, newProvider(901)],
+        runnerDry,
+        (m) => lines.push(m),
+      );
+      expect(written).toEqual([]);
+      expect(counters.assigned).toBe(0);
+      expect(store.catalogue().rows).toEqual([]);
+      // The rehearsal: auto-assign on with dry run still set has to name what
+      // it would add, or there is no way to check an alias before trusting it.
+      expect(lines.join('\n')).toContain('would assign 1: 901[Provider A]');
+    });
+
+    it('assigns against the live order, not the stale pass-start one', async () => {
+      // Stream 1 is gone from the channel by the time we write. It is still
+      // matched and still healthy, so auto-assign legitimately puts it back --
+      // podium has no way to know from the channel alone that its absence was
+      // deliberate. The next case is how that is actually said.
+      const { written } = await reorder([30], [1], [entries[0]!, newProvider(901)], assigning());
+      expect(written).toEqual([[901, 1, 30]]);
+    });
+
+    it('never re-assigns a stream someone took off the channel', async () => {
+      // What the unassign endpoint records. Without it the button is useless
+      // with auto-assign on: remove a stream, and the next pass restores it.
+      store.blockAssignment(1, 1);
+      const { written } = await reorder([30], [30], [entries[0]!, newProvider(901)], assigning());
+      expect(written).toEqual([[901, 30]]);
+      expect(written[0]).not.toContain(1);
+    });
+
+    it('lets a blocked stream back in once it is unblocked', async () => {
+      store.blockAssignment(1, 1);
+      store.unblockAssignment(1, 1);
+      const { written } = await reorder([30], [30], [entries[0]!, newProvider(901)], assigning());
+      expect(written).toEqual([[901, 1, 30]]);
+    });
+
+    it('blocks per channel, not globally', async () => {
+      // Stream 1 is unwanted on channel 2; channel 1 is unaffected.
+      store.blockAssignment(2, 1);
+      const { written } = await reorder([30], [30], [entries[0]!, newProvider(901)], assigning());
+      expect(written).toEqual([[901, 1, 30]]);
+    });
   });
 });

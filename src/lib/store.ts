@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS runs (
     dead             INTEGER NOT NULL DEFAULT 0,
     reordered        INTEGER NOT NULL DEFAULT 0,
     unchanged        INTEGER NOT NULL DEFAULT 0,
+    assigned         INTEGER NOT NULL DEFAULT 0,
     skipped          INTEGER NOT NULL DEFAULT 0,
     deferred         INTEGER NOT NULL DEFAULT 0,
     backlog          INTEGER NOT NULL DEFAULT 0,
@@ -121,6 +122,25 @@ CREATE TABLE IF NOT EXISTS refresh_marks (
     -- A Dispatcharr group id, or ALL_GROUPS for the whole catalogue.
     group_id   INTEGER PRIMARY KEY,
     forced_at  INTEGER NOT NULL
+);
+
+-- Streams a person explicitly took off a channel, so auto-assign does not put
+-- them back. Without this the unassign button is useless whenever
+-- PODIUM_AUTO_ASSIGN is on: the stream is still matched by the alias and still
+-- has a usable verdict, so the very next pass re-assigns it and the removal
+-- looks like it never happened. Podium cannot tell "never added" from
+-- "deliberately removed" by looking at the channel, so the decision is recorded
+-- here at the moment it is made.
+--
+-- Deliberately permanent, and deliberately only written by the unassign
+-- endpoint: a reorder that drops a stray under PODIUM_REMOVE_UNMATCHED is
+-- podium's own ranking decision and must stay reversible, but a person removing
+-- one stream from one channel is an instruction.
+CREATE TABLE IF NOT EXISTS assign_blocks (
+    channel_id INTEGER NOT NULL,
+    stream_id  INTEGER NOT NULL,
+    blocked_at INTEGER NOT NULL,
+    PRIMARY KEY (channel_id, stream_id)
 );
 
 -- The managed catalogue as of the last pass that fetched it: one row per
@@ -381,6 +401,7 @@ export interface RunUpdate {
   dead?: number;
   reordered?: number;
   unchanged?: number;
+  assigned?: number;
   skipped?: number;
   deferred?: number;
   backlog?: number;
@@ -482,6 +503,9 @@ export class Store {
         ['runs', 'backlog INTEGER NOT NULL DEFAULT 0'],
         ['runs', 'next_due_at INTEGER'],
         ['runs', 'oldest_probed_at INTEGER'],
+        // Default 0 is the truth for every run recorded before auto-assign
+        // existed: none of them ever put a stream onto a channel.
+        ['runs', 'assigned INTEGER NOT NULL DEFAULT 0'],
         // Existing rows land on 0, which `deadTtlFor` treats as the base TTL:
         // an install upgrading in place re-probes its dead streams once at the
         // old cadence and starts backing them off from there, rather than
@@ -689,6 +713,7 @@ export class Store {
       ['dead', 'dead'],
       ['reordered', 'reordered'],
       ['unchanged', 'unchanged'],
+      ['assigned', 'assigned'],
       ['skipped', 'skipped'],
       ['deferred', 'deferred'],
       ['backlog', 'backlog'],
@@ -1099,6 +1124,7 @@ export class Store {
     cached: number;
     dead: number;
     reordered: number;
+    assigned: number;
     skipped: number;
   } {
     const row = this.sql(
@@ -1108,6 +1134,7 @@ export class Store {
               COALESCE(SUM(cached), 0)    AS cached,
               COALESCE(SUM(dead), 0)      AS dead,
               COALESCE(SUM(reordered), 0) AS reordered,
+              COALESCE(SUM(assigned), 0)  AS assigned,
               COALESCE(SUM(skipped), 0)   AS skipped
        FROM runs`,
     ).get() as Record<string, number>;
@@ -1118,6 +1145,7 @@ export class Store {
       cached: row.cached ?? 0,
       dead: row.dead ?? 0,
       reordered: row.reordered ?? 0,
+      assigned: row.assigned ?? 0,
       skipped: row.skipped ?? 0,
     };
   }
@@ -1187,6 +1215,33 @@ export class Store {
     })();
   }
 
+  /**
+   * Record that a person took this stream off this channel, so no later pass
+   * assigns it back. See the `assign_blocks` table.
+   */
+  blockAssignment(channelId: number, streamId: number): void {
+    this.sql(
+      `INSERT INTO assign_blocks (channel_id, stream_id, blocked_at) VALUES (?, ?, ?)
+       ON CONFLICT(channel_id, stream_id) DO NOTHING`,
+    ).run(channelId, streamId, Date.now());
+  }
+
+  /** Streams auto-assign must not put back on this channel. */
+  assignBlocks(channelId: number): Set<number> {
+    const rows = this.sql('SELECT stream_id FROM assign_blocks WHERE channel_id = ?').all(
+      channelId,
+    ) as Array<{ stream_id: number }>;
+    return new Set(rows.map((r) => r.stream_id));
+  }
+
+  /** Undo a block, for a stream someone wants back in the running. */
+  unblockAssignment(channelId: number, streamId: number): void {
+    this.sql('DELETE FROM assign_blocks WHERE channel_id = ? AND stream_id = ?').run(
+      channelId,
+      streamId,
+    );
+  }
+
   /** The catalogue snapshot and when it was last written as a whole. */
   catalogue(): { rows: CatalogueRow[]; writtenAt: number | null } {
     const rows = this.sql(
@@ -1226,6 +1281,7 @@ export class Store {
       this.sql('DELETE FROM refresh_marks').run();
       this.sql('DELETE FROM catalogue').run();
       this.sql('DELETE FROM catalogue_state').run();
+      this.sql('DELETE FROM assign_blocks').run();
     })();
   }
 

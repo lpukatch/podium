@@ -186,6 +186,12 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
   out.add('podium_streams_cached_total', 'Probes served from cache.', 'counter', totals.cached);
   out.add('podium_streams_dead_total', 'Dead verdicts recorded.', 'counter', totals.dead);
   out.add('podium_channels_reordered_total', 'Channels reordered.', 'counter', totals.reordered);
+  out.add(
+    'podium_streams_assigned_total',
+    'Streams put onto a channel that did not carry them, all runs. Zero unless PODIUM_AUTO_ASSIGN is on.',
+    'counter',
+    totals.assigned,
+  );
   out.add('podium_probes_skipped_total', 'Probes skipped by an abort.', 'counter', totals.skipped);
 
   const lastRun = store.recentRuns(1)[0];
