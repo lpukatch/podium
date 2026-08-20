@@ -369,8 +369,8 @@ describe('pacing', () => {
     expect(
       pacer().laneLimits(
         new Map([
-          [1, 3],
-          [2, 5],
+          ['1:0', 3],
+          ['2:0', 5],
         ]),
         busy,
         new Map(),
@@ -385,15 +385,15 @@ describe('pacing', () => {
     const busy: Activity = { channelIds: new Set([9]), idle: false };
     const limits = pacer({ pauseWhenWatching: false }).laneLimits(
       new Map([
-        [1, 3],
-        [2, 5],
+        ['1:0', 3],
+        ['2:0', 5],
       ]),
       busy,
-      new Map([[1, 1]]),
+      new Map([['1:0', 1]]),
     );
     expect([...limits]).toEqual([
-      [1, 1],
-      [2, 4],
+      ['1:0', 1],
+      ['2:0', 4],
     ]);
   });
 
@@ -402,21 +402,24 @@ describe('pacing', () => {
     // while fully idle would give 1 - 0 - 1 = 0 and starve it forever.
     const limits = pacer({ pauseWhenWatching: false }).laneLimits(
       new Map([
-        [5, 1],
-        [6, 3],
+        ['5:0', 1],
+        ['6:0', 3],
       ]),
       idle,
       new Map(),
     );
-    expect(limits.get(5)).toBe(1);
-    expect(limits.get(6)).toBe(3);
+    expect(limits.get('5:0')).toBe(1);
+    expect(limits.get('6:0')).toBe(3);
   });
 
   it('drops a lane with no spare capacity while busy', () => {
     const busy: Activity = { channelIds: new Set([9]), idle: false };
     expect(
-      pacer({ pauseWhenWatching: false }).laneLimits(new Map([[5, 1]]), busy, new Map([[5, 1]]))
-        .size,
+      pacer({ pauseWhenWatching: false }).laneLimits(
+        new Map([['5:0', 1]]),
+        busy,
+        new Map([['5:0', 1]]),
+      ).size,
     ).toBe(0);
   });
 
@@ -862,19 +865,23 @@ describe('lane capacity contract', () => {
     const busy: Activity = { channelIds: new Set([9]), idle: false };
     const limits = p.laneLimits(
       new Map([
-        [5, 1],
-        [6, 3],
-        [7, 5],
+        ['5:0', 1],
+        ['6:0', 3],
+        ['7:0', 5],
       ]),
       busy,
       new Map(),
     );
-    expect(limits.has(5)).toBe(false);
-    expect(limits.get(6)).toBe(2);
-    expect(limits.get(7)).toBe(4);
+    expect(limits.has('5:0')).toBe(false);
+    expect(limits.get('6:0')).toBe(2);
+    expect(limits.get('7:0')).toBe(4);
 
-    const jobs = [{ providerId: 5 }, { providerId: 6 }, { providerId: 7 }];
-    expect(jobs.filter((j) => limits.has(j.providerId))).toHaveLength(2);
+    const jobs = [
+      { providerId: 5, profileId: 0 },
+      { providerId: 6, profileId: 0 },
+      { providerId: 7, profileId: 0 },
+    ];
+    expect(jobs.filter((j) => limits.has(`${j.providerId}:${j.profileId}`))).toHaveLength(2);
   });
 });
 
@@ -1170,7 +1177,7 @@ describe('Runner.plan (managed set + oldest check)', () => {
     const espn = plan(runner, rules.get().eligibility).planned.find((p) => p.channel.id === 1);
     expect(espn?.cacheComplete).toBe(true);
     expect([
-      ...(espn as unknown as { cached: Map<number, { providerId: number }> }).cached.keys(),
+      ...(espn as unknown as { fresh: Map<number, Map<number, unknown>> }).fresh.keys(),
     ]).toEqual([10]);
   });
 

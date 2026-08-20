@@ -324,10 +324,14 @@ describe('the planner against a mark', () => {
     renameSync(tmp, rulesPath);
 
     const { rules, runner } = build();
-    const at = Date.now();
-    store.setRefreshMark(ALL_GROUPS, at);
+    // Verdicts first, then the request: a millisecond ticking between the two
+    // would otherwise leave the puts stamped after the mark, and the count
+    // this test asserts would depend on the clock. Same-ms ties count as
+    // retired -- the request means "before I asked".
     store.put(10, 'h', result());
     store.put(20, 'h', result());
+    const at = Date.now();
+    store.setRefreshMark(ALL_GROUPS, at);
 
     const planned = plan(runner, rules);
     // Stream 10 is on an allowed channel and becomes a job; stream 20 cannot

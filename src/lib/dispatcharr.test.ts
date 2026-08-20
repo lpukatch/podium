@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DispatcharrClient, DispatcharrError, PAGE_CONCURRENCY, PAGE_SIZE } from './dispatcharr';
+import {
+  DispatcharrClient,
+  DispatcharrError,
+  PAGE_CONCURRENCY,
+  PAGE_SIZE,
+  transformUrl,
+} from './dispatcharr';
 
 /**
  * A stub for global fetch that records every call.
@@ -212,6 +218,88 @@ describe('auth', () => {
   });
 });
 
+describe('transformUrl', () => {
+  // The rewrite Dispatcharr itself applies at playback, when a second login
+  // reaches the same upstream as the default one the stored URLs carry.
+  const url = 'http://crx.watch/live/coffee/684540451/1234.ts';
+
+  it('swaps credentials with a $1 backreference', () => {
+    expect(transformUrl(url, 'coffee/684540451', 'ahh/999')).toBe(
+      'http://crx.watch/live/ahh/999/1234.ts',
+    );
+  });
+
+  it('supports named groups and $<name> replacements', () => {
+    expect(transformUrl(url, 'live/(?<user>[^/]+)/(?<pass>[^/]+)', 'live/$<pass>/$<user>')).toBe(
+      'http://crx.watch/live/684540451/coffee/1234.ts',
+    );
+  });
+
+  it('supports Python-style named groups (?P<name>) and \\g<name> replacements', () => {
+    expect(
+      transformUrl(url, 'live/(?P<user>[^/]+)/(?P<pass>[^/]+)', 'live/\\g<pass>/\\g<user>'),
+    ).toBe('http://crx.watch/live/684540451/coffee/1234.ts');
+  });
+
+  it('reads a Python-style backreference, rather than copying it through', () => {
+    // Dispatcharr converts `$1` to `\\1` before handing the pattern to re.sub,
+    // so a profile authored either way must land on the same URL. Copied
+    // through instead, a working second login probes a URL beginning `\\1` and
+    // reads dead on every stream it has.
+    const grouped = '^(.*)/live/[^/]+/[^/]+/(.*)$';
+    const expected = 'http://crx.watch/live/ahh/999/1234.ts';
+    expect(transformUrl(url, grouped, '$1/live/ahh/999/$2')).toBe(expected);
+    expect(transformUrl(url, grouped, '\\1/live/ahh/999/\\2')).toBe(expected);
+    expect(transformUrl(url, grouped, '\\g<1>/live/ahh/999/\\g<2>')).toBe(expected);
+  });
+
+  it('backreferences a Python-style named group with (?P=name)', () => {
+    expect(transformUrl('http://a/x-crx-crx/1.ts', '(?P<h>crx)-(?P=h)', 'ok')).toBe(
+      'http://a/x-ok/1.ts',
+    );
+  });
+
+  it('keeps a $ that re.sub would treat as an ordinary character', () => {
+    // Dispatcharr converts only `$1` and `$<name>`; `$&`, `` $` ``, `$'` and
+    // `$$` reach re.sub with no meaning and are copied through. String.replace
+    // would substitute instead, mangling a password that contains one.
+    expect(transformUrl(url, 'coffee', 'p$&ss')).toBe(
+      'http://crx.watch/live/p$&ss/684540451/1234.ts',
+    );
+    expect(transformUrl(url, 'coffee', 'p$$ss')).toBe(
+      'http://crx.watch/live/p$$ss/684540451/1234.ts',
+    );
+  });
+
+  it('keeps an escaped backslash whole, so its tail is not read as a group', () => {
+    expect(transformUrl(url, 'coffee', 'a\\\\1b')).toBe(
+      'http://crx.watch/live/a\\1b/684540451/1234.ts',
+    );
+  });
+
+  it('refuses an escape re.sub would reject outright', () => {
+    // Python raises "bad escape" and Dispatcharr falls back to the stored URL.
+    // Null is how this reports that: the login keeps a lane, on the URL it
+    // would really play, and the pass logs the pattern as unusable.
+    expect(transformUrl(url, 'coffee', 'a\\db')).toBeNull();
+  });
+
+  it('replaces every occurrence, like the re.sub Dispatcharr runs', () => {
+    expect(transformUrl('a/a/a', 'a', 'b')).toBe('b/b/b');
+  });
+
+  it('returns the input unchanged when the pattern does not match', () => {
+    // Dispatcharr falls back to the original URL; the variant builder's
+    // dedupe is what drops the no-op rewrite.
+    expect(transformUrl(url, 'nomatch', 'x')).toBe(url);
+  });
+
+  it('returns null for an empty, invalid, or throwing pattern', () => {
+    expect(transformUrl(url, '', '$1')).toBeNull();
+    expect(transformUrl(url, 'coffee(', 'x')).toBeNull();
+  });
+});
+
 describe('resource mapping', () => {
   it('prefers the effective_* fields on a channel', async () => {
     stubFetch(() => ({
@@ -258,6 +346,64 @@ describe('resource mapping', () => {
     expect(providers.map((p) => p.maxStreams)).toEqual([3, 4, 4]);
   });
 
+  it('maps the profiles an account carries -- its extra logins', async () => {
+    stubFetch(() => ({
+      body: [
+        {
+          id: 6,
+          name: 'A',
+          max_streams: 3,
+          profiles: [
+            {
+              id: 6,
+              name: 'Default',
+              is_default: true,
+              is_active: true,
+              max_streams: 3,
+              current_viewers: 1,
+              search_pattern: '^(.*)$',
+              replace_pattern: '$1',
+            },
+            {
+              id: 9,
+              name: 'Second login',
+              is_default: false,
+              is_active: true,
+              max_streams: 2,
+              search_pattern: 'coffee/684540451',
+              replace_pattern: 'coffee2/xyz',
+            },
+            { id: 10, name: 'Disabled', is_default: false, is_active: false, max_streams: 0 },
+          ],
+        },
+        { id: 7, name: 'B', max_streams: 5 },
+      ],
+    }));
+    const providers = await new DispatcharrClient('http://d', { apiKey: 'k' }).providers();
+
+    const a = providers[0]!;
+    const b = providers[1]!;
+    // Inactive profiles are kept with their flag: whether a login is usable is
+    // a question for the variant builder, not the mapping.
+    expect(a.profiles.map((p) => [p.id, p.isActive])).toEqual([
+      [6, true],
+      [9, true],
+      [10, false],
+    ]);
+    expect(a.profiles[0]).toMatchObject({
+      isDefault: true,
+      maxStreams: 3,
+      currentViewers: 1,
+      searchPattern: '^(.*)$',
+      replacePattern: '$1',
+    });
+    expect(a.profiles[1]).toMatchObject({ maxStreams: 2, currentViewers: 0 });
+    // A profile cap of 0 means "use the account's cap" -- preserved as null.
+    expect(a.profiles[2]!.maxStreams).toBeNull();
+    // An account with no profiles (or an older Dispatcharr) gets [], not a crash.
+    expect(b.profiles).toEqual([]);
+  });
+
   it('reads active channel ids in every shape the proxy returns', async () => {
     stubFetch(() => ({
       body: { channels: [7, { channel_id: 8 }, { id: 9 }, { channel: 10 }] },
@@ -282,6 +428,31 @@ describe('resource mapping', () => {
     const uuidMap = new Map([['f08f5325-8fc2-4668-b765-37f90877828a', 46802]]);
     const ids = await new DispatcharrClient('http://d', { apiKey: 'k' }).activeChannelIds(uuidMap);
     expect(ids).toEqual([46802]);
+  });
+
+  it('names the login each live session is playing through', async () => {
+    // Dispatcharr picks a profile per session and reports it as
+    // `m3u_profile_id`. It is what lets a viewer be charged to the lane they
+    // are really occupying rather than guessed onto the default one.
+    stubFetch(() => ({
+      body: {
+        channels: [
+          { channel_id: 8, m3u_profile_id: 9 },
+          { channel_id: 10, m3u_profile_id: '5' },
+          { channel_id: 11 },
+          12,
+        ],
+        count: 4,
+      },
+    }));
+    const sessions = await new DispatcharrClient('http://d', { apiKey: 'k' }).activeSessions();
+    expect(sessions).toEqual([
+      { channelId: 8, profileId: 9 },
+      { channelId: 10, profileId: 5 },
+      // No login named: unattributed, not assumed onto a lane.
+      { channelId: 11, profileId: null },
+      { channelId: 12, profileId: null },
+    ]);
   });
 
   it('raises a DispatcharrError on shape mismatch when channels are active but cannot be resolved', async () => {

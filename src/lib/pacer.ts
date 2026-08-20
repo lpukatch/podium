@@ -80,6 +80,10 @@ export class Pacer {
   /**
    * Shrink each lane by what live viewers are already consuming.
    *
+   * Lanes are keyed `provider:profile` (see `laneKey` in scheduler.ts) -- one
+   * per login, each with its own cap -- but the arithmetic is per lane either
+   * way.
+   *
    * `minFreeSlots` is a courtesy reserve for a human who might want to tune in,
    * so it only applies when someone actually is watching. Applying it while
    * fully idle permanently starves any provider whose `max_streams` is 1:
@@ -88,18 +92,18 @@ export class Pacer {
    * have.
    */
   laneLimits(
-    base: Map<number, number>,
+    base: Map<string, number>,
     activity: Activity,
-    viewersByProvider: Map<number, number>,
-  ): Map<number, number> {
-    const out = new Map<number, number>();
+    viewersByLane: Map<string, number>,
+  ): Map<string, number> {
+    const out = new Map<string, number>();
     if (this.pausedByActivity(activity)) return out;
 
     const reserve = activity.idle ? 0 : this.config.minFreeSlots;
-    for (const [providerId, limit] of base) {
-      const inUse = viewersByProvider.get(providerId) ?? 0;
+    for (const [lane, limit] of base) {
+      const inUse = viewersByLane.get(lane) ?? 0;
       const free = limit - inUse - reserve;
-      if (free > 0) out.set(providerId, free);
+      if (free > 0) out.set(lane, free);
     }
     return out;
   }

@@ -355,6 +355,42 @@ declares one. Podium reads a few seconds of the stream, which also gives it the
 black-screen check from the same read, so it costs one provider connection
 rather than two.
 
+**Extra logins on one provider are probed too.** A Dispatcharr M3U account can
+carry several profiles — separate logins to the same upstream, each with its own
+connection cap. Podium probes a stream through every active login (rewriting
+the URL with each profile's pattern, exactly as Dispatcharr does at playback)
+and reports one verdict per stream: alive if any login can play it, carrying
+the measurements of the best one that could. Each login gets its own lane at
+its own cap, so two logins probe twice as fast without either exceeding its
+limit — and a stream is no longer called dead just because the default login is
+rate-limited. Nothing to configure; it turns itself on when a second profile
+appears on the account.
+
+A few details are worth knowing. The default profile's own search and replace
+are applied as well, not assumed to be the identity pair Dispatcharr creates it
+with — so a default profile edited to swap a LAN address for a WAN one is
+probed at the address it actually plays. Patterns may be written in either the
+JavaScript style (`$1`, `$<name>`) or the Python one (`\1`, `\g<name>`,
+`(?P<name>...)`), since Dispatcharr accepts both.
+
+Xtream Codes accounts work differently under the hood, and Podium follows them
+there. Dispatcharr never rewrites the stored URL on an XC account: it applies
+the profile's pattern to a canonical `server/live/user/pass/…` address, reads
+the username and password back out *by position*, and rebuilds the URL around
+them. Two consequences follow. A pattern that renames the `live` segment is
+undone, because the rebuild writes that segment back. And a pattern that leaves
+the address no longer parsable as `…/user/pass/file` — or that fills in only
+one half of the search/replace pair — is abandoned altogether, with the
+account's own credentials played instead. Podium reproduces both, so it never
+spends a connection probing an address Dispatcharr would not play. The one gap
+left is credential rotation: Podium transforms the stored URL, so if an
+account's credentials change without an M3U refresh it probes the old ones
+until the next sync.
+
+A login whose pattern does not compile, or that rewrites onto a URL another
+login already probes, is skipped with a line in the worker log naming it —
+check there first if a second login does not seem to be running.
+
 There is deliberately no loop detection. Catching a loop means watching for at
 least one loop period — around 120s per stream against the ~1s the other checks
 cost — for a failure far rarer than dead, black or throttled.
