@@ -206,9 +206,9 @@ export function parseAlias(line: string): AliasSpec {
   for (;;) {
     const match = QUALIFIER.exec(text);
     if (!match) break;
-    // Tolerate "@AU:" -- the separator is how the prefix reads in the stream
-    // name, so people will type it.
-    const key = matchKey((match[2] ?? match[3] ?? '').replace(/[:|]+$/, ''));
+    // Tolerate "@AU:" or "@AU -" -- the separator is how the prefix reads in the
+    // stream name, so people will type it.
+    const key = matchKey((match[2] ?? match[3] ?? '').replace(/[:|–—-]+$/, ''));
     if (key) (match[1] ? reject : require).add(key);
     text = text.slice(match[0].length);
   }
