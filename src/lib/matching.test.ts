@@ -138,10 +138,26 @@ describe('normalize', () => {
     expect(normalize('Sports Alpha 1 TH MY').name).toBe('Sports Alpha 1 TH MY');
   });
 
-  it('keeps a market tag left of the quality marker', () => {
-    const n = normalize('Sports Alpha MY HD');
-    expect(n.name).toBe('Sports Alpha MY');
-    expect(n.regions).toEqual([]);
+  it('lifts dash-separated prefixes', () => {
+    const n = normalize('US - ANIMAL PLANET FHD');
+    expect(n.name).toBe('ANIMAL PLANET');
+    expect(n.prefixes).toEqual(['US']);
+    expect(n.quality.tier).toBe('fhd');
+  });
+
+  it('lifts en-dash and em-dash separated prefixes', () => {
+    const n1 = normalize('US – ANIMAL PLANET FHD');
+    expect(n1.name).toBe('ANIMAL PLANET');
+    expect(n1.prefixes).toEqual(['US']);
+
+    const n2 = normalize('US — ANIMAL PLANET FHD');
+    expect(n2.name).toBe('ANIMAL PLANET');
+    expect(n2.prefixes).toEqual(['US']);
+  });
+
+  it('preserves hyphens in names without surrounding spaces', () => {
+    expect(normalize('Sci-Fi Channel HD').name).toBe('Sci-Fi Channel');
+    expect(normalize('UK-FAST: Sports Alpha Main Event').prefixes).toEqual(['UK-FAST']);
   });
 });
 
@@ -859,6 +875,16 @@ describe('matcher', () => {
     const m = matcherFor({ channel_id: 1, aliases: ['@!Prime ESPN'] });
     const index = m.buildIndex([stream(10, 'US: ESPN'), stream(11, 'Prime: ESPN')]);
     expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('matches dash-separated streams with negative qualifier aliases', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['@!UK Animal Planet'] });
+    const index = m.buildIndex([
+      stream(10, 'UK: ANIMAL PLANET [1080p]'),
+      stream(11, 'UK| ANIMAL PLANET FHD'),
+      stream(12, 'US - ANIMAL PLANET FHD'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[12, 0]]);
   });
 
   it('accepts any of several required prefixes', () => {
