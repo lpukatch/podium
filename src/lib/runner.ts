@@ -108,7 +108,7 @@ export function sameOrder(a: number[], b: number[]): boolean {
  * feature the aliases exist for: one flat `ESPN` alias, a new provider, and its
  * streams join the channel on the next pass. Its `eligible` set is the caller's
  * judgement of what is fit to add (probed, and usable); `max` caps how many
- * matched streams the channel ends up carrying.
+ * matched streams the channel ends up carrying (0 removes the cap).
  *
  * The cap only ever limits ADDITIONS. A channel already at or over `max` keeps
  * every stream it has and gains nothing -- truncating `ranked` would unassign
@@ -131,10 +131,11 @@ export function composeOrder(
   if (assign) {
     // Budget is measured against what the channel already carries from this
     // rule, so a channel at the cap adds nothing and a nearly-full one tops up
-    // to it. Never negative: `max` lowered below a channel's current holding
-    // must read as "no room", not as room to remove.
+    // to it. 0 or less removes the cap (unlimited). Never negative: `max`
+    // lowered below a channel's current holding must read as "no room", not
+    // as room to remove.
     const held = ranked.filter((id) => onChannel.has(id)).length;
-    let budget = Math.max(0, assign.max - held);
+    let budget = assign.max <= 0 ? Number.POSITIVE_INFINITY : Math.max(0, assign.max - held);
     const adding = new Set<number>();
     // `ranked` is best-first, so the budget buys the best candidates.
     for (const id of ranked) {

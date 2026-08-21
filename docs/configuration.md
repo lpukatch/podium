@@ -117,7 +117,7 @@ holds a Dispatcharr credential.
 | `PODIUM_DRY_RUN` | `true` | never writes while set; set `false` to let it reorder |
 | `PODIUM_REMOVE_UNMATCHED` | `false` | `true` unassigns unclaimed streams |
 | `PODIUM_AUTO_ASSIGN` | `true` | lets a pass put matched streams onto channels that do not carry them; `false` is reorder-only |
-| `PODIUM_AUTO_ASSIGN_MAX` | `10` | ceiling on how many matched streams a channel may gain this way |
+| `PODIUM_AUTO_ASSIGN_MAX` | `0` | ceiling on how many matched streams a channel may gain this way; `0` removes the cap |
 
 ### Auto-assign
 
@@ -144,7 +144,7 @@ What it will and will not do:
   under the bitrate floor. Dead candidates still get ranked (they have to, to
   sink) but are never added.
 - **Only up to the cap.** `PODIUM_AUTO_ASSIGN_MAX` counts the matched streams a
-  channel ends up carrying. A channel already at or over it gains nothing.
+  channel ends up carrying (`0` removes the cap). A channel already at or over it gains nothing.
 - **Never removes anything.** The cap limits additions only; lowering it will
   not unassign streams a channel already has. Dropping streams remains
   `PODIUM_REMOVE_UNMATCHED`'s job.

@@ -134,6 +134,7 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
           order: targetOrder,
           removeUnmatched: dropUnclaimed,
           force: result.allowed === false,
+          allowAssign: true,
         }),
       });
       const body = await resp.json();

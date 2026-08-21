@@ -848,8 +848,10 @@ describe('composeOrder', () => {
       expect(composeOrder([999], [10, 20])).toEqual([10, 20]);
     });
 
-    it('adds nothing when the cap is zero', () => {
-      expect(composeOrder([999, 10], [10], false, assign([999], 0))).toEqual([10]);
+    it('removes the cap when max is zero (unlimited)', () => {
+      expect(composeOrder([901, 902, 903, 10], [10], false, assign([901, 902, 903], 0))).toEqual([
+        901, 902, 903, 10,
+      ]);
     });
   });
 });

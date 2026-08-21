@@ -116,9 +116,9 @@ export const FIELDS: FieldSpec[] = [
     key: 'PODIUM_AUTO_ASSIGN_MAX',
     kind: 'number',
     label: 'Most streams to assign per channel',
-    help: 'Ceiling on how many matched streams a channel ends up carrying because of the setting above. Counts what is already there, so a full channel gains nothing — and lowering this never unassigns anything.',
+    help: 'Ceiling on how many matched streams a channel ends up carrying because of the setting above. Counts what is already there, so a full channel gains nothing — and lowering this never unassigns anything. 0 removes the cap.',
     section: 'behaviour',
-    min: 1,
+    min: 0,
     max: 100,
   },
   {
