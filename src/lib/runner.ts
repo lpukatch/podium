@@ -310,6 +310,7 @@ export interface PlannedChannel {
   settled: Set<number>;
   /** Every hit is settled, so this channel needs no probing. */
   cacheComplete: boolean;
+  audioOnly?: boolean;
 }
 
 export interface OpenJobItem {
@@ -484,10 +485,14 @@ export interface StreamSettlerDeps {
  * how the planner happens to queue work.
  */
 export function makeStreamSettler(jobs: ProbeJob[], deps: StreamSettlerDeps): StreamSettler {
-  const pending = new Map<number, { left: number; landed: VariantVerdict[] }>();
+  const pending = new Map<
+    number,
+    { left: number; landed: VariantVerdict[]; audioOnly?: boolean }
+  >();
   for (const job of jobs) {
-    const entry = pending.get(job.streamId) ?? { left: 0, landed: [] };
+    const entry = pending.get(job.streamId) ?? { left: 0, landed: [], audioOnly: job.audioOnly };
     entry.left += 1;
+    if (job.audioOnly) entry.audioOnly = true;
     pending.set(job.streamId, entry);
   }
   return {
@@ -498,11 +503,11 @@ export function makeStreamSettler(jobs: ProbeJob[], deps: StreamSettlerDeps): St
       if (result !== null) entry.landed.push({ variantId: job.profileId, result });
       if (entry.left > 0) return;
       pending.delete(job.streamId);
-      deps.onSettled(job.streamId, pickBestVariant(entry.landed, deps.weights));
+      deps.onSettled(job.streamId, pickBestVariant(entry.landed, deps.weights, entry.audioOnly));
     },
     drain(): void {
       for (const [streamId, entry] of pending) {
-        deps.onSettled(streamId, pickBestVariant(entry.landed, deps.weights));
+        deps.onSettled(streamId, pickBestVariant(entry.landed, deps.weights, entry.audioOnly));
       }
       pending.clear();
     },
@@ -1253,6 +1258,7 @@ export class Runner {
                 measureSeconds: config.PODIUM_MEASURE_SECONDS,
                 detectBlack: config.PODIUM_DETECT_BLACK,
                 blackRatio: config.PODIUM_BLACK_RATIO,
+                audioOnly: job.audioOnly,
               });
             } catch (error) {
               // probe() returns DEAD rather than throwing, so this is defensive
@@ -1324,7 +1330,7 @@ export class Runner {
               for (const [variantId, result] of entry.fresh.get(streamId) ?? []) {
                 if (!seen?.has(variantId)) verdicts.push({ variantId, result });
               }
-              const best = pickBestVariant(verdicts, strategy.weights);
+              const best = pickBestVariant(verdicts, strategy.weights, entry.audioOnly);
               if (best) {
                 entries.push({
                   streamId,
@@ -1355,6 +1361,7 @@ export class Runner {
                   channelName: entry.channel.name,
                   byId: streamById,
                   providerNames,
+                  audioOnly: entry.audioOnly,
                 },
               );
             }
@@ -1764,6 +1771,7 @@ export class Runner {
               providerId: stream.providerId,
               profileId: variant.profileId,
               stepOrder,
+              audioOnly: policy.audioOnly,
             },
             // Never-probed sorts first, and a stream somebody has explicitly
             // asked to re-check goes with it -- the request means "now", not
@@ -1784,6 +1792,7 @@ export class Runner {
           fresh: freshEntries,
           settled: settledStreams,
           cacheComplete: settledStreams.size === hits.length,
+          audioOnly: policy.audioOnly,
         });
       }
     }
@@ -1858,7 +1867,7 @@ export class Runner {
     providerNames: Map<number, string>,
   ): Promise<void> {
     const log = this.deps.log ?? (() => {});
-    for (const { channel, hits, fresh, cacheComplete } of planned) {
+    for (const { channel, hits, fresh, cacheComplete, audioOnly } of planned) {
       if (!cacheComplete) continue;
       const entries: RankEntry[] = [];
       for (const [streamId, stepOrder] of hits) {
@@ -1867,6 +1876,7 @@ export class Runner {
         const best = pickBestVariant(
           [...verdicts].map(([variantId, result]) => ({ variantId, result })),
           strategy.weights,
+          audioOnly,
         );
         if (!best) continue;
         entries.push({
@@ -1881,6 +1891,7 @@ export class Runner {
         channelName: channel.name,
         byId,
         providerNames,
+        audioOnly,
       });
     }
   }
@@ -1897,11 +1908,12 @@ export class Runner {
       channelName: string;
       byId: Map<number, Stream>;
       providerNames: Map<number, string>;
+      audioOnly?: boolean;
     },
   ): Promise<void> {
     if (entries.length === 0) return;
     const config = this.deps.config();
-    const ranked = rank(entries, strategy);
+    const ranked = rank(entries, strategy, snapshot.audioOnly);
     // What this pass would be willing to put on the channel: matched, probed,
     // and good enough to watch. A dead or black candidate is still ranked --
     // it has to be, or it could never sink past the streams above it -- but
@@ -1917,7 +1929,7 @@ export class Runner {
       assign = {
         eligible: new Set(
           entries
-            .filter((entry) => isUsable(entry.result, strategy.weights))
+            .filter((entry) => isUsable(entry.result, strategy.weights, snapshot.audioOnly))
             .filter((entry) => !blocked.has(entry.streamId))
             .map((entry) => entry.streamId),
         ),

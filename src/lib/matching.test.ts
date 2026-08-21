@@ -16,6 +16,7 @@ import { EMPTY_RULES_DOC, loadRules } from './rules';
 import { statsPayload } from './runner';
 import {
   audioScore,
+  DEFAULT_STRATEGY,
   DEFAULT_WEIGHTS,
   isUsable,
   NEW_INSTALL_AUDIO,
@@ -338,6 +339,52 @@ describe('scoring', () => {
     expect(isUsable(alive({ bitrateKbps: 600 }))).toBe(true);
   });
 
+  it('allows radio / audio-only streams below the video bitrate floor', () => {
+    const radio = alive({
+      height: 0,
+      width: 0,
+      fps: 0,
+      videoCodec: '',
+      audioCodec: 'aac',
+      audioChannels: 2,
+      audioBitrateKbps: 128,
+      bitrateKbps: 128,
+    });
+    expect(isUsable(radio, DEFAULT_WEIGHTS, true)).toBe(true);
+    expect(score(radio, DEFAULT_WEIGHTS, true)).toBeGreaterThan(0);
+  });
+
+  it('ranks audio-only streams by channels and bitrate', () => {
+    const stereo = alive({
+      height: 0,
+      width: 0,
+      videoCodec: '',
+      audioCodec: 'aac',
+      audioChannels: 2,
+      audioBitrateKbps: 128,
+      bitrateKbps: 128,
+    });
+    const surround = alive({
+      height: 0,
+      width: 0,
+      videoCodec: '',
+      audioCodec: 'eac3',
+      audioChannels: 6,
+      audioBitrateKbps: 256,
+      bitrateKbps: 256,
+    });
+    expect(
+      rank(
+        [
+          { streamId: 1, stepOrder: 0, providerId: 1, result: stereo },
+          { streamId: 2, stepOrder: 0, providerId: 1, result: surround },
+        ],
+        DEFAULT_STRATEGY,
+        true,
+      ),
+    ).toEqual([2, 1]);
+  });
+
   it('treats an unmeasured bitrate as unknown, not as zero', () => {
     // 0 means we could not measure, so it must not be punished as sub-floor.
     expect(isUsable(alive({ bitrateKbps: 0 }))).toBe(true);
@@ -462,10 +509,35 @@ describe('ffprobe parsing', () => {
     expect(parseFps(raw as string | undefined)).toBe(expected);
   });
 
-  it('rejects an audio-only payload', () => {
+  it('rejects an audio-only payload by default', () => {
     expect(parsePayload({ streams: [{ codec_type: 'audio', codec_name: 'aac' }] }).alive).toBe(
       false,
     );
+  });
+
+  it('accepts an audio-only payload when audioOnly is true', () => {
+    const parsed = parsePayload(
+      {
+        streams: [
+          {
+            codec_type: 'audio',
+            codec_name: 'aac',
+            channels: 2,
+            channel_layout: 'stereo',
+            bit_rate: '128000',
+            sample_rate: '44100',
+          },
+        ],
+      },
+      true,
+    );
+    expect(parsed.alive).toBe(true);
+    expect(parsed.audioCodec).toBe('aac');
+    expect(parsed.audioChannels).toBe(2);
+    expect(parsed.audioBitrateKbps).toBe(128);
+    expect(parsed.audioSampleRate).toBe(44_100);
+    expect(parsed.width).toBe(0);
+    expect(parsed.height).toBe(0);
   });
 
   it('reads the richest audio track, not the first one listed', () => {

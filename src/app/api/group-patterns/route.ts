@@ -10,11 +10,17 @@ interface PatternRow {
   grace_minutes?: number;
   window_minutes?: number;
   require_live?: boolean;
+  audio_only?: boolean;
 }
 
 /** Add or replace a name-pattern rule, and report which groups it would hit. */
 export async function PUT(request: Request) {
-  const body = (await request.json()) as { pattern?: string; mode?: string };
+  const body = (await request.json()) as {
+    pattern?: string;
+    mode?: string;
+    audioOnly?: boolean;
+    audio_only?: boolean;
+  };
   const pattern = (body.pattern ?? '').trim();
   const mode = body.mode ?? ALWAYS;
 
@@ -26,12 +32,22 @@ export async function PUT(request: Request) {
   const doc = readRulesDoc();
   const patterns = (doc.group_patterns ?? []) as PatternRow[];
   const existing = patterns.findIndex((p) => p.pattern.toLowerCase() === pattern.toLowerCase());
+  const audioOnly =
+    body.audioOnly ??
+    body.audio_only ??
+    (existing >= 0 ? patterns[existing]?.audio_only : undefined);
 
-  if (mode === ALWAYS) {
-    // `always` is the default; storing it would just be noise.
+  if (mode === ALWAYS && !audioOnly) {
+    // `always` with no custom flags is the default; storing it would just be noise.
     if (existing >= 0) patterns.splice(existing, 1);
   } else {
-    const entry: PatternRow = { pattern, mode, grace_minutes: 5, window_minutes: 180 };
+    const entry: PatternRow = {
+      pattern,
+      mode,
+      grace_minutes: 5,
+      window_minutes: 180,
+      ...(audioOnly ? { audio_only: true } : {}),
+    };
     // Carried over rather than reset: `require_live` has no control in this UI,
     // so an operator who turned it off did it by hand in the rules file, and
     // silently switching the gate back on the next time they touch the mode

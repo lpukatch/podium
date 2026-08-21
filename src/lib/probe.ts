@@ -100,6 +100,11 @@ export interface ProbeOptions {
   analyzeSeconds?: number;
   userAgent?: string;
   ffprobePath?: string;
+  /**
+   * When true, allows audio-only streams (no video track) to be considered alive.
+   * If false (default), missing video track marks the stream as DEAD.
+   */
+  audioOnly?: boolean;
 }
 
 export interface FfprobeStream {
@@ -211,13 +216,17 @@ function toNumber(raw: string | undefined): number {
   return Number.isFinite(value) ? value : 0;
 }
 
-export function parsePayload(payload: FfprobePayload): Omit<ProbeResult, 'elapsedMs' | 'error'> {
+export function parsePayload(
+  payload: FfprobePayload,
+  audioOnly = false,
+): Omit<ProbeResult, 'elapsedMs' | 'error'> {
   const video = (payload.streams ?? []).find((s) => s.codec_type === 'video');
   const audio = pickAudio(payload.streams ?? []);
-  if (!video) return { ...DEAD };
+  if (!video && !audio) return { ...DEAD };
+  if (!video && !audioOnly) return { ...DEAD };
 
   let bitrate = 0;
-  for (const source of [video.bit_rate, payload.format?.bit_rate]) {
+  for (const source of [video?.bit_rate, audio?.bit_rate, payload.format?.bit_rate]) {
     if (!source) continue;
     const value = Number(source);
     if (Number.isFinite(value)) {
@@ -228,13 +237,13 @@ export function parsePayload(payload: FfprobePayload): Omit<ProbeResult, 'elapse
 
   return {
     alive: true,
-    width: video.width ?? 0,
-    height: video.height ?? 0,
-    fps: parseFps(video.avg_frame_rate ?? video.r_frame_rate),
+    width: video?.width ?? 0,
+    height: video?.height ?? 0,
+    fps: video ? parseFps(video.avg_frame_rate ?? video.r_frame_rate) : 0,
     bitrateKbps: Math.round(bitrate * 100) / 100,
-    videoCodec: video.codec_name ?? '',
+    videoCodec: video?.codec_name ?? '',
     audioCodec: audio?.codec_name ?? '',
-    pixelFormat: video.pix_fmt ?? '',
+    pixelFormat: video?.pix_fmt ?? '',
     audioChannels: audio?.channels ?? 0,
     channelLayout: audio?.channel_layout ?? '',
     // Unlike video, audio tracks do declare a bitrate in these streams -- ac3
@@ -302,6 +311,7 @@ export async function sampleStream(
     ffmpegPath?: string;
     blackMinSeconds?: number;
     blackPixelThreshold?: number;
+    hasVideo?: boolean;
   } = {},
 ): Promise<SampleResult> {
   const {
@@ -311,6 +321,7 @@ export async function sampleStream(
     ffmpegPath = 'ffmpeg',
     blackMinSeconds = 0.5,
     blackPixelThreshold = 0.1,
+    hasVideo = true,
   } = options;
 
   const nul = process.platform === 'win32' ? 'NUL' : '/dev/null';
@@ -352,15 +363,19 @@ export async function sampleStream(
     '-f',
     'mpegts',
     nul,
-    // Branch 2: decode video only, for blackdetect.
-    '-map',
-    '0:v:0',
-    '-vf',
-    `blackdetect=d=${blackMinSeconds}:pix_th=${blackPixelThreshold}`,
-    '-an',
-    '-f',
-    'null',
-    '-',
+    // Branch 2: decode video only, for blackdetect (only if video is present).
+    ...(hasVideo
+      ? [
+          '-map',
+          '0:v:0',
+          '-vf',
+          `blackdetect=d=${blackMinSeconds}:pix_th=${blackPixelThreshold}`,
+          '-an',
+          '-f',
+          'null',
+          '-',
+        ]
+      : []),
   ];
 
   if (rejectUrl(url)) return { bitrateKbps: 0, blackSeconds: 0 };
@@ -432,21 +447,21 @@ export async function probe(url: string, options: ProbeOptions = {}): Promise<Pr
     ffmpegPath = 'ffmpeg',
     detectBlack = true,
     blackRatio = 0.8,
+    audioOnly = false,
   } = options;
 
   const refusal = rejectUrl(url);
   if (refusal) return { ...DEAD, elapsedMs: 0, error: refusal };
 
-  const micros = String(Math.round(analyzeSeconds * 1_000_000));
   const args = [
     '-v',
-    'error',
+    'quiet',
     ...userAgentArgs(url, userAgent),
     ...protocolArgs(url),
     '-analyzeduration',
-    micros,
+    `${Math.round(analyzeSeconds * 1_000_000)}`,
     '-probesize',
-    micros,
+    `${Math.round(analyzeSeconds * 1_000_000)}`,
     '-print_format',
     'json',
     '-show_streams',
@@ -500,13 +515,16 @@ export async function probe(url: string, options: ProbeOptions = {}): Promise<Pr
         return;
       }
       try {
-        const parsed = parsePayload(JSON.parse(stdout) as FfprobePayload);
+        const parsed = parsePayload(JSON.parse(stdout) as FfprobePayload, audioOnly);
         // Clear ffprobe timer once process exits cleanly
         clearTimeout(timer);
 
+        const hasVideo = Boolean(parsed.width || parsed.height || parsed.videoCodec);
+        const canDetectBlack = detectBlack && hasVideo;
+
         // A dead stream has nothing worth sampling; a healthy one still does,
         // because live TS rarely declares a bitrate and never reveals a slate.
-        if (!parsed.alive || (!shouldMeasure && !detectBlack)) {
+        if (!parsed.alive || (!shouldMeasure && !canDetectBlack)) {
           finish({ ...parsed, error: '' });
           return;
         }
@@ -523,6 +541,7 @@ export async function probe(url: string, options: ProbeOptions = {}): Promise<Pr
           timeoutMs: remainingMs,
           userAgent,
           ffmpegPath,
+          hasVideo,
         })
           .then((sample) => {
             // A cut-short sample still measured a real bitrate over the bytes it
@@ -531,14 +550,17 @@ export async function probe(url: string, options: ProbeOptions = {}): Promise<Pr
             // would report a definite "not black" on evidence we do not have, so
             // an unfinished sample that has not already cleared the bar leaves
             // the verdict open instead.
-            const blackEnough = sample.blackSeconds >= measureSeconds * blackRatio;
+            const blackEnough =
+              canDetectBlack && sample.blackSeconds >= measureSeconds * blackRatio;
             finish({
               ...parsed,
               bitrateKbps:
                 shouldMeasure && sample.bitrateKbps > 0 ? sample.bitrateKbps : parsed.bitrateKbps,
               bitrateMeasured: shouldMeasure && sample.bitrateKbps > 0,
-              black: detectBlack && (blackEnough || !sample.truncated) ? blackEnough : undefined,
-              blackSeconds: detectBlack ? Math.round(sample.blackSeconds * 100) / 100 : undefined,
+              black: canDetectBlack && (blackEnough || !sample.truncated) ? blackEnough : undefined,
+              blackSeconds: canDetectBlack
+                ? Math.round(sample.blackSeconds * 100) / 100
+                : undefined,
               error: '',
             });
           })

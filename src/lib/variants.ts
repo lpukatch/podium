@@ -303,20 +303,28 @@ export interface VariantVerdict {
 export function pickBestVariant(
   verdicts: VariantVerdict[],
   weights: Weights = DEFAULT_WEIGHTS,
+  audioOnly = false,
 ): ProbeResult | null {
   let best: VariantVerdict | null = null;
   for (const verdict of verdicts) {
-    if (best === null || compareVariants(verdict, best, weights) < 0) best = verdict;
+    if (best === null || compareVariants(verdict, best, weights, audioOnly) < 0) best = verdict;
   }
   return best?.result ?? null;
 }
 
-function compareVariants(a: VariantVerdict, b: VariantVerdict, weights: Weights): number {
-  const usable = (isUsable(a.result, weights) ? 0 : 1) - (isUsable(b.result, weights) ? 0 : 1);
+function compareVariants(
+  a: VariantVerdict,
+  b: VariantVerdict,
+  weights: Weights,
+  audioOnly = false,
+): number {
+  const usable =
+    (isUsable(a.result, weights, audioOnly) ? 0 : 1) -
+    (isUsable(b.result, weights, audioOnly) ? 0 : 1);
   if (usable !== 0) return usable;
   const measured = (bitrateUnknown(a.result) ? 1 : 0) - (bitrateUnknown(b.result) ? 1 : 0);
   if (measured !== 0) return measured;
-  const delta = score(b.result, weights) - score(a.result, weights);
+  const delta = score(b.result, weights, audioOnly) - score(a.result, weights, audioOnly);
   if (delta !== 0) return delta;
   return a.variantId - b.variantId;
 }

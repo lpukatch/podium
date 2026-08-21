@@ -14,6 +14,7 @@ import {
 } from './dispatcharr';
 import {
   AFTER_EPG_START,
+  ALWAYS,
   ASSIGNED,
   assignmentIsRule,
   currentProgrammes,
@@ -197,6 +198,15 @@ describe('eligibility', () => {
     ).toBe(false);
     expect(
       parseGroupPatterns([{ pattern: 'Auto | *', mode: AFTER_EPG_START }])[0]?.requireLive,
+    ).toBe(true);
+  });
+
+  it('defaults audio_only off, and parses it on from either side', () => {
+    expect(parsePolicies({ 9: { mode: ALWAYS } }).get(9)?.audioOnly).toBe(false);
+    expect(parsePolicies({ 9: { mode: ALWAYS, audio_only: true } }).get(9)?.audioOnly).toBe(true);
+    expect(parseGroupPatterns([{ pattern: 'Radio | *', mode: ALWAYS }])[0]?.audioOnly).toBe(false);
+    expect(
+      parseGroupPatterns([{ pattern: 'Radio | *', mode: ALWAYS, audio_only: true }])[0]?.audioOnly,
     ).toBe(true);
   });
 

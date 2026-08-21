@@ -75,6 +75,12 @@ export interface GroupPolicy {
    * for that group restores the old behaviour.
    */
   requireLive: boolean;
+  /**
+   * For radio / music channels: streams carry audio only (no video track).
+   * Probes treat audio streams as alive, skip video black-screen detection,
+   * bypass the video bitrate floor, and score on audio quality.
+   */
+  audioOnly?: boolean;
 }
 
 export const DEFAULT_POLICY: GroupPolicy = {
@@ -82,6 +88,7 @@ export const DEFAULT_POLICY: GroupPolicy = {
   graceMinutes: 5,
   windowMinutes: 180,
   requireLive: true,
+  audioOnly: false,
 };
 
 export interface Programme {
@@ -311,6 +318,7 @@ export function parsePolicies(
       graceMinutes: Number(extra.grace_minutes ?? DEFAULT_POLICY.graceMinutes),
       windowMinutes: Number(extra.window_minutes ?? DEFAULT_POLICY.windowMinutes),
       requireLive: bool(extra.require_live, DEFAULT_POLICY.requireLive),
+      audioOnly: bool(extra.audio_only ?? extra.audioOnly, Boolean(DEFAULT_POLICY.audioOnly)),
     });
   }
   return out;
@@ -339,6 +347,7 @@ export function parseGroupPatterns(
       graceMinutes: Number(row.grace_minutes ?? DEFAULT_POLICY.graceMinutes),
       windowMinutes: Number(row.window_minutes ?? DEFAULT_POLICY.windowMinutes),
       requireLive: bool(row.require_live, DEFAULT_POLICY.requireLive),
+      audioOnly: bool(row.audio_only ?? row.audioOnly, Boolean(DEFAULT_POLICY.audioOnly)),
     });
   }
   return out;

@@ -108,6 +108,7 @@ export async function GET(request: Request) {
         fromPattern,
         grace: resolved.graceMinutes,
         window: resolved.windowMinutes,
+        audioOnly: resolved.audioOnly,
         channels: channels.length,
         ruled,
         matchedChannels,

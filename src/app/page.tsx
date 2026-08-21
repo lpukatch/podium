@@ -33,6 +33,7 @@ interface ChannelRow {
 interface PatternRule {
   pattern: string;
   mode: Mode;
+  audio_only?: boolean;
 }
 
 interface GroupRow {
@@ -40,6 +41,7 @@ interface GroupRow {
   name: string;
   mode: Mode;
   fromPattern: boolean;
+  audioOnly?: boolean;
   channels: number;
   ruled: number;
   matchedChannels: number;
@@ -434,6 +436,15 @@ export default function Page() {
     await load();
   };
 
+  const toggleAudioOnly = async (id: number, mode: Mode, currentAudioOnly: boolean) => {
+    await fetch(`/api/groups/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode, audioOnly: !currentAudioOnly }),
+    });
+    await load();
+  };
+
   const savePattern = async (mode: Mode) => {
     const pattern = patternText.trim();
     if (!pattern) return;
@@ -699,6 +710,13 @@ export default function Page() {
                           </span>
                         </span>
                         <span className="flex flex-none items-center gap-2">
+                          {g.audioOnly && (
+                            <span
+                              className={`${pill} bg-[var(--color-accent-soft)] text-[var(--color-accent)]`}
+                            >
+                              audio
+                            </span>
+                          )}
                           {g.mode !== 'always' && (
                             <span
                               className={`${pill} ${
@@ -734,6 +752,13 @@ export default function Page() {
                   {patterns.map((p) => (
                     <div key={p.pattern} className="mt-3 flex items-center gap-3">
                       <code className="mono min-w-0 flex-1 truncate">{p.pattern}</code>
+                      {p.audio_only && (
+                        <span
+                          className={`${pill} bg-[var(--color-accent-soft)] text-[var(--color-accent)]`}
+                        >
+                          audio
+                        </span>
+                      )}
                       <span className={`${pill} bg-[var(--color-line)] text-[var(--color-muted)]`}>
                         {MODE_CHIP[p.mode]}
                       </span>
@@ -861,17 +886,29 @@ export default function Page() {
               </p>
             </div>
             <div className="border-b border-[var(--color-line)] bg-[var(--color-panel)] p-4">
-              <div className="flex flex-wrap gap-2">
-                {MODES.map((m) => (
-                  <button
-                    type="button"
-                    key={m.value}
-                    onClick={() => void setMode(group.id, m.value)}
-                    className={chip(group.mode === m.value)}
-                  >
-                    {m.label}
-                  </button>
-                ))}
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap gap-2">
+                  {MODES.map((m) => (
+                    <button
+                      type="button"
+                      key={m.value}
+                      onClick={() => void setMode(group.id, m.value)}
+                      className={chip(group.mode === m.value)}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void toggleAudioOnly(group.id, group.mode, Boolean(group.audioOnly))
+                  }
+                  className={chip(Boolean(group.audioOnly))}
+                  title="Treat streams in this group as audio-only radio/music feeds (skips video black detection and video bitrate floor)"
+                >
+                  {group.audioOnly ? '✓ Audio only' : 'Audio only'}
+                </button>
               </div>
               <p className="mt-2 text-sm text-[var(--color-muted)]">
                 {MODES.find((m) => m.value === group.mode)?.hint}

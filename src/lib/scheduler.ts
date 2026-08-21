@@ -41,6 +41,7 @@ export interface ProbeJob {
    */
   profileId: number;
   stepOrder: number;
+  audioOnly?: boolean;
 }
 
 /**
