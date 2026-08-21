@@ -72,11 +72,19 @@ export const DEFAULT_WEIGHTS: Weights = {
 export const NEW_INSTALL_AUDIO = 0.1;
 
 /** True when a stream is alive but too degraded to be worth offering. */
-export function isUsable(result: ProbeResult, weights: Weights = DEFAULT_WEIGHTS): boolean {
+export function isUsable(
+  result: ProbeResult,
+  weights: Weights = DEFAULT_WEIGHTS,
+  audioOnly = false,
+): boolean {
   if (!result.alive) return false;
   // A slate is not a fallback. Alive, correctly sized, healthy bitrate -- and
   // showing nothing.
   if (result.black) return false;
+  // For audio-only streams (or streams with no video codec/height), video bitrate floor (e.g. 500kbps) does not apply.
+  if (audioOnly || (!result.videoCodec && !result.height)) {
+    return result.audioBitrateKbps > 0 || result.bitrateKbps > 0 || result.audioChannels > 0;
+  }
   // A measured 0 means "unknown", not "no data" -- only judge what we measured.
   if (weights.minBitrateKbps <= 0 || result.bitrateKbps <= 0) return true;
   return result.bitrateKbps >= weights.minBitrateKbps;
@@ -111,8 +119,29 @@ export function audioScore(result: ProbeResult): number {
 }
 
 /** Score a probe result in [0, 1]. A dead or unusable stream always scores 0. */
-export function score(result: ProbeResult, weights: Weights = DEFAULT_WEIGHTS): number {
-  if (!isUsable(result, weights)) return 0;
+export function score(
+  result: ProbeResult,
+  weights: Weights = DEFAULT_WEIGHTS,
+  audioOnly = false,
+): number {
+  if (!isUsable(result, weights, audioOnly)) return 0;
+
+  if (audioOnly || (!result.videoCodec && !result.height)) {
+    const channels = Math.min((result.audioChannels || 2) / MAX_AUDIO_CHANNELS, 1);
+    const rate = Math.min(
+      (result.audioBitrateKbps || result.bitrateKbps || 128) / MAX_AUDIO_KBPS,
+      1,
+    );
+    const sampleRate = Math.min((result.audioSampleRate || 44100) / 48000, 1);
+    let codec = 0.5;
+    const ac = (result.audioCodec || '').toLowerCase();
+    if (ac === 'flac' || ac === 'alac') codec = 1.0;
+    else if (ac === 'eac3' || ac === 'ac3' || ac === 'aac') codec = 0.8;
+    else if (ac === 'mp3') codec = 0.6;
+    return (
+      Math.round((channels * 0.4 + rate * 0.4 + sampleRate * 0.1 + codec * 0.1) * 10_000) / 10_000
+    );
+  }
 
   const resolution = result.height ? Math.min(result.height / MAX_HEIGHT, 1) : 0;
   const bitrate = result.bitrateKbps ? Math.min(result.bitrateKbps / MAX_BITRATE_KBPS, 1) : 0;
@@ -191,11 +220,17 @@ export const DEFAULT_STRATEGY: RankStrategy = {
  * - `alias`: the regex/alias step order leads -- for an operator who curated it
  *   deliberately -- with score breaking ties within a step.
  */
-export function rank(entries: RankEntry[], strategy: RankStrategy = DEFAULT_STRATEGY): number[] {
+export function rank(
+  entries: RankEntry[],
+  strategy: RankStrategy = DEFAULT_STRATEGY,
+  audioOnly = false,
+): number[] {
   const { weights, mode, providerRank } = strategy;
   return [...entries]
     .sort((a, b) => {
-      const usable = (isUsable(a.result, weights) ? 0 : 1) - (isUsable(b.result, weights) ? 0 : 1);
+      const usable =
+        (isUsable(a.result, weights, audioOnly) ? 0 : 1) -
+        (isUsable(b.result, weights, audioOnly) ? 0 : 1);
       if (usable !== 0) return usable;
 
       if (mode === 'alias' && a.stepOrder !== b.stepOrder) return a.stepOrder - b.stepOrder;
@@ -219,7 +254,7 @@ export function rank(entries: RankEntry[], strategy: RankStrategy = DEFAULT_STRA
       const measured = (bitrateUnknown(a.result) ? 1 : 0) - (bitrateUnknown(b.result) ? 1 : 0);
       if (measured !== 0) return measured;
 
-      const scoreDelta = score(b.result, weights) - score(a.result, weights);
+      const scoreDelta = score(b.result, weights, audioOnly) - score(a.result, weights, audioOnly);
       if (scoreDelta !== 0) return scoreDelta;
       return a.streamId - b.streamId;
     })

@@ -106,6 +106,8 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         ? snap.groups.find((g) => g.id === channel.groupId)?.name
         : undefined;
     const elig = new Eligibility(policies(), undefined, groupPatterns());
+    const groupPolicy = elig.policyFor(channel.groupId, groupName);
+    const audioOnly = groupPolicy.audioOnly;
     const epgRows = (await client.epgWindow().catch(() => [])) as never[];
     const programmes = currentProgrammes(epgRows);
     const verdict = elig.allows(channel.groupId, channel.tvgId, programmes, new Date(), groupName);
@@ -117,8 +119,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     // `assignedCandidates`), so this has to as well -- the endpoint exists to
     // preview what the worker would do, and refusing here would say "no rule"
     // about a channel the worker is actively ranking.
-    const assignmentOnly =
-      !rule && assignmentIsRule(elig.policyFor(channel.groupId, groupName).mode);
+    const assignmentOnly = !rule && assignmentIsRule(groupPolicy.mode);
     if (!rule && !assignmentOnly) {
       return NextResponse.json({ error: 'channel has no rule yet' }, { status: 400 });
     }
@@ -265,6 +266,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
           measureSeconds: config.PODIUM_MEASURE_SECONDS,
           detectBlack: config.PODIUM_DETECT_BLACK,
           blackRatio: config.PODIUM_BLACK_RATIO,
+          audioOnly,
         });
         // Do not pollute shared cache if channel is held back by group policy
         if (verdict.allowed) {
@@ -288,7 +290,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
 
     const results = new Map<number, ProbeResult>();
     for (const [streamId, verdicts] of variantResults) {
-      const best = pickBestVariant(verdicts, strategy.weights);
+      const best = pickBestVariant(verdicts, strategy.weights, audioOnly);
       if (!best) continue;
       results.set(streamId, best);
       // Published once per stream from the combined verdict, after the run --
@@ -312,7 +314,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         } satisfies RankEntry;
       })
       .filter((entry): entry is RankEntry => entry !== null);
-    const ranked = rank(entries, strategy);
+    const ranked = rank(entries, strategy, audioOnly);
 
     // Whether the rule claims a stream is a question about the rule, so it is
     // answered from `hits` -- everything the rule matched -- and not from what
@@ -331,8 +333,21 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     // the same bargain the worker strikes when it refuses to reorder a channel
     // it has not got a verdict for every stream on.
     const removeUnmatched = config.PODIUM_REMOVE_UNMATCHED && unprobedIds.length === 0;
-    const workerOrder = composeOrder(ranked, current, removeUnmatched);
-    const kept = composeOrder(ranked, current, false);
+    let assign: { eligible: Set<number>; max: number } | undefined;
+    if (config.PODIUM_AUTO_ASSIGN) {
+      const blocked = store.assignBlocks(id);
+      assign = {
+        eligible: new Set(
+          entries
+            .filter((entry) => isUsable(entry.result, strategy.weights, audioOnly))
+            .filter((entry) => !blocked.has(entry.streamId))
+            .map((entry) => entry.streamId),
+        ),
+        max: config.PODIUM_AUTO_ASSIGN_MAX,
+      };
+    }
+    const workerOrder = composeOrder(ranked, current, removeUnmatched, assign);
+    const kept = composeOrder(ranked, current, false, assign);
     const proposed = ranked;
 
     const describe = (streamId: number) => {
@@ -350,8 +365,8 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         videoCodec: result?.videoCodec ?? '',
         error: result?.error ?? '',
         elapsedMs: result?.elapsedMs ?? 0,
-        score: result ? score(result, strategy.weights) : 0,
-        usable: result ? isUsable(result, strategy.weights) : false,
+        score: result ? score(result, strategy.weights, audioOnly) : 0,
+        usable: result ? isUsable(result, strategy.weights, audioOnly) : false,
         black: result?.black ?? false,
         currentRank: current.indexOf(streamId) >= 0 ? current.indexOf(streamId) + 1 : null,
         proposedRank: proposed.indexOf(streamId) >= 0 ? proposed.indexOf(streamId) + 1 : null,

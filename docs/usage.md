@@ -286,6 +286,17 @@ The policy is the row of chips at the top of a group. `assigned` is what
 Dispatcharr has on the channel now; `matched` is what your rules claim — the two
 differing is how you spot a stream the provider has just added.
 
+#### Audio only (Radio & Music groups)
+
+Channels carrying radio stations, Sirius XM, or music feeds have audio tracks but no video stream. By default, Podium expects video streams and treats video-less feeds as dead, black-screened, or sub-floor.
+
+Toggling **Audio only** on a group (or adding `"audio_only": true` in `rules.json` / `rules.yml` or group name patterns) tells Podium to:
+- Accept streams with valid audio tracks as healthy (`alive: true`).
+- Skip video black-screen detection during probing to prevent stream mapping errors.
+- Bypass the video bitrate floor (e.g. 500kbps) while still validating audio channel counts and audio bitrates.
+- Score and rank streams by audio quality (channel count, codec, sample rate, and audio bitrate).
+- Auto-assign matched radio streams to radio channels normally.
+
 ## Re-checking on demand
 
 The freshness target is a floor, not a schedule. "Nothing older than 24 hours"

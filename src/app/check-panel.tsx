@@ -256,11 +256,17 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
                       <td className="py-2 pr-3">
                         {row.alive ? (
                           <span className="text-[var(--color-muted)]">
-                            {row.height ? `${row.height}p` : '?'} · {row.fps || '?'}fps ·{' '}
-                            {row.bitrateKbps > 0
-                              ? `${Math.round(row.bitrateKbps)}kbps`
-                              : 'bitrate unknown'}{' '}
-                            · {row.videoCodec}
+                            {row.height
+                              ? `${row.height}p · ${row.fps || '?'}fps · ${
+                                  row.bitrateKbps > 0
+                                    ? `${Math.round(row.bitrateKbps)}kbps`
+                                    : 'bitrate unknown'
+                                } · ${row.videoCodec}`
+                              : `Audio only · ${
+                                  row.bitrateKbps > 0
+                                    ? `${Math.round(row.bitrateKbps)}kbps`
+                                    : 'bitrate unknown'
+                                }`}
                           </span>
                         ) : (
                           <span className="text-[var(--color-bad)]">{row.error || 'dead'}</span>
