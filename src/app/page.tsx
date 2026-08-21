@@ -120,6 +120,20 @@ const MODE_CHIP: Record<Mode, string> = {
 const RANKS_ASSIGNED = new Set<Mode>(['after_epg_start', 'assigned']);
 
 /**
+ * Channels in a group that can be probed on-demand.
+ * Under 'always', requires a rule.
+ * Under 'assigned' or 'after_epg_start', includes ruleless channels with assigned streams.
+ * Under 'never', none are probeable.
+ */
+export function probeableChannelsForGroup(group: Pick<GroupRow, 'mode' | 'rows'>): ChannelRow[] {
+  if (group.mode === 'never') return [];
+  return group.rows.filter(
+    (c) =>
+      c.hasRule || Boolean(c.assignmentOnly) || (RANKS_ASSIGNED.has(group.mode) && c.assigned > 0),
+  );
+}
+
+/**
  * How much of a group podium is actually working on.
  *
  * "0/40 ruled" is the wrong thing to say about a group whose rule-less channels
@@ -195,6 +209,19 @@ export default function Page() {
   const [removing, setRemoving] = useState<number | null>(null);
   const [removeNote, setRemoveNote] = useState<{ text: string; bad: boolean } | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [probingGroup, setProbingGroup] = useState(false);
+  const [probeProgress, setProbeProgress] = useState<{
+    current: number;
+    total: number;
+    channelName: string;
+    probed: number;
+    dead: number;
+  } | null>(null);
+  const [probeResultNote, setProbeResultNote] = useState<{ text: string; bad: boolean } | null>(
+    null,
+  );
+  const probeAbortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(async (refresh = false) => {
     setLoading(true);
@@ -274,6 +301,10 @@ export default function Page() {
     [group, channelId],
   );
 
+  const probeableChannels = useMemo(() => {
+    return group ? probeableChannelsForGroup(group) : [];
+  }, [group]);
+
   const visibleGroups = useMemo(() => {
     const base = showDisabled ? groups : groups.filter((g) => g.mode !== 'never');
     const q = groupFilter.trim().toLowerCase();
@@ -305,7 +336,22 @@ export default function Page() {
     seedRules(channel);
   }, [channelId, channel, seedRules]);
 
+  useEffect(() => {
+    setProbeResultNote(null);
+  }, [groupId]);
+
+  useEffect(() => {
+    return () => {
+      if (probeAbortRef.current) {
+        probeAbortRef.current.abort();
+      }
+    };
+  }, []);
+
   const openChannel = (c: ChannelRow, gid?: number) => {
+    if (probeAbortRef.current) {
+      probeAbortRef.current.abort();
+    }
     navigate({ group: gid ?? groupId, channel: c.id });
     seedRules(c);
   };
@@ -405,6 +451,95 @@ export default function Page() {
     await load();
     void runPreview();
   };
+
+  /**
+   * Probe every probeable channel in this group on-demand.
+   */
+  const startProbeAll = useCallback(
+    async (targetGroup: GroupRow) => {
+      const targets = probeableChannelsForGroup(targetGroup);
+      if (targets.length === 0) return;
+
+      const controller = new AbortController();
+      probeAbortRef.current = controller;
+      setProbingGroup(true);
+      setProbeResultNote(null);
+
+      let totalProbed = 0;
+      let totalDead = 0;
+      let completed = 0;
+      let errors = 0;
+
+      try {
+        for (const [i, chan] of targets.entries()) {
+          if (controller.signal.aborted) break;
+          setProbeProgress({
+            current: i + 1,
+            total: targets.length,
+            channelName: chan.name || `Channel ${chan.id}`,
+            probed: totalProbed,
+            dead: totalDead,
+          });
+
+          try {
+            const resp = await fetch(`/api/check/${chan.id}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              signal: controller.signal,
+            });
+            const data = (await resp.json()) as {
+              probed?: number;
+              dead?: number;
+              error?: string;
+            };
+            if (resp.ok && !data.error) {
+              totalProbed += data.probed ?? 0;
+              totalDead += data.dead ?? 0;
+              completed++;
+            } else {
+              errors++;
+            }
+          } catch {
+            if (controller.signal.aborted) break;
+            errors++;
+          }
+        }
+
+        if (controller.signal.aborted) {
+          setProbeResultNote({
+            text: `Probe cancelled after ${completed} of ${targets.length} channel(s) (${totalProbed} streams probed, ${totalDead} dead).`,
+            bad: false,
+          });
+        } else {
+          setProbeResultNote({
+            text: `Finished probing ${completed} channel(s) (${totalProbed} streams probed, ${totalDead} dead)${
+              errors > 0 ? ` · ${errors} skipped or failed` : ''
+            }.`,
+            bad: errors > 0 && completed === 0,
+          });
+        }
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          setProbeResultNote({
+            text: `Probe error: ${err instanceof Error ? err.message : String(err)}`,
+            bad: true,
+          });
+        }
+      } finally {
+        setProbingGroup(false);
+        setProbeProgress(null);
+        probeAbortRef.current = null;
+        await load();
+      }
+    },
+    [load],
+  );
+
+  const cancelProbeAll = useCallback(() => {
+    if (probeAbortRef.current) {
+      probeAbortRef.current.abort();
+    }
+  }, []);
 
   /**
    * Ask for this group to be re-checked whatever the cache says.
@@ -926,50 +1061,99 @@ export default function Page() {
                   Currently set by a name rule. Choosing here pins this group explicitly.
                 </p>
               )}
-              {/* Re-check on demand.
-
-                  The freshness target is the right default and the wrong one on
-                  the afternoon of a big event: every stream here can be
-                  comfortably inside the 24-hour window and still have been
-                  measured at four in the morning. This says "look again anyway".
-
-                  Not offered on an excluded group, which is not checked at all,
-                  so a mark on it would sit there queued forever. */}
-              {group.mode !== 'never' &&
-                (refreshAllAt !== null ? (
-                  <p className="mt-3 text-sm text-[var(--color-muted)]">
-                    Everything is queued for a re-check — this group included. Call it off on the
-                    Progress tab.
-                  </p>
-                ) : group.refreshQueuedAt !== null ? (
-                  <div className="mt-3 flex flex-wrap items-center gap-3">
-                    <span className="text-sm text-[var(--color-muted)]">
-                      Queued for a re-check {since(group.refreshQueuedAt)}. The worker works through
-                      it at the provider limits, and pauses while anyone is watching.
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => void cancelRefresh(group.id)}
-                      className={btn}
-                    >
-                      Cancel
-                    </button>
+              {/* On-demand probe & re-check for the group */}
+              {group.mode !== 'never' && (
+                <div className="mt-3 space-y-3">
+                  <div className="flex flex-wrap items-center gap-3">
+                    {probingGroup ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={cancelProbeAll}
+                          className={`${btn} border-[var(--color-bad)] text-[var(--color-bad)]`}
+                        >
+                          Cancel probe
+                        </button>
+                        <span className="flex items-center gap-2 text-sm text-[var(--color-muted)]">
+                          <LoaderCircle
+                            className="h-4 w-4 animate-spin text-[var(--color-accent)]"
+                            aria-hidden="true"
+                          />
+                          {probeProgress
+                            ? `Probing channel ${probeProgress.current} of ${probeProgress.total}: ${probeProgress.channelName} (${probeProgress.probed} probed${probeProgress.dead > 0 ? `, ${probeProgress.dead} dead` : ''})…`
+                            : 'Preparing to probe…'}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void startProbeAll(group)}
+                          disabled={probeableChannels.length === 0}
+                          className={btn}
+                          title={
+                            probeableChannels.length === 0
+                              ? 'No channels in this group have rules or assignments to probe'
+                              : `Probe all ${probeableChannels.length} channel(s) in this group now`
+                          }
+                        >
+                          Probe all
+                        </button>
+                        <span className="text-sm text-[var(--color-muted)]">
+                          Probes every channel in this group immediately and updates cached stream
+                          stats.
+                        </span>
+                      </>
+                    )}
                   </div>
-                ) : (
-                  <div className="mt-3 flex flex-wrap items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={() => void queueRefresh(group.id)}
-                      className={btn}
+                  {probeResultNote && (
+                    <p
+                      className={`text-sm ${
+                        probeResultNote.bad
+                          ? 'text-[var(--color-bad)]'
+                          : 'text-[var(--color-accent)]'
+                      }`}
                     >
-                      Re-check this group
-                    </button>
-                    <span className="text-sm text-[var(--color-muted)]">
-                      Measures every stream here again, however fresh it is — for the hours before
-                      something you care about is on.
-                    </span>
-                  </div>
-                ))}
+                      {probeResultNote.text}
+                    </p>
+                  )}
+                  {refreshAllAt !== null ? (
+                    <p className="text-sm text-[var(--color-muted)]">
+                      Everything is queued for a re-check — this group included. Call it off on the
+                      Progress tab.
+                    </p>
+                  ) : group.refreshQueuedAt !== null ? (
+                    <div className="flex flex-wrap items-center gap-3">
+                      <span className="text-sm text-[var(--color-muted)]">
+                        Queued for a re-check {since(group.refreshQueuedAt)}. The worker works
+                        through it at the provider limits, and pauses while anyone is watching.
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => void cancelRefresh(group.id)}
+                        className={btn}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex flex-wrap items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => void queueRefresh(group.id)}
+                        className={btn}
+                        disabled={probingGroup}
+                      >
+                        Re-check this group
+                      </button>
+                      <span className="text-sm text-[var(--color-muted)]">
+                        Measures every stream here again, however fresh it is — for the hours before
+                        something you care about is on.
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
               <input
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
