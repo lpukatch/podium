@@ -22,6 +22,7 @@ interface ChannelRow {
   aliases: string[];
   contains: string[];
   exclude: string[];
+  providers?: number[] | null;
   patterns: string[];
   regexCount: number;
   hasRule: boolean;
@@ -181,6 +182,8 @@ export default function Page() {
   const [patternText, setPatternText] = useState('');
   const [groupFilter, setGroupFilter] = useState('');
 
+  const [providersList, setProvidersList] = useState<Array<{ id: number; name: string }>>([]);
+  const [selectedProviders, setSelectedProviders] = useState<number[] | null>(null);
   const [aliases, setAliases] = useState('');
   const [contains, setContains] = useState('');
   const [exclude, setExclude] = useState('');
@@ -210,6 +213,9 @@ export default function Page() {
       setError(null);
       setGroups(body.groups as GroupRow[]);
       setPatterns((body.patterns ?? []) as PatternRule[]);
+      if (Array.isArray(body.providers)) {
+        setProvidersList(body.providers as Array<{ id: number; name: string }>);
+      }
       setStreamCount(body.streamCount as number);
       setRefreshAllAt((body.refreshAllQueuedAt as number | null) ?? null);
     } catch (e) {
@@ -279,6 +285,7 @@ export default function Page() {
     setAliases(c.aliases.join('\n'));
     setContains(c.contains.join('\n'));
     setExclude(c.exclude.join('\n'));
+    setSelectedProviders(c.providers ? [...c.providers] : null);
     setPreview(null);
     setRemoveNote(null);
   }, []);
@@ -313,13 +320,14 @@ export default function Page() {
           aliases: lines(aliases),
           contains: lines(contains),
           exclude: lines(exclude),
+          providers: selectedProviders,
         }),
       });
       if (resp.ok) setPreview((await resp.json()) as Preview);
     } finally {
       setPreviewing(false);
     }
-  }, [channelId, aliases, contains, exclude]);
+  }, [channelId, aliases, contains, exclude, selectedProviders]);
 
   useEffect(() => {
     if (channelId === null) return;
@@ -381,6 +389,7 @@ export default function Page() {
         aliases: lines(aliases),
         contains: lines(contains),
         exclude: lines(exclude),
+        providers: selectedProviders,
       }),
     });
     setSaved(resp.ok ? 'Saved' : 'Save failed');
@@ -1060,6 +1069,73 @@ export default function Page() {
             <div className="mt-4">
               <StreamSearch onAdd={addAlias} onAddContains={addContains} />
             </div>
+
+            {providersList.length > 0 && (
+              <div className={`${card} mt-4 p-5`}>
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <h3 className="text-sm font-semibold uppercase tracking-wide text-[var(--color-muted)]">
+                    Stream Sources
+                  </h3>
+                  <span className="text-sm tabular-nums text-[var(--color-muted)]">
+                    {selectedProviders === null ||
+                    selectedProviders.length === 0 ||
+                    selectedProviders.length === providersList.length
+                      ? 'All providers allowed'
+                      : `${selectedProviders.length} of ${providersList.length} providers selected`}
+                  </span>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedProviders(null)}
+                    className={chip(
+                      selectedProviders === null ||
+                        selectedProviders.length === 0 ||
+                        selectedProviders.length === providersList.length,
+                    )}
+                  >
+                    All Providers
+                  </button>
+                  {providersList.map((p) => {
+                    const isSelected =
+                      selectedProviders !== null &&
+                      selectedProviders.length > 0 &&
+                      selectedProviders.length < providersList.length &&
+                      selectedProviders.includes(p.id);
+                    return (
+                      <button
+                        type="button"
+                        key={p.id}
+                        onClick={() => {
+                          if (
+                            selectedProviders === null ||
+                            selectedProviders.length === 0 ||
+                            selectedProviders.length === providersList.length
+                          ) {
+                            setSelectedProviders([p.id]);
+                          } else if (selectedProviders.includes(p.id)) {
+                            const next = selectedProviders.filter((id) => id !== p.id);
+                            setSelectedProviders(next.length === 0 ? null : next);
+                          } else {
+                            const next = [...selectedProviders, p.id];
+                            setSelectedProviders(
+                              next.length === providersList.length ? null : next,
+                            );
+                          }
+                        }}
+                        className={chip(isSelected)}
+                      >
+                        {p.name}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="mt-2 text-sm text-[var(--color-muted)]">
+                  Restrict this channel to matching streams from specific providers. Leave set to
+                  “All Providers” to match across every provider account.
+                </p>
+              </div>
+            )}
 
             <div className="mt-4 grid gap-4 sm:grid-cols-2">
               <Editor

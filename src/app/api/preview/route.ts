@@ -37,10 +37,11 @@ export async function POST(request: Request) {
       aliases: body.aliases ?? [],
       contains: body.contains ?? [],
       exclude: body.exclude ?? [],
-      // Keep the legacy regexes in the preview: hiding them would make a
-      // channel look unmatched when it is actually still covered by one.
       patterns: existing?.patterns ?? [],
-      providers: parseProviders(body.providers) ?? existing?.providers ?? null,
+      providers:
+        body.providers !== undefined
+          ? parseProviders(body.providers)
+          : (existing?.providers ?? null),
       stepOrder: existing?.stepOrder ?? 0,
       excludeRegions: existing?.excludeRegions ?? null,
     };

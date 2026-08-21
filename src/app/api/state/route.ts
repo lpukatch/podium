@@ -89,6 +89,7 @@ export async function GET(request: Request) {
           aliases: rule?.aliases ?? [],
           contains: rule?.contains ?? [],
           exclude: rule?.exclude ?? [],
+          providers: rule?.providers ? [...rule.providers] : null,
           // Surfaced, not hidden: a channel still carrying a legacy regex looks
           // unmanaged otherwise, and you cannot decide whether an alias has
           // replaced it without seeing what it actually says.
