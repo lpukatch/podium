@@ -307,9 +307,10 @@ describe('settings persistence', () => {
   it('refuses a per-channel cap outside its bounds', () => {
     // Not clamped: a typo that would put 999 streams on a channel should come
     // back as an error on the form, not be quietly reinterpreted.
-    expect(validateSettings({ PODIUM_AUTO_ASSIGN_MAX: '0' }).errors).toEqual([
-      { key: 'PODIUM_AUTO_ASSIGN_MAX', message: 'must be at least 1' },
+    expect(validateSettings({ PODIUM_AUTO_ASSIGN_MAX: '-1' }).errors).toEqual([
+      { key: 'PODIUM_AUTO_ASSIGN_MAX', message: 'must be a non-negative number' },
     ]);
+    expect(validateSettings({ PODIUM_AUTO_ASSIGN_MAX: '0' }).errors).toEqual([]);
     expect(validateSettings({ PODIUM_AUTO_ASSIGN_MAX: '999' }).errors).toEqual([
       { key: 'PODIUM_AUTO_ASSIGN_MAX', message: 'must be at most 100' },
     ]);

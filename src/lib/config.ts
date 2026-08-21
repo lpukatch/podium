@@ -109,15 +109,13 @@ export const configSchema = z.object({
   PODIUM_AUTO_ASSIGN: bool(true),
   /**
    * Ceiling on how many matched streams a channel may carry because of
-   * auto-assignment.
+   * auto-assignment. 0 removes the cap (unlimited).
    *
-   * A flat alias against five providers is a handful of streams; a flat alias
-   * against a 22,000-stream catalogue can be hundreds, and a channel carrying
-   * hundreds of sources is unusable in Dispatcharr's own UI. The cap limits
-   * only what a pass ADDS: a channel already over it keeps everything it has
-   * and simply gains nothing, because unassigning is not this setting's job.
+   * The cap limits only what a pass ADDS: a channel already over it keeps
+   * everything it has and simply gains nothing, because unassigning is not this
+   * setting's job.
    */
-  PODIUM_AUTO_ASSIGN_MAX: num(10),
+  PODIUM_AUTO_ASSIGN_MAX: num(0),
 
   /** Cache TTLs. Dead streams are rechecked far more often than live ones. */
   PODIUM_LIVE_TTL_MS: num(24 * 3_600_000),
