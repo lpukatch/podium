@@ -183,4 +183,3 @@ describe('Channel provider restrictions in matcher', () => {
     expect(allMatches.map(([id]) => id)).toEqual([101, 102]);
   });
 });
-
