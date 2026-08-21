@@ -338,7 +338,8 @@ Two things to know before queueing the whole catalogue:
 
 For a single channel, the **Check now** panel on the channel itself is faster
 still — it probes on the spot and shows the ordering the results imply without
-writing anything.
+writing anything. To probe all channels in a group immediately on demand, use
+the **Probe all** button on the group view.
 
 ## Ranking
 
