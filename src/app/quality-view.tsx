@@ -38,6 +38,85 @@ interface ScopeSummary {
   unrecorded: number;
 }
 
+interface MatchedRule {
+  type: string;
+  value: string;
+  points: number;
+}
+
+interface PickView {
+  streamId: number;
+  name: string;
+  providerName: string;
+  groupName: string;
+  points: number;
+  matched: MatchedRule[];
+  bitrateKbps: number;
+  height: number;
+  alive: boolean;
+  black: boolean;
+}
+
+interface ChannelCheck {
+  channelId: number;
+  channelName: string;
+  streams: number;
+  agree: boolean;
+  ambiguous: boolean;
+  teamarr: PickView;
+  podium: PickView;
+  gapKbps: number;
+}
+
+interface RuleCheck {
+  generatedAt: number;
+  rules: { evaluated: number; skipped: Array<{ type: string; value: string; reason: string }> };
+  summary: {
+    channels: number;
+    agreed: number;
+    disagreed: number;
+    ambiguous: number;
+    deadFirst: number;
+    gapKbps: number;
+    approximate: boolean;
+  };
+  channels: ChannelCheck[];
+}
+
+interface StoredMiss {
+  channelId: number;
+  channelName: string;
+  teamarrName: string;
+  teamarrProvider: string;
+  teamarrPoints: number;
+  teamarrBitrate: number;
+  teamarrAlive: boolean;
+  teamarrBlack: boolean;
+  teamarrMatched: MatchedRule[];
+  podiumName: string;
+  podiumProvider: string;
+  podiumBitrate: number;
+  gapKbps: number;
+}
+
+interface StoredCheck {
+  checkedAt: number;
+  channels: number;
+  agreed: number;
+  disagreed: number;
+  ambiguous: number;
+  deadFirst: number;
+  gapKbps: number;
+  approximate: boolean;
+}
+
+interface CheckHistory {
+  rulesUploadedAt: number | null;
+  ruleCount: number;
+  history: StoredCheck[];
+  latest: StoredMiss[];
+}
+
 interface Profile {
   generatedAt: number;
   totalSamples: number;
@@ -139,6 +218,9 @@ export function QualityView() {
   const [ungated, setUngated] = useState(false);
   const [merging, setMerging] = useState(false);
   const [merged, setMerged] = useState('');
+  const [checking, setChecking] = useState(false);
+  const [check, setCheck] = useState<RuleCheck | null>(null);
+  const [history, setHistory] = useState<CheckHistory | null>(null);
 
   const load = useCallback(async (min: number, open: boolean) => {
     setLoading(true);
@@ -163,6 +245,21 @@ export function QualityView() {
   useEffect(() => {
     void load(minSamples, ungated);
   }, [load, minSamples, ungated]);
+
+  const loadHistory = useCallback(async () => {
+    try {
+      const resp = await fetch('/api/rule-check');
+      const body = await resp.json();
+      if (resp.ok && !body.error) setHistory(body as CheckHistory);
+    } catch {
+      // The stored view is an extra; failing to read it must not take the page
+      // down with it.
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadHistory();
+  }, [loadHistory]);
 
   // The export carries the scope being previewed, so the file always describes
   // the table it was downloaded from. Handing over rules fitted on a population
@@ -212,6 +309,38 @@ export function QualityView() {
       setError(String(e));
     } finally {
       setMerging(false);
+    }
+  };
+
+  /**
+   * Score the rules Teamarr is running against what Podium has measured.
+   *
+   * Reads only cached verdicts, so it can be run after every edit -- which is
+   * the whole point: a scoring rule is otherwise unfalsifiable, and the only
+   * visible consequence of a wrong one is which stream somebody gets weeks
+   * later.
+   */
+  const checkAgainst = async (file: File) => {
+    setChecking(true);
+    setCheck(null);
+    try {
+      const resp = await fetch('/api/rule-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: await file.text(),
+      });
+      const body = await resp.json();
+      if (!resp.ok || body.error) {
+        setError(String(body.error ?? `HTTP ${resp.status}`));
+        return;
+      }
+      setError('');
+      setCheck(body as RuleCheck);
+      void loadHistory();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setChecking(false);
     }
   };
 
@@ -529,6 +658,264 @@ export function QualityView() {
           A rule Podium also generated is updated in place rather than added twice, so re-importing
           next month refreshes the numbers instead of stacking a second set of points.
         </p>
+      </section>
+
+      <section className={`${card} p-5`}>
+        <h3 className="text-base">Check the rules you are running</h3>
+        <p className={`mt-1 max-w-[75ch] text-sm ${muted}`}>
+          A scoring rule cannot be checked from inside Teamarr: a +20 that matches nothing, a regex
+          pinned to the wrong end of a name and a rule that works all look the same in the file, and
+          the only visible consequence is which stream somebody gets weeks later. Upload your rules
+          and Podium scores them against every channel it has measured — the stream your rules put
+          first, beside the stream the measurements say should be first. Nothing is written and no
+          stream is probed, so run it after every edit. The set you upload is kept and re-checked by
+          every later pass — which is the only way a fixture channel is ever checked, since its
+          streams are gone by the next morning.
+        </p>
+
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <label className={`${btn} cursor-pointer`}>
+            {checking ? 'Scoring…' : 'Check my Teamarr rules…'}
+            <input
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              disabled={checking}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = '';
+                if (file) void checkAgainst(file);
+              }}
+            />
+          </label>
+          {check && (
+            <span className="text-sm">
+              <strong>{check.summary.agreed}</strong> of {check.summary.channels} channels agree
+              {check.summary.disagreed > 0 && (
+                <span className="text-[var(--color-bad)]">
+                  {' '}
+                  · {check.summary.disagreed} pick a worse stream
+                </span>
+              )}
+              {check.summary.deadFirst > 0 && (
+                <span className="text-[var(--color-bad)]">
+                  {' '}
+                  · {check.summary.deadFirst} put a dead or black stream first
+                </span>
+              )}
+              {check.summary.ambiguous > 0 && (
+                <span className={muted}> · {check.summary.ambiguous} decided by a tie</span>
+              )}
+            </span>
+          )}
+        </div>
+
+        {check && check.summary.gapKbps > 0 && (
+          <p className={`mt-3 text-sm ${muted}`}>
+            Across the disagreements, {rate(check.summary.gapKbps)} of measured bitrate goes to the
+            stream that is not chosen.
+          </p>
+        )}
+
+        {check && check.rules.skipped.length > 0 && (
+          <p className={`mt-3 max-w-[75ch] text-sm ${muted}`}>
+            {check.rules.evaluated} rules scored; {check.rules.skipped.length} could not be:{' '}
+            {check.rules.skipped.map((rule) => `${rule.type} (${rule.reason})`).join('; ')}. Those
+            read Teamarr&apos;s own state, so this comparison is approximate — a rule that applies
+            to every stream on a channel cancels out and changes no ordering, but that cannot be
+            shown from here.
+          </p>
+        )}
+
+        {check?.channels.some((row) => !row.agree) && (
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className={`text-left ${muted}`}>
+                <tr className="border-b border-[var(--color-line)]">
+                  <th className="py-2 pr-3 font-normal">Channel</th>
+                  <th className="py-2 pr-3 font-normal">Your rules pick</th>
+                  <th className="py-2 pr-3 text-right font-normal">Scored</th>
+                  <th className="py-2 pr-3 font-normal">Measurement picks</th>
+                  <th className="py-2 text-right font-normal">Given up</th>
+                </tr>
+              </thead>
+              <tbody>
+                {check.channels
+                  .filter((row) => !row.agree)
+                  .map((row) => (
+                    <tr key={row.channelId} className="border-b border-[var(--color-line)]">
+                      <td className="py-2 pr-3">{row.channelName}</td>
+                      <td className="py-2 pr-3">
+                        <span className="block truncate">{row.teamarr.name}</span>
+                        <span className={`block text-xs ${muted}`}>
+                          {row.teamarr.providerName} ·{' '}
+                          {row.teamarr.alive && !row.teamarr.black ? (
+                            rate(row.teamarr.bitrateKbps)
+                          ) : (
+                            <span className="text-[var(--color-bad)]">
+                              {row.teamarr.alive ? 'black screen' : 'dead'}
+                            </span>
+                          )}
+                          {row.teamarr.matched.length > 0 &&
+                            ` · ${row.teamarr.matched
+                              .map(
+                                (rule) =>
+                                  `${rule.type} ${rule.points > 0 ? '+' : ''}${rule.points}`,
+                              )
+                              .join(', ')}`}
+                        </span>
+                      </td>
+                      <td className="py-2 pr-3 text-right tabular-nums">{row.teamarr.points}</td>
+                      <td className="py-2 pr-3">
+                        <span className="block truncate">{row.podium.name}</span>
+                        <span className={`block text-xs ${muted}`}>
+                          {row.podium.providerName} · {rate(row.podium.bitrateKbps)} · scored{' '}
+                          {row.podium.points}
+                        </span>
+                      </td>
+                      <td className="py-2 text-right tabular-nums">
+                        {row.gapKbps > 0 ? rate(row.gapKbps) : '—'}
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* What the passes have found on their own. The half that survives a
+            fixture: a live check can only see channels whose streams still
+            exist, and an event channel's are gone by morning. */}
+        {history && history.rulesUploadedAt !== null && (
+          <div className="mt-5 border-t border-[var(--color-line)] pt-4">
+            <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
+              <h4 className="text-sm font-semibold">Checked automatically each pass</h4>
+              <span className={`text-sm ${muted}`}>
+                {history.ruleCount} rules, uploaded {ago(history.rulesUploadedAt)}
+              </span>
+            </div>
+            {history.history.length === 0 ? (
+              <p className={`mt-2 max-w-[75ch] text-sm ${muted}`}>
+                No pass has run since these rules were uploaded. The next one will check them while
+                its verdicts are fresh, which is the only moment a fixture channel can be checked at
+                all — by tomorrow its streams are gone and there is nothing left to compare.
+              </p>
+            ) : (
+              <>
+                <div className="mt-2 overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className={`text-left ${muted}`}>
+                      <tr className="border-b border-[var(--color-line)]">
+                        <th className="py-2 pr-3 font-normal">Pass</th>
+                        <th className="py-2 pr-3 text-right font-normal">Channels</th>
+                        <th className="py-2 pr-3 text-right font-normal">Agreed</th>
+                        <th className="py-2 pr-3 text-right font-normal">Picked worse</th>
+                        <th className="py-2 pr-3 text-right font-normal">Dead first</th>
+                        <th className="py-2 text-right font-normal">Given up</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {history.history.slice(0, 10).map((row) => (
+                        <tr key={row.checkedAt} className="border-b border-[var(--color-line)]">
+                          <td className={`py-2 pr-3 ${muted}`}>{ago(row.checkedAt)}</td>
+                          <td className="py-2 pr-3 text-right tabular-nums">{row.channels}</td>
+                          <td className="py-2 pr-3 text-right tabular-nums">{row.agreed}</td>
+                          <td
+                            className={`py-2 pr-3 text-right tabular-nums ${
+                              row.disagreed > 0 ? 'text-[var(--color-bad)]' : ''
+                            }`}
+                          >
+                            {row.disagreed}
+                          </td>
+                          <td
+                            className={`py-2 pr-3 text-right tabular-nums ${
+                              row.deadFirst > 0 ? 'text-[var(--color-bad)]' : ''
+                            }`}
+                          >
+                            {row.deadFirst}
+                          </td>
+                          <td className="py-2 text-right tabular-nums">
+                            {row.gapKbps > 0 ? rate(row.gapKbps) : '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {history.latest.length > 0 && (
+                  <>
+                    <p className={`mt-3 max-w-[75ch] text-sm ${muted}`}>
+                      What the most recent pass got wrong, worst first. These name the streams as
+                      they stood at the time — a fixture&apos;s are gone by now, which is why the
+                      row is kept rather than re-derived.
+                    </p>
+                    <div className="mt-2 overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead className={`text-left ${muted}`}>
+                          <tr className="border-b border-[var(--color-line)]">
+                            <th className="py-2 pr-3 font-normal">Channel</th>
+                            <th className="py-2 pr-3 font-normal">Rules picked</th>
+                            <th className="py-2 pr-3 font-normal">Measurement picked</th>
+                            <th className="py-2 text-right font-normal">Given up</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {history.latest.slice(0, 20).map((miss) => (
+                            <tr
+                              key={`${miss.channelId}:${miss.teamarrName}`}
+                              className="border-b border-[var(--color-line)]"
+                            >
+                              <td className="py-2 pr-3">{miss.channelName}</td>
+                              <td className="py-2 pr-3">
+                                <span className="block truncate">{miss.teamarrName}</span>
+                                <span className={`block text-xs ${muted}`}>
+                                  {miss.teamarrProvider} ·{' '}
+                                  {miss.teamarrAlive && !miss.teamarrBlack ? (
+                                    rate(miss.teamarrBitrate)
+                                  ) : (
+                                    <span className="text-[var(--color-bad)]">
+                                      {miss.teamarrAlive ? 'black screen' : 'dead'}
+                                    </span>
+                                  )}{' '}
+                                  · scored {miss.teamarrPoints}
+                                  {miss.teamarrMatched.length > 0 &&
+                                    ` (${miss.teamarrMatched
+                                      .map(
+                                        (rule) =>
+                                          `${rule.type} ${rule.points > 0 ? '+' : ''}${rule.points}`,
+                                      )
+                                      .join(', ')})`}
+                                </span>
+                              </td>
+                              <td className="py-2 pr-3">
+                                <span className="block truncate">{miss.podiumName}</span>
+                                <span className={`block text-xs ${muted}`}>
+                                  {miss.podiumProvider} · {rate(miss.podiumBitrate)}
+                                </span>
+                              </td>
+                              <td className="py-2 text-right tabular-nums">
+                                {miss.gapKbps > 0 ? rate(miss.gapKbps) : '—'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {check && check.summary.disagreed === 0 && check.summary.channels > 0 && (
+          <p className={`mt-3 text-sm ${muted}`}>
+            Every measured channel puts the same stream first under your rules as it would under the
+            measurements. Worth re-running as the priors fill in — a rule set that is right today is
+            right about the providers you have today.
+          </p>
+        )}
       </section>
     </div>
   );

@@ -273,6 +273,69 @@ CREATE TABLE IF NOT EXISTS quality_samples (
     height        INTEGER NOT NULL,
     fps           REAL    NOT NULL
 );
+-- The Teamarr rule set to check each pass against, and what the checks found.
+--
+-- A pass is the only moment the comparison can be made at all. Teamarr's rules
+-- are evaluated against streams, Podium's verdict describes the same stream, and
+-- for a fixture channel both exist for one afternoon: pruneOutside sweeps the
+-- verdict when the stream leaves the catalogue, so by Monday there is nothing
+-- left to compare and the question "did my rules serve the right stream on
+-- Saturday" has no answer anywhere. Running the check while the verdicts are hot
+-- and keeping the result is the only way that question survives the fixture.
+--
+-- The rule set is stored because the check has to run unattended. It arrives by
+-- upload -- there is no way to read it out of Teamarr -- so the last one
+-- uploaded is the one every later pass is measured against, and the date it
+-- arrived is reported next to the findings.
+CREATE TABLE IF NOT EXISTS teamarr_rules (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    rules        TEXT    NOT NULL,
+    uploaded_at  INTEGER NOT NULL
+);
+
+-- One row per pass that ran a check.
+CREATE TABLE IF NOT EXISTS rule_checks (
+    checked_at      INTEGER PRIMARY KEY,
+    run_id          TEXT,
+    channels        INTEGER NOT NULL,
+    agreed          INTEGER NOT NULL,
+    disagreed       INTEGER NOT NULL,
+    ambiguous       INTEGER NOT NULL,
+    dead_first      INTEGER NOT NULL,
+    gap_kbps        INTEGER NOT NULL,
+    approximate     INTEGER NOT NULL,
+    rules_evaluated INTEGER NOT NULL,
+    rules_skipped   INTEGER NOT NULL
+);
+
+-- The disagreements themselves, which is the half worth reading.
+--
+-- Only the disagreements: an agreeing channel is fully described by the counts
+-- above, and storing every channel every pass would write the whole catalogue
+-- to disk hourly to record that nothing was wrong.
+CREATE TABLE IF NOT EXISTS rule_check_misses (
+    checked_at       INTEGER NOT NULL,
+    channel_id       INTEGER NOT NULL,
+    channel_name     TEXT    NOT NULL,
+    teamarr_stream   INTEGER NOT NULL,
+    teamarr_name     TEXT    NOT NULL,
+    teamarr_provider TEXT    NOT NULL,
+    teamarr_points   INTEGER NOT NULL,
+    teamarr_bitrate  INTEGER NOT NULL,
+    teamarr_alive    INTEGER NOT NULL,
+    teamarr_black    INTEGER NOT NULL,
+    -- The rules that scored Teamarr's pick, as JSON: the blame line. Kept with
+    -- the miss because the rule set is editable, so re-deriving it later would
+    -- explain a past miss with a rule that was not in force when it happened.
+    teamarr_matched  TEXT    NOT NULL DEFAULT '[]',
+    podium_stream    INTEGER NOT NULL,
+    podium_name      TEXT    NOT NULL,
+    podium_provider  TEXT    NOT NULL,
+    podium_bitrate   INTEGER NOT NULL,
+    gap_kbps         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS rule_check_misses_at ON rule_check_misses (checked_at DESC);
+
 CREATE INDEX IF NOT EXISTS quality_samples_bucket
     ON quality_samples (provider_id, tier, sampled_at);
 `;
@@ -610,6 +673,57 @@ export const MAX_STREAM_NAME = 200;
 /** Samples older than this stop describing anything the provider still runs. */
 export const QUALITY_HISTORY_MS = 90 * 86_400_000;
 
+/** How long a rule check is worth keeping. Long enough to cover a season's shape. */
+export const RULE_CHECK_HISTORY_MS = 90 * 86_400_000;
+
+export interface StoredRuleMiss {
+  channelId: number;
+  channelName: string;
+  teamarrStream: number;
+  teamarrName: string;
+  teamarrProvider: string;
+  teamarrPoints: number;
+  teamarrBitrate: number;
+  teamarrAlive: boolean;
+  teamarrBlack: boolean;
+  /** The rules that scored Teamarr's pick, as they stood when it was checked. */
+  teamarrMatched: Array<{ type: string; value: string; points: number }>;
+  podiumStream: number;
+  podiumName: string;
+  podiumProvider: string;
+  podiumBitrate: number;
+  gapKbps: number;
+}
+
+export interface StoredRuleCheckRow {
+  checkedAt: number;
+  runId: string | null;
+  channels: number;
+  agreed: number;
+  disagreed: number;
+  ambiguous: number;
+  deadFirst: number;
+  gapKbps: number;
+  approximate: boolean;
+  rulesEvaluated: number;
+  rulesSkipped: number;
+}
+
+export interface StoredRuleCheck extends StoredRuleCheckRow {
+  misses: StoredRuleMiss[];
+}
+
+function parseMatched(raw: string): Array<{ type: string; value: string; points: number }> {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed)
+      ? (parsed as Array<{ type: string; value: string; points: number }>)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 /** One settled verdict, tagged with the provenance that outlives its stream. */
 export interface QualitySample {
   providerId: number;
@@ -890,6 +1004,11 @@ export class Store {
     // of buckets -- tens of thousands of rows at the very most -- so the sweep
     // is cheap enough to pay every pass rather than only at boot.
     this.trimQuality();
+    // Same sweep, same reason. A check is a handful of rows per pass, but a
+    // pass runs hourly forever.
+    const cutoff = now - RULE_CHECK_HISTORY_MS;
+    this.sql('DELETE FROM rule_check_misses WHERE checked_at < ?').run(cutoff);
+    this.sql('DELETE FROM rule_checks WHERE checked_at < ?').run(cutoff);
   }
 
   finishRun(runId: string, fields: RunUpdate = {}): void {
@@ -1429,6 +1548,139 @@ export class Store {
        )`,
     ).run(perBucket).changes;
     return removed;
+  }
+
+  /**
+   * The rule set every later pass is checked against.
+   *
+   * Replaced rather than appended: there is one Teamarr instance and one
+   * current answer to "what is it running". History lives in the checks, which
+   * carry the date of the rules they used.
+   */
+  saveTeamarrRules(rules: unknown): void {
+    this.sql(
+      `INSERT INTO teamarr_rules (id, rules, uploaded_at) VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET rules = excluded.rules, uploaded_at = excluded.uploaded_at`,
+    ).run(JSON.stringify(rules), Date.now());
+  }
+
+  teamarrRules(): { rules: unknown[]; uploadedAt: number } | null {
+    const row = this.sql('SELECT rules, uploaded_at FROM teamarr_rules WHERE id = 1').get() as
+      | { rules: string; uploaded_at: number }
+      | undefined;
+    if (!row) return null;
+    try {
+      const parsed = JSON.parse(row.rules) as unknown;
+      if (!Array.isArray(parsed)) return null;
+      return { rules: parsed, uploadedAt: row.uploaded_at };
+    } catch {
+      // A row that will not parse is a row that cannot be checked against.
+      // Reported as absent rather than thrown: a corrupt rule set must not be
+      // able to fail a probing pass.
+      return null;
+    }
+  }
+
+  /** Record one pass's check, summary and misses together. */
+  recordRuleCheck(check: StoredRuleCheck): void {
+    const checkedAt = check.checkedAt;
+    this.db.transaction(() => {
+      this.sql(
+        `INSERT OR REPLACE INTO rule_checks
+           (checked_at, run_id, channels, agreed, disagreed, ambiguous, dead_first,
+            gap_kbps, approximate, rules_evaluated, rules_skipped)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        checkedAt,
+        check.runId,
+        check.channels,
+        check.agreed,
+        check.disagreed,
+        check.ambiguous,
+        check.deadFirst,
+        Math.round(check.gapKbps),
+        check.approximate ? 1 : 0,
+        check.rulesEvaluated,
+        check.rulesSkipped,
+      );
+      const insert = this.sql(
+        `INSERT INTO rule_check_misses
+           (checked_at, channel_id, channel_name, teamarr_stream, teamarr_name,
+            teamarr_provider, teamarr_points, teamarr_bitrate, teamarr_alive,
+            teamarr_black, teamarr_matched, podium_stream, podium_name,
+            podium_provider, podium_bitrate, gap_kbps)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const miss of check.misses) {
+        insert.run(
+          checkedAt,
+          miss.channelId,
+          miss.channelName,
+          miss.teamarrStream,
+          miss.teamarrName,
+          miss.teamarrProvider,
+          miss.teamarrPoints,
+          Math.round(miss.teamarrBitrate),
+          miss.teamarrAlive ? 1 : 0,
+          miss.teamarrBlack ? 1 : 0,
+          JSON.stringify(miss.teamarrMatched),
+          miss.podiumStream,
+          miss.podiumName,
+          miss.podiumProvider,
+          Math.round(miss.podiumBitrate),
+          Math.round(miss.gapKbps),
+        );
+      }
+    })();
+  }
+
+  /** Recent checks, newest first, with the misses of the newest attached. */
+  ruleChecks(limit = 30): { history: StoredRuleCheckRow[]; latest: StoredRuleMiss[] } {
+    const history = this.sql(
+      `SELECT checked_at, run_id, channels, agreed, disagreed, ambiguous, dead_first,
+              gap_kbps, approximate, rules_evaluated, rules_skipped
+         FROM rule_checks ORDER BY checked_at DESC LIMIT ?`,
+    ).all(limit) as Array<Record<string, number | string | null>>;
+
+    const rows = history.map((row) => ({
+      checkedAt: Number(row.checked_at),
+      runId: (row.run_id as string) ?? null,
+      channels: Number(row.channels),
+      agreed: Number(row.agreed),
+      disagreed: Number(row.disagreed),
+      ambiguous: Number(row.ambiguous),
+      deadFirst: Number(row.dead_first),
+      gapKbps: Number(row.gap_kbps),
+      approximate: Number(row.approximate) === 1,
+      rulesEvaluated: Number(row.rules_evaluated),
+      rulesSkipped: Number(row.rules_skipped),
+    }));
+
+    if (rows.length === 0) return { history: [], latest: [] };
+    const misses = this.sql(
+      `SELECT * FROM rule_check_misses WHERE checked_at = ? ORDER BY gap_kbps DESC`,
+    ).all(rows[0]!.checkedAt) as Array<Record<string, number | string>>;
+
+    return {
+      history: rows,
+      latest: misses.map((row) => ({
+        channelId: Number(row.channel_id),
+        channelName: String(row.channel_name),
+        teamarrStream: Number(row.teamarr_stream),
+        teamarrName: String(row.teamarr_name),
+        teamarrProvider: String(row.teamarr_provider),
+        teamarrPoints: Number(row.teamarr_points),
+        teamarrBitrate: Number(row.teamarr_bitrate),
+        teamarrAlive: Number(row.teamarr_alive) === 1,
+        teamarrBlack: Number(row.teamarr_black) === 1,
+        teamarrMatched: parseMatched(String(row.teamarr_matched ?? '[]')),
+        podiumStream: Number(row.podium_stream),
+        podiumName: String(row.podium_name),
+        podiumProvider: String(row.podium_provider),
+        podiumBitrate: Number(row.podium_bitrate),
+        gapKbps: Number(row.gap_kbps),
+      })),
+    };
   }
 
   /**

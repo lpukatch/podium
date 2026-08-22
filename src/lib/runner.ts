@@ -28,17 +28,16 @@ import { type ProbeResult, probe } from './probe';
 import { tierOf } from './quality';
 import type { RulesSource } from './rules-source';
 import { AbortFlag, laneKey, type ProbeJob, runLanes } from './scheduler';
-import {
-  DEFAULT_WEIGHTS,
-  isUsable,
-  type RankEntry,
-  type RankStrategy,
-  rank,
-  score,
-  type Weights,
-} from './scoring';
+
+// Re-exported: `statsPayload` lived here before the rule check needed it too,
+// and the API route and tests that import it from here still can.
+export { statsPayload } from './stats';
+
+import { isUsable, type RankEntry, type RankStrategy, rank, type Weights } from './scoring';
+import { statsPayload } from './stats';
 import type { CatalogueRow } from './store';
 import { ALL_GROUPS, forcedAtFor, type Progress, type Store, ttlFor } from './store';
+import { type ChannelInput, checkRules, factsFor, type RuleInput } from './teamarr';
 import {
   buildVariants,
   drawVariant,
@@ -50,58 +49,6 @@ import {
   type VariantIssue,
   type VariantVerdict,
 } from './variants';
-
-/**
- * The shape published to Dispatcharr's `stream_stats`.
- *
- * Key names follow what Dispatcharr's channel table renders: `resolution`,
- * `video_codec`, `audio_codec`, `source_fps` and `video_bitrate`. The bitrate is
- * `video_bitrate` (kbps) and not `bitrate_kbps` -- the frontend reads the former
- * and shows an empty badge for the latter. `audio_bitrate` and `sample_rate`
- * fill Dispatcharr's audio group, and `channel_layout` is the string its own
- * probe writes beside `audio_channels`. The remaining keys are podium-only
- * extras the UI ignores but that round-trip harmlessly.
- */
-export function statsPayload(
-  result: ProbeResult,
-  weights: Weights = DEFAULT_WEIGHTS,
-): Record<string, unknown> {
-  return {
-    width: result.width,
-    height: result.height,
-    resolution: result.width && result.height ? `${result.width}x${result.height}` : '0x0',
-    source_fps: result.fps,
-    video_codec: result.videoCodec,
-    audio_codec: result.audioCodec,
-    pixel_format: result.pixelFormat,
-    audio_channels: result.audioChannels,
-    channel_layout: result.channelLayout,
-    audio_bitrate: Math.round(result.audioBitrateKbps),
-    sample_rate: result.audioSampleRate,
-    video_bitrate: Math.round(result.bitrateKbps),
-    /**
-     * The same number under the key Dispatcharr's own probe writes it to.
-     *
-     * This PATCH replaces `stream_stats` wholesale, so publishing only
-     * `video_bitrate` does not merely fail to fill `ffmpeg_output_bitrate` in
-     * -- it deletes whatever was there. Everything downstream reads the
-     * Dispatcharr key: its channel table, and Teamarr's Stream Stats rules,
-     * which is how a "bitrate >= 4000" rule ends up matching nothing on
-     * exactly the streams Podium has measured most carefully. Both are
-     * written, because `video_bitrate` is the one Podium's own history and
-     * UI already read.
-     */
-    ffmpeg_output_bitrate: Math.round(result.bitrateKbps),
-    bitrate_measured: Boolean(result.bitrateMeasured),
-    blank_detected: Boolean(result.black),
-    blank_seconds: result.blackSeconds ?? 0,
-    quality_score: score(result, weights),
-    alive: result.alive,
-    quality_reason: !result.alive ? result.error || 'dead' : result.black ? 'black screen' : 'ok',
-    probed_by: 'podium',
-    probed_at: new Date().toISOString(),
-  };
-}
 
 /** Whether a computed ordering is the one Dispatcharr already holds. */
 export function sameOrder(a: number[], b: number[]): boolean {
@@ -1498,6 +1445,20 @@ export class Runner {
         lanes: laneSnapshot(),
       });
 
+      // Check the Teamarr rules against what this pass just measured, before
+      // anything can sweep it. A fixture's streams exist for one afternoon, so
+      // this is the only moment the comparison can be made at all: by tomorrow
+      // the verdicts are gone with the streams and "did my rules serve the
+      // right stream on Saturday" has no answer anywhere. Best-effort and last,
+      // because it is a report and a report must never fail a pass.
+      try {
+        this.checkTeamarrRules(runId, channels, streamById, groupNames, providerNames, strategy, {
+          policyFor: (groupId, groupName) => eligibility.policyFor(groupId, groupName).audioOnly,
+        });
+      } catch (err) {
+        log(`rule check failed: ${String(err)}`);
+      }
+
       const lanes: RunSummary['lanes'] = {};
       for (const [key, lane] of stats.lanes) {
         // Aggregated per provider, on the same rule the progress bars use.
@@ -1968,6 +1929,102 @@ export class Runner {
    * pass, off two different readings of the cache. `cacheComplete` is exactly
    * the set with nothing pending, which is the set this was always meant to be.
    */
+  /**
+   * Score the stored Teamarr rule set against this pass's verdicts.
+   *
+   * Nothing happens until a rule set has been uploaded -- there is no way to
+   * read one out of Teamarr, so an install that has never uploaded is one that
+   * has not asked for this.
+   *
+   * Only the disagreements are stored. An agreeing channel is fully described
+   * by the counts, and writing every channel every pass would put the whole
+   * catalogue on disk hourly to record that nothing was wrong.
+   */
+  private checkTeamarrRules(
+    runId: string,
+    channels: Channel[],
+    streamById: Map<number, Stream>,
+    groupNames: Map<number, string>,
+    providerNames: Map<number, string>,
+    strategy: RankStrategy,
+    policy: { policyFor: (groupId: number | null, groupName?: string) => boolean | undefined },
+  ): void {
+    const { store } = this.deps;
+    const stored = store.teamarrRules();
+    if (!stored) return;
+
+    const verdicts = store.verdicts([...new Set(channels.flatMap((c) => c.streams))]);
+    const inputs: ChannelInput[] = [];
+    for (const channel of channels) {
+      if (channel.hidden_from_output) continue;
+      const groupName = channel.groupId === null ? undefined : groupNames.get(channel.groupId);
+      const streams: ChannelInput['streams'] = [];
+      channel.streams.forEach((streamId, position) => {
+        const stream = streamById.get(streamId);
+        const verdict = verdicts.get(streamId);
+        // A stream nobody has probed cannot disagree with anything, and
+        // including it would manufacture findings out of what Podium has said
+        // least about.
+        if (!stream || !verdict) return;
+        streams.push({
+          facts: factsFor(
+            {
+              id: streamId,
+              name: stream.name,
+              providerName: providerNames.get(stream.providerId) ?? '',
+              groupName: stream.groupId === null ? '' : (groupNames.get(stream.groupId) ?? ''),
+            },
+            verdict.result,
+            strategy,
+          ),
+          stepOrder: position,
+        });
+      });
+      if (streams.length < 2) continue;
+      inputs.push({
+        channelId: channel.id,
+        channelName: channel.name,
+        audioOnly: policy.policyFor(channel.groupId, groupName),
+        streams,
+      });
+    }
+    if (inputs.length === 0) return;
+
+    const check = checkRules(inputs, stored.rules as RuleInput[], strategy);
+    store.recordRuleCheck({
+      checkedAt: Date.now(),
+      runId,
+      channels: check.summary.channels,
+      agreed: check.summary.agreed,
+      disagreed: check.summary.disagreed,
+      ambiguous: check.summary.ambiguous,
+      deadFirst: check.summary.deadFirst,
+      gapKbps: check.summary.gapKbps,
+      approximate: check.summary.approximate,
+      rulesEvaluated: check.rules.evaluated,
+      rulesSkipped: check.rules.skipped.length,
+      misses: check.channels
+        .filter((row) => !row.agree)
+        .map((row) => ({
+          channelId: row.channelId,
+          channelName: row.channelName,
+          teamarrStream: row.teamarr.streamId,
+          teamarrName: row.teamarr.name,
+          teamarrProvider: row.teamarr.providerName,
+          teamarrPoints: row.teamarr.points,
+          teamarrBitrate: row.teamarr.bitrateKbps,
+          teamarrAlive: row.teamarr.alive,
+          teamarrBlack: row.teamarr.black,
+          teamarrMatched: row.teamarr.matched,
+          podiumStream: row.podium.streamId,
+          podiumName: row.podium.name,
+          podiumProvider: row.podium.providerName,
+          podiumBitrate: row.podium.bitrateKbps,
+          gapKbps: row.gapKbps,
+        })),
+    });
+  }
+
   private async reorderCachedOnly(
     client: DispatcharrClient,
     planned: PlannedChannel[],

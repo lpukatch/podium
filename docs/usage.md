@@ -643,6 +643,77 @@ when the name was the only thing to go on.
 > re-importing next month refreshes the numbers instead of stacking a second
 > set of points on top of the first.
 
+### Checking the rules you are running
+
+    POST /api/rule-check
+
+A scoring rule cannot be checked from inside Teamarr. A `+20` that matches
+nothing, a regex pinned to the wrong end of a name, and a rule that works are
+the same few characters in a JSON file, and the only visible consequence of the
+wrong one is which stream somebody gets three weeks later.
+
+POST the file Teamarr exported — same shape the merge takes — and Podium scores
+it against every channel it has measured, reporting per channel the stream those
+rules put first beside the stream the measurements say should be first. The
+Quality tab has it behind **Check my Teamarr rules…**.
+
+Nothing is written and nothing is probed: it reads cached verdicts only, so it
+costs one Dispatcharr snapshot and can be re-run after every edit. That is how
+it is meant to be used — change a rule, run it again, watch the disagreements
+go down.
+
+What it reports:
+
+| number | meaning |
+| --- | --- |
+| **agreed** | the rules and the measurements put the same stream first |
+| **disagreed** | they do not, with the measured bitrate given up |
+| **dead first** | the rules put a stream first that does not play, or shows a slate |
+| **decided by a tie** | two streams tie at the top, so the rules do not decide the channel at all — whatever Teamarr does next does, and a tie falling the right way is not a working rule set |
+
+Each disagreement names the rules that scored the losing stream, which is
+usually the whole explanation: an `m3u` rule worth +20 on a provider that is
+running 2Mbps tonight, against a provider with no rule at all running 12.
+
+Two rule types cannot be simulated. `epg_match` and `stream_type` read Teamarr's
+own state, so a set carrying them is reported as **approximate** rather than
+scored as though those rules were absent — a `stream_type` rule that applies to
+every stream on a channel cancels out and changes no ordering, but that cannot
+be shown from here. `priority`-mode rules are skipped for a different reason:
+they sort into bands rather than adding, so summing them would produce a number
+Teamarr never computes.
+
+#### It runs itself after the first upload
+
+There is a catch that decides how this is usable at all. A fixture channel's
+streams exist for one afternoon, and `pruneOutside` sweeps their verdicts when
+they leave the catalogue — so a check run on Monday cannot see Saturday's EPL
+channels. There is nothing left to compare.
+
+So the rule set you upload is **kept**, and every later pass re-runs the check
+against what it has just measured, while the verdicts are still there. Each
+pass records its counts, and the disagreements themselves, which is how
+Saturday's misses are still readable on Monday. The Quality tab shows the last
+ten passes and the most recent pass's misses under **Checked automatically each
+pass**.
+
+The stored miss names the streams as they stood at the time and carries the
+rules that scored the losing one. Both are kept rather than re-derived: the
+streams are gone, and the rule set is editable, so re-deriving would explain a
+past miss with a rule that was not in force when it happened.
+
+    GET /api/rule-check
+
+returns the history and the latest misses. Checks are trimmed at 90 days, like
+the quality samples.
+
+Upload a new file whenever the rules change — the last one uploaded is the one
+being checked, and its date is shown beside the findings.
+
+Regexes are evaluated as Python writes them — inline `(?i)` flags and the
+`(?P<name>)` spelling are both translated — with `search` semantics, which is
+what a hand-written `^NFL Game Pass.*` already assumes.
+
 ## Importing existing rules
 
 If you are arriving with a set of generated regexes, Podium can convert them
