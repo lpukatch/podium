@@ -34,7 +34,13 @@ interface ChannelRow {
 interface PatternRule {
   pattern: string;
   mode: Mode;
-  audio_only?: boolean;
+  /**
+   * Camel case because /api/state serves the *parsed* policy, not the rules
+   * file. Read as `audio_only` here for as long as this row has existed, which
+   * is why the audio pill has never once rendered.
+   */
+  audioOnly?: boolean;
+  measureOnly?: boolean;
 }
 
 interface GroupRow {
@@ -596,6 +602,21 @@ export default function Page() {
     await load();
   };
 
+  /**
+   * Flip measure-only on a pattern that already exists.
+   *
+   * Only reachable from a saved row, because the flag is meaningless without a
+   * mode to carry it -- and the mode is what the buttons below set.
+   */
+  const togglePatternMeasureOnly = async (pattern: string, mode: Mode, current: boolean) => {
+    await fetch('/api/group-patterns', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pattern, mode, measureOnly: !current }),
+    });
+    await load();
+  };
+
   const savePattern = async (mode: Mode) => {
     const pattern = patternText.trim();
     if (!pattern) return;
@@ -912,7 +933,7 @@ export default function Page() {
                   {patterns.map((p) => (
                     <div key={p.pattern} className="mt-3 flex items-center gap-3">
                       <code className="mono min-w-0 flex-1 truncate">{p.pattern}</code>
-                      {p.audio_only && (
+                      {p.audioOnly && (
                         <span
                           className={`${pill} bg-[var(--color-accent-soft)] text-[var(--color-accent)]`}
                         >
@@ -922,6 +943,20 @@ export default function Page() {
                       <span className={`${pill} bg-[var(--color-line)] text-[var(--color-muted)]`}>
                         {MODE_CHIP[p.mode]}
                       </span>
+                      <button
+                        type="button"
+                        className={chip(Boolean(p.measureOnly))}
+                        onClick={() =>
+                          void togglePatternMeasureOnly(
+                            p.pattern,
+                            p.mode as Mode,
+                            Boolean(p.measureOnly),
+                          )
+                        }
+                        title="Probe these groups and record what is learned, but never write an order or assign a stream. For groups another app owns and rewrites — a Teamarr fixture group — where a write from here is overwritten anyway."
+                      >
+                        {p.measureOnly ? '✓ Measure only' : 'Measure only'}
+                      </button>
                       <button
                         type="button"
                         className={`${btn} px-3 py-1.5 text-sm`}

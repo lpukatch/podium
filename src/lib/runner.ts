@@ -1298,6 +1298,7 @@ export class Runner {
                 providerId: source.providerId,
                 providerName: providerNames.get(source.providerId) ?? String(source.providerId),
                 tier: tierOf(source.name),
+                streamName: source.name,
                 groupId: source.groupId,
                 groupName: source.groupId === null ? '' : (groupNames.get(source.groupId) ?? ''),
                 channelGroupId,

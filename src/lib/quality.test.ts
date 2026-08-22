@@ -12,13 +12,14 @@ import {
   tierOf,
   tierPattern,
 } from './quality';
-import { Store, type StoredQualitySample } from './store';
+import { MAX_STREAM_NAME, Store, type StoredQualitySample } from './store';
 
 function sample(over: Partial<StoredQualitySample> = {}): StoredQualitySample {
   return {
     providerId: 1,
     providerName: 'Provider A',
     tier: 'fhd',
+    streamName: 'Sports Alpha FHD',
     groupId: 1,
     groupName: 'Group One',
     channelGroupId: 10,
@@ -553,6 +554,45 @@ describe('scope', () => {
   });
 });
 
+describe('names on samples', () => {
+  it('keeps the provider name and counts how many samples carry one', () => {
+    // Nothing reads names yet -- they are for mining name patterns, which needs
+    // enough of them first. This count is what says when that is true, so it
+    // has to describe the scoped population the mining would run over.
+    const profile = buildProfile(
+      [...many(3, { streamName: 'EPL01: Hull vs Man Utd' }), ...many(2, { streamName: '' })],
+      { minSamples: 1 },
+    );
+    expect(profile.namedSamples).toBe(3);
+    expect(profile.totalSamples).toBe(5);
+  });
+
+  it('bounds what a provider can write into the table', () => {
+    // Provider-controlled text on the hot path of every probe.
+    const store = new Store(':memory:');
+    store.recordQuality({
+      providerId: 1,
+      providerName: 'Provider A',
+      tier: 'fhd',
+      streamName: 'x'.repeat(MAX_STREAM_NAME + 500),
+      groupId: 3,
+      groupName: 'Group One',
+      channelGroupId: 10,
+      channelGroupName: 'Entertainment',
+      policyMode: 'after_epg_start',
+      audioOnly: false,
+      alive: true,
+      black: false,
+      bitrateKbps: 6000,
+      measured: true,
+      height: 1080,
+      fps: 50,
+    });
+    expect(store.qualitySamples()[0]!.streamName).toHaveLength(MAX_STREAM_NAME);
+    store.close();
+  });
+});
+
 describe('parseGlobs', () => {
   it('reads a list written either way round', () => {
     // The same string is typed one-per-line into settings and passed
@@ -585,6 +625,7 @@ describe('store', () => {
       providerId: 7,
       providerName: 'Provider A',
       tier: 'fhd',
+      streamName: 'Sports Alpha FHD',
       groupId: 3,
       groupName: 'Group One',
       channelGroupId: 10,
@@ -612,6 +653,7 @@ describe('store', () => {
         providerId: 1,
         providerName: 'Provider A',
         tier: 'fhd',
+        streamName: 'Sports Alpha FHD',
         groupId: 3,
         groupName: 'Group One',
         channelGroupId: 10,
@@ -644,6 +686,7 @@ describe('store', () => {
           providerId: 1,
           providerName: 'Provider A',
           tier,
+          streamName: 'Sports Alpha FHD',
           groupId: 3,
           groupName: 'Group One',
           channelGroupId: 10,
@@ -678,6 +721,7 @@ describe('store', () => {
         providerId: 1,
         providerName: 'Provider A',
         tier: 'fhd',
+        streamName: 'Sports Alpha FHD',
         groupId: 3,
         groupName: 'Group One',
         channelGroupId: 10,
