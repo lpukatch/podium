@@ -83,6 +83,40 @@ interface RuleCheck {
   channels: ChannelCheck[];
 }
 
+interface StoredMiss {
+  channelId: number;
+  channelName: string;
+  teamarrName: string;
+  teamarrProvider: string;
+  teamarrPoints: number;
+  teamarrBitrate: number;
+  teamarrAlive: boolean;
+  teamarrBlack: boolean;
+  teamarrMatched: MatchedRule[];
+  podiumName: string;
+  podiumProvider: string;
+  podiumBitrate: number;
+  gapKbps: number;
+}
+
+interface StoredCheck {
+  checkedAt: number;
+  channels: number;
+  agreed: number;
+  disagreed: number;
+  ambiguous: number;
+  deadFirst: number;
+  gapKbps: number;
+  approximate: boolean;
+}
+
+interface CheckHistory {
+  rulesUploadedAt: number | null;
+  ruleCount: number;
+  history: StoredCheck[];
+  latest: StoredMiss[];
+}
+
 interface Profile {
   generatedAt: number;
   totalSamples: number;
@@ -186,6 +220,7 @@ export function QualityView() {
   const [merged, setMerged] = useState('');
   const [checking, setChecking] = useState(false);
   const [check, setCheck] = useState<RuleCheck | null>(null);
+  const [history, setHistory] = useState<CheckHistory | null>(null);
 
   const load = useCallback(async (min: number, open: boolean) => {
     setLoading(true);
@@ -210,6 +245,21 @@ export function QualityView() {
   useEffect(() => {
     void load(minSamples, ungated);
   }, [load, minSamples, ungated]);
+
+  const loadHistory = useCallback(async () => {
+    try {
+      const resp = await fetch('/api/rule-check');
+      const body = await resp.json();
+      if (resp.ok && !body.error) setHistory(body as CheckHistory);
+    } catch {
+      // The stored view is an extra; failing to read it must not take the page
+      // down with it.
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadHistory();
+  }, [loadHistory]);
 
   // The export carries the scope being previewed, so the file always describes
   // the table it was downloaded from. Handing over rules fitted on a population
@@ -286,6 +336,7 @@ export function QualityView() {
       }
       setError('');
       setCheck(body as RuleCheck);
+      void loadHistory();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -617,7 +668,9 @@ export function QualityView() {
           the only visible consequence is which stream somebody gets weeks later. Upload your rules
           and Podium scores them against every channel it has measured — the stream your rules put
           first, beside the stream the measurements say should be first. Nothing is written and no
-          stream is probed, so run it after every edit.
+          stream is probed, so run it after every edit. The set you upload is kept and re-checked by
+          every later pass — which is the only way a fixture channel is ever checked, since its
+          streams are gone by the next morning.
         </p>
 
         <div className="mt-4 flex flex-wrap items-center gap-3">
@@ -727,6 +780,132 @@ export function QualityView() {
                   ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {/* What the passes have found on their own. The half that survives a
+            fixture: a live check can only see channels whose streams still
+            exist, and an event channel's are gone by morning. */}
+        {history && history.rulesUploadedAt !== null && (
+          <div className="mt-5 border-t border-[var(--color-line)] pt-4">
+            <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
+              <h4 className="text-sm font-semibold">Checked automatically each pass</h4>
+              <span className={`text-sm ${muted}`}>
+                {history.ruleCount} rules, uploaded {ago(history.rulesUploadedAt)}
+              </span>
+            </div>
+            {history.history.length === 0 ? (
+              <p className={`mt-2 max-w-[75ch] text-sm ${muted}`}>
+                No pass has run since these rules were uploaded. The next one will check them while
+                its verdicts are fresh, which is the only moment a fixture channel can be checked at
+                all — by tomorrow its streams are gone and there is nothing left to compare.
+              </p>
+            ) : (
+              <>
+                <div className="mt-2 overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className={`text-left ${muted}`}>
+                      <tr className="border-b border-[var(--color-line)]">
+                        <th className="py-2 pr-3 font-normal">Pass</th>
+                        <th className="py-2 pr-3 text-right font-normal">Channels</th>
+                        <th className="py-2 pr-3 text-right font-normal">Agreed</th>
+                        <th className="py-2 pr-3 text-right font-normal">Picked worse</th>
+                        <th className="py-2 pr-3 text-right font-normal">Dead first</th>
+                        <th className="py-2 text-right font-normal">Given up</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {history.history.slice(0, 10).map((row) => (
+                        <tr key={row.checkedAt} className="border-b border-[var(--color-line)]">
+                          <td className={`py-2 pr-3 ${muted}`}>{ago(row.checkedAt)}</td>
+                          <td className="py-2 pr-3 text-right tabular-nums">{row.channels}</td>
+                          <td className="py-2 pr-3 text-right tabular-nums">{row.agreed}</td>
+                          <td
+                            className={`py-2 pr-3 text-right tabular-nums ${
+                              row.disagreed > 0 ? 'text-[var(--color-bad)]' : ''
+                            }`}
+                          >
+                            {row.disagreed}
+                          </td>
+                          <td
+                            className={`py-2 pr-3 text-right tabular-nums ${
+                              row.deadFirst > 0 ? 'text-[var(--color-bad)]' : ''
+                            }`}
+                          >
+                            {row.deadFirst}
+                          </td>
+                          <td className="py-2 text-right tabular-nums">
+                            {row.gapKbps > 0 ? rate(row.gapKbps) : '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {history.latest.length > 0 && (
+                  <>
+                    <p className={`mt-3 max-w-[75ch] text-sm ${muted}`}>
+                      What the most recent pass got wrong, worst first. These name the streams as
+                      they stood at the time — a fixture&apos;s are gone by now, which is why the
+                      row is kept rather than re-derived.
+                    </p>
+                    <div className="mt-2 overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead className={`text-left ${muted}`}>
+                          <tr className="border-b border-[var(--color-line)]">
+                            <th className="py-2 pr-3 font-normal">Channel</th>
+                            <th className="py-2 pr-3 font-normal">Rules picked</th>
+                            <th className="py-2 pr-3 font-normal">Measurement picked</th>
+                            <th className="py-2 text-right font-normal">Given up</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {history.latest.slice(0, 20).map((miss) => (
+                            <tr
+                              key={`${miss.channelId}:${miss.teamarrName}`}
+                              className="border-b border-[var(--color-line)]"
+                            >
+                              <td className="py-2 pr-3">{miss.channelName}</td>
+                              <td className="py-2 pr-3">
+                                <span className="block truncate">{miss.teamarrName}</span>
+                                <span className={`block text-xs ${muted}`}>
+                                  {miss.teamarrProvider} ·{' '}
+                                  {miss.teamarrAlive && !miss.teamarrBlack ? (
+                                    rate(miss.teamarrBitrate)
+                                  ) : (
+                                    <span className="text-[var(--color-bad)]">
+                                      {miss.teamarrAlive ? 'black screen' : 'dead'}
+                                    </span>
+                                  )}{' '}
+                                  · scored {miss.teamarrPoints}
+                                  {miss.teamarrMatched.length > 0 &&
+                                    ` (${miss.teamarrMatched
+                                      .map(
+                                        (rule) =>
+                                          `${rule.type} ${rule.points > 0 ? '+' : ''}${rule.points}`,
+                                      )
+                                      .join(', ')})`}
+                                </span>
+                              </td>
+                              <td className="py-2 pr-3">
+                                <span className="block truncate">{miss.podiumName}</span>
+                                <span className={`block text-xs ${muted}`}>
+                                  {miss.podiumProvider} · {rate(miss.podiumBitrate)}
+                                </span>
+                              </td>
+                              <td className="py-2 text-right tabular-nums">
+                                {miss.gapKbps > 0 ? rate(miss.gapKbps) : '—'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )}
+              </>
+            )}
           </div>
         )}
 

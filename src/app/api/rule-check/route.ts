@@ -15,6 +15,32 @@ import {
 export const dynamic = 'force-dynamic';
 
 /**
+ * What the passes have found, and against which rules.
+ *
+ * The stored history is the half that survives a fixture: a live check can only
+ * see channels whose streams still exist, and an event channel's do not outlast
+ * the afternoon.
+ */
+export function GET() {
+  let store: Store | null = null;
+  try {
+    store = new Store(loadConfig().dbPath);
+    const stored = store.teamarrRules();
+    const { history, latest } = store.ruleChecks();
+    return NextResponse.json({
+      rulesUploadedAt: stored?.uploadedAt ?? null,
+      ruleCount: stored?.rules.length ?? 0,
+      history,
+      latest,
+    });
+  } catch (error) {
+    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+  } finally {
+    store?.close();
+  }
+}
+
+/**
  * Score a Teamarr rule set against what Podium has measured.
  *
  * POST the file Teamarr's Export button produced -- a bare array or a
@@ -97,6 +123,12 @@ export async function POST(request: Request) {
         streams,
       });
     }
+
+    // Kept, so every later pass re-runs this without anybody being present.
+    // The uploaded set is the only copy Podium can have -- there is no way to
+    // read one out of Teamarr -- and a check that only runs when somebody is at
+    // the keyboard cannot see a Saturday fixture at all.
+    store.saveTeamarrRules(rules);
 
     return NextResponse.json(checkRules(channels, rules, strategy));
   } catch (error) {

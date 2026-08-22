@@ -20,8 +20,8 @@
  */
 
 import type { ProbeResult } from './probe';
-import { statsPayload } from './runner';
 import { type RankEntry, type RankStrategy, rank } from './scoring';
+import { statsPayload } from './stats';
 
 /** A rule as it appears in `stream-ordering-rules.json`. */
 export interface RuleInput {

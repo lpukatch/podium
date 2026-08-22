@@ -683,6 +683,33 @@ be shown from here. `priority`-mode rules are skipped for a different reason:
 they sort into bands rather than adding, so summing them would produce a number
 Teamarr never computes.
 
+#### It runs itself after the first upload
+
+There is a catch that decides how this is usable at all. A fixture channel's
+streams exist for one afternoon, and `pruneOutside` sweeps their verdicts when
+they leave the catalogue — so a check run on Monday cannot see Saturday's EPL
+channels. There is nothing left to compare.
+
+So the rule set you upload is **kept**, and every later pass re-runs the check
+against what it has just measured, while the verdicts are still there. Each
+pass records its counts, and the disagreements themselves, which is how
+Saturday's misses are still readable on Monday. The Quality tab shows the last
+ten passes and the most recent pass's misses under **Checked automatically each
+pass**.
+
+The stored miss names the streams as they stood at the time and carries the
+rules that scored the losing one. Both are kept rather than re-derived: the
+streams are gone, and the rule set is editable, so re-deriving would explain a
+past miss with a rule that was not in force when it happened.
+
+    GET /api/rule-check
+
+returns the history and the latest misses. Checks are trimmed at 90 days, like
+the quality samples.
+
+Upload a new file whenever the rules change — the last one uploaded is the one
+being checked, and its date is shown beside the findings.
+
 Regexes are evaluated as Python writes them — inline `(?i)` flags and the
 `(?P<name>)` spelling are both translated — with `search` semantics, which is
 what a hand-written `^NFL Game Pass.*` already assumes.

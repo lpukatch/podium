@@ -8,6 +8,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { ProbeResult } from './probe';
+import { Store } from './store';
 import { DEFAULT_STRATEGY } from './scoring';
 import { checkRules, compileRules, factsFor, type RuleInput, toJsRegExp } from './teamarr';
 
@@ -260,5 +261,75 @@ describe('checkRules', () => {
     ]);
     expect(compiled[0]!.test(facts(1, {}, { bitrateKbps: 12_000 }))).toBe(true);
     expect(compiled[0]!.test(facts(1, {}, { bitrateKbps: 9000 }))).toBe(false);
+  });
+});
+
+describe('what a pass keeps', () => {
+  it('survives the fixture the check was about', () => {
+    // The whole reason checks are stored. A fixture's streams exist for one
+    // afternoon and pruneOutside sweeps their verdicts with them, so a check
+    // run on Monday cannot see Saturday at all -- but a check run on Saturday
+    // and written down can still be read on Monday.
+    const store = new Store(':memory:');
+    store.saveTeamarrRules(LIVE_RULES);
+
+    store.recordRuleCheck({
+      checkedAt: 1_700_000_000_000,
+      runId: 'run-1',
+      channels: 12,
+      agreed: 9,
+      disagreed: 3,
+      ambiguous: 1,
+      deadFirst: 1,
+      gapKbps: 14_000,
+      approximate: true,
+      rulesEvaluated: 6,
+      rulesSkipped: 2,
+      misses: [
+        {
+          channelId: 47,
+          channelName: 'EPL01',
+          teamarrStream: 1,
+          teamarrName: 'EPL01: Hull 12:30 Man Utd 22/08',
+          teamarrProvider: 'Provider A',
+          teamarrPoints: 20,
+          teamarrBitrate: 2000,
+          teamarrAlive: true,
+          teamarrBlack: false,
+          teamarrMatched: [{ type: 'm3u', value: 'Provider A', points: 20 }],
+          podiumStream: 2,
+          podiumName: 'EPL01: Hull v Man Utd FHD',
+          podiumProvider: 'Provider C',
+          podiumBitrate: 12_000,
+          gapKbps: 10_000,
+        },
+      ],
+    });
+
+    // Everything the miss described is gone from the catalogue by now.
+    store.pruneOutside(new Set([999]));
+    store.prune(-1);
+
+    const { history, latest } = store.ruleChecks();
+    expect(history[0]?.disagreed).toBe(3);
+    expect(history[0]?.approximate).toBe(true);
+    // The blame line too: the rule set is editable, so re-deriving why a past
+    // miss happened would explain it with a rule that was not in force.
+    expect(latest[0]?.teamarrMatched).toEqual([{ type: 'm3u', value: 'Provider A', points: 20 }]);
+    expect(latest[0]?.podiumName).toBe('EPL01: Hull v Man Utd FHD');
+    store.close();
+  });
+
+  it('reads back the rule set every later pass is measured against', () => {
+    const store = new Store(':memory:');
+    expect(store.teamarrRules()).toBeNull();
+    store.saveTeamarrRules(LIVE_RULES);
+    expect(store.teamarrRules()?.rules).toHaveLength(LIVE_RULES.length);
+
+    // Replaced, not appended: there is one Teamarr and one current answer to
+    // what it is running.
+    store.saveTeamarrRules([LIVE_RULES[0]]);
+    expect(store.teamarrRules()?.rules).toHaveLength(1);
+    store.close();
   });
 });
