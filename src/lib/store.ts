@@ -69,6 +69,8 @@ CREATE TABLE IF NOT EXISTS runs (
     reordered        INTEGER NOT NULL DEFAULT 0,
     unchanged        INTEGER NOT NULL DEFAULT 0,
     assigned         INTEGER NOT NULL DEFAULT 0,
+    -- Channels probed under a measure-only policy and deliberately not written.
+    measured         INTEGER NOT NULL DEFAULT 0,
     skipped          INTEGER NOT NULL DEFAULT 0,
     deferred         INTEGER NOT NULL DEFAULT 0,
     backlog          INTEGER NOT NULL DEFAULT 0,
@@ -309,6 +311,13 @@ export interface Progress {
   reordered: number;
   /** Channels checked and found already in the right order. */
   unchanged: number;
+  /**
+   * Channels probed under a measure-only policy, whose order was withheld.
+   *
+   * Optional because a pass that has not reached the writing phase has no
+   * answer yet, and a zero there would read as "none" rather than "not known".
+   */
+  measured?: number;
   cached: number;
   deferred: number;
   /**
@@ -493,6 +502,8 @@ export interface RunUpdate {
   reordered?: number;
   unchanged?: number;
   assigned?: number;
+  /** Channels probed under a measure-only policy and deliberately not written. */
+  measured?: number;
   skipped?: number;
   deferred?: number;
   backlog?: number;
@@ -636,6 +647,9 @@ export class Store {
         // Default 0 is the truth for every run recorded before auto-assign
         // existed: none of them ever put a stream onto a channel.
         ['runs', 'assigned INTEGER NOT NULL DEFAULT 0'],
+        // 0 is the truth for every run recorded before measure-only groups
+        // existed: none of them ever withheld a write.
+        ['runs', 'measured INTEGER NOT NULL DEFAULT 0'],
         // Existing rows land on 0, which `deadTtlFor` treats as the base TTL:
         // an install upgrading in place re-probes its dead streams once at the
         // old cadence and starts backing them off from there, rather than
@@ -862,6 +876,7 @@ export class Store {
       ['reordered', 'reordered'],
       ['unchanged', 'unchanged'],
       ['assigned', 'assigned'],
+      ['measured', 'measured'],
       ['skipped', 'skipped'],
       ['deferred', 'deferred'],
       ['backlog', 'backlog'],

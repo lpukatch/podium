@@ -225,6 +225,9 @@ Policy is per Dispatcharr channel group:
 | `after_epg_start` | rule or not, but only once the channel's EPG programme has started |
 | `assigned` | rule or not, on the normal freshness schedule |
 
+Any of them can carry `measure_only`, which probes the group without ever
+writing to it — see [Measure only](#measure-only-channels-another-app-owns).
+
 The policy says *when* a channel is checked. What decides whether it is checked
 at all is having a rule: under `always` — which is also what a group you have
 never touched resolves to — a channel with no alias is not podium's to look at,
@@ -285,6 +288,47 @@ every stream on the channel is a candidate, scored on what it measures.
 The policy is the row of chips at the top of a group. `assigned` is what
 Dispatcharr has on the channel now; `matched` is what your rules claim — the two
 differing is how you spot a stream the provider has just added.
+
+#### Measure only (channels another app owns)
+
+A fixture channel created by Teamarr carries its own idea of stream order and
+rewrites it on its own schedule. A reorder written from Podium is overwritten,
+which makes the two applications take turns clobbering the field a viewer
+actually reads — and Podium loses that race by design.
+
+What is worth having from those channels is the *measurement*. Probed after
+kickoff, while nobody is watching, they are the only source of what the right
+order would have been, which is what the quality priors are fitted from and what
+the exported rules hand back to the app that owns the channel.
+
+Toggling **Measure only** on a group — or `"measure_only": true` in
+`rules.json` / `rules.yml`, on a group or a name pattern — keeps everything
+except the writes:
+
+| still happens | suppressed |
+| --- | --- |
+| the probe, at the time the policy says | writing the stream order |
+| the cached verdict and its TTL | assigning a matched stream to the channel |
+| the quality sample the priors are fitted from | |
+| `stream_stats` published to Dispatcharr | |
+
+Auto-assignment is suppressed with the reorder, and deliberately so: adding a
+stream to a channel another app curates is the more intrusive of the two writes,
+not the lesser.
+
+It is orthogonal to the mode, so the natural setting for a Teamarr install is
+both at once — probe once the fixture is under way, and never write:
+
+```json
+"group_patterns": [
+  { "pattern": "Auto | *", "mode": "after_epg_start", "measure_only": true }
+]
+```
+
+Channels handled this way are counted as `measured only` in the pass line on the
+dashboard rather than folded into `already in order`, which means something
+else — that the channel was checked and found correct. These were ranked and the
+ranking was withheld.
 
 #### Audio only (Radio & Music groups)
 
