@@ -425,6 +425,102 @@ Mode and weights live in **Settings → Stream ordering**. Preferred providers
 only apply in `provider` mode; in `quality` mode the best measured source wins
 outright, whoever carries it.
 
+## Exporting what Podium learned
+
+Podium ranks a stream by measuring it. Some streams cannot be measured in time
+to be useful: an event channel's streams are created for one fixture and gone
+by morning, so by the time a probe would tell you anything the game has
+started, and the verdict is swept with the stream the next time the catalogue
+is fetched. Probing harder does not help. There is no *before* to probe in.
+
+What outlives the fixture is where the stream came from. Podium keeps a running
+record of every verdict against the provider account the stream arrived on and
+the quality token in its name — `FHD`, `1080p`, `HD`, `4K` — and after a few
+weeks of ordinary passes that record says something useful about a stream
+nobody has ever probed: *streams like this one, from this account, measure
+about 6800kbps and are dead one time in twenty.*
+
+Nothing about this changes how Podium probes. The record is a byproduct of
+verdicts already being produced, so it costs no extra provider connections, and
+it accumulates in dry-run exactly as it does live.
+
+### The profile
+
+    GET /api/quality-profile
+
+Returns every bucket Podium has samples for — how many, how often they were
+alive, how often black, the median and p90 of the bitrates it actually
+measured — along with the per-account and per-tier effects derived from them.
+`?minSamples=` sets how many samples a bucket needs before it is allowed to
+contribute an effect; the default is 20, because a reading off four streams is
+noise with a number attached.
+
+Bitrate percentiles use only bitrates that were *read*, on streams that were
+alive and not black. A container's declared bitrate, a dead stream's zero and a
+slate's 300kbps all describe something other than what a viewer receives; how
+often those happen is carried separately, as the alive and black rates.
+
+### As Teamarr rules
+
+    GET /api/quality-profile?format=teamarr
+
+Returns a `stream-ordering-rules.json` that [Teamarr](https://github.com/pharaoh-labs/teamarr)'s
+**Channels → Stream Priority → Import** accepts as-is: one scoring rule per
+provider account, one per quality tier, each carrying that dimension's measured
+distance from your install's baseline. Teamarr sums the rules a stream matches,
+so an account 2Mbps above the house average and an `FHD` token worth another
+1.5 come to +35 together — no probe on Teamarr's side, and the ordering applies
+to a stream the moment it appears.
+
+The effects are fitted against each other rather than averaged separately, so
+an account is credited for the streams it runs *better than other accounts in
+the same group at the same tier* — not for happening to sell more 1080p, which
+the tier rule already pays for, or for carrying a better class of package.
+Averaging the dimensions independently looks equivalent and is not. On the
+install this was developed against it collapsed four provider accounts into a
+366kbps spread while their 1080p streams alone spanned 3193kbps, and it flipped
+the sign of one account's effect — from promote to demote — purely because that
+account also carried a radio package.
+
+Podium fits a third effect per **provider group** and does not export it. A
+group is the strongest single predictor it has, and also the one Teamarr can
+only match on channel-source streams, so shipping it as a rule would mostly do
+nothing. It is fitted because leaving it out of the *model* lets it contaminate
+the two effects that do ship, and published in the profile because "which of my
+groups are any good" is a question worth being able to answer.
+
+Audio-only streams — radio, SiriusXM, anything on a group marked **Audio only**
+— are recorded but held out of the video model entirely. Their bitrate is an
+audio bitrate, so a few hundred kbps means a healthy stream rather than a
+throttled one, and pooling them in reads as a catastrophic provider. On the
+install above they were 18% of all probes and 30% of the untagged tier.
+
+`?pointsPerMbps=` scales the result; the default of 10 puts a provider running
+3Mbps above average at +30, which reads alongside a hand-written "+30 for the
+home feed" as an opinion of comparable strength rather than one that drowns it.
+Raise it if your own rules use larger numbers — only the ratio matters.
+
+Streams whose names advertise no quality at all are the reference level and get
+no rule — they score their account's effect alone, which is the right answer
+when the name was the only thing to go on.
+
+> [!IMPORTANT]
+> Teamarr's import **replaces** its entire rule set rather than merging, so
+> importing a bare export would delete every rule you wrote by hand. Export
+> your rules from Teamarr first and POST them to the same endpoint to get a
+> file carrying both:
+>
+> ```sh
+> curl -X POST --data-binary @stream-ordering-rules.json \
+>   -H 'Content-Type: application/json' \
+>   http://podium:3456/api/quality-profile > merged.json
+> ```
+>
+> Your rules come back untouched and in their original order. A rule Podium
+> also generated is updated in place rather than added a second time, so
+> re-importing next month refreshes the numbers instead of stacking a second
+> set of points on top of the first.
+
 ## Importing existing rules
 
 If you are arriving with a set of generated regexes, Podium can convert them

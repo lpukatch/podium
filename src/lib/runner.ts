@@ -25,6 +25,7 @@ import type { Matcher, StreamIndex } from './matcher';
 import { resolveOrdering } from './ordering';
 import { Pacer, type PacerConfig, viewersByProvider } from './pacer';
 import { type ProbeResult, probe } from './probe';
+import { tierOf } from './quality';
 import type { RulesSource } from './rules-source';
 import { AbortFlag, laneKey, type ProbeJob, runLanes } from './scheduler';
 import {
@@ -78,6 +79,19 @@ export function statsPayload(
     audio_bitrate: Math.round(result.audioBitrateKbps),
     sample_rate: result.audioSampleRate,
     video_bitrate: Math.round(result.bitrateKbps),
+    /**
+     * The same number under the key Dispatcharr's own probe writes it to.
+     *
+     * This PATCH replaces `stream_stats` wholesale, so publishing only
+     * `video_bitrate` does not merely fail to fill `ffmpeg_output_bitrate` in
+     * -- it deletes whatever was there. Everything downstream reads the
+     * Dispatcharr key: its channel table, and Teamarr's Stream Stats rules,
+     * which is how a "bitrate >= 4000" rule ends up matching nothing on
+     * exactly the streams Podium has measured most carefully. Both are
+     * written, because `video_bitrate` is the one Podium's own history and
+     * UI already read.
+     */
+    ffmpeg_output_bitrate: Math.round(result.bitrateKbps),
     bitrate_measured: Boolean(result.bitrateMeasured),
     blank_detected: Boolean(result.black),
     blank_seconds: result.blackSeconds ?? 0,
@@ -471,7 +485,12 @@ export interface StreamSettlerDeps {
    * A stream whose every queued probe failed or was skipped settles with no
    * verdict, exactly as a lone failed probe always did.
    */
-  onSettled: (streamId: number, best: ProbeResult | null) => void;
+  onSettled: (
+    streamId: number,
+    best: ProbeResult | null,
+    /** Whether the stream was probed as a video-less feed. */
+    audioOnly: boolean,
+  ) => void;
 }
 
 /**
@@ -503,11 +522,19 @@ export function makeStreamSettler(jobs: ProbeJob[], deps: StreamSettlerDeps): St
       if (result !== null) entry.landed.push({ variantId: job.profileId, result });
       if (entry.left > 0) return;
       pending.delete(job.streamId);
-      deps.onSettled(job.streamId, pickBestVariant(entry.landed, deps.weights, entry.audioOnly));
+      deps.onSettled(
+        job.streamId,
+        pickBestVariant(entry.landed, deps.weights, entry.audioOnly),
+        Boolean(entry.audioOnly),
+      );
     },
     drain(): void {
       for (const [streamId, entry] of pending) {
-        deps.onSettled(streamId, pickBestVariant(entry.landed, deps.weights, entry.audioOnly));
+        deps.onSettled(
+          streamId,
+          pickBestVariant(entry.landed, deps.weights, entry.audioOnly),
+          Boolean(entry.audioOnly),
+        );
       }
       pending.clear();
     },
@@ -1215,10 +1242,37 @@ export class Runner {
       // with one login -- most of them -- that is the moment the probe returns.
       const settler = makeStreamSettler(selected, {
         weights: strategy.weights,
-        onSettled: (streamId, best) => {
+        onSettled: (streamId, best, audioOnly) => {
           if (!best) return;
           counters.probed += 1;
           if (!best.alive) counters.dead += 1;
+          // Tag the verdict with the provenance that will outlive its stream,
+          // before anything gets the chance to sweep it. Unconditional on
+          // dry-run and on WRITE_STATS: neither of those is about Podium's own
+          // records, and an install left in dry-run for a month is exactly the
+          // one whose history is worth having when it comes out.
+          const source = streamById.get(streamId);
+          if (source) {
+            try {
+              store.recordQuality({
+                providerId: source.providerId,
+                providerName: providerNames.get(source.providerId) ?? String(source.providerId),
+                tier: tierOf(source.name),
+                groupId: source.groupId,
+                groupName:
+                  source.groupId === null ? '' : (groupNames.get(source.groupId) ?? ''),
+                audioOnly,
+                alive: best.alive,
+                black: Boolean(best.black),
+                bitrateKbps: best.bitrateKbps,
+                measured: Boolean(best.bitrateMeasured),
+                height: best.height,
+                fps: best.fps,
+              });
+            } catch (err) {
+              log(`quality sample failed for stream ${streamId}: ${String(err)}`);
+            }
+          }
           if (config.PODIUM_WRITE_STATS && !config.PODIUM_DRY_RUN) {
             // Best-effort: publishing stats must never fail a probe.
             client.setStreamStats(streamId, statsPayload(best, strategy.weights)).catch((err) => {
