@@ -4,6 +4,7 @@ import {
   buildProfile,
   mergeTeamarrRules,
   parseGlobs,
+  profileQuery,
   type QualityScope,
   scopeFromConfig,
   teamarrRules,
@@ -12,19 +13,6 @@ import { resolveEnv } from '@/lib/settings';
 import { Store } from '@/lib/store';
 
 export const dynamic = 'force-dynamic';
-
-/** Query knobs, all optional, all clamped -- this is a public GET. */
-function options(url: URL): { minSamples: number; pointsPerMbps: number } {
-  const number = (key: string, fallback: number, min: number, max: number): number => {
-    const raw = Number(url.searchParams.get(key));
-    if (!Number.isFinite(raw)) return fallback;
-    return Math.max(min, Math.min(max, raw));
-  };
-  return {
-    minSamples: Math.round(number('minSamples', 20, 1, 100_000)),
-    pointsPerMbps: number('pointsPerMbps', 5, 0, 10_000),
-  };
-}
 
 /**
  * The configured scope, with per-request overrides.
@@ -70,7 +58,7 @@ export function GET(request: Request) {
   let store: Store | null = null;
   try {
     const url = new URL(request.url);
-    const { minSamples, pointsPerMbps } = options(url);
+    const { minSamples, pointsPerMbps } = profileQuery(url.searchParams);
     store = new Store(loadConfig().dbPath);
     // Settings-resolved, not the raw environment: the scope is edited in the UI
     // and stored, and reading it from `process.env` would report the gate the
@@ -111,7 +99,7 @@ export async function POST(request: Request) {
   let store: Store | null = null;
   try {
     const url = new URL(request.url);
-    const { minSamples, pointsPerMbps } = options(url);
+    const { minSamples, pointsPerMbps } = profileQuery(url.searchParams);
 
     const parsed = (await request.json()) as unknown;
     const container = parsed as { rules?: unknown };

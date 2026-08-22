@@ -654,6 +654,38 @@ export interface ExportOptions extends ProfileOptions {
   maxPoints?: number;
 }
 
+/**
+ * The profile knobs as a URL carries them, clamped.
+ *
+ * Here rather than in the route so it can be tested against the URLs people
+ * actually type. The absent case is checked before the number is parsed,
+ * because `Number(null)` is `0` and `0` is finite: reading the parameter first
+ * made every default unreachable. Measured on a live install, `?format=teamarr`
+ * with no parameters -- the URL in the documentation -- returned an empty rule
+ * set, because `pointsPerMbps` resolved to 0 and `teamarrRules` drops a rule
+ * worth nothing; the profile meanwhile fitted at `minSamples` 1, over buckets
+ * holding a single probe. The UI passes both explicitly, which is why the paths
+ * people click were right while the ones they curl were not.
+ */
+export function profileQuery(params: URLSearchParams): {
+  minSamples: number;
+  pointsPerMbps: number;
+} {
+  const number = (key: string, fallback: number, min: number, max: number): number => {
+    const raw = params.get(key);
+    // Blank as well as missing: `?pointsPerMbps=` is a parameter somebody meant
+    // to fill in, not a request to score everything at zero.
+    if (raw === null || raw.trim() === '') return fallback;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return fallback;
+    return Math.max(min, Math.min(max, value));
+  };
+  return {
+    minSamples: Math.round(number('minSamples', 20, 1, 100_000)),
+    pointsPerMbps: number('pointsPerMbps', 5, 0, 10_000),
+  };
+}
+
 export interface RulesExport {
   rules: TeamarrRule[];
   /** Not read by Teamarr -- context for whoever opens the file. */
