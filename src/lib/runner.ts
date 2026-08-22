@@ -1240,6 +1240,18 @@ export class Runner {
       // Dispatcharr speak per stream, so they wait for the stream's last
       // queued variant to land rather than firing per probe. For a stream
       // with one login -- most of them -- that is the moment the probe returns.
+      // Which channel each probe was run *for*, and under which policy. A
+      // stream claimed by several channels queues once -- see `seenVariants` --
+      // so this is the channel that put it in the queue, which is the one whose
+      // ranking the verdict is about to feed. Built from the jobs rather than
+      // from `streamToChannel`, because that map is last-write-wins over the
+      // whole catalogue and would attribute a probe to a channel this pass
+      // never considered.
+      const jobChannel = new Map<number, number>();
+      for (const job of selected) {
+        if (!jobChannel.has(job.streamId)) jobChannel.set(job.streamId, job.channelId);
+      }
+      const channelById = new Map(channels.map((c) => [c.id, c]));
       const settler = makeStreamSettler(selected, {
         weights: strategy.weights,
         onSettled: (streamId, best, audioOnly) => {
@@ -1254,12 +1266,26 @@ export class Runner {
           const source = streamById.get(streamId);
           if (source) {
             try {
+              // The channel's group and its policy, resolved the same way
+              // `plan` resolved it to admit this probe in the first place. It
+              // is what says whether the sample describes a fixture or a film
+              // library, which is the difference between a prior Teamarr can
+              // use and one measured on a population its rules never meet.
+              const channel = channelById.get(jobChannel.get(streamId) ?? -1);
+              const channelGroupId = channel?.groupId ?? null;
+              const channelGroupName =
+                channelGroupId === null ? '' : (groupNames.get(channelGroupId) ?? '');
               store.recordQuality({
                 providerId: source.providerId,
                 providerName: providerNames.get(source.providerId) ?? String(source.providerId),
                 tier: tierOf(source.name),
                 groupId: source.groupId,
                 groupName: source.groupId === null ? '' : (groupNames.get(source.groupId) ?? ''),
+                channelGroupId,
+                channelGroupName,
+                policyMode: channel
+                  ? eligibility.policyFor(channelGroupId, channelGroupName || undefined).mode
+                  : '',
                 audioOnly,
                 alive: best.alive,
                 black: Boolean(best.black),

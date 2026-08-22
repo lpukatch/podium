@@ -223,6 +223,25 @@ CREATE TABLE IF NOT EXISTS quality_samples (
     -- evidence said demote. It is here to be held constant, not to be shipped.
     group_id      INTEGER,
     group_name    TEXT    NOT NULL DEFAULT '',
+    -- The channel this probe was run for, and the probing policy its group
+    -- resolved to at that moment.
+    --
+    -- The provider group above says where a stream came from; this says what it
+    -- was being ranked *for*, which is the question the export actually answers.
+    -- A Teamarr rule is evaluated behind a fixture channel, so a sample taken
+    -- for a film library describes a population the rule will never meet, and
+    -- pooling the two makes the baseline every exported delta is quoted against
+    -- a number from the wrong catalogue.
+    --
+    -- The policy is denormalised alongside the id for the same reason the
+    -- provider name is: it is what the group was set to when the probe ran, and
+    -- re-reading it later would re-judge months of history against a rule that
+    -- has since been edited. Empty on rows written before this column existed,
+    -- which is a third state -- unjudgeable, not out of scope -- and is
+    -- reported as such rather than silently dropped.
+    channel_group_id   INTEGER,
+    channel_group_name TEXT NOT NULL DEFAULT '',
+    policy_mode        TEXT NOT NULL DEFAULT '',
     -- Radio and music feeds carry no video track at all, so their bitrate is
     -- an audio bitrate: a few hundred kbps that means "fine" rather than
     -- "throttled". Pooled into a video model they read as catastrophic, and on
@@ -569,6 +588,11 @@ export interface QualitySample {
   tier: string;
   groupId: number | null;
   groupName: string;
+  /** The channel the probe was run for -- see the column comment. */
+  channelGroupId: number | null;
+  channelGroupName: string;
+  /** The channel group's probing policy at probe time; '' when unrecorded. */
+  policyMode: string;
   /** Video-less feed: its bitrate is an audio bitrate. See the column comment. */
   audioOnly: boolean;
   alive: boolean;
@@ -617,6 +641,13 @@ export class Store {
         // old cadence and starts backing them off from there, rather than
         // inheriting a streak it never measured.
         ['probe_cache', 'dead_streak INTEGER NOT NULL DEFAULT 0'],
+        // Samples recorded before the quality scope existed carry no channel
+        // and no policy. Empty rather than a guessed default: '' means "never
+        // recorded", and `buildProfile` counts those separately from the ones
+        // it judged and rejected.
+        ['quality_samples', 'channel_group_id INTEGER'],
+        ['quality_samples', "channel_group_name TEXT NOT NULL DEFAULT ''"],
+        ['quality_samples', "policy_mode TEXT NOT NULL DEFAULT ''"],
       ] as const) {
         try {
           this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`);
@@ -1297,15 +1328,19 @@ export class Store {
   recordQuality(sample: QualitySample): void {
     this.sql(
       `INSERT INTO quality_samples
-         (provider_id, provider_name, tier, group_id, group_name, audio_only,
+         (provider_id, provider_name, tier, group_id, group_name,
+          channel_group_id, channel_group_name, policy_mode, audio_only,
           sampled_at, alive, black, bitrate_kbps, measured, height, fps)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       sample.providerId,
       sample.providerName,
       sample.tier,
       sample.groupId,
       sample.groupName,
+      sample.channelGroupId,
+      sample.channelGroupName,
+      sample.policyMode,
       sample.audioOnly ? 1 : 0,
       Date.now(),
       sample.alive ? 1 : 0,
@@ -1325,6 +1360,13 @@ export class Store {
    * age limit alone lets a provider with thousands of streams write an
    * unbounded table inside the window; the count limit alone keeps a bucket
    * that stopped being probed a year ago answering as though it were current.
+   *
+   * The bucket includes the policy the sample was probed under, so a provider's
+   * event samples cannot be evicted by its VOD ones. Without that the cap and
+   * the scope work against each other: a catalogue is mostly not events, so the
+   * 400 most recent probes of a (provider, tier) are mostly out of scope, and
+   * the gate would then be reading a window the trim had already emptied of
+   * everything it wanted.
    */
   trimQuality(perBucket = SAMPLES_PER_BUCKET, olderThanMs = QUALITY_HISTORY_MS): number {
     let removed = this.sql('DELETE FROM quality_samples WHERE sampled_at < ?').run(
@@ -1335,7 +1377,8 @@ export class Store {
          SELECT rowid FROM (
            SELECT rowid,
                   ROW_NUMBER() OVER (
-                    PARTITION BY provider_id, tier ORDER BY sampled_at DESC, rowid DESC
+                    PARTITION BY provider_id, tier, policy_mode
+                        ORDER BY sampled_at DESC, rowid DESC
                   ) AS rank
              FROM quality_samples
          ) WHERE rank > ?
@@ -1357,12 +1400,14 @@ export class Store {
     const rows = (
       sinceMs === undefined
         ? this.sql(
-            `SELECT provider_id, provider_name, tier, group_id, group_name, audio_only,
+            `SELECT provider_id, provider_name, tier, group_id, group_name,
+                    channel_group_id, channel_group_name, policy_mode, audio_only,
                     sampled_at, alive, black, bitrate_kbps, measured, height, fps
                FROM quality_samples ORDER BY sampled_at DESC`,
           ).all()
         : this.sql(
-            `SELECT provider_id, provider_name, tier, group_id, group_name, audio_only,
+            `SELECT provider_id, provider_name, tier, group_id, group_name,
+                    channel_group_id, channel_group_name, policy_mode, audio_only,
                     sampled_at, alive, black, bitrate_kbps, measured, height, fps
                FROM quality_samples WHERE sampled_at >= ? ORDER BY sampled_at DESC`,
           ).all(Date.now() - sinceMs)
@@ -1372,6 +1417,9 @@ export class Store {
       tier: string;
       group_id: number | null;
       group_name: string;
+      channel_group_id: number | null;
+      channel_group_name: string;
+      policy_mode: string;
       audio_only: number;
       sampled_at: number;
       alive: number;
@@ -1387,6 +1435,9 @@ export class Store {
       tier: row.tier,
       groupId: row.group_id,
       groupName: row.group_name,
+      channelGroupId: row.channel_group_id,
+      channelGroupName: row.channel_group_name ?? '',
+      policyMode: row.policy_mode ?? '',
       audioOnly: Boolean(row.audio_only),
       sampledAt: row.sampled_at,
       alive: Boolean(row.alive),

@@ -27,9 +27,22 @@ interface Effect {
   deltaKbps: number;
 }
 
+interface ScopeSummary {
+  eventOnly: boolean;
+  include: string[];
+  exclude: string[];
+  inScope: number;
+  excluded: number;
+  notIncluded: number;
+  notEvent: number;
+  unrecorded: number;
+}
+
 interface Profile {
   generatedAt: number;
   totalSamples: number;
+  recordedSamples: number;
+  scope: ScopeSummary;
   audioOnlySamples: number;
   baselineKbps: number;
   buckets: Bucket[];
@@ -69,6 +82,33 @@ export function tone(kbps: number): string {
   return muted;
 }
 
+/**
+ * The scope in a sentence.
+ *
+ * Written out rather than shown as three fields because the rules compose in a
+ * way a field list does not say: the excludes are a veto over the other two,
+ * and someone reading "events" beside "*VOD*" has no way to know which wins.
+ */
+export function describeScope(scope: ScopeSummary): string {
+  const parts: string[] = [];
+  if (scope.eventOnly) parts.push('channels in groups set to after EPG start or assigned');
+  if (scope.include.length > 0) parts.push(`groups matching ${scope.include.join(', ')}`);
+  const admitted = parts.length > 0 ? parts.join(', or ') : 'every probe';
+  return scope.exclude.length > 0
+    ? `Learning from ${admitted} — except groups matching ${scope.exclude.join(', ')}.`
+    : `Learning from ${admitted}.`;
+}
+
+/** Why samples were left out, as counted rows, most explicable first. */
+export function scopeDrops(scope: ScopeSummary): Array<{ label: string; count: number }> {
+  return [
+    { label: 'excluded by pattern', count: scope.excluded },
+    { label: 'not an event channel', count: scope.notEvent },
+    { label: 'matched no include pattern', count: scope.notIncluded },
+    { label: 'probed before the scope was recorded', count: scope.unrecorded },
+  ].filter((row) => row.count > 0);
+}
+
 function ago(at: number): string {
   const hours = (Date.now() - at) / 3_600_000;
   if (hours < 1) return 'under an hour ago';
@@ -80,27 +120,31 @@ function ago(at: number): string {
  * What Podium has learned about stream quality by provenance, and the export
  * that hands it to Teamarr.
  *
- * The group table leads because it is the strongest thing here and the only
- * place it exists: a group's effect routinely spans thousands of kbps where an
- * account's spans tens. It is also the one Podium cannot export -- Teamarr
- * matches a group only on channel-source streams -- so a view is the only way
- * it reaches anybody.
+ * The group table leads because it is the strongest thing here: a group's
+ * effect routinely spans thousands of kbps where an account's spans tens, so it
+ * is both the most useful row to read and the most valuable rule to ship.
  */
 export function QualityView() {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [minSamples, setMinSamples] = useState(20);
-  const [pointsPerMbps, setPointsPerMbps] = useState(10);
+  const [pointsPerMbps, setPointsPerMbps] = useState(5);
   const [showAudio, setShowAudio] = useState(false);
   const [showThin, setShowThin] = useState(false);
+  // A preview, never a saved setting. The cost of a scope that is too narrow is
+  // invisible from inside it -- a smaller table looks like a quieter install --
+  // so the answer to "what am I not being shown" has to be one click away.
+  const [ungated, setUngated] = useState(false);
   const [merging, setMerging] = useState(false);
   const [merged, setMerged] = useState('');
 
-  const load = useCallback(async (min: number) => {
+  const load = useCallback(async (min: number, open: boolean) => {
     setLoading(true);
     try {
-      const resp = await fetch(`/api/quality-profile?minSamples=${min}`);
+      const resp = await fetch(
+        `/api/quality-profile?minSamples=${min}${open ? '&eventOnly=0&include=&exclude=' : ''}`,
+      );
       const body = await resp.json();
       if (!resp.ok || body.error) {
         setError(String(body.error ?? `HTTP ${resp.status}`));
@@ -116,10 +160,15 @@ export function QualityView() {
   }, []);
 
   useEffect(() => {
-    void load(minSamples);
-  }, [load, minSamples]);
+    void load(minSamples, ungated);
+  }, [load, minSamples, ungated]);
 
-  const query = `minSamples=${minSamples}&pointsPerMbps=${pointsPerMbps}`;
+  // The export carries the scope being previewed, so the file always describes
+  // the table it was downloaded from. Handing over rules fitted on a population
+  // the page was not showing is the one way this feature could lie outright.
+  const query =
+    `minSamples=${minSamples}&pointsPerMbps=${pointsPerMbps}` +
+    (ungated ? '&eventOnly=0&include=&exclude=' : '');
 
   /**
    * Merge Podium's rules into the file Teamarr exported.
@@ -181,6 +230,8 @@ export function QualityView() {
   const counted =
     profile?.buckets.filter((b) => b.samples >= minSamples && !b.audioOnly).length ?? 0;
 
+  const drops = profile ? scopeDrops(profile.scope) : [];
+
   if (loading && !profile) {
     return <p className={`p-5 ${muted}`}>Loading…</p>;
   }
@@ -189,7 +240,7 @@ export function QualityView() {
     return <p className="p-5 text-[var(--color-bad)]">{error}</p>;
   }
 
-  if (profile && profile.totalSamples === 0) {
+  if (profile && profile.totalSamples === 0 && profile.recordedSamples === 0) {
     return (
       <div className={`m-5 p-5 ${card}`}>
         <h2 className="text-lg">Nothing measured yet</h2>
@@ -198,6 +249,38 @@ export function QualityView() {
           passes run — no extra probing, and it accumulates in dry-run too. A few days of ordinary
           passes is usually enough for the first buckets to clear the sample floor.
         </p>
+      </div>
+    );
+  }
+
+  // Samples exist and the gate took all of them. Distinguished from having no
+  // samples at all because the two look identical on the page and are fixed in
+  // opposite ways -- one by waiting, one by widening the scope.
+  if (profile && profile.totalSamples === 0) {
+    return (
+      <div className={`m-5 p-5 ${card}`}>
+        <h2 className="text-lg">Nothing in scope</h2>
+        <p className={`mt-2 max-w-[75ch] text-sm ${muted}`}>
+          {profile.recordedSamples.toLocaleString()} samples are held, and the scope admits none of
+          them. {describeScope(profile.scope)}{' '}
+          {profile.scope.unrecorded > 0 && (
+            <>
+              {profile.scope.unrecorded.toLocaleString()} of them were probed before Podium recorded
+              which channel a probe was for, so their policy cannot be read — name their groups
+              under <strong>Always learn from groups matching</strong> in Settings to use them, or
+              leave them and let new passes accumulate.
+            </>
+          )}
+        </p>
+        <label className={`mt-3 flex cursor-pointer items-center gap-2 text-sm ${muted}`}>
+          <input
+            type="checkbox"
+            checked={ungated}
+            onChange={(e) => setUngated(e.target.checked)}
+            className="h-4 w-4 accent-[var(--color-accent)]"
+          />
+          Ignore the scope and show everything measured
+        </label>
       </div>
     );
   }
@@ -222,14 +305,43 @@ export function QualityView() {
           fitted against each other, so a group is compared against other groups at the same tier on
           the same account rather than against the install as a whole.
         </p>
+
+        {profile && (
+          <div className="mt-4 border-t border-[var(--color-line)] pt-3">
+            <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
+              <p className={`max-w-[70ch] text-sm ${muted}`}>
+                <strong className="text-[var(--color-text)]">Scope.</strong>{' '}
+                {describeScope(profile.scope)}{' '}
+                {drops.length > 0 && (
+                  <>
+                    {(profile.recordedSamples - profile.totalSamples).toLocaleString()} of{' '}
+                    {profile.recordedSamples.toLocaleString()} samples sit outside it —{' '}
+                    {drops.map((d) => `${d.count.toLocaleString()} ${d.label}`).join(', ')}. They
+                    are kept, not deleted: widening the scope in Settings brings them back with no
+                    waiting.
+                  </>
+                )}
+              </p>
+              <label className={`flex cursor-pointer items-center gap-2 text-sm ${muted}`}>
+                <input
+                  type="checkbox"
+                  checked={ungated}
+                  onChange={(e) => setUngated(e.target.checked)}
+                  className="h-4 w-4 accent-[var(--color-accent)]"
+                />
+                Ignore the scope
+              </label>
+            </div>
+          </div>
+        )}
       </section>
 
       <section className={`${card} p-5`}>
         <h3 className="text-base">Groups</h3>
         <p className={`mt-1 max-w-[70ch] text-sm ${muted}`}>
-          The strongest signal Podium has, and the one it does not export: Teamarr can only match a
-          group on channel-source streams. It is fitted anyway, because leaving it out of the model
-          lets it contaminate the account and tier numbers that do get exported.
+          The strongest signal Podium has — a group is how a provider organises what it sells, and a
+          sports package and a VOD dump are not the same product. Exported as Teamarr Group rules,
+          matched on the name exactly as the provider writes it.
         </p>
         <EffectTable
           effects={profile?.groups ?? []}
@@ -240,7 +352,9 @@ export function QualityView() {
       <div className="grid gap-4 md:grid-cols-2">
         <section className={`${card} p-5`}>
           <h3 className="text-base">Provider accounts</h3>
-          <p className={`mt-1 text-sm ${muted}`}>Exported as Teamarr M3U Account rules.</p>
+          <p className={`mt-1 text-sm ${muted}`}>
+            Exported as Teamarr M3U Account rules — wholesale, like groups.
+          </p>
           <EffectTable
             effects={profile?.accounts ?? []}
             empty="No account has enough samples yet."
@@ -365,6 +479,9 @@ export function QualityView() {
             />
             <span className={`mt-1 block text-xs ${muted}`}>
               Only the ratio against your own rules matters. Raise it if those use larger numbers.
+              No generated rule exceeds ±15 either way: Teamarr already scores a measured stream
+              from the bitrate Podium publishes, and a prior about streams like it should never
+              outrank a reading of the stream itself.
             </span>
           </label>
         </div>
@@ -389,6 +506,14 @@ export function QualityView() {
           </label>
           {merged && <span className={`text-sm ${muted}`}>{merged}</span>}
         </div>
+
+        {ungated && (
+          <p className="mt-3 max-w-[70ch] text-sm text-[var(--color-bad)]">
+            The scope is switched off, so these rules would be fitted on every probe this install
+            has taken — VOD and filler included — and evaluated on fixtures. Turn it back on above
+            before exporting unless you mean that.
+          </p>
+        )}
 
         <p className={`mt-3 max-w-[70ch] text-sm ${muted}`}>
           Teamarr&apos;s import <strong>replaces</strong> its whole rule set. Export your rules from

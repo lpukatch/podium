@@ -23,7 +23,7 @@ export interface FieldSpec {
   label: string;
   help: string;
   /** Grouping for the settings page. */
-  section: 'dispatcharr' | 'behaviour' | 'probing';
+  section: 'dispatcharr' | 'behaviour' | 'probing' | 'quality';
   /**
    * Stored units per displayed unit.
    *
@@ -216,6 +216,27 @@ export const FIELDS: FieldSpec[] = [
     section: 'behaviour',
     min: 1,
     max: 10_000,
+  },
+  {
+    key: 'PODIUM_QUALITY_EVENT_ONLY',
+    kind: 'boolean',
+    label: 'Learn only from event channels',
+    help: 'Count a probe towards the priors only when the channel it was run for sits in a group set to "after EPG start" or "assigned" — the groups you have already declared are events. On, because the exported rules are evaluated at kickoff, and a catalogue is mostly VOD and filler: learning from all of it makes the baseline a film library\'s bitrate. Samples taken before this setting existed carry no policy and are shown as unrecorded until the patterns below claim them.',
+    section: 'quality',
+  },
+  {
+    key: 'PODIUM_QUALITY_INCLUDE_GROUPS',
+    kind: 'string',
+    label: 'Always learn from groups matching',
+    help: 'Globs, comma-separated — e.g. "* SPORT*, *PPV*". Matched against both the provider group and the channel group, same syntax as the group patterns. Admits a group whatever its policy says, and it is the only setting that reaches backwards: naming the groups your existing history came from puts those samples in scope today.',
+    section: 'quality',
+  },
+  {
+    key: 'PODIUM_QUALITY_EXCLUDE_GROUPS',
+    kind: 'string',
+    label: 'Never learn from groups matching',
+    help: 'Globs, comma-separated — e.g. "*VOD*, *MOVIE*, *24/7*". A veto: a sample either name matches is dropped from the fit however it was admitted. Nothing is deleted — widening the rules later brings the samples back.',
+    section: 'quality',
   },
   {
     key: 'PODIUM_MAX_CONCURRENT_PROBES',
