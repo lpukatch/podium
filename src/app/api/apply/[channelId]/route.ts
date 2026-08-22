@@ -90,7 +90,22 @@ export async function POST(request: Request, context: { params: Promise<{ channe
 
     const previous = channel.streams ?? [];
     const removeUnmatched = body.removeUnmatched ?? config.PODIUM_REMOVE_UNMATCHED;
-    const targetOrder = body.allowAssign ? order : composeOrder(order, previous, removeUnmatched);
+    // `allowAssign` says the caller composed this order itself -- the check
+    // panel sends what the check composed, assignments included -- so
+    // re-composing here would strip every addition back out again, since
+    // composeOrder keeps only what the channel already carries.
+    //
+    // The tail is still worth restoring. A stream assigned to the channel
+    // between the check and the apply is in `previous` and not in `order`, and
+    // writing `order` verbatim would unassign it without anyone asking. That is
+    // what composeOrder's tail does, and it is skipped only when the caller has
+    // explicitly asked to drop whatever the order leaves out.
+    const sent = new Set(order);
+    const targetOrder = body.allowAssign
+      ? removeUnmatched
+        ? order
+        : [...order, ...previous.filter((id) => !sent.has(id))]
+      : composeOrder(order, previous, removeUnmatched);
 
     if (targetOrder.length === 0) {
       return NextResponse.json({ error: 'composed order is empty' }, { status: 400 });

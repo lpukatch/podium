@@ -12,7 +12,7 @@ import { orderToApply, pendingChange } from './check-panel';
  */
 const settled = {
   identical: true,
-  proposed: [1, 2, 3],
+  dropOrder: [1, 2, 3],
   kept: [1, 2, 3, 4, 5],
   workerOrder: [1, 2, 3, 4, 5],
   unclaimed: [{ id: 4 }, { id: 5 }] as { id: number }[],
@@ -38,6 +38,22 @@ describe('which order an apply sends', () => {
     // Nothing to remove, but the answer must not depend on which install it is.
     const pruned = { ...settled, workerOrder: [1, 2, 3] };
     expect(orderToApply(pruned, true)).toEqual([1, 2, 3]);
+  });
+
+  it('sends the composed drop order, not the raw ranking', () => {
+    // The bug: the drop sent `proposed` -- every stream the rule claims,
+    // including the dead ones and the ones the cap and the block list keep off
+    // -- and the apply was told not to re-compose it. A tick labelled "remove"
+    // assigned six streams. `dropOrder` is the composed answer, so a claimed
+    // stream that is not fit to be added stays off.
+    const withCandidates = {
+      ...settled,
+      dropOrder: [1, 2, 3, 6],
+      kept: [1, 2, 3, 6, 4, 5],
+      workerOrder: [1, 2, 3, 6, 4, 5],
+    };
+    expect(orderToApply(withCandidates, true)).toEqual([1, 2, 3, 6]);
+    expect(orderToApply(withCandidates, false)).toEqual([1, 2, 3, 6, 4, 5]);
   });
 });
 

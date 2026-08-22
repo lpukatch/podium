@@ -30,6 +30,7 @@ interface CheckResult {
   current: number[];
   proposed: number[];
   kept: number[];
+  dropOrder: number[];
   workerOrder?: number[];
   truncated?: boolean;
   totalHits?: number;
@@ -46,7 +47,7 @@ const btn =
 const pill = 'inline-block rounded-full px-2 py-0.5 text-xs whitespace-nowrap';
 
 /** The three orders an apply may send, and which one the tick asks for. */
-type OrderChoice = Pick<CheckResult, 'proposed' | 'kept' | 'workerOrder'>;
+type OrderChoice = Pick<CheckResult, 'dropOrder' | 'kept' | 'workerOrder'>;
 
 /**
  * Which of the check's orders to send to `/api/apply`.
@@ -59,11 +60,17 @@ type OrderChoice = Pick<CheckResult, 'proposed' | 'kept' | 'workerOrder'>;
  * the order it was handed leaves out, and that one leaves out nothing.
  *
  * So the tick has to be consulted before `workerOrder`, not after it. Written
- * as `workerOrder ?? (drop ? proposed : kept)` the tick is unreachable, since
+ * as `workerOrder ?? (drop ? dropOrder : kept)` the tick is unreachable, since
  * `workerOrder` is always present.
+ *
+ * The drop sends `dropOrder` and never `proposed`. `proposed` is the raw
+ * ranking the table is drawn from -- every claimed stream, dead ones included
+ * -- and the apply is told not to re-compose what it is handed, so sending it
+ * would put the whole list on the channel. `dropOrder` is the same list already
+ * composed against the cap, the block list and what is fit to watch.
  */
 export function orderToApply(result: OrderChoice, dropUnclaimed: boolean): number[] {
-  if (dropUnclaimed) return result.proposed;
+  if (dropUnclaimed) return result.dropOrder;
   return result.workerOrder ?? result.kept;
 }
 
