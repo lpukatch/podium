@@ -8,8 +8,8 @@
 
 import { describe, expect, it } from 'vitest';
 import type { ProbeResult } from './probe';
-import { Store } from './store';
 import { DEFAULT_STRATEGY } from './scoring';
+import { Store } from './store';
 import { checkRules, compileRules, factsFor, type RuleInput, toJsRegExp } from './teamarr';
 
 const LIVE_RULES: RuleInput[] = [
