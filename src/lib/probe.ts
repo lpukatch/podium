@@ -454,8 +454,12 @@ export async function probe(url: string, options: ProbeOptions = {}): Promise<Pr
   if (refusal) return { ...DEAD, elapsedMs: 0, error: refusal };
 
   const args = [
+    // `error`, never `quiet`: a failed probe says why only on stderr, and the
+    // last line of it is what `deadReason` classifies. Silence the channel and
+    // every dead stream reports `exit 1` -- one `other` bucket where the
+    // auth/not-found/server/unreachable split used to be.
     '-v',
-    'quiet',
+    'error',
     ...userAgentArgs(url, userAgent),
     ...protocolArgs(url),
     '-analyzeduration',
