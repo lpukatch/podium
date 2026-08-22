@@ -162,6 +162,47 @@ export const configSchema = z.object({
    */
   PODIUM_EPG_TTL_MS: num(60 * 60_000),
 
+  /**
+   * Learn quality priors only from channels an operator has marked as events.
+   *
+   * The priors exist to rank a fixture's streams before anyone has probed
+   * them, and the rules built from them are evaluated at kickoff. A catalogue
+   * is mostly not that -- VOD, 24/7 filler, entertainment packages -- so
+   * learning from all of it measures the wrong population: the baseline every
+   * exported delta is quoted against becomes a film library's bitrate.
+   *
+   * On by default, because a rule fitted on the wrong population is worse than
+   * no rule: it is acted on. `after_epg_start` and `assigned` are the modes
+   * that qualify, both being ones an operator set deliberately on a named
+   * group (see `assignmentIsRule`).
+   *
+   * Note what that means on an upgrade: samples recorded before this existed
+   * carry no policy and cannot be judged, so the Quality tab reports them as
+   * unrecorded and leaves them out until either new probes accumulate or
+   * PODIUM_QUALITY_INCLUDE_GROUPS names the groups they came from.
+   */
+  PODIUM_QUALITY_EVENT_ONLY: bool(true),
+  /**
+   * Globs that put a group in scope whatever its policy says, comma- or
+   * newline-separated -- e.g. `* SPORT*, *PPV*`.
+   *
+   * Matched against the provider group and the channel group, with the `*`/`?`
+   * syntax the group policy patterns already use. This is the only lever that
+   * reaches backwards: an install with months of history can name the groups
+   * those samples came from and have them count today, rather than waiting for
+   * the same measurements to be taken again.
+   */
+  PODIUM_QUALITY_INCLUDE_GROUPS: z.string().default(''),
+  /**
+   * Globs that keep a group out however it was admitted -- e.g. `*VOD*,
+   * *MOVIE*, *24/7*`.
+   *
+   * A veto, so it also covers the case an event policy admits wrongly: a
+   * fixture channel carrying a filler group's streams contributes the filler
+   * to the prior otherwise.
+   */
+  PODIUM_QUALITY_EXCLUDE_GROUPS: z.string().default(''),
+
   PODIUM_LANE_STAGGER_MS: num(0),
   /**
    * Ceiling on probes in flight at once, across every provider lane.

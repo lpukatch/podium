@@ -225,6 +225,9 @@ Policy is per Dispatcharr channel group:
 | `after_epg_start` | rule or not, but only once the channel's EPG programme has started |
 | `assigned` | rule or not, on the normal freshness schedule |
 
+Any of them can carry `measure_only`, which probes the group without ever
+writing to it — see [Measure only](#measure-only-channels-another-app-owns).
+
 The policy says *when* a channel is checked. What decides whether it is checked
 at all is having a rule: under `always` — which is also what a group you have
 never touched resolves to — a channel with no alias is not podium's to look at,
@@ -285,6 +288,47 @@ every stream on the channel is a candidate, scored on what it measures.
 The policy is the row of chips at the top of a group. `assigned` is what
 Dispatcharr has on the channel now; `matched` is what your rules claim — the two
 differing is how you spot a stream the provider has just added.
+
+#### Measure only (channels another app owns)
+
+A fixture channel created by Teamarr carries its own idea of stream order and
+rewrites it on its own schedule. A reorder written from Podium is overwritten,
+which makes the two applications take turns clobbering the field a viewer
+actually reads — and Podium loses that race by design.
+
+What is worth having from those channels is the *measurement*. Probed after
+kickoff, while nobody is watching, they are the only source of what the right
+order would have been, which is what the quality priors are fitted from and what
+the exported rules hand back to the app that owns the channel.
+
+Toggling **Measure only** on a group — or `"measure_only": true` in
+`rules.json` / `rules.yml`, on a group or a name pattern — keeps everything
+except the writes:
+
+| still happens | suppressed |
+| --- | --- |
+| the probe, at the time the policy says | writing the stream order |
+| the cached verdict and its TTL | assigning a matched stream to the channel |
+| the quality sample the priors are fitted from | |
+| `stream_stats` published to Dispatcharr | |
+
+Auto-assignment is suppressed with the reorder, and deliberately so: adding a
+stream to a channel another app curates is the more intrusive of the two writes,
+not the lesser.
+
+It is orthogonal to the mode, so the natural setting for a Teamarr install is
+both at once — probe once the fixture is under way, and never write:
+
+```json
+"group_patterns": [
+  { "pattern": "Auto | *", "mode": "after_epg_start", "measure_only": true }
+]
+```
+
+Channels handled this way are counted as `measured only` in the pass line on the
+dashboard rather than folded into `already in order`, which means something
+else — that the channel was checked and found correct. These were ranked and the
+ranking was withheld.
 
 #### Audio only (Radio & Music groups)
 
@@ -444,6 +488,36 @@ Nothing about this changes how Podium probes. The record is a byproduct of
 verdicts already being produced, so it costs no extra provider connections, and
 it accumulates in dry-run exactly as it does live.
 
+### What it learns from
+
+A rule exported from this is evaluated behind a fixture channel, at kickoff. A
+catalogue is mostly not that — VOD dumps, 24/7 filler, entertainment packages —
+so learning from all of it measures the wrong population twice over: the
+baseline every exported number is quoted against becomes a film library's
+bitrate, and an account's effect becomes a claim about its movie encoder.
+
+**Settings → Quality priors** decides which probes count. Two signals, and an
+`exclude` that vetoes both:
+
+| Setting | What it does |
+| --- | --- |
+| **Learn only from event channels** | Counts a probe only when the channel it was run for sits in a group set to `after_epg_start` or `assigned` — the groups you already declared are events under [Channel groups](#channel-groups). On by default. |
+| **Always learn from groups matching** | Globs — `* SPORT*, *PPV*` — matched against the provider group *and* the channel group. Admits a group whatever its policy says. |
+| **Never learn from groups matching** | Globs — `*VOD*, *MOVIE*, *24/7*` — that drop a sample however it was admitted. |
+
+Every sample is still recorded, whatever the scope says. The gate applies when
+the profile is *built*, so narrowing it costs nothing permanent and widening it
+takes effect immediately rather than after another month of probing. The
+Quality tab reports what the scope dropped and why, and **Ignore the scope**
+shows the ungated profile for comparison without saving anything.
+
+One transitional case worth knowing about: samples recorded before this
+existed carry no channel and no policy, so under **Learn only from event
+channels** they cannot be judged and are reported as *probed before the scope
+was recorded* rather than silently dropped. Naming their groups under **Always
+learn from groups matching** puts them back in scope today; otherwise new
+passes replace them over the following weeks.
+
 ### The profile
 
     GET /api/quality-profile
@@ -454,6 +528,13 @@ measured — along with the per-account and per-tier effects derived from them.
 `?minSamples=` sets how many samples a bucket needs before it is allowed to
 contribute an effect; the default is 20, because a reading off four streams is
 noise with a number attached.
+
+The response describes the scoped population: `totalSamples` is what the fit
+read, `recordedSamples` is everything held, and `scope` carries the rules in
+force and a count per reason a sample was left out. `?eventOnly=0`,
+`?include=` and `?exclude=` override the configured scope for one request —
+`?eventOnly=0&include=&exclude=` is the ungated profile — which is how to ask
+what a change would do before making it.
 
 Bitrate percentiles use only bitrates that were *read*, on streams that were
 alive and not black. A container's declared bitrate, a dead stream's zero and a
@@ -466,11 +547,18 @@ often those happen is carried separately, as the alive and black rates.
 
 Returns a `stream-ordering-rules.json` that [Teamarr](https://github.com/pharaoh-labs/teamarr)'s
 **Channels → Stream Priority → Import** accepts as-is: one scoring rule per
-provider account, one per quality tier, each carrying that dimension's measured
-distance from your install's baseline. Teamarr sums the rules a stream matches,
-so an account 2Mbps above the house average and an `FHD` token worth another
-1.5 come to +35 together — no probe on Teamarr's side, and the ordering applies
-to a stream the moment it appears.
+provider account, one per provider group and one per quality tier, each
+carrying that dimension's measured distance from your install's baseline.
+Teamarr sums the rules a stream matches, so a good account, a good group and an
+`FHD` token add up — no probe on Teamarr's side, and the ordering applies to a
+stream the moment it appears.
+
+The three are what Teamarr can match on, and they split the way its matcher
+does: `m3u` and `group` are wholesale — a stream either came from that account
+or that group — while `regex` is the only rule that reads the stream's own
+name. Podium writes no `stats_metric` rules, deliberately: those already read
+the `ffmpeg_output_bitrate` Podium publishes to Dispatcharr, so generating them
+here would score the same measurement twice.
 
 The effects are fitted against each other rather than averaged separately, so
 an account is credited for the streams it runs *better than other accounts in
@@ -482,12 +570,12 @@ install this was developed against it collapsed four provider accounts into a
 the sign of one account's effect — from promote to demote — purely because that
 account also carried a radio package.
 
-Podium fits a third effect per **provider group** and does not export it. A
-group is the strongest single predictor it has, and also the one Teamarr can
-only match on channel-source streams, so shipping it as a rule would mostly do
-nothing. It is fitted because leaving it out of the *model* lets it contaminate
-the two effects that do ship, and published in the profile because "which of my
-groups are any good" is a question worth being able to answer.
+The **provider group** is the strongest single predictor here — a group's
+effect routinely spans thousands of kbps where an account's spans tens, which
+stands to reason: a group is how a provider organises what it sells, and a
+sports package and a VOD dump are not the same product. It is also the effect
+that most needs fitting jointly rather than alone, because an account's number
+otherwise absorbs the quality of whichever groups it happens to carry.
 
 Audio-only streams — radio, SiriusXM, anything on a group marked **Audio only**
 — are recorded but held out of the video model entirely. Their bitrate is an
@@ -495,10 +583,42 @@ audio bitrate, so a few hundred kbps means a healthy stream rather than a
 throttled one, and pooling them in reads as a catastrophic provider. On the
 install above they were 18% of all probes and 30% of the untagged tier.
 
-`?pointsPerMbps=` scales the result; the default of 10 puts a provider running
-3Mbps above average at +30, which reads alongside a hand-written "+30 for the
+`?pointsPerMbps=` scales the result; the default of 5 puts a provider running
+3Mbps above average at +15, which reads alongside a hand-written "+20 for the
 home feed" as an opinion of comparable strength rather than one that drowns it.
 Raise it if your own rules use larger numbers — only the ratio matters.
+
+No generated rule exceeds **±15** whatever it fitted. Teamarr scores a stream
+it has measurements for from `stats_metric` rules reading the bitrate Podium
+published — a reading of *that stream* — while everything generated here is an
+inference about streams of the same provenance. The cap keeps the strongest
+inference below the first rung of a measured ladder, so a stream measured at
+10Mbps outranks one that merely comes from a good account.
+
+### The regex form
+
+Tier rules are emitted as
+
+```
+(?i).*(?<![A-Za-z0-9])(?:FHD|1080P|1080I)\d*(?![A-Za-z]).*
+```
+
+which is more armour than it looks. The inline `(?i)` because the exported
+pattern carries no flags of its own and every token is written uppercase —
+without it a rule for `1080P` scores nothing on the `1080p` providers actually
+write. The `.*` on each end because a rules file cannot say whether Teamarr
+calls `search`, `match` or `fullmatch`, and under `match` an unanchored pattern
+is pinned to offset 0 and fires only on names that *begin* with the token. The
+left boundary stops `HD` matching inside `FHD` and `UHD`. The right boundary is
+deliberately weaker — `\d*` then "no letter" — because providers number their
+feeds: `EPL01`, `EPL05`, `1080p60`. A symmetric boundary rejects all three
+while looking correct.
+
+Verified against Python `re` under all three call styles.
+
+The exported file carries the scope it was fitted under, in its `podium` block.
+The points are otherwise unfalsifiable once they leave: a +40 fitted on event
+channels and a +40 fitted on a film library are the same two characters.
 
 Streams whose names advertise no quality at all are the reference level and get
 no rule — they score their account's effect alone, which is the right answer

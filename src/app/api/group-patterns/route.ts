@@ -11,6 +11,7 @@ interface PatternRow {
   window_minutes?: number;
   require_live?: boolean;
   audio_only?: boolean;
+  measure_only?: boolean;
 }
 
 /** Add or replace a name-pattern rule, and report which groups it would hit. */
@@ -20,6 +21,8 @@ export async function PUT(request: Request) {
     mode?: string;
     audioOnly?: boolean;
     audio_only?: boolean;
+    measureOnly?: boolean;
+    measure_only?: boolean;
   };
   const pattern = (body.pattern ?? '').trim();
   const mode = body.mode ?? ALWAYS;
@@ -36,8 +39,12 @@ export async function PUT(request: Request) {
     body.audioOnly ??
     body.audio_only ??
     (existing >= 0 ? patterns[existing]?.audio_only : undefined);
+  const measureOnly =
+    body.measureOnly ??
+    body.measure_only ??
+    (existing >= 0 ? patterns[existing]?.measure_only : undefined);
 
-  if (mode === ALWAYS && !audioOnly) {
+  if (mode === ALWAYS && !audioOnly && !measureOnly) {
     // `always` with no custom flags is the default; storing it would just be noise.
     if (existing >= 0) patterns.splice(existing, 1);
   } else {
@@ -47,6 +54,7 @@ export async function PUT(request: Request) {
       grace_minutes: 5,
       window_minutes: 180,
       ...(audioOnly ? { audio_only: true } : {}),
+      ...(measureOnly ? { measure_only: true } : {}),
     };
     // Carried over rather than reset: `require_live` has no control in this UI,
     // so an operator who turned it off did it by hand in the rules file, and

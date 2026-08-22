@@ -81,6 +81,30 @@ export interface GroupPolicy {
    * bypass the video bitrate floor, and score on audio quality.
    */
   audioOnly?: boolean;
+  /**
+   * Probe the group's channels, but never write to them.
+   *
+   * For channels another app owns. A fixture channel created by Teamarr has
+   * its own idea of stream order and rewrites it on its own schedule, so a
+   * reorder from here is overwritten -- two applications taking turns
+   * rewriting the same field, with the last writer deciding what a viewer
+   * gets. Podium loses that race by design, and should not enter it.
+   *
+   * What is worth having from those channels is the measurement. Probing them
+   * after kickoff, while nobody is watching, is the only way to learn what the
+   * right order *would* have been -- which is what the quality priors are fitted
+   * from and what the exported rules then tell the owning app. So the probe
+   * runs, the verdict is cached, the sample is recorded and `stream_stats` is
+   * published; only the write to the channel is suppressed.
+   *
+   * Auto-assignment is suppressed with it. Adding a stream to a channel another
+   * app curates is the more intrusive of the two writes, not the lesser.
+   *
+   * Orthogonal to `mode`, deliberately: the point is to keep `after_epg_start`
+   * timing -- probe once the fixture is under way -- while declining to write.
+   * A mode could not express that combination.
+   */
+  measureOnly?: boolean;
 }
 
 export const DEFAULT_POLICY: GroupPolicy = {
@@ -89,6 +113,7 @@ export const DEFAULT_POLICY: GroupPolicy = {
   windowMinutes: 180,
   requireLive: true,
   audioOnly: false,
+  measureOnly: false,
 };
 
 export interface Programme {
@@ -319,6 +344,10 @@ export function parsePolicies(
       windowMinutes: Number(extra.window_minutes ?? DEFAULT_POLICY.windowMinutes),
       requireLive: bool(extra.require_live, DEFAULT_POLICY.requireLive),
       audioOnly: bool(extra.audio_only ?? extra.audioOnly, Boolean(DEFAULT_POLICY.audioOnly)),
+      measureOnly: bool(
+        extra.measure_only ?? extra.measureOnly,
+        Boolean(DEFAULT_POLICY.measureOnly),
+      ),
     });
   }
   return out;
@@ -348,6 +377,7 @@ export function parseGroupPatterns(
       windowMinutes: Number(row.window_minutes ?? DEFAULT_POLICY.windowMinutes),
       requireLive: bool(row.require_live, DEFAULT_POLICY.requireLive),
       audioOnly: bool(row.audio_only ?? row.audioOnly, Boolean(DEFAULT_POLICY.audioOnly)),
+      measureOnly: bool(row.measure_only ?? row.measureOnly, Boolean(DEFAULT_POLICY.measureOnly)),
     });
   }
   return out;

@@ -7,7 +7,7 @@ interface Field {
   kind: 'string' | 'secret' | 'boolean' | 'number';
   label: string;
   help: string;
-  section: 'dispatcharr' | 'behaviour' | 'probing';
+  section: 'dispatcharr' | 'behaviour' | 'probing' | 'quality';
   value: string;
   isSet: boolean;
   source: 'stored' | 'environment' | 'default';
@@ -28,6 +28,12 @@ const SECTIONS: Array<{ id: Field['section']; title: string; blurb: string }> = 
     blurb: 'What Podium is allowed to change, and how hard it works.',
   },
   { id: 'probing', title: 'Probing', blurb: 'How each stream is judged.' },
+  {
+    id: 'quality',
+    title: 'Quality priors',
+    blurb:
+      'Which probes the learned priors — and the rules exported from them — are allowed to measure. Nothing here deletes a sample; it only decides what the fit reads.',
+  },
 ];
 
 const card = 'rounded-xl border border-[var(--color-line)] bg-[var(--color-panel)]';

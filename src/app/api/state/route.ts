@@ -109,6 +109,7 @@ export async function GET(request: Request) {
         grace: resolved.graceMinutes,
         window: resolved.windowMinutes,
         audioOnly: resolved.audioOnly,
+        measureOnly: resolved.measureOnly,
         channels: channels.length,
         ruled,
         matchedChannels,

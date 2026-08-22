@@ -16,6 +16,7 @@ export async function PUT(request: Request, context: { params: Promise<{ groupId
     graceMinutes?: number;
     windowMinutes?: number;
     audioOnly?: boolean;
+    measureOnly?: boolean;
   };
   const mode = body.mode ?? ALWAYS;
   if (!VALID_MODES.includes(mode as never)) {
@@ -29,8 +30,10 @@ export async function PUT(request: Request, context: { params: Promise<{ groupId
     stored && typeof stored === 'object' ? (stored as Record<string, unknown>) : undefined;
   const keptLive = storedObj?.require_live;
   const audioOnly = body.audioOnly !== undefined ? body.audioOnly : Boolean(storedObj?.audio_only);
+  const measureOnly =
+    body.measureOnly !== undefined ? body.measureOnly : Boolean(storedObj?.measure_only);
 
-  if (mode === ALWAYS && !audioOnly && keptLive === undefined) {
+  if (mode === ALWAYS && !audioOnly && !measureOnly && keptLive === undefined) {
     // Default mode with no custom settings: clean up entry
     delete groups[String(id)];
   } else {
@@ -39,11 +42,12 @@ export async function PUT(request: Request, context: { params: Promise<{ groupId
       grace_minutes: body.graceMinutes ?? 5,
       window_minutes: body.windowMinutes ?? 180,
       ...(audioOnly ? { audio_only: true } : {}),
+      ...(measureOnly ? { measure_only: true } : {}),
       ...(keptLive === undefined ? {} : { require_live: keptLive }),
     };
   }
 
   doc.groups = groups;
   writeRulesDoc(doc);
-  return NextResponse.json({ status: 'saved', mode, audioOnly });
+  return NextResponse.json({ status: 'saved', mode, audioOnly, measureOnly });
 }

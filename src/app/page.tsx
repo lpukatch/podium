@@ -43,6 +43,7 @@ interface GroupRow {
   mode: Mode;
   fromPattern: boolean;
   audioOnly?: boolean;
+  measureOnly?: boolean;
   channels: number;
   ruled: number;
   matchedChannels: number;
@@ -586,6 +587,15 @@ export default function Page() {
     await load();
   };
 
+  const toggleMeasureOnly = async (id: number, mode: Mode, current: boolean) => {
+    await fetch(`/api/groups/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode, measureOnly: !current }),
+    });
+    await load();
+  };
+
   const savePattern = async (mode: Mode) => {
     const pattern = patternText.trim();
     if (!pattern) return;
@@ -860,6 +870,13 @@ export default function Page() {
                               audio
                             </span>
                           )}
+                          {g.measureOnly && (
+                            <span
+                              className={`${pill} bg-[var(--color-accent-soft)] text-[var(--color-accent)]`}
+                            >
+                              measure
+                            </span>
+                          )}
                           {g.mode !== 'always' && (
                             <span
                               className={`${pill} ${
@@ -1051,6 +1068,16 @@ export default function Page() {
                   title="Treat streams in this group as audio-only radio/music feeds (skips video black detection and video bitrate floor)"
                 >
                   {group.audioOnly ? '✓ Audio only' : 'Audio only'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void toggleMeasureOnly(group.id, group.mode, Boolean(group.measureOnly))
+                  }
+                  className={chip(Boolean(group.measureOnly))}
+                  title="Probe this group's channels and record what it learns, but never write an order or assign a stream. For channels another app owns and rewrites -- a Teamarr fixture group -- where a reorder from here would be overwritten anyway."
+                >
+                  {group.measureOnly ? '✓ Measure only' : 'Measure only'}
                 </button>
               </div>
               <p className="mt-2 text-sm text-[var(--color-muted)]">

@@ -325,6 +325,12 @@ export interface PlannedChannel {
   /** Every hit is settled, so this channel needs no probing. */
   cacheComplete: boolean;
   audioOnly?: boolean;
+  /**
+   * Probe this channel, rank it, and write nothing back -- see `measureOnly`
+   * in `eligibility.ts`. Resolved in `plan` with the rest of the policy so the
+   * two write paths cannot disagree about it.
+   */
+  measureOnly?: boolean;
 }
 
 export interface OpenJobItem {
@@ -556,6 +562,16 @@ export interface RunSummary {
   skipped: number;
   /** Streams a saturated provider left for a later pass -- still real work. */
   deferred: number;
+  /**
+   * Channels probed under a measure-only policy, whose order was deliberately
+   * not written.
+   *
+   * Reported rather than folded into `unchanged`, which means something else
+   * entirely -- the channel was already in the ranked order. These were ranked
+   * and the ranking was withheld, and an install whose fixture groups are all
+   * measure-only would otherwise read as doing nothing every pass.
+   */
+  measured: number;
   /** Streams needing a probe when this pass planned, before the slice. */
   backlog: number;
   /**
@@ -729,6 +745,7 @@ export class Runner {
         skipped: 0,
         deferred: 0,
         backlog: 0,
+        measured: 0,
         nextDueAt: null,
         nextEligibleAt: null,
         runnableBacklog: 0,
@@ -779,6 +796,8 @@ export class Runner {
       dead: 0,
       reordered: 0,
       unchanged: 0,
+      /** Channels probed under a measure-only policy and deliberately not written. */
+      measured: 0,
       /** Streams this pass put onto a channel that did not carry them. */
       assigned: 0,
       skipped: 0,
@@ -1240,6 +1259,18 @@ export class Runner {
       // Dispatcharr speak per stream, so they wait for the stream's last
       // queued variant to land rather than firing per probe. For a stream
       // with one login -- most of them -- that is the moment the probe returns.
+      // Which channel each probe was run *for*, and under which policy. A
+      // stream claimed by several channels queues once -- see `seenVariants` --
+      // so this is the channel that put it in the queue, which is the one whose
+      // ranking the verdict is about to feed. Built from the jobs rather than
+      // from `streamToChannel`, because that map is last-write-wins over the
+      // whole catalogue and would attribute a probe to a channel this pass
+      // never considered.
+      const jobChannel = new Map<number, number>();
+      for (const job of selected) {
+        if (!jobChannel.has(job.streamId)) jobChannel.set(job.streamId, job.channelId);
+      }
+      const channelById = new Map(channels.map((c) => [c.id, c]));
       const settler = makeStreamSettler(selected, {
         weights: strategy.weights,
         onSettled: (streamId, best, audioOnly) => {
@@ -1254,12 +1285,26 @@ export class Runner {
           const source = streamById.get(streamId);
           if (source) {
             try {
+              // The channel's group and its policy, resolved the same way
+              // `plan` resolved it to admit this probe in the first place. It
+              // is what says whether the sample describes a fixture or a film
+              // library, which is the difference between a prior Teamarr can
+              // use and one measured on a population its rules never meet.
+              const channel = channelById.get(jobChannel.get(streamId) ?? -1);
+              const channelGroupId = channel?.groupId ?? null;
+              const channelGroupName =
+                channelGroupId === null ? '' : (groupNames.get(channelGroupId) ?? '');
               store.recordQuality({
                 providerId: source.providerId,
                 providerName: providerNames.get(source.providerId) ?? String(source.providerId),
                 tier: tierOf(source.name),
                 groupId: source.groupId,
                 groupName: source.groupId === null ? '' : (groupNames.get(source.groupId) ?? ''),
+                channelGroupId,
+                channelGroupName,
+                policyMode: channel
+                  ? eligibility.policyFor(channelGroupId, channelGroupName || undefined).mode
+                  : '',
                 audioOnly,
                 alive: best.alive,
                 black: Boolean(best.black),
@@ -1401,6 +1446,15 @@ export class Runner {
               break;
             }
 
+            // Measured, ranked, and deliberately not written: the verdicts and
+            // the quality sample are already recorded by the time this runs,
+            // which is the entire reason the channel was probed.
+            if (complete && entry.measureOnly) {
+              counters.measured += 1;
+              log(`${entry.channel.name}: measured, not written (measure-only group)`);
+              return;
+            }
+
             if (complete && entries.length > 0) {
               await this.reorder(
                 client,
@@ -1433,6 +1487,7 @@ export class Runner {
         dead: counters.dead,
         reordered: counters.reordered,
         unchanged: counters.unchanged,
+        measured: counters.measured,
         oldestManagedProbedAt: oldestProbedAt,
         retired,
         message: `finished in ${((Date.now() - started) / 1000).toFixed(1)}s`,
@@ -1846,6 +1901,7 @@ export class Runner {
           settled: settledStreams,
           cacheComplete: settledStreams.size === hits.length,
           audioOnly: policy.audioOnly,
+          measureOnly: policy.measureOnly,
         });
       }
     }
@@ -1914,14 +1970,18 @@ export class Runner {
   private async reorderCachedOnly(
     client: DispatcharrClient,
     planned: PlannedChannel[],
-    counters: { reordered: number; unchanged: number; assigned: number },
+    counters: { reordered: number; unchanged: number; assigned: number; measured: number },
     strategy: RankStrategy,
     byId: Map<number, Stream>,
     providerNames: Map<number, string>,
   ): Promise<void> {
     const log = this.deps.log ?? (() => {});
-    for (const { channel, hits, fresh, cacheComplete, audioOnly } of planned) {
+    for (const { channel, hits, fresh, cacheComplete, audioOnly, measureOnly } of planned) {
       if (!cacheComplete) continue;
+      if (measureOnly) {
+        counters.measured += 1;
+        continue;
+      }
       const entries: RankEntry[] = [];
       for (const [streamId, stepOrder] of hits) {
         const verdicts = fresh.get(streamId);
@@ -2098,6 +2158,7 @@ export class Runner {
       skipped: number;
       deferred: number;
       backlog: number;
+      measured: number;
       nextDueAt: number | null;
       nextEligibleAt: number | null;
       runnableBacklog: number;

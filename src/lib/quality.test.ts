@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildProfile,
+  inScope,
   mergeTeamarrRules,
+  parseGlobs,
+  type QualityScope,
+  scopeFromConfig,
   type TeamarrRule,
+  teamarrPattern,
   teamarrRules,
   tierOf,
   tierPattern,
@@ -16,6 +21,9 @@ function sample(over: Partial<StoredQualitySample> = {}): StoredQualitySample {
     tier: 'fhd',
     groupId: 1,
     groupName: 'Group One',
+    channelGroupId: 10,
+    channelGroupName: 'Entertainment',
+    policyMode: 'always',
     audioOnly: false,
     sampledAt: 1_700_000_000_000,
     alive: true,
@@ -62,6 +70,27 @@ describe('tierOf', () => {
     expect(pattern.test('Sports HD')).toBe(true);
     expect(pattern.test('Sports FHD')).toBe(false);
     expect(pattern.test('Sports 720p')).toBe(true);
+  });
+
+  it('reads a token a provider has numbered', () => {
+    // Real names from one provider's EPL group:
+    //   EPL01: Hull 12:30 Man Utd 22/08
+    //   EPL05: Brentford 17:30 Spurs 22/08
+    // A symmetric (?![A-Za-z0-9]) boundary rejects both -- the trailing digit
+    // trips it -- so a rule written that way scores a third of the group and
+    // looks correct while doing it. Providers number resolutions the same way.
+    const pattern = new RegExp(tierPattern('fhd'), 'i');
+    expect(pattern.test('Sports Alpha 1080p60')).toBe(true);
+    // A letter still terminates, which is the case the boundary is for.
+    expect(new RegExp(tierPattern('hd'), 'i').test('Sports HDR')).toBe(false);
+  });
+});
+
+describe('teamarrPattern', () => {
+  it('anchors nothing and survives every way Teamarr might call it', () => {
+    // JS cannot evaluate the inline flag, so the wrapper is asserted as text
+    // and the predicate inside it is what the tests above exercise.
+    expect(teamarrPattern(tierPattern('uhd'))).toBe(`(?i).*${tierPattern('uhd')}.*`);
   });
 });
 
@@ -201,21 +230,24 @@ describe('buildProfile', () => {
     expect(profile.groups.some((effect) => effect.key === 'SiriusXM')).toBe(false);
   });
 
-  it('does not export a group rule', () => {
-    // Group is a confounder held constant, not a product. Teamarr can only
-    // match a group on channel-source streams, so a group rule would be inert
-    // across most of the catalogue.
+  it('exports a group as the wholesale rule Teamarr matches it with', () => {
+    // The strongest effect Podium fits, and the one it withheld longest. A
+    // group is matched by name, exactly as the provider writes it -- the same
+    // key the samples were bucketed on, so the rule selects the population its
+    // number was measured over.
     const profile = buildProfile(
       [
-        ...many(100, { groupId: 1, groupName: 'Good group', bitrateKbps: 8000 }),
-        ...many(100, { groupId: 2, groupName: 'Bad group', bitrateKbps: 1000 }),
+        ...many(100, { groupId: 1, groupName: 'Sports | EPL', bitrateKbps: 8000 }),
+        ...many(100, { groupId: 2, groupName: 'VOD | Movies', bitrateKbps: 1000 }),
       ],
       { minSamples: 20 },
     );
     expect(profile.groups).toHaveLength(2);
-    for (const rule of teamarrRules(profile).rules) {
-      expect(rule.value).not.toContain('group');
-    }
+
+    const groups = teamarrRules(profile).rules.filter((rule) => rule.type === 'group');
+    expect(groups.map((rule) => rule.value)).toEqual(['Sports | EPL', 'VOD | Movies']);
+    expect(groups[0]!.points).toBeGreaterThan(0);
+    expect(groups[1]!.points).toBeLessThan(0);
   });
 
   it('predicts a bucket from the sum of its fitted effects', () => {
@@ -333,11 +365,41 @@ describe('teamarrRules', () => {
   });
 
   it('scales points by the knob, not by the raw kbps', () => {
-    const tenfold = teamarrRules(profile, { pointsPerMbps: 100 });
-    const base = teamarrRules(profile, { pointsPerMbps: 10 });
     const top = (result: { rules: TeamarrRule[] }): number =>
       result.rules.find((rule) => rule.value === 'Premium IPTV')!.points;
+    // Raised out of the cap's way: the point of this is the ratio.
+    const tenfold = teamarrRules(profile, { pointsPerMbps: 100, maxPoints: 100_000 });
+    const base = teamarrRules(profile, { pointsPerMbps: 10, maxPoints: 100_000 });
     expect(top(tenfold)).toBeCloseTo(top(base) * 10, -1);
+  });
+
+  it('keeps a prior below a measured stream, whatever it fitted', () => {
+    // Teamarr scores a probed stream from stats_metric rules reading the
+    // bitrate Podium published -- a reading of that stream. Everything here is
+    // an inference about streams like it. On the rule set this was calibrated
+    // against the first rung of the measured ladder is +20, so a cap of 15
+    // means no inference ever outranks a measurement.
+    const extreme = buildProfile(
+      [
+        ...many(100, { providerName: 'Ludicrous', bitrateKbps: 200_000 }),
+        ...many(100, { providerName: 'Dire', bitrateKbps: 100 }),
+      ],
+      { minSamples: 20 },
+    );
+    for (const rule of teamarrRules(extreme).rules) {
+      expect(Math.abs(rule.points)).toBeLessThanOrEqual(15);
+    }
+  });
+
+  it('emits a regex Teamarr reads the same way Podium did', () => {
+    const tier = teamarrRules(profile).rules.find((rule) => rule.type === 'regex')!;
+    // The flag, because the exported copy carries none of its own and every
+    // token here is uppercase -- without it a rule for 1080P misses the 1080p
+    // providers actually write. The wrapping, because a rules file cannot say
+    // whether Teamarr calls search, match or fullmatch, and under match an
+    // unanchored pattern is pinned to offset 0.
+    expect(tier.value.startsWith('(?i).*')).toBe(true);
+    expect(tier.value.endsWith('.*')).toBe(true);
   });
 });
 
@@ -391,6 +453,129 @@ describe('mergeTeamarrRules', () => {
   });
 });
 
+describe('scope', () => {
+  const events: QualityScope = { eventOnly: true, include: [], exclude: [] };
+
+  it('admits a probe run for a channel an operator gated on kickoff', () => {
+    expect(inScope(sample({ policyMode: 'after_epg_start' }), events)).toBe(true);
+    expect(inScope(sample({ policyMode: 'assigned' }), events)).toBe(true);
+  });
+
+  it('leaves out a probe run for a channel in an ungated group', () => {
+    // The whole point: a film library's bitrate must not become the baseline a
+    // fixture's rule is quoted against.
+    expect(inScope(sample({ policyMode: 'always' }), events)).toBe(false);
+    expect(inScope(sample({ policyMode: 'never' }), events)).toBe(false);
+  });
+
+  it('cannot judge a sample recorded before the policy was', () => {
+    // Not the same as rejecting it -- the row never carried the field. The
+    // summary counts these apart so an upgrade does not read as a wrong prior.
+    const profile = buildProfile([sample({ policyMode: '' })], { minSamples: 1, scope: events });
+    expect(profile.scope.unrecorded).toBe(1);
+    expect(profile.scope.notEvent).toBe(0);
+    expect(profile.totalSamples).toBe(0);
+  });
+
+  it('lets a name pattern reach the history a policy cannot', () => {
+    const legacy = sample({ policyMode: '', groupName: 'USA | SPORTS FHD' });
+    expect(inScope(legacy, events)).toBe(false);
+    expect(inScope(legacy, { ...events, include: ['*SPORTS*'] })).toBe(true);
+  });
+
+  it('matches a pattern against either group name', () => {
+    // The stream's own group and the group of the channel it was probed for are
+    // different questions, and an operator naming "sports" means either.
+    const byChannel = sample({ groupName: 'Provider Feed 3', channelGroupName: 'Auto | SPORT' });
+    expect(inScope(byChannel, { eventOnly: false, include: ['Auto | *'], exclude: [] })).toBe(true);
+  });
+
+  it('lets an exclude veto whatever admitted the sample', () => {
+    const admitted = sample({ policyMode: 'after_epg_start', groupName: 'VOD | MOVIES' });
+    expect(inScope(admitted, events)).toBe(true);
+    expect(inScope(admitted, { ...events, exclude: ['*VOD*'] })).toBe(false);
+    expect(inScope(admitted, { eventOnly: true, include: ['*MOVIES*'], exclude: ['*VOD*'] })).toBe(
+      false,
+    );
+  });
+
+  it('treats an include list with no policy gate as a whitelist', () => {
+    const scope: QualityScope = { eventOnly: false, include: ['*SPORT*'], exclude: [] };
+    expect(inScope(sample({ groupName: 'USA | SPORT' }), scope)).toBe(true);
+    expect(inScope(sample({ groupName: 'USA | MOVIES' }), scope)).toBe(false);
+  });
+
+  it('admits everything when nothing is configured', () => {
+    const profile = buildProfile(many(3, { policyMode: '' }), { minSamples: 1 });
+    expect(profile.totalSamples).toBe(3);
+    expect(profile.scope.inScope).toBe(3);
+  });
+
+  it('fits and exports only what it admitted', () => {
+    // Two accounts, one probed for fixtures and one for a film library. The
+    // gated fit must describe the first and say nothing at all about the second.
+    const samples = [
+      ...many(30, {
+        providerName: 'Events Co',
+        providerId: 1,
+        policyMode: 'after_epg_start',
+        bitrateKbps: 8000,
+      }),
+      ...many(30, {
+        providerName: 'Films Co',
+        providerId: 2,
+        policyMode: 'always',
+        bitrateKbps: 2000,
+      }),
+    ];
+
+    const open = buildProfile(samples, { minSamples: 10 });
+    expect(open.accounts.map((a) => a.key).sort()).toEqual(['Events Co', 'Films Co']);
+
+    const gated = buildProfile(samples, { minSamples: 10, scope: events });
+    expect(gated.accounts.map((a) => a.key)).toEqual(['Events Co']);
+    expect(gated.baselineKbps).toBe(8000);
+    expect(gated.recordedSamples).toBe(60);
+    expect(gated.totalSamples).toBe(30);
+    expect(gated.scope.notEvent).toBe(30);
+    // Nothing to say about an account with no in-scope samples beats guessing.
+    expect(teamarrRules(gated).rules.some((rule) => rule.value === 'Films Co')).toBe(false);
+  });
+
+  it('carries the scope into the exported file', () => {
+    // The points are unfalsifiable once they leave: +40 fitted on fixtures and
+    // +40 fitted on a film library are the same two characters.
+    const exported = teamarrRules(
+      buildProfile(many(30, { policyMode: 'after_epg_start' }), { minSamples: 10, scope: events }),
+    );
+    expect(exported.podium.scope.eventOnly).toBe(true);
+    expect(exported.podium.scope.inScope).toBe(30);
+  });
+});
+
+describe('parseGlobs', () => {
+  it('reads a list written either way round', () => {
+    // The same string is typed one-per-line into settings and passed
+    // comma-separated as a query parameter.
+    expect(parseGlobs('*SPORT*, *PPV*')).toEqual(['*SPORT*', '*PPV*']);
+    expect(parseGlobs('*SPORT*\n*PPV*\n')).toEqual(['*SPORT*', '*PPV*']);
+    expect(parseGlobs('')).toEqual([]);
+    expect(parseGlobs(undefined)).toEqual([]);
+  });
+});
+
+describe('scopeFromConfig', () => {
+  it('reads the three settings as one scope', () => {
+    expect(
+      scopeFromConfig({
+        PODIUM_QUALITY_EVENT_ONLY: true,
+        PODIUM_QUALITY_INCLUDE_GROUPS: '*SPORT*',
+        PODIUM_QUALITY_EXCLUDE_GROUPS: '*VOD*, *24/7*',
+      }),
+    ).toEqual({ eventOnly: true, include: ['*SPORT*'], exclude: ['*VOD*', '*24/7*'] });
+  });
+});
+
 describe('store', () => {
   it('keeps samples after the streams they came from are gone', () => {
     // The whole point: pruneOutside sweeps probe_cache for streams no longer
@@ -402,6 +587,9 @@ describe('store', () => {
       tier: 'fhd',
       groupId: 3,
       groupName: 'Group One',
+      channelGroupId: 10,
+      channelGroupName: 'Entertainment',
+      policyMode: 'always',
       audioOnly: false,
       alive: true,
       black: false,
@@ -426,6 +614,9 @@ describe('store', () => {
         tier: 'fhd',
         groupId: 3,
         groupName: 'Group One',
+        channelGroupId: 10,
+        channelGroupName: 'Entertainment',
+        policyMode: 'always',
         audioOnly: false,
         alive: true,
         black: false,
@@ -455,6 +646,9 @@ describe('store', () => {
           tier,
           groupId: 3,
           groupName: 'Group One',
+          channelGroupId: 10,
+          channelGroupName: 'Entertainment',
+          policyMode: 'always',
           audioOnly: false,
           alive: true,
           black: false,
@@ -470,6 +664,41 @@ describe('store', () => {
     // Three each, not three in total -- a busy bucket must not evict a quiet
     // one, or the quiet one never reaches minSamples and never gets a rule.
     expect(store.qualitySamples()).toHaveLength(6);
+    store.close();
+  });
+
+  it('does not let a provider VOD probes evict its event ones', () => {
+    // The trim window and the scope work against each other otherwise: a
+    // catalogue is mostly not events, so the most recent 400 probes of a
+    // (provider, tier) are mostly out of scope, and the gate would be reading a
+    // window the trim had already emptied of everything it wanted.
+    const store = new Store(':memory:');
+    const write = (policyMode: string) =>
+      store.recordQuality({
+        providerId: 1,
+        providerName: 'Provider A',
+        tier: 'fhd',
+        groupId: 3,
+        groupName: 'Group One',
+        channelGroupId: 10,
+        channelGroupName: 'Entertainment',
+        policyMode,
+        audioOnly: false,
+        alive: true,
+        black: false,
+        bitrateKbps: 1000,
+        measured: true,
+        height: 1080,
+        fps: 50,
+      });
+
+    for (let i = 0; i < 3; i += 1) write('after_epg_start');
+    for (let i = 0; i < 20; i += 1) write('always');
+    store.trimQuality(5);
+
+    const kept = store.qualitySamples();
+    expect(kept.filter((s) => s.policyMode === 'after_epg_start')).toHaveLength(3);
+    expect(kept.filter((s) => s.policyMode === 'always')).toHaveLength(5);
     store.close();
   });
 });

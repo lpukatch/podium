@@ -42,6 +42,8 @@ interface Progress {
   reordered: number;
   /** Optional: a progress row written by an older worker will not have it. */
   unchanged?: number;
+  /** Channels probed under a measure-only policy, whose order was withheld. */
+  measured?: number;
   cached: number;
   deferred: number;
   /**
@@ -404,6 +406,10 @@ export function ProgressView() {
           <p className="mt-2 text-sm tabular-nums text-[var(--color-muted)]">
             This pass: {n(p.probed)} probed · {n(p.dead)} dead · {n(p.reordered)} reordered ·{' '}
             {n(p.unchanged ?? 0)} already in order · {n(p.cached)} from cache
+            {/* Only when there are any. On an install with no measure-only
+                group this is a zero that never moves, and the line is already
+                long. */}
+            {(p.measured ?? 0) > 0 && <> · {n(p.measured ?? 0)} measured only</>}
           </p>
         )}
 

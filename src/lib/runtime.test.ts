@@ -668,6 +668,7 @@ describe('idle back-off', () => {
     probed: 0,
     cached: 100,
     dead: 0,
+    measured: 0,
     reordered: 0,
     unchanged: 100,
     assigned: 0,

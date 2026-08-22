@@ -24,6 +24,7 @@
  * have no way to apply.
  */
 
+import { assignmentIsRule, globToRegExp, type PolicyMode } from './eligibility';
 import type { StoredQualitySample } from './store';
 
 export type Tier = 'uhd' | 'fhd' | 'hd' | 'sd' | 'unknown';
@@ -53,16 +54,53 @@ const TIER_TOKENS: Record<Exclude<Tier, 'unknown'>, string[]> = {
 export const TIERS: Tier[] = ['uhd', 'fhd', 'hd', 'sd', 'unknown'];
 
 /**
- * The pattern for a tier, as both sides evaluate it.
+ * A token alternation with the boundaries that make it a token match.
  *
- * The boundaries are the whole reason this is generated rather than written
+ * The left boundary is the whole reason this is generated rather than written
  * out: a bare `HD` matches inside `FHD` and `UHD`, which would put every
  * 1080p and 2160p stream in the install into the `hd` bucket and then hand
  * Teamarr a rule that does the same thing. `[A-Za-z0-9]` rather than a word
  * boundary, which sits happily between the `F` and the `HD`.
+ *
+ * The right boundary is deliberately weaker: `\d*` then "no letter". Providers
+ * number their feeds -- `EPL01`, `EPL05`, `1080P60` -- and a symmetric
+ * `(?![A-Za-z0-9])` rejects every one of them. Measured against three real
+ * names from one provider's EPL group, the symmetric form matched one of the
+ * three; this form matched all three. Letters still terminate, so `HD` does not
+ * match inside `HDR`, which is the case the boundary exists for.
  */
+function bounded(tokens: string[]): string {
+  return `(?<![A-Za-z0-9])(?:${tokens.join('|')})\\d*(?![A-Za-z])`;
+}
+
+/** The pattern for a tier, as Podium's own scan evaluates it. */
 export function tierPattern(tier: Exclude<Tier, 'unknown'>): string {
-  return `(?<![A-Za-z0-9])(?:${TIER_TOKENS[tier].join('|')})(?![A-Za-z0-9])`;
+  return bounded(TIER_TOKENS[tier]);
+}
+
+/**
+ * The same predicate, in the dialect Teamarr's importer is handed.
+ *
+ * Two accommodations, neither of which changes what is matched:
+ *
+ * `(?i)` because the exported pattern carries no flags of its own. Podium's
+ * side compiles with `/i`; without the inline flag the exported copy is
+ * case-sensitive, and every token here is written uppercase -- so a rule for
+ * `1080P` would silently score nothing on the `1080p` that providers actually
+ * write. Python takes the inline form; JavaScript does not, which is why this
+ * is a separate function rather than something baked into the pattern both
+ * sides share.
+ *
+ * The `.*` on each end because it is not knowable from a rules file whether
+ * Teamarr calls `search`, `match` or `fullmatch`, and the three disagree about
+ * an unanchored pattern: under `match` this pattern is pinned to offset 0 and
+ * fires only on names that *begin* with the token. The wrapper is correct under
+ * all three. The evidence it is needed is in the field -- a hand-written rule
+ * in a live rule set reads `.*4K.*`, which is exactly what somebody writes
+ * after discovering this the hard way.
+ */
+export function teamarrPattern(pattern: string): string {
+  return `(?i).*${pattern}.*`;
 }
 
 const TIER_RE = new Map<Tier, RegExp>(
@@ -79,6 +117,142 @@ export function tierOf(name: string): Tier {
     if (TIER_RE.get(tier)!.test(name)) return tier;
   }
   return 'unknown';
+}
+
+/**
+ * Which probes a prior is allowed to learn from.
+ *
+ * Every settled verdict is recorded, but not every verdict describes the thing
+ * the export is for. A Teamarr rule ranks the streams behind a fixture channel,
+ * and a catalogue is mostly not that: VOD dumps, 24/7 filler and entertainment
+ * packages outnumber the sports groups on every install this was built against,
+ * so an ungated fit measures the wrong population twice over. The baseline every
+ * delta is quoted against becomes a film library's bitrate, and an account's
+ * effect becomes a statement about its movie encoder -- on a rule that will only
+ * ever be evaluated at kickoff.
+ *
+ * Two signals decide it, because they fail in opposite directions:
+ *
+ * - **The group's probing policy.** `after_epg_start` and `assigned` are modes
+ *   an operator set on a named group, and `after_epg_start` in particular *is*
+ *   the after-kickoff population -- the same declaration that decides when a
+ *   channel may be probed decides whether its numbers are worth exporting. It
+ *   needs no patterns and it cannot drift out of date, but it is recorded per
+ *   sample, so it says nothing about history probed before this existed.
+ * - **Name globs**, matched against the provider group and the channel group.
+ *   The same `*`/`?` syntax the policy patterns already use, and the only lever
+ *   that reaches backwards: an install with three months of samples can put its
+ *   sports groups back in scope today rather than re-earning them.
+ *
+ * They combine as an admission with a veto. An `exclude` match rejects a sample
+ * outright, whatever else says; otherwise an `include` match admits it, and
+ * `eventOnly` admits anything an event policy covers. An empty scope admits
+ * everything, which is what an install that has not configured this gets.
+ */
+export interface QualityScope {
+  /**
+   * Admit samples whose channel sat in a group set to `after_epg_start` or
+   * `assigned` -- the groups an operator has already declared are events.
+   */
+  eventOnly: boolean;
+  /** Globs against the provider group or channel group name. */
+  include: string[];
+  /** Globs that reject a sample however it was admitted. */
+  exclude: string[];
+}
+
+/** Everything in scope: what an install that has not configured this gets. */
+export const OPEN_SCOPE: QualityScope = { eventOnly: false, include: [], exclude: [] };
+
+/**
+ * The configured scope.
+ *
+ * Takes the three fields structurally rather than a `Config`, so `quality.ts`
+ * stays a module about samples: everything here is testable without a boot.
+ */
+export function scopeFromConfig(config: {
+  PODIUM_QUALITY_EVENT_ONLY: boolean;
+  PODIUM_QUALITY_INCLUDE_GROUPS: string;
+  PODIUM_QUALITY_EXCLUDE_GROUPS: string;
+}): QualityScope {
+  return {
+    eventOnly: config.PODIUM_QUALITY_EVENT_ONLY,
+    include: parseGlobs(config.PODIUM_QUALITY_INCLUDE_GROUPS),
+    exclude: parseGlobs(config.PODIUM_QUALITY_EXCLUDE_GROUPS),
+  };
+}
+
+/**
+ * Split a written list of globs.
+ *
+ * Commas and newlines both, because the same string is typed into a settings
+ * field one per line and passed as a query parameter comma-separated, and
+ * having those mean different things would be a trap rather than a feature.
+ */
+export function parseGlobs(raw: string | string[] | null | undefined): string[] {
+  if (raw === null || raw === undefined) return [];
+  const parts = Array.isArray(raw) ? raw : raw.split(/[,\n]/);
+  return parts.map((part) => part.trim()).filter((part) => part !== '');
+}
+
+/**
+ * Why a sample is or is not in scope.
+ *
+ * Reported rather than reduced to a boolean because "the table is empty" has
+ * four very different causes -- a veto, a whitelist nothing matched, a
+ * catalogue with no event groups configured, and history that predates the
+ * recording -- and only the last one comes right on its own.
+ */
+export type ScopeVerdict = 'in' | 'excluded' | 'not-included' | 'not-event' | 'unrecorded';
+
+interface CompiledScope {
+  eventOnly: boolean;
+  include: RegExp[];
+  exclude: RegExp[];
+}
+
+function compileScope(scope: QualityScope): CompiledScope {
+  return {
+    eventOnly: scope.eventOnly,
+    include: scope.include.map(globToRegExp),
+    exclude: scope.exclude.map(globToRegExp),
+  };
+}
+
+/** The names a glob is tried against: the stream's group and its channel's. */
+function namesOf(sample: StoredQualitySample): string[] {
+  return [sample.groupName, sample.channelGroupName].filter((name) => name !== '');
+}
+
+function judge(sample: StoredQualitySample, scope: CompiledScope): ScopeVerdict {
+  const names = namesOf(sample);
+  if (scope.exclude.some((test) => names.some((name) => test.test(name)))) return 'excluded';
+  if (scope.include.some((test) => names.some((name) => test.test(name)))) return 'in';
+  if (!scope.eventOnly) return scope.include.length > 0 ? 'not-included' : 'in';
+  // Recorded before the channel's policy was: the sample is not out of scope so
+  // much as unjudgeable, and saying so is what stops an upgrade reading as "the
+  // priors were wrong" when it is really "these rows never carried the field".
+  if (sample.policyMode === '') return 'unrecorded';
+  return assignmentIsRule(sample.policyMode as PolicyMode) ? 'in' : 'not-event';
+}
+
+/** Whether one sample is in scope. Exported for callers that only want the bit. */
+export function inScope(sample: StoredQualitySample, scope: QualityScope): boolean {
+  return judge(sample, compileScope(scope)) === 'in';
+}
+
+/** What the gate did to a run of samples, as the UI and the export both report it. */
+export interface ScopeSummary extends QualityScope {
+  /** Samples the fit is built from. */
+  inScope: number;
+  /** Rejected by an `exclude` glob. */
+  excluded: number;
+  /** `include` is a whitelist and nothing matched. */
+  notIncluded: number;
+  /** The channel's group carries a policy, and it is not an event one. */
+  notEvent: number;
+  /** Probed before the policy was recorded -- reachable only by an `include`. */
+  unrecorded: number;
 }
 
 export interface Bucket {
@@ -129,7 +303,19 @@ export interface Effect {
 
 export interface QualityProfile {
   generatedAt: number;
+  /**
+   * Samples the fit is built from -- in scope, audio-only included.
+   *
+   * Not the number of rows held: `recordedSamples` is that, and the gap between
+   * the two is the whole point of the gate. Reported this way round because
+   * every other number on the profile describes the scoped population, so the
+   * headline count has to as well or the page contradicts itself.
+   */
   totalSamples: number;
+  /** Every sample held, before the scope was applied. */
+  recordedSamples: number;
+  /** What the gate admitted and rejected, and the rules it used. */
+  scope: ScopeSummary;
   /** Samples held out of the fit because the stream carries no video. */
   audioOnlySamples: number;
   /** Sample-weighted mean of every bucket in the fit. */
@@ -138,14 +324,17 @@ export interface QualityProfile {
   accounts: Effect[];
   tiers: Effect[];
   /**
-   * Fitted the same way as the others, and deliberately not exported.
+   * The strongest effect here, and the one worth exporting most.
    *
-   * Teamarr can only match a group on channel-source streams, so a group rule
-   * would be inert for most of the catalogue. It is fitted anyway because
-   * leaving it out of the *model* is what does the damage: without it, an
-   * account's number silently absorbs the quality of whichever groups it
-   * happens to carry. Published so the question "which of my groups are any
-   * good" has an answer, which is the question this whole table started as.
+   * A group's effect routinely spans thousands of kbps where an account's spans
+   * tens -- which stands to reason, since a group is how a provider organises
+   * what it sells, and a sports package and a VOD dump are not the same product
+   * at all.
+   *
+   * This was withheld from the export at first, on the belief that Teamarr
+   * could match a group only on channel-source streams. A live rule set carrying
+   * a hand-written `{"type": "group", "value": "Sports | DAZN US"}` says
+   * otherwise, so it ships.
    */
   groups: Effect[];
 }
@@ -158,6 +347,11 @@ export interface ProfileOptions {
    * number attached -- and unlike a missing rule, a wrong one is acted on.
    */
   minSamples?: number;
+  /**
+   * Which samples may be learned from. Defaults to all of them, so a caller
+   * that has not thought about scope gets the pre-gate behaviour.
+   */
+  scope?: QualityScope;
 }
 
 function percentile(sorted: number[], fraction: number): number {
@@ -172,9 +366,36 @@ export function buildProfile(
   options: ProfileOptions = {},
 ): QualityProfile {
   const minSamples = options.minSamples ?? 20;
+  const scope = options.scope ?? OPEN_SCOPE;
+  const compiled = compileScope(scope);
+
+  // Gated here rather than at record time, deliberately. A sample costs a row
+  // and a probe that was being paid for anyway, and a scope is a guess an
+  // operator revises -- narrowing it at the point of writing would make every
+  // revision cost a month of waiting, and would hide the evidence that the
+  // rule is wrong. Everything is kept; only the fit is selective.
+  const summary: ScopeSummary = {
+    ...scope,
+    inScope: 0,
+    excluded: 0,
+    notIncluded: 0,
+    notEvent: 0,
+    unrecorded: 0,
+  };
+  const scoped: StoredQualitySample[] = [];
+  for (const sample of samples) {
+    const verdict = judge(sample, compiled);
+    if (verdict === 'in') {
+      summary.inScope += 1;
+      scoped.push(sample);
+    } else if (verdict === 'excluded') summary.excluded += 1;
+    else if (verdict === 'not-included') summary.notIncluded += 1;
+    else if (verdict === 'not-event') summary.notEvent += 1;
+    else summary.unrecorded += 1;
+  }
 
   const grouped = new Map<string, StoredQualitySample[]>();
-  for (const sample of samples) {
+  for (const sample of scoped) {
     // The cell is all three factors at once. Summarising a coarser cell and
     // fitting from that would average the factors together before the fit gets
     // to separate them, which is the exact mistake the fit exists to avoid.
@@ -195,8 +416,10 @@ export function buildProfile(
 
   return {
     generatedAt: Date.now(),
-    totalSamples: samples.length,
-    audioOnlySamples: samples.reduce((sum, sample) => sum + (sample.audioOnly ? 1 : 0), 0),
+    totalSamples: scoped.length,
+    recordedSamples: samples.length,
+    scope: summary,
+    audioOnlySamples: scoped.reduce((sum, sample) => sum + (sample.audioOnly ? 1 : 0), 0),
     baselineKbps,
     buckets,
     accounts,
@@ -265,11 +488,11 @@ function summarise(list: StoredQualitySample[]): Bucket {
  * stop moving. Sequential elimination would do for two factors but not three,
  * because the second factor's estimate is itself biased by the third.
  *
- * `group` is fitted and then not exported. That is the point of including it:
- * it is a confounder, not a product. Teamarr can only match a group on
- * channel-source streams, so shipping a group rule would mostly do nothing --
- * but leaving group out of the *model* lets it contaminate the two effects
- * that do ship.
+ * `group` is fitted for two reasons, and the second one only became true
+ * later. It is a confounder -- leaving it out of the model lets it contaminate
+ * the other two effects, which is the sign flip above -- and it is also the
+ * most valuable thing exported, now that Teamarr is known to match a group
+ * rule on the streams that matter.
  */
 function fitEffects(buckets: Bucket[]): {
   baselineKbps: number;
@@ -371,12 +594,24 @@ function fitEffects(buckets: Bucket[]): {
 
 /** One rule in Teamarr's `stream-ordering-rules.json`. */
 export interface TeamarrRule {
-  type: 'm3u' | 'regex';
+  /**
+   * The three Teamarr matches Podium can speak to.
+   *
+   * `m3u` and `group` are wholesale -- a stream either came from that account
+   * or that group -- and `regex` is the only per-stream lever, matched against
+   * the stream's name. Teamarr has others (`stats_metric`, `epg_match`,
+   * `stream_type`); they are somebody else's opinion to write, and
+   * `stats_metric` in particular already reads the bitrate Podium publishes to
+   * Dispatcharr, so duplicating it here would score the same measurement twice.
+   */
+  type: 'm3u' | 'group' | 'regex';
   value: string;
   /**
    * Ignored by Teamarr for `score` rules -- bands only apply to `priority`
-   * ones -- but its importer rejects anything outside 1-99, so it is set to a
-   * valid middle rather than left off.
+   * ones -- but its importer rejects anything outside 1-99. 99 to match the
+   * convention of the hand-written rule sets this merges into, so a merged
+   * file does not read as two authors disagreeing about a field neither of
+   * them uses.
    */
   priority: number;
   mode: 'score';
@@ -388,12 +623,24 @@ export interface ExportOptions extends ProfileOptions {
    * Points awarded per megabit of measured advantage over the baseline.
    *
    * Only the ratio between this and other people's hand-written rules matters,
-   * since Teamarr sums them: at the default, a provider running 3Mbps above
-   * the house average earns +30, which sits alongside a hand-written "+30 for
-   * the home feed" as a comparable-strength opinion rather than drowning it.
+   * since Teamarr sums them. The default is set against a real rule set, whose
+   * positives run +10 to +20 with a bitrate ladder at +20 per rung: 5 puts a
+   * provider running 3Mbps above the house average at +15, an opinion of
+   * comparable strength to the ones written by hand rather than one that
+   * drowns them.
    */
   pointsPerMbps?: number;
-  /** Teamarr clamps to this either way; applied here so the file is honest. */
+  /**
+   * Ceiling on any single generated rule.
+   *
+   * A prior must never outrank a measurement. Teamarr scores a probed stream
+   * from `stats_metric` rules reading the bitrate Podium publishes -- a real
+   * reading of that stream -- while everything generated here is an inference
+   * about streams from the same provenance. The cap keeps the strongest
+   * inference below the first rung of a measured ladder, so a stream that has
+   * actually been measured at 10Mbps outranks one that merely comes from a
+   * good account.
+   */
   maxPoints?: number;
 }
 
@@ -405,6 +652,15 @@ export interface RulesExport {
     baselineKbps: number;
     pointsPerMbps: number;
     minSamples: number;
+    /**
+     * The population these points describe.
+     *
+     * Carried into the file because the numbers are otherwise unfalsifiable
+     * once they leave: a +40 fitted on event channels and a +40 fitted on a
+     * film library are the same two characters, and whoever opens this file in
+     * three months is the person who needs to know which one it was.
+     */
+    scope: ScopeSummary;
     note: string;
   };
 }
@@ -417,19 +673,26 @@ function pointsFor(deltaKbps: number, pointsPerMbps: number, maxPoints: number):
 /**
  * The learned profile as scoring rules Teamarr's importer already accepts.
  *
- * One `m3u` rule per account and one `regex` rule per tier, each carrying that
- * dimension's distance from the baseline. A stream is then scored by the sum
- * of the two, which is the additive model Teamarr evaluates natively -- an
- * account 2Mbps above the house average and an `fhd` token worth another 1.5
- * come to +35 together, with no conjunction rule needed.
+ * One rule per account, per group and per tier, each carrying that dimension's
+ * distance from the baseline. A stream is scored by the sum of the ones it
+ * matches, which is the additive model Teamarr evaluates natively -- an account
+ * 2Mbps above the house average, a group worth another 3 and an `fhd` token
+ * worth another 1.5 add up, with no conjunction rule needed.
+ *
+ * The three are what Teamarr can actually match on, and they divide the way its
+ * matcher does: `m3u` and `group` are wholesale set membership, `regex` is the
+ * only thing that reads the stream's own name. That is also the order of how
+ * much they are worth here -- a group's effect routinely spans thousands of
+ * kbps where an account's spans tens -- which is why shipping the group matters
+ * more than any refinement of the other two.
  *
  * `unknown` gets no rule on purpose. It is the reference level: a stream whose
  * name advertises nothing scores its account's effect alone, which is the
  * right answer when the name is the only thing there was to go on.
  */
 export function teamarrRules(profile: QualityProfile, options: ExportOptions = {}): RulesExport {
-  const pointsPerMbps = options.pointsPerMbps ?? 10;
-  const maxPoints = options.maxPoints ?? 100_000;
+  const pointsPerMbps = options.pointsPerMbps ?? 5;
+  const maxPoints = options.maxPoints ?? 15;
   const minSamples = options.minSamples ?? 20;
 
   const rules: TeamarrRule[] = [];
@@ -438,7 +701,17 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
     if (account.samples < minSamples || !account.key.trim()) continue;
     const points = pointsFor(account.deltaKbps, pointsPerMbps, maxPoints);
     if (points === 0) continue;
-    rules.push({ type: 'm3u', value: account.key, priority: 50, mode: 'score', points });
+    rules.push({ type: 'm3u', value: account.key, priority: 99, mode: 'score', points });
+  }
+
+  // Matched on the group's name exactly as the provider writes it, which is
+  // what the samples were keyed on -- so the rule selects the population its
+  // number was measured over, rather than one that merely resembles it.
+  for (const group of profile.groups) {
+    if (group.samples < minSamples || !group.key.trim()) continue;
+    const points = pointsFor(group.deltaKbps, pointsPerMbps, maxPoints);
+    if (points === 0) continue;
+    rules.push({ type: 'group', value: group.key, priority: 99, mode: 'score', points });
   }
 
   for (const tier of profile.tiers) {
@@ -447,8 +720,8 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
     if (points === 0) continue;
     rules.push({
       type: 'regex',
-      value: tierPattern(tier.key as Exclude<Tier, 'unknown'>),
-      priority: 50,
+      value: teamarrPattern(tierPattern(tier.key as Exclude<Tier, 'unknown'>)),
+      priority: 99,
       mode: 'score',
       points,
     });
@@ -461,6 +734,7 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
       baselineKbps: profile.baselineKbps,
       pointsPerMbps,
       minSamples,
+      scope: profile.scope,
       note:
         'Generated by Podium from measured stream quality. Points are the ' +
         "dimension's measured distance from this install's baseline, in " +

@@ -1,6 +1,14 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
-import { buildProfile, mergeTeamarrRules, teamarrRules } from '@/lib/quality';
+import {
+  buildProfile,
+  mergeTeamarrRules,
+  parseGlobs,
+  type QualityScope,
+  scopeFromConfig,
+  teamarrRules,
+} from '@/lib/quality';
+import { resolveEnv } from '@/lib/settings';
 import { Store } from '@/lib/store';
 
 export const dynamic = 'force-dynamic';
@@ -14,7 +22,33 @@ function options(url: URL): { minSamples: number; pointsPerMbps: number } {
   };
   return {
     minSamples: Math.round(number('minSamples', 20, 1, 100_000)),
-    pointsPerMbps: number('pointsPerMbps', 10, 0, 10_000),
+    pointsPerMbps: number('pointsPerMbps', 5, 0, 10_000),
+  };
+}
+
+/**
+ * The configured scope, with per-request overrides.
+ *
+ * Overrides exist because the scope is a judgement rather than a fact, and the
+ * cost of a wrong one is invisible from inside it: an operator who narrows it
+ * too far sees a smaller table, not a warning. `?eventOnly=0` answers "what
+ * would I be reading if I had not gated this", against the same samples, with
+ * nothing saved -- which is the question worth being able to ask before the
+ * setting is trusted.
+ */
+function scopeOf(url: URL, config: Parameters<typeof scopeFromConfig>[0]): QualityScope {
+  const scope = scopeFromConfig(config);
+  const eventOnly = url.searchParams.get('eventOnly');
+  const include = url.searchParams.get('include');
+  const exclude = url.searchParams.get('exclude');
+  return {
+    eventOnly:
+      eventOnly === null ? scope.eventOnly : ['1', 'true', 'yes', 'on'].includes(eventOnly.trim()),
+    // An empty parameter clears the list rather than falling back to the
+    // configured one: `?include=` has to mean something, and "no patterns" is
+    // the only thing it can honestly mean.
+    include: include === null ? scope.include : parseGlobs(include),
+    exclude: exclude === null ? scope.exclude : parseGlobs(exclude),
   };
 }
 
@@ -38,7 +72,12 @@ export function GET(request: Request) {
     const url = new URL(request.url);
     const { minSamples, pointsPerMbps } = options(url);
     store = new Store(loadConfig().dbPath);
-    const profile = buildProfile(store.qualitySamples(), { minSamples });
+    // Settings-resolved, not the raw environment: the scope is edited in the UI
+    // and stored, and reading it from `process.env` would report the gate the
+    // container booted with rather than the one in force.
+    const config = loadConfig(resolveEnv(process.env, store.settings()));
+    const scope = scopeOf(url, config);
+    const profile = buildProfile(store.qualitySamples(), { minSamples, scope });
 
     if (url.searchParams.get('format') !== 'teamarr') {
       return NextResponse.json(profile);
@@ -94,7 +133,11 @@ export async function POST(request: Request) {
     );
 
     store = new Store(loadConfig().dbPath);
-    const profile = buildProfile(store.qualitySamples(), { minSamples });
+    const config = loadConfig(resolveEnv(process.env, store.settings()));
+    const profile = buildProfile(store.qualitySamples(), {
+      minSamples,
+      scope: scopeOf(url, config),
+    });
     const generated = teamarrRules(profile, { minSamples, pointsPerMbps });
     const merged = mergeTeamarrRules(rules, generated.rules);
 
