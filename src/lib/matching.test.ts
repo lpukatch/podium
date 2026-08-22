@@ -139,26 +139,34 @@ describe('normalize', () => {
     expect(normalize('Sports Alpha 1 TH MY').name).toBe('Sports Alpha 1 TH MY');
   });
 
-  it('lifts dash-separated prefixes', () => {
-    const n = normalize('US - ANIMAL PLANET FHD');
-    expect(n.name).toBe('ANIMAL PLANET');
-    expect(n.prefixes).toEqual(['US']);
-    expect(n.quality.tier).toBe('fhd');
-  });
-
-  it('lifts en-dash and em-dash separated prefixes', () => {
-    const n1 = normalize('US – ANIMAL PLANET FHD');
-    expect(n1.name).toBe('ANIMAL PLANET');
-    expect(n1.prefixes).toEqual(['US']);
-
-    const n2 = normalize('US — ANIMAL PLANET FHD');
-    expect(n2.name).toBe('ANIMAL PLANET');
-    expect(n2.prefixes).toEqual(['US']);
+  it('keeps a market tag left of the quality marker', () => {
+    const n = normalize('Sports Alpha MY HD');
+    expect(n.name).toBe('Sports Alpha MY');
+    expect(n.regions).toEqual([]);
   });
 
   it('preserves hyphens in names without surrounding spaces', () => {
     expect(normalize('Sci-Fi Channel HD').name).toBe('Sci-Fi Channel');
     expect(normalize('UK-FAST: Sports Alpha Main Event').prefixes).toEqual(['UK-FAST']);
+  });
+
+  /**
+   * A dash is not a separator, and the attempt to make it one is why this test
+   * exists. " - " reads as a prefix delimiter in "US - ANIMAL PLANET" and as
+   * part of the name in every "TNT - HD" a provider ships, and normalisation
+   * cannot tell the two apart from the name alone. Lifting it globally ate the
+   * second kind whole: "TNT - HD" lifted "TNT" into `prefixes`, the quality
+   * scan consumed "HD", and the name keyed to the empty string -- so the alias
+   * that used to claim it matched nothing, silently, across the catalogue.
+   *
+   * Making this work needs the operator to say which providers name channels
+   * that way. Until then the dash stays in the name.
+   */
+  it('does not lift a dash-separated head into a prefix', () => {
+    expect(normalize('TNT - HD').name).toBe('TNT');
+    expect(normalize('TNT - HD').prefixes).toEqual([]);
+    expect(normalize('BBC One - London HD').name).toBe('BBC One - London');
+    expect(normalize('US - ANIMAL PLANET FHD').prefixes).toEqual([]);
   });
 });
 
@@ -949,14 +957,12 @@ describe('matcher', () => {
     expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
   });
 
-  it('matches dash-separated streams with negative qualifier aliases', () => {
-    const m = matcherFor({ channel_id: 1, aliases: ['@!UK Animal Planet'] });
-    const index = m.buildIndex([
-      stream(10, 'UK: ANIMAL PLANET [1080p]'),
-      stream(11, 'UK| ANIMAL PLANET FHD'),
-      stream(12, 'US - ANIMAL PLANET FHD'),
-    ]);
-    expect(m.match(m.rules.get(1)!, index)).toEqual([[12, 0]]);
+  it('keeps a "<name> - <quality>" stream reachable by its own alias', () => {
+    // The regression the dash separator caused: this stream keyed to '' and
+    // dropped out of the ruleset entirely, while "TNT HD" beside it matched.
+    const m = matcherFor({ channel_id: 1, aliases: ['TNT'] });
+    const index = m.buildIndex([stream(10, 'TNT HD'), stream(11, 'TNT - HD')]);
+    expect(m.match(m.rules.get(1)!, index).map(([id]) => id)).toEqual([10, 11]);
   });
 
   it('accepts any of several required prefixes', () => {
