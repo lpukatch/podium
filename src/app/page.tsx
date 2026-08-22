@@ -5,12 +5,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CheckPanel } from './check-panel';
 import { OrderingView } from './ordering-view';
 import { ProgressView } from './progress-view';
+import { QualityView } from './quality-view';
 import { SettingsView } from './settings-view';
 import { StreamGroupsView } from './stream-groups-view';
 import { StreamSearch } from './stream-search';
 
 type Mode = 'always' | 'never' | 'after_epg_start' | 'assigned';
-type Tab = 'groups' | 'all' | 'rules' | 'progress' | 'settings';
+type Tab = 'groups' | 'all' | 'rules' | 'progress' | 'quality' | 'settings';
 type ChanFilter = 'all' | 'regex' | 'noregex' | 'nomatch';
 
 interface ChannelRow {
@@ -164,6 +165,7 @@ const TAB_LABELS: Record<Tab, string> = {
   all: 'All channels',
   rules: 'Name rules',
   progress: 'Progress',
+  quality: 'Quality',
   settings: 'Settings',
 };
 
@@ -263,7 +265,11 @@ export default function Page() {
   // alias box never triggers a Next navigation.
   const applyUrl = useCallback((params: URLSearchParams) => {
     const t = params.get('tab');
-    setTab(t === 'all' || t === 'rules' || t === 'progress' || t === 'settings' ? t : 'groups');
+    setTab(
+      t === 'all' || t === 'rules' || t === 'progress' || t === 'quality' || t === 'settings'
+        ? t
+        : 'groups',
+    );
     const g = Number(params.get('group'));
     const c = Number(params.get('channel'));
     setGroupId(Number.isInteger(g) && g > 0 ? g : null);
@@ -766,7 +772,7 @@ export default function Page() {
         {!group && (
           <>
             <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-line)] bg-[var(--color-panel)] px-5 py-3">
-              {(['groups', 'all', 'rules', 'progress', 'settings'] as const).map((t) => (
+              {(['groups', 'all', 'rules', 'progress', 'quality', 'settings'] as const).map((t) => (
                 <button
                   type="button"
                   key={t}
@@ -793,6 +799,8 @@ export default function Page() {
             </div>
 
             {tab === 'progress' && <ProgressView />}
+
+            {tab === 'quality' && <QualityView />}
 
             {tab === 'settings' && (
               <>
