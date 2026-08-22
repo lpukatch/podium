@@ -42,6 +42,7 @@ interface Profile {
   generatedAt: number;
   totalSamples: number;
   recordedSamples: number;
+  namedSamples: number;
   scope: ScopeSummary;
   audioOnlySamples: number;
   baselineKbps: number;
@@ -297,6 +298,13 @@ export function QualityView() {
             {rate(profile?.baselineKbps ?? 0)}
             {profile && profile.audioOnlySamples > 0 && (
               <> · {profile.audioOnlySamples.toLocaleString()} audio-only held out</>
+            )}
+            {/* The readiness number for name-pattern mining: samples taken
+                before names were kept carry none, so this climbs from zero as
+                ordinary passes run. Hidden once every sample has one, when it
+                has stopped saying anything. */}
+            {profile && profile.namedSamples < profile.totalSamples && (
+              <> · {profile.namedSamples.toLocaleString()} with names</>
             )}
           </span>
         </div>

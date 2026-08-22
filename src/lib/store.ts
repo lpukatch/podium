@@ -244,6 +244,16 @@ CREATE TABLE IF NOT EXISTS quality_samples (
     channel_group_id   INTEGER,
     channel_group_name TEXT NOT NULL DEFAULT '',
     policy_mode        TEXT NOT NULL DEFAULT '',
+    -- The stream's name as the provider wrote it, truncated.
+    --
+    -- Kept because the name is the only per-stream thing a consumer can match
+    -- on -- Teamarr's account and group rules are wholesale, its regex rules
+    -- read this -- and because what generalises out of a name is not knowable
+    -- yet. Storing the raw name rather than extracted tokens is the whole
+    -- point: the token vocabulary will improve, and a stored token set freezes
+    -- today's extractor while a stored name lets months of history be re-mined
+    -- for nothing. Same argument as keeping samples instead of a running mean.
+    stream_name        TEXT NOT NULL DEFAULT '',
     -- Radio and music feeds carry no video track at all, so their bitrate is
     -- an audio bitrate: a few hundred kbps that means "fine" rather than
     -- "throttled". Pooled into a video model they read as catastrophic, and on
@@ -588,6 +598,15 @@ interface CacheRow {
  */
 export const SAMPLES_PER_BUCKET = 400;
 
+/**
+ * Longest stream name kept on a sample.
+ *
+ * Generous for a channel name and short enough that the table stays small at
+ * tens of thousands of rows. Everything a name rule could be mined from is at
+ * the front; what runs past this is fixture text and decoration.
+ */
+export const MAX_STREAM_NAME = 200;
+
 /** Samples older than this stop describing anything the provider still runs. */
 export const QUALITY_HISTORY_MS = 90 * 86_400_000;
 
@@ -599,6 +618,8 @@ export interface QualitySample {
   tier: string;
   groupId: number | null;
   groupName: string;
+  /** The provider's own name for the stream -- see the column comment. */
+  streamName: string;
   /** The channel the probe was run for -- see the column comment. */
   channelGroupId: number | null;
   channelGroupName: string;
@@ -662,6 +683,10 @@ export class Store {
         ['quality_samples', 'channel_group_id INTEGER'],
         ['quality_samples', "channel_group_name TEXT NOT NULL DEFAULT ''"],
         ['quality_samples', "policy_mode TEXT NOT NULL DEFAULT ''"],
+        // Empty on every row written before names were kept. The profile
+        // reports how many samples carry one, because that count is what says
+        // whether there is yet anything to mine.
+        ['quality_samples', "stream_name TEXT NOT NULL DEFAULT ''"],
       ] as const) {
         try {
           this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`);
@@ -1344,9 +1369,9 @@ export class Store {
     this.sql(
       `INSERT INTO quality_samples
          (provider_id, provider_name, tier, group_id, group_name,
-          channel_group_id, channel_group_name, policy_mode, audio_only,
-          sampled_at, alive, black, bitrate_kbps, measured, height, fps)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          channel_group_id, channel_group_name, policy_mode, stream_name,
+          audio_only, sampled_at, alive, black, bitrate_kbps, measured, height, fps)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       sample.providerId,
       sample.providerName,
@@ -1356,6 +1381,10 @@ export class Store {
       sample.channelGroupId,
       sample.channelGroupName,
       sample.policyMode,
+      // Bounded rather than trusted. A name is provider-controlled text on the
+      // hot path of every probe, and the mining this exists for reads tokens
+      // out of the first few words, not the two hundredth.
+      sample.streamName.slice(0, MAX_STREAM_NAME),
       sample.audioOnly ? 1 : 0,
       Date.now(),
       sample.alive ? 1 : 0,
@@ -1416,14 +1445,14 @@ export class Store {
       sinceMs === undefined
         ? this.sql(
             `SELECT provider_id, provider_name, tier, group_id, group_name,
-                    channel_group_id, channel_group_name, policy_mode, audio_only,
-                    sampled_at, alive, black, bitrate_kbps, measured, height, fps
+                    channel_group_id, channel_group_name, policy_mode, stream_name,
+                    audio_only, sampled_at, alive, black, bitrate_kbps, measured, height, fps
                FROM quality_samples ORDER BY sampled_at DESC`,
           ).all()
         : this.sql(
             `SELECT provider_id, provider_name, tier, group_id, group_name,
-                    channel_group_id, channel_group_name, policy_mode, audio_only,
-                    sampled_at, alive, black, bitrate_kbps, measured, height, fps
+                    channel_group_id, channel_group_name, policy_mode, stream_name,
+                    audio_only, sampled_at, alive, black, bitrate_kbps, measured, height, fps
                FROM quality_samples WHERE sampled_at >= ? ORDER BY sampled_at DESC`,
           ).all(Date.now() - sinceMs)
     ) as Array<{
@@ -1435,6 +1464,7 @@ export class Store {
       channel_group_id: number | null;
       channel_group_name: string;
       policy_mode: string;
+      stream_name: string;
       audio_only: number;
       sampled_at: number;
       alive: number;
@@ -1453,6 +1483,7 @@ export class Store {
       channelGroupId: row.channel_group_id,
       channelGroupName: row.channel_group_name ?? '',
       policyMode: row.policy_mode ?? '',
+      streamName: row.stream_name ?? '',
       audioOnly: Boolean(row.audio_only),
       sampledAt: row.sampled_at,
       alive: Boolean(row.alive),

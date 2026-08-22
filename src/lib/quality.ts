@@ -314,6 +314,15 @@ export interface QualityProfile {
   totalSamples: number;
   /** Every sample held, before the scope was applied. */
   recordedSamples: number;
+  /**
+   * In-scope samples carrying the stream's name.
+   *
+   * Nothing reads the names yet -- they are kept for mining name patterns, and
+   * that has to wait for enough of them. This is the readiness number: samples
+   * recorded before names were kept have none, so it climbs from zero as
+   * ordinary passes run and says when there is something to mine.
+   */
+  namedSamples: number;
   /** What the gate admitted and rejected, and the rules it used. */
   scope: ScopeSummary;
   /** Samples held out of the fit because the stream carries no video. */
@@ -418,6 +427,7 @@ export function buildProfile(
     generatedAt: Date.now(),
     totalSamples: scoped.length,
     recordedSamples: samples.length,
+    namedSamples: scoped.reduce((sum, sample) => sum + (sample.streamName ? 1 : 0), 0),
     scope: summary,
     audioOnlySamples: scoped.reduce((sum, sample) => sum + (sample.audioOnly ? 1 : 0), 0),
     baselineKbps,

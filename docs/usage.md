@@ -530,7 +530,9 @@ contribute an effect; the default is 20, because a reading off four streams is
 noise with a number attached.
 
 The response describes the scoped population: `totalSamples` is what the fit
-read, `recordedSamples` is everything held, and `scope` carries the rules in
+read, `recordedSamples` is everything held, `namedSamples` is how many carry the
+stream's name — kept for mining name patterns later, so it reads as zero on
+history recorded before names were — and `scope` carries the rules in
 force and a count per reason a sample was left out. `?eventOnly=0`,
 `?include=` and `?exclude=` override the configured scope for one request —
 `?eventOnly=0&include=&exclude=` is the ungated profile — which is how to ask
