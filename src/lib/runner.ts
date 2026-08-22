@@ -1259,8 +1259,7 @@ export class Runner {
                 providerName: providerNames.get(source.providerId) ?? String(source.providerId),
                 tier: tierOf(source.name),
                 groupId: source.groupId,
-                groupName:
-                  source.groupId === null ? '' : (groupNames.get(source.groupId) ?? ''),
+                groupName: source.groupId === null ? '' : (groupNames.get(source.groupId) ?? ''),
                 audioOnly,
                 alive: best.alive,
                 black: Boolean(best.black),
