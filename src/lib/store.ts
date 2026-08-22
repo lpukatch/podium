@@ -174,6 +174,76 @@ CREATE TABLE IF NOT EXISTS catalogue_state (
     written_at INTEGER NOT NULL,
     run_id     TEXT
 );
+
+-- Measured quality kept by provenance rather than by stream identity.
+--
+-- probe_cache answers "what is this stream", and is deliberately thrown away
+-- with the stream: pruneOutside drops verdicts for anything no longer in the
+-- catalogue. On an install carrying event channels that is most of them -- a
+-- fixture's streams exist for one afternoon -- so by the time "how good are
+-- this provider's 1080p feeds" is worth asking, every measurement that could
+-- have answered it has been swept. Probing harder does not fix that; the
+-- verdict was never going to outlive the stream it described.
+--
+-- What generalises is not the measurement but its provenance. The stream from
+-- account 4 whose name says FHD came off the same encoder as next Saturday's,
+-- so (provider, tier) is a bucket worth keeping after the stream is gone,
+-- and a stream nobody has ever probed can be ranked off the bucket it arrives
+-- in. That is the whole point: the ranking has to be available *before* the
+-- probe, because for an event stream there is no before.
+--
+-- Rows are individual samples, not a running mean, because the useful summary
+-- is a percentile and percentiles need the distribution. They are capped per
+-- bucket at SAMPLES_PER_BUCKET and trimmed oldest-first: a bucket that has
+-- seen ten thousand streams is not better described by all ten thousand than
+-- by its most recent few hundred, and the recent ones are the ones that
+-- describe the encoder the provider is running *now*.
+CREATE TABLE IF NOT EXISTS quality_samples (
+    provider_id   INTEGER NOT NULL,
+    -- Denormalised on purpose. The export keys on account *name* because that
+    -- is what Teamarr's rules match on, and the id -> name mapping lives only
+    -- in Dispatcharr -- which is exactly the thing that may not be reachable,
+    -- or may have renumbered, when the export is built.
+    provider_name TEXT    NOT NULL,
+    -- The quality token parsed out of the stream's own name (normalize), not
+    -- the measured height. Deliberately: this is the dimension a consumer can
+    -- still see on an unprobed stream, so it has to be one that is legible
+    -- from the name alone. The measured height goes in its own column, and the
+    -- gap between the two is the lie the provider told.
+    tier          TEXT    NOT NULL,
+    -- The provider group the stream was imported under (its group-title).
+    --
+    -- Not a bucketing dimension anybody consumes -- Teamarr can only match a
+    -- group on channel-source streams -- but recorded because leaving it out
+    -- silently biases the dimensions that ARE consumed. An account's measured
+    -- quality is really the quality of whichever groups it happens to carry,
+    -- so an account selling one radio package reads as a worse video provider
+    -- than it is. Measured on a live install, omitting this flipped the sign
+    -- of an account's exported effect: the rules said promote where the video
+    -- evidence said demote. It is here to be held constant, not to be shipped.
+    group_id      INTEGER,
+    group_name    TEXT    NOT NULL DEFAULT '',
+    -- Radio and music feeds carry no video track at all, so their bitrate is
+    -- an audio bitrate: a few hundred kbps that means "fine" rather than
+    -- "throttled". Pooled into a video model they read as catastrophic, and on
+    -- a real install they were 30% of the untagged tier. Kept rather than
+    -- dropped -- Podium ranks these streams on their own terms and a prior for
+    -- them is worth having -- but kept separable.
+    audio_only    INTEGER NOT NULL DEFAULT 0,
+    sampled_at    INTEGER NOT NULL,
+    alive         INTEGER NOT NULL,
+    black         INTEGER NOT NULL,
+    bitrate_kbps  INTEGER NOT NULL,
+    -- Whether that bitrate came from reading the stream or from a container
+    -- that declared one. Only measured values feed the percentiles; live TS
+    -- rarely declares a bitrate, and averaging in the ones that do biases the
+    -- bucket towards whichever streams happened to be muxed with metadata.
+    measured      INTEGER NOT NULL,
+    height        INTEGER NOT NULL,
+    fps           REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS quality_samples_bucket
+    ON quality_samples (provider_id, tier, sampled_at);
 `;
 
 /**
@@ -479,6 +549,40 @@ interface CacheRow {
 }
 
 /** A cached verdict with the bookkeeping `ttlFor` needs. */
+/**
+ * How many samples a single `(provider, tier)` bucket keeps.
+ *
+ * Set for the shape of the summary rather than for the disk: a p90 is stable
+ * enough to act on somewhere in the low hundreds of samples, and past that the
+ * extra rows only slow the bucket's response to a provider changing encoder.
+ */
+export const SAMPLES_PER_BUCKET = 400;
+
+/** Samples older than this stop describing anything the provider still runs. */
+export const QUALITY_HISTORY_MS = 90 * 86_400_000;
+
+/** One settled verdict, tagged with the provenance that outlives its stream. */
+export interface QualitySample {
+  providerId: number;
+  providerName: string;
+  /** Quality token from the stream's own name -- see the column comment. */
+  tier: string;
+  groupId: number | null;
+  groupName: string;
+  /** Video-less feed: its bitrate is an audio bitrate. See the column comment. */
+  audioOnly: boolean;
+  alive: boolean;
+  black: boolean;
+  bitrateKbps: number;
+  measured: boolean;
+  height: number;
+  fps: number;
+}
+
+export interface StoredQualitySample extends QualitySample {
+  sampledAt: number;
+}
+
 export interface CacheEntry {
   probedAt: number;
   alive: boolean;
@@ -710,6 +814,12 @@ export class Store {
     // nothing on every pass but the first of the day, so paying it per pass
     // costs less than the bookkeeping to pay it less often.
     this.sql('DELETE FROM runs WHERE started_at < ?').run(now - RUN_HISTORY_MS);
+    // Same bargain, same place, for the same reason: the quality table grows
+    // by one row per probe and a container that stays up for months would
+    // otherwise never trim it. Bounded by SAMPLES_PER_BUCKET times the number
+    // of buckets -- tens of thousands of rows at the very most -- so the sweep
+    // is cheap enough to pay every pass rather than only at boot.
+    this.trimQuality();
   }
 
   finishRun(runId: string, fields: RunUpdate = {}): void {
@@ -1173,6 +1283,122 @@ export class Store {
   }
 
   /**
+   * Record one settled verdict against the bucket its stream arrived in.
+   *
+   * Called for every stream a pass probes, alive or dead, because the dead
+   * ones are half the signal: a bucket where a third of the streams never
+   * answer is a bad bucket however fast the other two thirds run.
+   *
+   * Writes only -- no read-modify-write, no trim on the hot path. The trim is
+   * `trimQuality`, run once per pass, because doing it per sample would turn
+   * every probe into a delete against the largest table here for the sake of
+   * a row count nobody reads between passes.
+   */
+  recordQuality(sample: QualitySample): void {
+    this.sql(
+      `INSERT INTO quality_samples
+         (provider_id, provider_name, tier, group_id, group_name, audio_only,
+          sampled_at, alive, black, bitrate_kbps, measured, height, fps)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      sample.providerId,
+      sample.providerName,
+      sample.tier,
+      sample.groupId,
+      sample.groupName,
+      sample.audioOnly ? 1 : 0,
+      Date.now(),
+      sample.alive ? 1 : 0,
+      sample.black ? 1 : 0,
+      Math.round(sample.bitrateKbps),
+      sample.measured ? 1 : 0,
+      Math.round(sample.height),
+      sample.fps,
+    );
+  }
+
+  /**
+   * Hold each bucket to its most recent `perBucket` samples, and drop samples
+   * past `olderThanMs` outright.
+   *
+   * Two limits rather than one because they fail in opposite directions. The
+   * age limit alone lets a provider with thousands of streams write an
+   * unbounded table inside the window; the count limit alone keeps a bucket
+   * that stopped being probed a year ago answering as though it were current.
+   */
+  trimQuality(perBucket = SAMPLES_PER_BUCKET, olderThanMs = QUALITY_HISTORY_MS): number {
+    let removed = this.sql('DELETE FROM quality_samples WHERE sampled_at < ?').run(
+      Date.now() - olderThanMs,
+    ).changes;
+    removed += this.sql(
+      `DELETE FROM quality_samples WHERE rowid IN (
+         SELECT rowid FROM (
+           SELECT rowid,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY provider_id, tier ORDER BY sampled_at DESC, rowid DESC
+                  ) AS rank
+             FROM quality_samples
+         ) WHERE rank > ?
+       )`,
+    ).run(perBucket).changes;
+    return removed;
+  }
+
+  /**
+   * Every sample still held, newest first.
+   *
+   * Returned raw rather than pre-aggregated: the summary a caller wants -- a
+   * percentile, an alive rate, a points value -- depends on how the export is
+   * being scaled, and re-deriving it from samples that were never averaged
+   * away means changing the scale does not mean waiting a month for new data.
+   * Bounded by `trimQuality`, so "every sample" is thousands, not millions.
+   */
+  qualitySamples(sinceMs?: number): StoredQualitySample[] {
+    const rows = (
+      sinceMs === undefined
+        ? this.sql(
+            `SELECT provider_id, provider_name, tier, group_id, group_name, audio_only,
+                    sampled_at, alive, black, bitrate_kbps, measured, height, fps
+               FROM quality_samples ORDER BY sampled_at DESC`,
+          ).all()
+        : this.sql(
+            `SELECT provider_id, provider_name, tier, group_id, group_name, audio_only,
+                    sampled_at, alive, black, bitrate_kbps, measured, height, fps
+               FROM quality_samples WHERE sampled_at >= ? ORDER BY sampled_at DESC`,
+          ).all(Date.now() - sinceMs)
+    ) as Array<{
+      provider_id: number;
+      provider_name: string;
+      tier: string;
+      group_id: number | null;
+      group_name: string;
+      audio_only: number;
+      sampled_at: number;
+      alive: number;
+      black: number;
+      bitrate_kbps: number;
+      measured: number;
+      height: number;
+      fps: number;
+    }>;
+    return rows.map((row) => ({
+      providerId: row.provider_id,
+      providerName: row.provider_name,
+      tier: row.tier,
+      groupId: row.group_id,
+      groupName: row.group_name,
+      audioOnly: Boolean(row.audio_only),
+      sampledAt: row.sampled_at,
+      alive: Boolean(row.alive),
+      black: Boolean(row.black),
+      bitrateKbps: row.bitrate_kbps,
+      measured: Boolean(row.measured),
+      height: row.height,
+      fps: row.fps,
+    }));
+  }
+
+  /**
    * Replace the whole catalogue snapshot with the state the last pass fetched.
    *
    * Empty rows write NOTHING, on purpose, for the same reason `pruneOutside`
@@ -1290,6 +1516,7 @@ export class Store {
       this.sql('DELETE FROM catalogue').run();
       this.sql('DELETE FROM catalogue_state').run();
       this.sql('DELETE FROM assign_blocks').run();
+      this.sql('DELETE FROM quality_samples').run();
     })();
   }
 
