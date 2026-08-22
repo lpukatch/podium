@@ -348,6 +348,13 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     }
     const workerOrder = composeOrder(ranked, current, removeUnmatched, assign);
     const kept = composeOrder(ranked, current, false, assign);
+    // What the panel's drop tick asks for, composed here rather than left to
+    // the apply. `proposed` below is the raw ranking -- every stream the rule
+    // claims, dead ones included, because the table has to show them to explain
+    // why they sank. Sending that as an order would assign the lot, cap and
+    // block list and all, so the drop gets its own composition: the same one
+    // the worker makes when remove-unmatched is on.
+    const dropOrder = composeOrder(ranked, current, true, assign);
     const proposed = ranked;
 
     const describe = (streamId: number) => {
@@ -397,6 +404,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       proposed,
       kept,
       workerOrder,
+      dropOrder,
       // Surfaced rather than silent: a capped check has probed only part of what
       // the rule claims, so the ranking below is partial even though the
       // unclaimed list beside it is now complete.

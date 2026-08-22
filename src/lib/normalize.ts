@@ -62,7 +62,7 @@ const BRACKETED = /\[[^\]]*\]|\([^)]*\)/g;
  * the bidi isolates that wrap many names ("⁨Movie Network East⁩").
  */
 const DECORATION = /[¹²³ʰ-˿ᴬ-ᶿ⁰-₟⁦-⁩]+/g;
-const SEPARATORS = /\s*[:|]\s*|\s+[-–—]\s+/;
+const SEPARATORS = /\s*[:|]\s*/;
 /**
  * An opening delimiter, which carries no information on its own.
  *
@@ -71,7 +71,7 @@ const SEPARATORS = /\s*[:|]\s*|\s+[-–—]\s+/;
  * first separator sits at offset zero, so the segment never lifts and the whole
  * bracket keys as part of the name.
  */
-const LEADING_SEPARATOR = /^[\s:|–—-]+/;
+const LEADING_SEPARATOR = /^[\s:|]+/;
 
 export interface Quality {
   tier: string;
