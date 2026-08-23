@@ -25,6 +25,7 @@ interface Effect {
   samples: number;
   effectiveKbps: number;
   deltaKbps: number;
+  vsReferenceKbps: number | null;
   accounts: number;
   topAccountShare: number;
 }
@@ -526,9 +527,9 @@ export function QualityView() {
           <h3 className="text-base">Quality tiers</h3>
           <p className={`mt-1 text-sm ${muted}`}>
             From the token in the stream&apos;s own name. Exported as regex rules; streams naming no
-            tier are the reference level and get none. A tier fitted almost entirely from one
-            account is withheld from the export — see below for whether its labels are worth
-            anything.
+            tier match none of them, so they are the reference level and every other tier is quoted
+            as its distance from them. A tier fitted almost entirely from one account is withheld
+            from the export — see below for whether its labels are worth anything.
           </p>
           <EffectTable
             effects={profile?.tiers ?? []}
@@ -710,11 +711,13 @@ export function QualityView() {
           A scoring rule cannot be checked from inside Teamarr: a +20 that matches nothing, a regex
           pinned to the wrong end of a name and a rule that works all look the same in the file, and
           the only visible consequence is which stream somebody gets weeks later. Upload your rules
-          and Podium scores them against every channel it has measured — the stream your rules put
-          first, beside the stream the measurements say should be first. Nothing is written and no
-          stream is probed, so run it after every edit. The set you upload is kept and re-checked by
-          every later pass — which is the only way a fixture channel is ever checked, since its
-          streams are gone by the next morning.
+          and Podium scores them against every channel <em>Teamarr orders</em> that it has measured
+          — the stream your rules put first, beside the stream the measurements say should be first.
+          Channels Teamarr does not order are left out: its rules are never evaluated on them, so a
+          disagreement there judges the rules on a population they will never see. Nothing is
+          written and no stream is probed, so run it after every edit. The set you upload is kept
+          and re-checked by every later pass — which is the only way a fixture channel is ever
+          checked, since its streams are gone by the next morning.
         </p>
 
         <div className="mt-4 flex flex-wrap items-center gap-3">
@@ -758,16 +761,8 @@ export function QualityView() {
 
         {check && check.summary.managedGapKbps > 0 && (
           <p className={`mt-3 max-w-[75ch] text-sm ${muted}`}>
-            Across the managed disagreements, {rate(check.summary.managedGapKbps)} of measured
-            bitrate goes to the stream that is not chosen.
-            {check.summary.channels > check.summary.managedChannels && (
-              <>
-                {' '}
-                The other {check.summary.channels - check.summary.managedChannels} channels checked
-                are not ordered by Teamarr — its rules are never evaluated on them, so they are
-                listed below but left out of the headline.
-              </>
-            )}
+            Across these disagreements, {rate(check.summary.managedGapKbps)} of measured bitrate
+            goes to the stream that is not chosen.
           </p>
         )}
 
@@ -800,6 +795,8 @@ export function QualityView() {
                     <tr key={row.channelId} className="border-b border-[var(--color-line)]">
                       <td className="py-2 pr-3">
                         {row.channelName}
+                        {/* Only reachable from a check stored before the scoping;
+                            those rows still carry the wider population. */}
                         {!row.managed && (
                           <span className={`ml-2 text-xs ${muted}`}>not Teamarr-ordered</span>
                         )}
@@ -1021,12 +1018,15 @@ function EffectTable({
             <th className="py-2 pr-3 font-normal">Name</th>
             <th className="py-2 pr-3 text-right font-normal">Samples</th>
             <th className="py-2 pr-3 text-right font-normal">Worth</th>
-            <th className="py-2 text-right font-normal">vs baseline</th>
+            <th className="py-2 text-right font-normal">
+              {warnSingleAccount ? 'vs unlabelled' : 'vs baseline'}
+            </th>
           </tr>
         </thead>
         <tbody>
           {effects.map((effect) => {
             const confounded = warnSingleAccount && effect.topAccountShare > MAX_TIER_ACCOUNT_SHARE;
+            const shown = effect.vsReferenceKbps ?? effect.deltaKbps;
             return (
               <tr key={effect.key} className="border-b border-[var(--color-line)]">
                 <td className="py-2 pr-3">
@@ -1045,11 +1045,16 @@ function EffectTable({
                 </td>
                 <td className="py-2 pr-3 text-right tabular-nums">{rate(effect.effectiveKbps)}</td>
                 {/* A confounded delta is shown but not coloured: the number is
-                    real, what it is a number *about* is not what the row says. */}
-                <td
-                  className={`py-2 text-right tabular-nums ${confounded ? muted : tone(effect.deltaKbps)}`}
-                >
-                  {signed(effect.deltaKbps)}
+                    real, what it is a number *about* is not what the row says.
+                    Tiers are quoted against the unlabelled reference rather than
+                    the baseline, because that is the distance the exported rule
+                    carries -- an unlabelled stream matches no tier rule at all. */}
+                <td className={`py-2 text-right tabular-nums ${confounded ? muted : tone(shown)}`}>
+                  {effect.vsReferenceKbps !== null && effect.key === 'unknown' ? (
+                    <span className={muted}>reference</span>
+                  ) : (
+                    signed(shown)
+                  )}
                 </td>
               </tr>
             );

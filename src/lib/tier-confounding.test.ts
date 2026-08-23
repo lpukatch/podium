@@ -89,6 +89,74 @@ describe('an effect knows how many accounts it rests on', () => {
   });
 });
 
+describe('the unlabelled reference level', () => {
+  /**
+   * Two tiers with genuinely different quality, spread over enough accounts
+   * that the guard leaves the rule alone.
+   */
+  const spread = () =>
+    buildProfile(
+      [
+        ...many(30, { providerId: 1, providerName: 'One', tier: 'fhd', bitrateKbps: 9000 }),
+        ...many(30, {
+          providerId: 2,
+          providerName: 'Two',
+          tier: 'fhd',
+          bitrateKbps: 9000,
+          groupId: 2,
+          groupName: 'Group Two',
+        }),
+        ...many(30, {
+          providerId: 3,
+          providerName: 'Three',
+          tier: 'unknown',
+          streamName: 'Sports Gamma',
+          groupId: 3,
+          groupName: 'Group Three',
+          bitrateKbps: 2000,
+        }),
+      ],
+      { minSamples: 20 },
+    );
+
+  it('pins unknown at zero, because that is what an unlabelled stream scores', () => {
+    // The fit re-centres tiers on their weighted mean, so `unknown` carries a
+    // delta of its own against the baseline. Teamarr writes no rule for an
+    // unlabelled stream, so on export that level *is* zero -- and a screen
+    // showing the reference level as a non-zero number is describing a
+    // different model from the one the file implements.
+    const tiers = spread().tiers;
+    const unknown = tiers.find((tier) => tier.key === 'unknown');
+    expect(unknown?.deltaKbps).not.toBe(0);
+    expect(unknown?.vsReferenceKbps).toBe(0);
+  });
+
+  it('quotes every other tier as its distance from unlabelled', () => {
+    const tiers = spread().tiers;
+    const fhd = tiers.find((tier) => tier.key === 'fhd');
+    const unknown = tiers.find((tier) => tier.key === 'unknown');
+    expect(fhd?.vsReferenceKbps).toBe((fhd?.deltaKbps ?? 0) - (unknown?.deltaKbps ?? 0));
+  });
+
+  it('scores the export from that distance, not from the baseline', () => {
+    // The bug this fixes, in the arithmetic that caused it: against the
+    // baseline the two numbers straddle zero, so each is smaller than the gap
+    // an operator can see between the rows.
+    const profile = spread();
+    const fhd = profile.tiers.find((tier) => tier.key === 'fhd')!;
+    const { rules } = teamarrRules(profile, { minSamples: 20, pointsPerMbps: 5, maxPoints: 100 });
+    const regex = rules.find((rule) => rule.type === 'regex');
+    expect(regex?.points).toBe(Math.round((fhd.vsReferenceKbps! / 1000) * 5));
+    expect(regex?.points).not.toBe(Math.round((fhd.deltaKbps / 1000) * 5));
+  });
+
+  it('leaves accounts and groups on the baseline, which has no reference level', () => {
+    const profile = spread();
+    expect(profile.accounts.every((effect) => effect.vsReferenceKbps === null)).toBe(true);
+    expect(profile.groups.every((effect) => effect.vsReferenceKbps === null)).toBe(true);
+  });
+});
+
 describe('the export withholds a confounded tier', () => {
   /**
    * One account labels and dies half the time; another never labels and is

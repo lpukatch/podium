@@ -600,6 +600,25 @@ inference about streams of the same provenance. The cap keeps the strongest
 inference below the first rung of a measured ladder, so a stream measured at
 10Mbps outranks one that merely comes from a good account.
 
+### The unlabelled reference level
+
+The fit re-centres each dimension so its sample-weighted mean is zero, which is
+the right centre for the model and the wrong one for the export. Teamarr writes
+no rule for a stream naming no tier, so an unlabelled stream scores **0** from
+the tier dimension whatever the fit says — which makes the number an exported
+tier rule has to carry its distance from *unlabelled*, not from the baseline.
+
+Those are not the same, and the gap was quietly costing points. On the install
+this was found on, `unknown` sat at **+988** and `fhd` at **−2937** against the
+baseline, so the exported rule understated the difference between a labelled and
+an unlabelled stream by very nearly a megabit.
+
+Tiers are therefore quoted against `unknown`, on the screen and in the file.
+`unknown` reads `reference` rather than a number, and every other tier reads its
+distance from it. Accounts and groups keep their baseline deltas: every stream
+belongs to exactly one of each and they all get rules, so there is no designated
+level for them to be a distance from.
+
 ### When a tier is really an account
 
 A tier rule is the only one of the three that has to travel. `m3u` and `group`
@@ -722,9 +741,17 @@ the same few characters in a JSON file, and the only visible consequence of the
 wrong one is which stream somebody gets three weeks later.
 
 POST the file Teamarr exported — same shape the merge takes — and Podium scores
-it against every channel it has measured, reporting per channel the stream those
-rules put first beside the stream the measurements say should be first. The
-Quality tab has it behind **Check my Teamarr rules…**.
+it against every channel **Teamarr orders** that it has measured, reporting per
+channel the stream those rules put first beside the stream the measurements say
+should be first. The Quality tab has it behind **Check my Teamarr rules…**.
+
+Channels Teamarr does not order are left out entirely. Its stream-priority rules
+are only ever evaluated on the channels it manages, so a disagreement anywhere
+else is a verdict on a population the rules will never see. It is not a small
+contamination: on a live install 522 channels carried enough verdicts to check,
+**110 were managed**, and two thirds of the reported disagreements were channels
+Teamarr never touches. A headline computed over the other 412 is not a cautious
+headline, it is a wrong one.
 
 Nothing is written and nothing is probed: it reads cached verdicts only, so it
 costs one Dispatcharr snapshot and can be re-run after every edit. That is how
