@@ -227,15 +227,11 @@ export interface ChannelCheck {
   channelName: string;
   streams: number;
   /**
-   * Teamarr orders this channel.
+   * Teamarr orders this channel. Always true now -- see `checkRules`.
    *
-   * Its stream-priority rules apply to the channels it manages, so a
-   * disagreement on anything else is a comparison against a population those
-   * rules will never be evaluated on -- the same mistake the quality scope
-   * exists to prevent, and it dominates: measured on a live install, 540
-   * channels carried enough verdicts to check and only 224 sat in a managed
-   * group. Both are reported, with the managed set as the headline, because a
-   * rule set aimed wider than its fixtures is somebody's legitimate setup.
+   * Kept on the row because stored checks predate the scoping and still carry
+   * a mixed population, and because a field that silently stops being written
+   * is worse than one that reads `true` for a reason.
    */
   managed: boolean;
   /** Teamarr's first pick is the one the measurements would have chosen. */
@@ -323,6 +319,15 @@ export function checkRules(
   for (const channel of channels) {
     // A channel carrying one stream has no ordering to get wrong.
     if (channel.streams.length < 2) continue;
+    // Nor has one Teamarr does not order. Its stream-priority rules are only
+    // ever evaluated on the channels it manages, so judging them anywhere else
+    // is a verdict on a population that will never be scored -- the same
+    // mistake the quality scope exists to prevent. It dominated: on a live
+    // install 522 channels carried enough verdicts to check, 110 were managed,
+    // and two thirds of the reported disagreements were channels Teamarr never
+    // touches. A headline computed over the wrong 412 is not a cautious
+    // headline, it is a wrong one.
+    if (!channel.managed) continue;
 
     const scores = new Map<number, Score>();
     for (const { facts } of channel.streams) {
@@ -396,6 +401,9 @@ export function checkRules(
   // clothes.
   const avoidablyDead = (row: ChannelCheck): boolean =>
     (!row.teamarr.alive || row.teamarr.black) && row.podium.alive && !row.podium.black;
+  // Every row is managed now; the split is kept so the shape of a stored check
+  // does not change under a UI that still reads history written before the
+  // scoping, where the two genuinely differed.
   const managed = rows.filter((row) => row.managed);
 
   return {

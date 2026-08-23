@@ -122,10 +122,13 @@ describe('compileRules', () => {
 describe('checkRules', () => {
   const channel = (
     streams: Array<{ facts: ReturnType<typeof facts>; stepOrder: number }>,
-    over: { channelId?: number; channelName?: string } = {},
+    over: { channelId?: number; channelName?: string; managed?: boolean } = {},
   ) => ({
     channelId: over.channelId ?? 1,
     channelName: over.channelName ?? 'EPL01',
+    // Managed by default: an unmanaged channel is skipped outright now, so a
+    // fixture that forgot to say would silently assert nothing.
+    managed: over.managed ?? true,
     streams,
   });
 
@@ -278,21 +281,30 @@ describe('scope and blame', () => {
     ],
   });
 
-  it('counts the channels Teamarr actually orders apart from the rest', () => {
-    // Its stream-priority rules apply to the channels it manages. A
-    // disagreement anywhere else is a comparison against a population those
-    // rules are never evaluated on -- on a live install that was two thirds of
-    // everything with enough verdicts to check.
+  it('judges only the channels Teamarr actually orders', () => {
+    // Its stream-priority rules apply to the channels it manages, so a
+    // disagreement anywhere else is a verdict on a population those rules are
+    // never evaluated on. It is not a small contamination: on a live install
+    // 522 channels carried enough verdicts to check, 110 were managed, and two
+    // thirds of the reported disagreements were channels Teamarr never touches.
     const check = checkRules(
       [pair({ managed: true }), { ...pair(), channelId: 2, channelName: 'NHK World TV' }],
       LIVE_RULES,
       DEFAULT_STRATEGY,
     );
-    expect(check.summary.disagreed).toBe(2);
+    expect(check.summary.channels).toBe(1);
+    expect(check.summary.disagreed).toBe(1);
     expect(check.summary.managedChannels).toBe(1);
     expect(check.summary.managedAgreed).toBe(0);
-    // Managed rows first, so the table opens on the channels that matter.
-    expect(check.channels[0]!.channelName).toBe('MLB | CIN/ARI');
+    expect(check.channels.map((row) => row.channelName)).toEqual(['MLB | CIN/ARI']);
+  });
+
+  it('treats a channel that never said as unmanaged', () => {
+    // `managed` is optional on the input and absent means "nobody told us".
+    // Defaulting that to "check it" is how the wider population got in.
+    const check = checkRules([pair()], LIVE_RULES, DEFAULT_STRATEGY);
+    expect(check.summary.channels).toBe(0);
+    expect(check.channels).toEqual([]);
   });
 
   it('only calls a dead pick dead when something else was watchable', () => {

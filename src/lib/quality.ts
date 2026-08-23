@@ -319,6 +319,21 @@ export interface Effect {
   /** How many accounts contributed samples to this effect. */
   accounts: number;
   /**
+   * For a tier: its distance from the `unknown` reference level. Null for the
+   * other two dimensions, which have no designated reference.
+   *
+   * `deltaKbps` is measured against the install baseline, which the fit
+   * re-centres so the *weighted mean of all tiers* is zero. That is the right
+   * centre for the model and the wrong one for the export, and the gap between
+   * them was silently costing points. Teamarr writes no rule for an unlabelled
+   * stream, so an unlabelled stream scores 0 from the tier dimension -- which
+   * makes the honest exported number for `fhd` its distance from *unlabelled*,
+   * not from the mean. On the install this was found on, `unknown` sat at +988
+   * and `fhd` at -2937, so the export understated the difference between them
+   * by very nearly a megabit.
+   */
+  vsReferenceKbps: number | null;
+  /**
    * Share of this effect's samples coming from its single largest account.
    *
    * The number that says whether an effect is about the thing it is named
@@ -727,15 +742,28 @@ function fitEffects(buckets: Bucket[]): {
           samples,
           effectiveKbps: baselineKbps + deltaKbps,
           deltaKbps,
+          vsReferenceKbps: null as number | null,
           accounts: byAccount.size,
           topAccountShare: samples === 0 ? 0 : top / samples,
         };
       })
       .sort((a, b) => b.deltaKbps - a.deltaKbps);
 
+  /**
+   * Tier effects re-expressed against `unknown`, which is the level the export
+   * actually scores everything from.
+   */
+  const againstUnknown = (effects: Effect[]): Effect[] => {
+    const reference = effects.find((effect) => effect.key === 'unknown')?.deltaKbps ?? 0;
+    return effects.map((effect) => ({
+      ...effect,
+      vsReferenceKbps: effect.key === 'unknown' ? 0 : effect.deltaKbps - reference,
+    }));
+  };
+
   return {
     baselineKbps,
-    tiers: asEffects(members[0]!, factors[0]!.effects),
+    tiers: againstUnknown(asEffects(members[0]!, factors[0]!.effects)),
     groups: asEffects(members[1]!, factors[1]!.effects),
     accounts: asEffects(members[2]!, factors[2]!.effects),
   };
@@ -936,7 +964,10 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
   const confounded: ConfoundedTier[] = [];
   for (const tier of profile.tiers) {
     if (tier.key === 'unknown' || tier.samples < minSamples) continue;
-    const points = pointsFor(tier.deltaKbps, pointsPerMbps, maxPoints);
+    // Against `unknown`, not against the baseline: an unlabelled stream matches
+    // no tier rule and so scores 0 here, which makes the reference level the
+    // thing this number has to be a distance from.
+    const points = pointsFor(tier.vsReferenceKbps ?? tier.deltaKbps, pointsPerMbps, maxPoints);
     if (points === 0) continue;
     if (tier.topAccountShare > MAX_TIER_ACCOUNT_SHARE) {
       // Withheld, not dropped. A rule that silently fails to appear is
