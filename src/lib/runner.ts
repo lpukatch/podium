@@ -343,6 +343,19 @@ export interface LaneBudgets {
   /** Lane key -> connections already spoken for by live viewers. */
   viewers: Map<string, number>;
   /**
+   * Lane key -> viewers Dispatcharr actually named this login for, without the
+   * `streamViewers` fallback folded in.
+   *
+   * `viewers` is deliberately generous: where nothing can be attributed it
+   * hands a provider-wide count to the default lane, so capacity is never
+   * over-spent. That makes it a good budget and a terrible identity. A watched
+   * channel usually carries a stream from every provider, so the count behind
+   * it says "one of these logins is serving this viewer" while reading exactly
+   * like "all of them are". Anything deciding *which* provider somebody is on
+   * has to use this instead -- see `Pacer.yieldedProviders`.
+   */
+  attributed: Map<string, number>;
+  /**
    * Lane key -> provider id, so the per-lane bookkeeping can still be
    * displayed per provider: the progress bars were per provider before
    * profiles split the lanes, and one login is not a row anyone asked for.
@@ -380,7 +393,12 @@ export function laneBudgets(
   streamViewers: Map<number, number>,
   viewersByProfile?: Map<number, number>,
 ): LaneBudgets {
-  const budgets: LaneBudgets = { base: new Map(), viewers: new Map(), provider: new Map() };
+  const budgets: LaneBudgets = {
+    base: new Map(),
+    viewers: new Map(),
+    attributed: new Map(),
+    provider: new Map(),
+  };
   for (const [providerId, logins] of loginsByProvider) {
     if (logins.length === 0) continue;
     // Per login, the larger of what the profile row claims and what the live
@@ -407,10 +425,9 @@ export function laneBudgets(
       const key = laneKey(providerId, login.id);
       budgets.provider.set(key, providerId);
       budgets.base.set(key, login.maxStreams);
-      budgets.viewers.set(
-        key,
-        (attributed.get(login) ?? 0) + (login === fallback ? unattributed : share),
-      );
+      const named = attributed.get(login) ?? 0;
+      budgets.attributed.set(key, named);
+      budgets.viewers.set(key, named + (login === fallback ? unattributed : share));
     }
   }
   return budgets;
@@ -851,9 +868,26 @@ export class Runner {
       const {
         base: laneBase,
         viewers: laneViewers,
+        attributed: laneAttributed,
         provider: laneProvider,
       } = laneBudgets(loginsByProvider, streamViewers, activity.viewersByProfile);
-      const limits = pacer.laneLimits(laneBase, activity, laneViewers, laneProvider);
+      // A viewer on a profile no login here claims is as unplaceable as one
+      // with no profile at all -- a login deactivated in Dispatcharr between
+      // the session starting and this read is enough to produce one.
+      const knownProfiles = new Set(
+        [...loginsByProvider.values()]
+          .flat()
+          .map((login) => login.dispatcharrProfileId)
+          .filter((id): id is number => id !== null),
+      );
+      const yielding = {
+        providerOf: laneProvider,
+        attributedByLane: laneAttributed,
+        allSessionsPlaced:
+          activity.unplacedSessions === 0 &&
+          [...activity.viewersByProfile.keys()].every((id) => knownProfiles.has(id)),
+      };
+      const limits = pacer.laneLimits(laneBase, activity, laneViewers, yielding);
 
       // Every stream's probe target for the pass: exactly one, drawn from the
       // logins that reach a distinct URL and weighted by the free connections
@@ -908,10 +942,27 @@ export class Runner {
         );
       }
 
+      // Named, not just counted. "(viewers active)" next to an empty lane map
+      // is the same line whether Podium stepped off one provider or gave up on
+      // all of them, and telling those apart from the log was the whole
+      // difficulty the first time this shipped.
+      const yielded = pacer.yieldedProviders(activity, yielding);
+      const yieldNote =
+        yielded === 'all'
+          ? ' (viewers active, provider unknown -- yielding everything)'
+          : yielded === 'none'
+            ? activity.probeFailed
+              ? ' (activity unknown)'
+              : activity.idle
+                ? ''
+                : ' (viewers active)'
+            : ` (viewers on ${[...yielded]
+                .map((id) => providerNames.get(id) ?? `provider ${id}`)
+                .join(', ')} -- yielded, others probing)`;
+
       log(
         `fetched ${channels.length} channels, ${streams.length} streams; ` +
-          `lanes ${JSON.stringify(Object.fromEntries(limits))}` +
-          (activity.probeFailed ? ' (activity unknown)' : activity.idle ? '' : ' (viewers active)'),
+          `lanes ${JSON.stringify(Object.fromEntries(limits))}${yieldNote}`,
       );
 
       if (limits.size === 0) {
@@ -923,7 +974,6 @@ export class Runner {
         // closed because no viewer could be charged to a provider, which reads
         // as "no spare capacity" while the real answer is that Podium could not
         // tell who was on what.
-        const yielded = pacer.yieldedProviders(activity, laneViewers, laneProvider);
         return pause(
           activity.probeFailed
             ? 'paused: cannot reach Dispatcharr to check who is watching; assuming busy'
@@ -1565,12 +1615,25 @@ export class Runner {
     probeFailed: boolean;
     /** Live sessions per M3U profile id, for the lanes to charge them to. */
     viewersByProfile: Map<number, number>;
+    /**
+     * Live sessions Dispatcharr named no M3U profile for.
+     *
+     * Only `probeIdleProviders` cares. Everything else treats the viewer
+     * counts as a budget, where an unplaceable session is absorbed by the
+     * provider-wide fallback; that mode treats them as identity, and one
+     * session it cannot place is one provider it cannot rule out.
+     */
+    unplacedSessions: number;
   }> {
     try {
       const sessions = await client.activeSessions(uuidMap);
       const viewersByProfile = new Map<number, number>();
+      let unplacedSessions = 0;
       for (const session of sessions) {
-        if (session.profileId === null) continue;
+        if (session.profileId === null) {
+          unplacedSessions += 1;
+          continue;
+        }
         viewersByProfile.set(session.profileId, (viewersByProfile.get(session.profileId) ?? 0) + 1);
       }
       return {
@@ -1578,6 +1641,7 @@ export class Runner {
         idle: sessions.length === 0,
         probeFailed: false,
         viewersByProfile,
+        unplacedSessions,
       };
     } catch (error) {
       log(`activity probe failed (${String(error)}) -- assuming busy`);
@@ -1586,6 +1650,9 @@ export class Runner {
         idle: false,
         probeFailed: true,
         viewersByProfile: new Map(),
+        // The viewer this reports is a placeholder for "somebody, somewhere".
+        // Counting it as unplaced is not bookkeeping, it is the literal truth.
+        unplacedSessions: 1,
       };
     }
   }

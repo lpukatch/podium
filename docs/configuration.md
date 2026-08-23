@@ -126,11 +126,13 @@ Two things to know before turning it on:
   out which provider to avoid needs those streams, so each pass during viewing
   now pays the full crawl.
 - **It fails closed, and can look like it is doing nothing.** The mode is only
-  safe while Podium can tell which provider a viewer is on. Dispatcharr names
-  the M3U profile for each live session; when it does not -- or when the
-  activity probe fails outright -- nothing can be attributed and the whole pass
-  pauses exactly as before. The log says so in as many words, rather than
-  blaming provider capacity.
+  safe while Podium can tell which provider *every* viewer is on. Dispatcharr
+  names the M3U profile for each live session; if a single session names none,
+  names one no active login claims, or the activity probe fails outright, the
+  whole pass pauses exactly as before -- one viewer it cannot place is one
+  provider it cannot rule out. The log says so in as many words, rather than
+  blaming provider capacity, and names the providers it yielded to when it did
+  place them.
 
 It has no effect unless `PODIUM_PAUSE_WHEN_WATCHING` is on. Pausing switched off
 already means competing for slots on every provider, and this setting only ever

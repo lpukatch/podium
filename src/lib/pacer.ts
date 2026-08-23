@@ -32,6 +32,24 @@ export function busyUnknown(): Activity {
   return { channelIds: new Set([-1]), idle: false };
 }
 
+/** What `probeIdleProviders` needs to decide which accounts to stay off. */
+export interface LaneYielding {
+  /** Lane key -> provider id. See `LaneBudgets.provider`. */
+  providerOf: Map<string, number>;
+  /** Lane key -> viewers Dispatcharr named this login for. See `LaneBudgets.attributed`. */
+  attributedByLane: Map<string, number>;
+  /**
+   * Whether every live session was placed on a login this pass knows about.
+   *
+   * The attributed counts alone cannot answer this. Two viewers, one named and
+   * one not, still leaves a non-empty busy set -- so the mode would yield the
+   * provider it could see and cheerfully probe the one the second viewer might
+   * be sitting on. "Somebody is unaccounted for" has to be asked separately
+   * from "who is accounted for".
+   */
+  allSessionsPlaced: boolean;
+}
+
 export interface PacerConfig {
   /** Freshness target, in ms. */
   maxAgeMs: number;
@@ -100,34 +118,49 @@ export class Pacer {
    * be checked at all -- and a single-connection provider is a common thing to
    * have.
    *
-   * `providerOf` maps each lane back to its provider, and is what makes
-   * `probeIdleProviders` possible: lanes are per login, but a viewer occupies
-   * the *account*, so yielding has to be decided one level up from the lane
-   * the arithmetic runs on. Without it the mode cannot tell a watched login's
-   * sibling lane from an unrelated provider's, and falls back to pausing.
+   * `yielding` is what makes `probeIdleProviders` possible, and it is one
+   * argument rather than two because its halves are useless apart.
+   * `providerOf` maps each lane back to its provider: lanes are per login, but
+   * a viewer occupies the *account*, so yielding is decided one level up from
+   * the lane the arithmetic runs on. `attributedByLane` is who Dispatcharr
+   * actually named -- see `LaneBudgets.attributed` for why the ordinary viewer
+   * counts cannot answer that question. Without both, the mode falls back to
+   * pausing.
    */
   laneLimits(
     base: Map<string, number>,
     activity: Activity,
     viewersByLane: Map<string, number>,
-    providerOf?: Map<string, number>,
+    yielding?: LaneYielding,
   ): Map<string, number> {
     const out = new Map<string, number>();
     if (this.pausedByActivity(activity)) return out;
 
     const reserve = activity.idle ? 0 : this.config.minFreeSlots;
-    const yielded = this.yieldedProviders(activity, viewersByLane, providerOf);
+    const yielded = this.yieldedProviders(activity, yielding);
     if (yielded === 'all') return out;
-    for (const [lane, limit] of base) {
-      if (yielded !== 'none') {
-        // A lane whose provider cannot be named is treated as watched. The
-        // point of the mode is to stay off the account somebody is streaming
-        // from, and a lane we cannot attribute might be it.
-        const provider = providerOf?.get(lane);
-        if (provider === undefined || yielded.has(provider)) continue;
+    if (yielded === 'none' || !yielding) {
+      for (const [lane, limit] of base) {
+        const free = limit - (viewersByLane.get(lane) ?? 0) - reserve;
+        if (free > 0) out.set(lane, free);
       }
-      const inUse = viewersByLane.get(lane) ?? 0;
-      const free = limit - inUse - reserve;
+      return out;
+    }
+
+    for (const [lane, limit] of base) {
+      // A lane whose provider cannot be named is treated as watched. The point
+      // of the mode is to stay off the account somebody is streaming from, and
+      // a lane we cannot place might be it.
+      const provider = yielding.providerOf.get(lane);
+      if (provider === undefined || yielded.has(provider)) continue;
+      // Attributed counts, not the generous ones. Reaching here means every
+      // viewer was placed on a provider -- `yieldedProviders` fails closed
+      // otherwise -- so the provider-wide fallback folded into `viewersByLane`
+      // is not merely redundant, it is double-counting a session we have
+      // already charged to somebody else. Left in, it takes a connection off
+      // every lane the mode just decided was free, which is enough to close a
+      // two-connection provider outright.
+      const free = limit - (yielding.attributedByLane.get(lane) ?? 0) - reserve;
       if (free > 0) out.set(lane, free);
     }
     return out;
@@ -151,24 +184,28 @@ export class Pacer {
    * shows a viewer", which is why the emptiness of the count is the test
    * rather than any flag on the read.
    *
+   * It reads `attributed` rather than the ordinary viewer counts on purpose.
+   * Those fold in a per-provider figure derived from the streams on the
+   * watched channel, and a channel normally carries one stream from every
+   * provider -- so a single viewer marks every account busy, this returns the
+   * whole set, and the mode yields everything while looking like it is working.
+   * That was the first version, and on a live install it produced `lanes {}`
+   * on every pass.
+   *
    * Public because `Runner` asks the same question a second time to explain a
    * pause in words -- "every provider is busy" and "we cannot tell who is on
    * what" send an operator to different places, and restating the test at the
    * call site is how the two answers drift apart.
    */
-  yieldedProviders(
-    activity: Activity,
-    viewersByLane: Map<string, number>,
-    providerOf?: Map<string, number>,
-  ): 'none' | 'all' | Set<number> {
+  yieldedProviders(activity: Activity, yielding?: LaneYielding): 'none' | 'all' | Set<number> {
     if (activity.idle) return 'none';
     if (!this.config.pauseWhenWatching || !this.config.probeIdleProviders) return 'none';
-    if (!providerOf) return 'all';
+    if (!yielding?.allSessionsPlaced) return 'all';
 
     const busy = new Set<number>();
-    for (const [lane, viewers] of viewersByLane) {
+    for (const [lane, viewers] of yielding.attributedByLane) {
       if (viewers <= 0) continue;
-      const provider = providerOf.get(lane);
+      const provider = yielding.providerOf.get(lane);
       if (provider === undefined) return 'all';
       busy.add(provider);
     }
