@@ -19,8 +19,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from './config';
 import { type Activity, busyUnknown, Pacer } from './pacer';
 import { RulesSource } from './rules-source';
-import { Runner } from './runner';
+import { laneBudgets, Runner } from './runner';
 import { Store } from './store';
+import type { ProviderLogin } from './variants';
 
 const idle: Activity = { channelIds: new Set(), idle: true };
 const watching: Activity = { channelIds: new Set([5]), idle: false };
@@ -46,12 +47,28 @@ const providerOf = new Map([
   ['8:0', 8],
 ]);
 
+/** The pair `probeIdleProviders` needs, with the lane->provider map above. */
+const yielding = (
+  attributed: Array<[string, number]>,
+  providers = providerOf,
+  allSessionsPlaced = true,
+) => ({
+  providerOf: providers,
+  attributedByLane: new Map(attributed),
+  allSessionsPlaced,
+});
+
 describe('laneLimits with probeIdleProviders', () => {
   it('keeps the unwatched provider open and yields the watched one', () => {
     // 8 keeps 5 - 0 in use - 1 courtesy reserve = 4. 7 is not shrunk to its
     // spare capacity, it is closed: the point is to stay off the account
     // entirely, not to compete politely on it.
-    const limits = pacer().laneLimits(base, watching, new Map([['7:0', 1]]), providerOf);
+    const limits = pacer().laneLimits(
+      base,
+      watching,
+      new Map([['7:0', 1]]),
+      yielding([['7:0', 1]]),
+    );
     expect([...limits]).toEqual([['8:0', 4]]);
   });
 
@@ -63,23 +80,23 @@ describe('laneLimits with probeIdleProviders', () => {
       new Map([...base, ['7:2', 4]]),
       watching,
       new Map([['7:0', 1]]),
-      new Map([...providerOf, ['7:2', 7]]),
+      yielding([['7:0', 1]], new Map([...providerOf, ['7:2', 7]])),
     );
     expect([...limits.keys()]).toEqual(['8:0']);
   });
 
   it('pauses everything when no viewer can be charged to a provider', () => {
-    // Dispatcharr named no M3U profile for the session, so every lane reads
-    // zero viewers while the read says somebody is watching. The mode cannot
-    // avoid a provider it cannot identify, so it does not pretend to.
-    expect(pacer().laneLimits(base, watching, new Map(), providerOf).size).toBe(0);
+    // Dispatcharr named no M3U profile for the session, so no lane shows an
+    // attributed viewer while the read says somebody is watching. The mode
+    // cannot avoid a provider it cannot identify, so it does not pretend to.
+    expect(pacer().laneLimits(base, watching, new Map(), yielding([])).size).toBe(0);
   });
 
   it('pauses everything when the activity probe itself failed', () => {
     // `busyUnknown` is a viewer nothing can be charged to by construction --
     // the same shape as the case above, which is why the emptiness of the
     // count is the test rather than a flag on the read.
-    expect(pacer().laneLimits(base, busyUnknown(), new Map(), providerOf).size).toBe(0);
+    expect(pacer().laneLimits(base, busyUnknown(), new Map(), yielding([])).size).toBe(0);
   });
 
   it('pauses everything when the lane map cannot be attributed at all', () => {
@@ -87,8 +104,13 @@ describe('laneLimits with probeIdleProviders', () => {
   });
 
   it('pauses everything when a lane carrying a viewer names no provider', () => {
-    // One unattributable lane is enough. It might be the account being watched.
-    const limits = pacer().laneLimits(base, watching, new Map([['7:0', 1]]), new Map([['8:0', 8]]));
+    // One unplaceable lane is enough. It might be the account being watched.
+    const limits = pacer().laneLimits(
+      base,
+      watching,
+      new Map([['7:0', 1]]),
+      yielding([['7:0', 1]], new Map([['8:0', 8]])),
+    );
     expect(limits.size).toBe(0);
   });
 
@@ -97,7 +119,7 @@ describe('laneLimits with probeIdleProviders', () => {
       new Map([...base, ['9:0', 5]]),
       watching,
       new Map([['7:0', 1]]),
-      providerOf,
+      yielding([['7:0', 1]]),
     );
     expect([...limits.keys()]).toEqual(['8:0']);
   });
@@ -105,23 +127,99 @@ describe('laneLimits with probeIdleProviders', () => {
   it('is unchanged while nobody is watching', () => {
     // No viewers, so no reserve and no yielding: a max_streams=1 provider must
     // still be checkable.
-    const limits = pacer().laneLimits(new Map([['7:0', 1]]), idle, new Map(), providerOf);
+    const limits = pacer().laneLimits(new Map([['7:0', 1]]), idle, new Map(), yielding([]));
     expect(limits.get('7:0')).toBe(1);
+  });
+
+  it('pauses everything when one viewer of several cannot be placed', () => {
+    // The attributed counts are non-empty -- 7 is named -- so the busy set
+    // looks perfectly usable. It is not: the second viewer could be sitting on
+    // 8, and probing it on the strength of the first is exactly the collision
+    // the pause exists to avoid.
+    const limits = pacer().laneLimits(
+      base,
+      watching,
+      new Map([['7:0', 1]]),
+      yielding([['7:0', 1]], providerOf, false),
+    );
+    expect(limits.size).toBe(0);
   });
 
   it('does nothing when the pause it relaxes is switched off', () => {
     // Pausing off already means "compete on every lane's own capacity", and
-    // this setting only ever relaxes a pause. Provider 7 keeps 3 - 1 - 1 = 1.
+    // this setting only ever relaxes a pause. Provider 7 keeps 3 - 1 - 1 = 1,
+    // and the generous viewer counts are the right input for that.
     const limits = pacer({ pauseWhenWatching: false }).laneLimits(
       base,
       watching,
       new Map([['7:0', 1]]),
-      providerOf,
+      yielding([['7:0', 1]]),
     );
     expect([...limits]).toEqual([
       ['7:0', 1],
       ['8:0', 4],
     ]);
+  });
+});
+
+describe('one viewer must not mark every provider busy', () => {
+  /**
+   * The bug the first cut shipped with, in the shape that produced it.
+   *
+   * A Podium channel exists to carry the same programme from several
+   * providers, so a watched channel normally has a stream from every one of
+   * them. `viewersByProvider` counts a viewer against each of those providers
+   * -- correct for a budget, since any of them *could* be the one serving it
+   * -- and `laneBudgets` then hands the unattributed remainder to each
+   * provider's default lane. Read as identity, that says all four accounts are
+   * busy. On the live install every pass logged `lanes {}` and paused, which
+   * is precisely the stall the mode exists to prevent, now with the catalogue
+   * fetch paid for on the way to it.
+   */
+  const login = (profileId: number): ProviderLogin => ({
+    id: 0,
+    dispatcharrProfileId: profileId,
+    name: 'default',
+    rewrite: null,
+    maxStreams: 3,
+    currentViewers: 0,
+    isDefault: true,
+    xtreamCodes: false,
+  });
+
+  const budgets = () =>
+    laneBudgets(
+      new Map([
+        [7, [login(70)]],
+        [8, [login(80)]],
+      ]),
+      // The watched channel carries a stream from both providers, so both are
+      // credited with the one viewer.
+      new Map([
+        [7, 1],
+        [8, 1],
+      ]),
+      // Dispatcharr, however, named exactly one: the session is on 7.
+      new Map([[70, 1]]),
+    );
+
+  it('charges the phantom to the budget but not to the identity', () => {
+    const { viewers, attributed } = budgets();
+    expect(viewers.get('8:0')).toBe(1);
+    expect(attributed.get('8:0')).toBe(0);
+    expect(attributed.get('7:0')).toBe(1);
+  });
+
+  it('yields only the provider Dispatcharr named', () => {
+    const { base: laneBase, viewers, attributed, provider } = budgets();
+    const limits = pacer().laneLimits(laneBase, watching, viewers, {
+      providerOf: provider,
+      attributedByLane: attributed,
+      allSessionsPlaced: true,
+    });
+    // 8 stays open at 3 - 0 attributed - 1 reserve = 2. Charging it the
+    // phantom as well would leave 1, and a two-connection provider none.
+    expect([...limits]).toEqual([['8:0', 2]]);
   });
 });
 
