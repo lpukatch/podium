@@ -667,10 +667,35 @@ function fitEffects(buckets: Bucket[]): {
     buckets.map((bucket) => ({ value: bucket.effectiveKbps, weight: bucket.samples })),
   );
 
+  // Broadest first, and the order is a decision rather than an array literal.
+  //
+  // Backfitting cannot split factors that move together, and on a real install
+  // they move together almost completely: of 121 provider groups measured on
+  // one, exactly 2 appeared under more than one account. A group is a
+  // provider's own way of organising what it sells, so it is nested inside the
+  // account by construction, and a tier token turns out to be nested too when
+  // only one account writes them.
+  //
+  // With collinear factors every split that sums the same predicts the same,
+  // so the fit cannot choose between them -- whichever is estimated first
+  // absorbs the shared signal and the rest re-centre to zero. That makes the
+  // order the thing that decides attribution, and the previous order put the
+  // tier first: an account whose streams answered 54% of the time against 85%
+  // had its -2937kbps land on `fhd`, its four accounts all read exactly 0, and
+  // the export withheld the tier rule as confounded. The signal was real and in
+  // the wrong column.
+  //
+  // Broad to narrow gets it right for two reasons. It generalises: a group that
+  // has not been measured yet still inherits its account's average, where the
+  // reverse order gives it nothing. And it exports correctly -- a `regex` on
+  // `1080p` is evaluated against every provider's streams, so charging one
+  // account's deficit to a token that other accounts also use is wrong in a way
+  // charging it to the account never is. Teamarr sums the three either way, so
+  // no arrangement double-counts; only one of them attributes.
   const factors = [
-    { of: (bucket: Bucket) => bucket.tier as string, effects: new Map<string, number>() },
-    { of: (bucket: Bucket) => bucket.groupName, effects: new Map<string, number>() },
     { of: (bucket: Bucket) => bucket.providerName, effects: new Map<string, number>() },
+    { of: (bucket: Bucket) => bucket.groupName, effects: new Map<string, number>() },
+    { of: (bucket: Bucket) => bucket.tier as string, effects: new Map<string, number>() },
   ];
 
   const members = factors.map((factor) => {
@@ -763,9 +788,9 @@ function fitEffects(buckets: Bucket[]): {
 
   return {
     baselineKbps,
-    tiers: againstUnknown(asEffects(members[0]!, factors[0]!.effects)),
+    accounts: asEffects(members[0]!, factors[0]!.effects),
     groups: asEffects(members[1]!, factors[1]!.effects),
-    accounts: asEffects(members[2]!, factors[2]!.effects),
+    tiers: againstUnknown(asEffects(members[2]!, factors[2]!.effects)),
   };
 }
 

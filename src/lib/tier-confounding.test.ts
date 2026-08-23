@@ -43,6 +43,49 @@ function sample(over: Partial<StoredQualitySample> = {}): StoredQualitySample {
 const many = (count: number, over: Partial<StoredQualitySample> = {}) =>
   Array.from({ length: count }, () => sample(over));
 
+/**
+ * Two tiers of genuinely different quality, both present inside each account
+ * *and* inside each group.
+ *
+ * A tier carried by only one account is collinear with it; a tier carried by
+ * only one group is collinear with that. Either way the broader factor is
+ * fitted first and takes the signal, leaving the tier at 0 -- the right
+ * answer, and a useless fixture. To say anything about a tier effect it has
+ * to be the only thing varying.
+ */
+const spread = () =>
+  buildProfile(
+    [
+      ...many(30, { providerId: 1, providerName: 'One', tier: 'fhd', bitrateKbps: 9000 }),
+      ...many(30, {
+        providerId: 1,
+        providerName: 'One',
+        tier: 'unknown',
+        streamName: 'Sports Alpha',
+        bitrateKbps: 3000,
+      }),
+      ...many(30, {
+        providerId: 2,
+        providerName: 'Two',
+        tier: 'fhd',
+        streamName: 'Sports Beta 1080p',
+        groupId: 2,
+        groupName: 'Group Two',
+        bitrateKbps: 9000,
+      }),
+      ...many(30, {
+        providerId: 2,
+        providerName: 'Two',
+        tier: 'unknown',
+        streamName: 'Sports Beta',
+        groupId: 2,
+        groupName: 'Group Two',
+        bitrateKbps: 3000,
+      }),
+    ],
+    { minSamples: 20 },
+  );
+
 describe('tierOfHeight', () => {
   it('reads the picture, not the name', () => {
     expect(tierOfHeight(2160)).toBe('uhd');
@@ -90,35 +133,6 @@ describe('an effect knows how many accounts it rests on', () => {
 });
 
 describe('the unlabelled reference level', () => {
-  /**
-   * Two tiers with genuinely different quality, spread over enough accounts
-   * that the guard leaves the rule alone.
-   */
-  const spread = () =>
-    buildProfile(
-      [
-        ...many(30, { providerId: 1, providerName: 'One', tier: 'fhd', bitrateKbps: 9000 }),
-        ...many(30, {
-          providerId: 2,
-          providerName: 'Two',
-          tier: 'fhd',
-          bitrateKbps: 9000,
-          groupId: 2,
-          groupName: 'Group Two',
-        }),
-        ...many(30, {
-          providerId: 3,
-          providerName: 'Three',
-          tier: 'unknown',
-          streamName: 'Sports Gamma',
-          groupId: 3,
-          groupName: 'Group Three',
-          bitrateKbps: 2000,
-        }),
-      ],
-      { minSamples: 20 },
-    );
-
   it('pins unknown at zero, because that is what an unlabelled stream scores', () => {
     // The fit re-centres tiers on their weighted mean, so `unknown` carries a
     // delta of its own against the baseline. Teamarr writes no rule for an
@@ -165,6 +179,7 @@ describe('the export withholds a confounded tier', () => {
   const lopsided = () =>
     buildProfile(
       [
+        // Labelled, and dying half the time -- the live shape.
         ...many(30, { providerId: 1, providerName: 'Labeller', tier: 'fhd' }),
         ...many(30, {
           providerId: 1,
@@ -175,7 +190,15 @@ describe('the export withholds a confounded tier', () => {
           height: 0,
           measured: false,
         }),
-        ...many(60, {
+        // Same account, same group, no label, healthy: the contrast that makes
+        // the tier effect identifiable rather than the account's in disguise.
+        ...many(30, {
+          providerId: 1,
+          providerName: 'Labeller',
+          tier: 'unknown',
+          streamName: 'Sports Alpha',
+        }),
+        ...many(30, {
           providerId: 2,
           providerName: 'Silent',
           tier: 'unknown',
@@ -211,50 +234,54 @@ describe('the export withholds a confounded tier', () => {
 
   it('exports the tier once a second account supplies enough of it', () => {
     // The guard is about evidence, not about the tier: spread the same label
-    // across two accounts and the rule is allowed to travel again.
-    const profile = buildProfile(
-      [
-        ...many(30, { providerId: 1, providerName: 'One', tier: 'fhd', bitrateKbps: 9000 }),
-        ...many(30, {
-          providerId: 2,
-          providerName: 'Two',
-          tier: 'fhd',
-          bitrateKbps: 9000,
-          groupId: 2,
-          groupName: 'Group Two',
-        }),
-        ...many(30, {
-          providerId: 3,
-          providerName: 'Three',
-          tier: 'unknown',
-          streamName: 'Sports Gamma',
-          groupId: 3,
-          groupName: 'Group Three',
-          bitrateKbps: 2000,
-        }),
-      ],
-      { minSamples: 20 },
-    );
-    const { rules, podium } = teamarrRules(profile, { minSamples: 20 });
+    // across two accounts -- varying inside each, so the effect is the tier's
+    // and not its account's -- and the rule is allowed to travel again.
+    const { rules, podium } = teamarrRules(spread(), { minSamples: 20 });
     expect(podium.confoundedTiers).toEqual([]);
     expect(rules.some((rule) => rule.type === 'regex')).toBe(true);
   });
 
-  it('is where the collinear signal ends up, which is why the guard exists', () => {
-    // Backfitting cannot split factors that move together, and this one does
-    // not split them evenly: fitting tier first each round lets it absorb the
-    // whole residual, after which group and account find nothing left and
-    // re-centring pins them at zero.
+  it('sends perfectly collinear signal to the account, not the tier', () => {
+    // The regression this ordering exists for. When account, group and tier
+    // move together, every split that sums the same predicts the same, so the
+    // fit cannot choose -- whichever is estimated first absorbs it and the rest
+    // re-centre to zero. Fitting the broadest first puts it on the account,
+    // which is the only one of the three that can carry it honestly: a `regex`
+    // on `1080p` is run against every provider's streams, so charging one
+    // account's deficit to a token other accounts also use is wrong in a way
+    // charging it to the account never is.
     //
-    // So a perfectly confounded install does not produce three modest effects
-    // that an operator might notice adding up. It produces one large tier
-    // effect and two dimensions reading exactly 0 -- which looks like "provider
-    // identity does not matter here" and is really "provider identity is in the
-    // next column, mislabelled".
-    const profile = lopsided();
-    expect(profile.accounts.map((a) => a.deltaKbps)).toEqual([0, 0]);
-    expect(profile.groups.map((g) => g.deltaKbps)).toEqual([0, 0]);
-    expect(profile.tiers.find((t) => t.key === 'fhd')?.deltaKbps).toBeLessThan(-500);
+    // Before the reorder this fixture produced a large `fhd` effect and four
+    // accounts reading exactly 0 -- which looks like "provider identity does
+    // not matter here" and means "provider identity is in the next column,
+    // mislabelled". On the live install it was -2937kbps sitting on `fhd`.
+    const profile = buildProfile(
+      [
+        ...many(30, { providerId: 1, providerName: 'Labeller', tier: 'fhd' }),
+        ...many(30, {
+          providerId: 1,
+          providerName: 'Labeller',
+          tier: 'fhd',
+          alive: false,
+          bitrateKbps: 0,
+          height: 0,
+          measured: false,
+        }),
+        ...many(60, {
+          providerId: 2,
+          providerName: 'Silent',
+          tier: 'unknown',
+          streamName: 'Sports Beta',
+          groupId: 2,
+          groupName: 'Group Two',
+        }),
+      ],
+      { minSamples: 20 },
+    );
+    expect(profile.accounts.find((a) => a.key === 'Labeller')?.deltaKbps).toBeLessThan(-500);
+    expect(profile.accounts.find((a) => a.key === 'Silent')?.deltaKbps).toBeGreaterThan(500);
+    expect(profile.tiers.every((t) => t.deltaKbps === 0)).toBe(true);
+    expect(profile.groups.every((g) => g.deltaKbps === 0)).toBe(true);
   });
 
   it('leaves account rules alone when the account has its own signal', () => {

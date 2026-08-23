@@ -565,6 +565,48 @@ name. Podium writes no `stats_metric` rules, deliberately: those already read
 the `ffmpeg_output_bitrate` Podium publishes to Dispatcharr, so generating them
 here would score the same measurement twice.
 
+### Which dimension gets the credit
+
+The three factors are estimated broadest first — account, then group, then
+tier — and that order is a decision, not an accident of declaration.
+
+Backfitting cannot split factors that move together, and on a real install they
+move together almost completely: of 121 provider groups measured on one,
+**exactly 2 appeared under more than one account**. A group is a provider's own
+way of organising what it sells, so it is nested inside the account by
+construction, and a tier token turns out to be nested too when only one account
+writes them. With collinear factors every split that sums to the same total
+predicts identically, so the fit cannot choose between them — whichever is
+estimated first absorbs the shared signal and the rest re-centre to zero.
+
+That made the order decisive, and the original order put the tier first. An
+account whose streams answered 54% of the time against 85% had its −2937kbps
+land on `fhd`; its four accounts all read exactly `0`; and the export withheld
+the tier rule as confounded. The signal was real and in the wrong column — and
+`m3u` rules, which Teamarr supports and most hand-written rule sets use, could
+never be generated at all.
+
+Broad to narrow fixes it for two reasons. It **generalises**: a group that has
+not been measured yet still inherits its account's average, where the reverse
+order gives it nothing. And it **exports correctly** — a `regex` on `1080p` is
+run against every provider's streams, so charging one account's deficit to a
+token other accounts also use is wrong in a way charging it to the account
+never is. Teamarr sums the three either way, so no arrangement double-counts;
+only one of them attributes.
+
+On the install above the same data went from four accounts at `0` and a
+withheld tier rule to:
+
+```
+Provider A  +1163   Provider D  +1039   Provider C  +321   Provider B  -2937
+fhd  0      unknown  0
+```
+
+Both tiers now read zero, which is the honest answer there: once you know the
+account, the resolution token adds nothing. A tier effect only survives where
+the token varies *within* an account and *within* a group — which is exactly
+when it is telling you something the wholesale rules cannot.
+
 The effects are fitted against each other rather than averaged separately, so
 an account is credited for the streams it runs *better than other accounts in
 the same group at the same tier* — not for happening to sell more 1080p, which
