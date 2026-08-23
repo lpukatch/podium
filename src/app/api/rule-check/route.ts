@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
-import { Eligibility } from '@/lib/eligibility';
+import { assignmentIsRule, Eligibility } from '@/lib/eligibility';
 import { resolveOrdering } from '@/lib/ordering';
 import { groupPatterns, ordering, policies, snapshot } from '@/lib/server/state';
 import { Store } from '@/lib/store';
@@ -120,6 +120,9 @@ export async function POST(request: Request) {
         channelId: channel.id,
         channelName: channel.name,
         audioOnly: policy.audioOnly,
+        // Teamarr orders what it creates: the groups marked measure-only, or
+        // ranked off their own assignment. Its rules reach nothing else.
+        managed: Boolean(policy.measureOnly) || assignmentIsRule(policy.mode),
         streams,
       });
     }

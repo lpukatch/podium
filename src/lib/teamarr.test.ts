@@ -264,6 +264,80 @@ describe('checkRules', () => {
   });
 });
 
+describe('scope and blame', () => {
+  const pair = (over: { managed?: boolean } = {}) => ({
+    channelId: 1,
+    channelName: 'MLB | CIN/ARI',
+    managed: over.managed,
+    streams: [
+      {
+        facts: facts(1, { providerName: 'Provider A' }, { bitrateKbps: 192 }),
+        stepOrder: 0,
+      },
+      { facts: facts(2, { providerName: 'Provider C' }, { bitrateKbps: 7000 }), stepOrder: 1 },
+    ],
+  });
+
+  it('counts the channels Teamarr actually orders apart from the rest', () => {
+    // Its stream-priority rules apply to the channels it manages. A
+    // disagreement anywhere else is a comparison against a population those
+    // rules are never evaluated on -- on a live install that was two thirds of
+    // everything with enough verdicts to check.
+    const check = checkRules(
+      [pair({ managed: true }), { ...pair(), channelId: 2, channelName: 'NHK World TV' }],
+      LIVE_RULES,
+      DEFAULT_STRATEGY,
+    );
+    expect(check.summary.disagreed).toBe(2);
+    expect(check.summary.managedChannels).toBe(1);
+    expect(check.summary.managedAgreed).toBe(0);
+    // Managed rows first, so the table opens on the channels that matter.
+    expect(check.channels[0]!.channelName).toBe('MLB | CIN/ARI');
+  });
+
+  it('only calls a dead pick dead when something else was watchable', () => {
+    // A channel where everything is dead also leads with a dead stream, and
+    // counting it says "your rules are broken" about a provider outage.
+    const allDead = checkRules(
+      [
+        {
+          channelId: 3,
+          channelName: 'Dead everywhere',
+          managed: true,
+          streams: [
+            { facts: facts(1, {}, { alive: false, bitrateKbps: 0 }), stepOrder: 0 },
+            { facts: facts(2, {}, { alive: false, bitrateKbps: 0 }), stepOrder: 1 },
+          ],
+        },
+      ],
+      LIVE_RULES,
+      DEFAULT_STRATEGY,
+    );
+    expect(allDead.summary.deadFirst).toBe(0);
+
+    const avoidable = checkRules(
+      [
+        {
+          channelId: 4,
+          channelName: 'NHK World TV',
+          managed: true,
+          streams: [
+            {
+              facts: facts(1, { providerName: 'Provider A' }, { alive: false, bitrateKbps: 0 }),
+              stepOrder: 0,
+            },
+            { facts: facts(2, {}, { bitrateKbps: 8000 }), stepOrder: 1 },
+          ],
+        },
+      ],
+      LIVE_RULES,
+      DEFAULT_STRATEGY,
+    );
+    expect(avoidable.summary.deadFirst).toBe(1);
+    expect(avoidable.summary.managedDeadFirst).toBe(1);
+  });
+});
+
 describe('what a pass keeps', () => {
   it('survives the fixture the check was about', () => {
     // The whole reason checks are stored. A fixture's streams exist for one
@@ -282,6 +356,10 @@ describe('what a pass keeps', () => {
       ambiguous: 1,
       deadFirst: 1,
       gapKbps: 14_000,
+      managedChannels: 5,
+      managedAgreed: 2,
+      managedDeadFirst: 1,
+      managedGapKbps: 12_000,
       approximate: true,
       rulesEvaluated: 6,
       rulesSkipped: 2,
@@ -289,6 +367,7 @@ describe('what a pass keeps', () => {
         {
           channelId: 47,
           channelName: 'EPL01',
+          managed: true,
           teamarrStream: 1,
           teamarrName: 'EPL01: Hull 12:30 Man Utd 22/08',
           teamarrProvider: 'Provider A',

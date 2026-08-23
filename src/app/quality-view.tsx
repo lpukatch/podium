@@ -61,6 +61,7 @@ interface ChannelCheck {
   channelId: number;
   channelName: string;
   streams: number;
+  managed: boolean;
   agree: boolean;
   ambiguous: boolean;
   teamarr: PickView;
@@ -78,6 +79,10 @@ interface RuleCheck {
     ambiguous: number;
     deadFirst: number;
     gapKbps: number;
+    managedChannels: number;
+    managedAgreed: number;
+    managedDeadFirst: number;
+    managedGapKbps: number;
     approximate: boolean;
   };
   channels: ChannelCheck[];
@@ -86,6 +91,7 @@ interface RuleCheck {
 interface StoredMiss {
   channelId: number;
   channelName: string;
+  managed: boolean;
   teamarrName: string;
   teamarrProvider: string;
   teamarrPoints: number;
@@ -107,6 +113,10 @@ interface StoredCheck {
   ambiguous: number;
   deadFirst: number;
   gapKbps: number;
+  managedChannels: number;
+  managedAgreed: number;
+  managedDeadFirst: number;
+  managedGapKbps: number;
   approximate: boolean;
 }
 
@@ -690,17 +700,19 @@ export function QualityView() {
           </label>
           {check && (
             <span className="text-sm">
-              <strong>{check.summary.agreed}</strong> of {check.summary.channels} channels agree
-              {check.summary.disagreed > 0 && (
+              <strong>{check.summary.managedAgreed}</strong> of {check.summary.managedChannels}{' '}
+              Teamarr-managed channels agree
+              {check.summary.managedChannels - check.summary.managedAgreed > 0 && (
                 <span className="text-[var(--color-bad)]">
                   {' '}
-                  · {check.summary.disagreed} pick a worse stream
+                  · {check.summary.managedChannels - check.summary.managedAgreed} pick a worse
+                  stream
                 </span>
               )}
-              {check.summary.deadFirst > 0 && (
+              {check.summary.managedDeadFirst > 0 && (
                 <span className="text-[var(--color-bad)]">
                   {' '}
-                  · {check.summary.deadFirst} put a dead or black stream first
+                  · {check.summary.managedDeadFirst} pick a dead stream over a working one
                 </span>
               )}
               {check.summary.ambiguous > 0 && (
@@ -710,10 +722,18 @@ export function QualityView() {
           )}
         </div>
 
-        {check && check.summary.gapKbps > 0 && (
-          <p className={`mt-3 text-sm ${muted}`}>
-            Across the disagreements, {rate(check.summary.gapKbps)} of measured bitrate goes to the
-            stream that is not chosen.
+        {check && check.summary.managedGapKbps > 0 && (
+          <p className={`mt-3 max-w-[75ch] text-sm ${muted}`}>
+            Across the managed disagreements, {rate(check.summary.managedGapKbps)} of measured
+            bitrate goes to the stream that is not chosen.
+            {check.summary.channels > check.summary.managedChannels && (
+              <>
+                {' '}
+                The other {check.summary.channels - check.summary.managedChannels} channels checked
+                are not ordered by Teamarr — its rules are never evaluated on them, so they are
+                listed below but left out of the headline.
+              </>
+            )}
           </p>
         )}
 
@@ -744,7 +764,12 @@ export function QualityView() {
                   .filter((row) => !row.agree)
                   .map((row) => (
                     <tr key={row.channelId} className="border-b border-[var(--color-line)]">
-                      <td className="py-2 pr-3">{row.channelName}</td>
+                      <td className="py-2 pr-3">
+                        {row.channelName}
+                        {!row.managed && (
+                          <span className={`ml-2 text-xs ${muted}`}>not Teamarr-ordered</span>
+                        )}
+                      </td>
                       <td className="py-2 pr-3">
                         <span className="block truncate">{row.teamarr.name}</span>
                         <span className={`block text-xs ${muted}`}>
@@ -807,10 +832,10 @@ export function QualityView() {
                     <thead className={`text-left ${muted}`}>
                       <tr className="border-b border-[var(--color-line)]">
                         <th className="py-2 pr-3 font-normal">Pass</th>
-                        <th className="py-2 pr-3 text-right font-normal">Channels</th>
+                        <th className="py-2 pr-3 text-right font-normal">Managed</th>
                         <th className="py-2 pr-3 text-right font-normal">Agreed</th>
                         <th className="py-2 pr-3 text-right font-normal">Picked worse</th>
-                        <th className="py-2 pr-3 text-right font-normal">Dead first</th>
+                        <th className="py-2 pr-3 text-right font-normal">Dead over live</th>
                         <th className="py-2 text-right font-normal">Given up</th>
                       </tr>
                     </thead>
@@ -818,24 +843,28 @@ export function QualityView() {
                       {history.history.slice(0, 10).map((row) => (
                         <tr key={row.checkedAt} className="border-b border-[var(--color-line)]">
                           <td className={`py-2 pr-3 ${muted}`}>{ago(row.checkedAt)}</td>
-                          <td className="py-2 pr-3 text-right tabular-nums">{row.channels}</td>
-                          <td className="py-2 pr-3 text-right tabular-nums">{row.agreed}</td>
+                          <td className="py-2 pr-3 text-right tabular-nums">
+                            {row.managedChannels}
+                          </td>
+                          <td className="py-2 pr-3 text-right tabular-nums">{row.managedAgreed}</td>
                           <td
                             className={`py-2 pr-3 text-right tabular-nums ${
-                              row.disagreed > 0 ? 'text-[var(--color-bad)]' : ''
+                              row.managedChannels - row.managedAgreed > 0
+                                ? 'text-[var(--color-bad)]'
+                                : ''
                             }`}
                           >
-                            {row.disagreed}
+                            {row.managedChannels - row.managedAgreed}
                           </td>
                           <td
                             className={`py-2 pr-3 text-right tabular-nums ${
-                              row.deadFirst > 0 ? 'text-[var(--color-bad)]' : ''
+                              row.managedDeadFirst > 0 ? 'text-[var(--color-bad)]' : ''
                             }`}
                           >
-                            {row.deadFirst}
+                            {row.managedDeadFirst}
                           </td>
                           <td className="py-2 text-right tabular-nums">
-                            {row.gapKbps > 0 ? rate(row.gapKbps) : '—'}
+                            {row.managedGapKbps > 0 ? rate(row.managedGapKbps) : '—'}
                           </td>
                         </tr>
                       ))}
@@ -866,7 +895,14 @@ export function QualityView() {
                               key={`${miss.channelId}:${miss.teamarrName}`}
                               className="border-b border-[var(--color-line)]"
                             >
-                              <td className="py-2 pr-3">{miss.channelName}</td>
+                              <td className="py-2 pr-3">
+                                {miss.channelName}
+                                {!miss.managed && (
+                                  <span className={`ml-2 text-xs ${muted}`}>
+                                    not Teamarr-ordered
+                                  </span>
+                                )}
+                              </td>
                               <td className="py-2 pr-3">
                                 <span className="block truncate">{miss.teamarrName}</span>
                                 <span className={`block text-xs ${muted}`}>

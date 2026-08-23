@@ -226,6 +226,18 @@ export interface ChannelCheck {
   channelId: number;
   channelName: string;
   streams: number;
+  /**
+   * Teamarr orders this channel.
+   *
+   * Its stream-priority rules apply to the channels it manages, so a
+   * disagreement on anything else is a comparison against a population those
+   * rules will never be evaluated on -- the same mistake the quality scope
+   * exists to prevent, and it dominates: measured on a live install, 540
+   * channels carried enough verdicts to check and only 224 sat in a managed
+   * group. Both are reported, with the managed set as the headline, because a
+   * rule set aimed wider than its fixtures is somebody's legitimate setup.
+   */
+  managed: boolean;
   /** Teamarr's first pick is the one the measurements would have chosen. */
   agree: boolean;
   /**
@@ -252,8 +264,21 @@ export interface RuleCheck {
     agreed: number;
     disagreed: number;
     ambiguous: number;
-    /** Channels whose first stream under these rules is dead or a black screen. */
+    /**
+     * Channels whose rules put a dead or black stream first *when a working one
+     * was available*.
+     *
+     * The qualifier is the whole number. A channel where every stream is dead
+     * also leads with a dead stream, and counting those says "your rules are
+     * broken" about a channel no rule could have saved -- the operator then
+     * goes looking for a rule to fix and finds a provider outage.
+     */
     deadFirst: number;
+    /** The same, over the channels Teamarr actually orders. */
+    managedChannels: number;
+    managedAgreed: number;
+    managedDeadFirst: number;
+    managedGapKbps: number;
     /** Total measured bitrate given up across every disagreement. */
     gapKbps: number;
     /**
@@ -274,6 +299,8 @@ export interface ChannelInput {
   channelId: number;
   channelName: string;
   audioOnly?: boolean;
+  /** Another app owns this channel's ordering -- see `ChannelCheck.managed`. */
+  managed?: boolean;
   streams: Array<{ facts: StreamFacts; stepOrder: number }>;
 }
 
@@ -346,6 +373,7 @@ export function checkRules(
       channelId: channel.channelId,
       channelName: channel.channelName,
       streams: channel.streams.length,
+      managed: Boolean(channel.managed),
       agree: teamarrPick === podiumPick,
       ambiguous: top === runnerUp,
       teamarr,
@@ -356,10 +384,20 @@ export function checkRules(
 
   rows.sort(
     (a, b) =>
-      Number(a.agree) - Number(b.agree) || b.gapKbps - a.gapKbps || a.channelId - b.channelId,
+      Number(b.managed) - Number(a.managed) ||
+      Number(a.agree) - Number(b.agree) ||
+      b.gapKbps - a.gapKbps ||
+      a.channelId - b.channelId,
   );
 
   const disagreed = rows.filter((row) => !row.agree);
+  // Dead first only counts where the measurements found something watchable to
+  // have chosen instead. Everything else is a provider outage wearing a rule's
+  // clothes.
+  const avoidablyDead = (row: ChannelCheck): boolean =>
+    (!row.teamarr.alive || row.teamarr.black) && row.podium.alive && !row.podium.black;
+  const managed = rows.filter((row) => row.managed);
+
   return {
     generatedAt: Date.now(),
     rules: { evaluated: compiled.length, skipped },
@@ -368,10 +406,16 @@ export function checkRules(
       agreed: rows.length - disagreed.length,
       disagreed: disagreed.length,
       ambiguous: rows.filter((row) => row.ambiguous).length,
-      deadFirst: rows.filter((row) => !row.teamarr.alive || row.teamarr.black).length,
+      deadFirst: rows.filter(avoidablyDead).length,
       gapKbps: disagreed.reduce((sum, row) => sum + Math.max(0, row.gapKbps), 0),
+      managedChannels: managed.length,
+      managedAgreed: managed.filter((row) => row.agree).length,
+      managedDeadFirst: managed.filter(avoidablyDead).length,
+      managedGapKbps: managed.reduce((sum, row) => sum + Math.max(0, row.gapKbps), 0),
       approximate: skipped.length > 0,
     },
+    // Managed first, then disagreements, then the widest gaps: the order they
+    // are worth reading in.
     channels: rows,
   };
 }
