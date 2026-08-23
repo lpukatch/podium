@@ -54,6 +54,23 @@ const TIER_TOKENS: Record<Exclude<Tier, 'unknown'>, string[]> = {
 export const TIERS: Tier[] = ['uhd', 'fhd', 'hd', 'sd', 'unknown'];
 
 /**
+ * Which tier a stream's *measured* picture puts it in.
+ *
+ * The counterpart to `tierOf`, and the reason label accuracy can be checked at
+ * all: one reads the provider's claim off the name, the other reads what the
+ * probe actually received. Boundaries are generous on purpose -- 1088 and 1078
+ * are both 1080p in practice, and a tier argument is not worth losing over
+ * sixteen scan lines.
+ */
+export function tierOfHeight(height: number): Tier {
+  if (height >= 1800) return 'uhd';
+  if (height >= 900) return 'fhd';
+  if (height >= 640) return 'hd';
+  if (height > 0) return 'sd';
+  return 'unknown';
+}
+
+/**
  * A token alternation with the boundaries that make it a token match.
  *
  * The left boundary is the whole reason this is generated rather than written
@@ -299,6 +316,46 @@ export interface Effect {
   effectiveKbps: number;
   /** Difference from the install-wide baseline, in kbps. */
   deltaKbps: number;
+  /** How many accounts contributed samples to this effect. */
+  accounts: number;
+  /**
+   * Share of this effect's samples coming from its single largest account.
+   *
+   * The number that says whether an effect is about the thing it is named
+   * after. A tier fitted entirely from one account is not a statement about
+   * 1080p streams, it is that account's effect wearing a tier's label, and no
+   * amount of backfitting can separate two factors that move together.
+   * Trivially 1 for an account effect, which is the honest answer there.
+   */
+  topAccountShare: number;
+}
+
+/**
+ * Whether an account's resolution labels mean anything.
+ *
+ * Podium measures the picture it receives, so it can hold a provider's own
+ * claim up against it. That turns out to be worth more than the tier effect it
+ * was a by-product of: on the install this was built against, streams named
+ * `1080p` measured 720 sixty percent of the time, while streams naming no tier
+ * at all were 1080 more often than the labelled ones. A tier token there is not
+ * a weak signal, it is noise, and a Teamarr regex written against it scores
+ * streams on a claim nobody is checking.
+ */
+export interface LabelAccuracy {
+  providerId: number;
+  providerName: string;
+  /** In-scope samples that came back alive with a readable picture. */
+  samples: number;
+  /** Of those, how many carry a tier token in the name. */
+  labelled: number;
+  /** Of the labelled ones, how many measured the tier they claimed. */
+  agreed: number;
+  /** `agreed / labelled`, or null when nothing was labelled to check. */
+  accuracy: number | null;
+  /** `labelled / samples` -- an account that never labels cannot be wrong. */
+  labelledShare: number;
+  /** The most common way this account's labels are wrong, when they are. */
+  commonestMiss: { claimed: string; measured: string; count: number } | null;
 }
 
 export interface QualityProfile {
@@ -346,6 +403,8 @@ export interface QualityProfile {
    * otherwise, so it ships.
    */
   groups: Effect[];
+  /** Per account, whether its own resolution labels survive being measured. */
+  labelAccuracy: LabelAccuracy[];
 }
 
 export interface ProfileOptions {
@@ -367,6 +426,70 @@ function percentile(sorted: number[], fraction: number): number {
   if (sorted.length === 0) return 0;
   const index = Math.min(sorted.length - 1, Math.floor(fraction * sorted.length));
   return sorted[index]!;
+}
+
+/**
+ * Check each account's resolution labels against what the probe measured.
+ *
+ * Only alive samples with a readable height can testify -- a dead stream has no
+ * picture to disagree with -- and audio-only feeds are excluded outright, since
+ * a radio stream naming no resolution is not a provider being coy.
+ */
+function labelAccuracy(samples: StoredQualitySample[]): LabelAccuracy[] {
+  const byAccount = new Map<
+    number,
+    {
+      providerName: string;
+      samples: number;
+      labelled: number;
+      agreed: number;
+      misses: Map<string, number>;
+    }
+  >();
+
+  for (const sample of samples) {
+    if (sample.audioOnly || !sample.alive || sample.height <= 0) continue;
+    let row = byAccount.get(sample.providerId);
+    if (!row) {
+      row = {
+        providerName: sample.providerName,
+        samples: 0,
+        labelled: 0,
+        agreed: 0,
+        misses: new Map(),
+      };
+      byAccount.set(sample.providerId, row);
+    }
+    row.samples += 1;
+    // `sample.tier` is what the name claimed at probe time, stored alongside
+    // the measurement rather than recomputed, so a later change to the token
+    // list cannot rewrite history.
+    if (sample.tier === 'unknown' || sample.tier === '') continue;
+    row.labelled += 1;
+    const measured = tierOfHeight(sample.height);
+    if (measured === sample.tier) row.agreed += 1;
+    else {
+      const key = `${sample.tier}>${measured}`;
+      row.misses.set(key, (row.misses.get(key) ?? 0) + 1);
+    }
+  }
+
+  return [...byAccount.entries()]
+    .map(([providerId, row]) => {
+      const worst = [...row.misses.entries()].sort((a, b) => b[1] - a[1])[0];
+      const [claimed, measured] = worst ? worst[0].split('>') : [null, null];
+      return {
+        providerId,
+        providerName: row.providerName,
+        samples: row.samples,
+        labelled: row.labelled,
+        agreed: row.agreed,
+        accuracy: row.labelled === 0 ? null : row.agreed / row.labelled,
+        labelledShare: row.samples === 0 ? 0 : row.labelled / row.samples,
+        commonestMiss: worst && claimed && measured ? { claimed, measured, count: worst[1] } : null,
+      };
+    })
+    .sort((a, b) => b.labelled - a.labelled || b.samples - a.samples);
 }
 
 /** Summarise raw samples into per-bucket and per-dimension effects. */
@@ -435,6 +558,11 @@ export function buildProfile(
     accounts,
     tiers,
     groups,
+    // Over everything in scope, not just the buckets that cleared `minSamples`.
+    // Whether a label is honest is a question about the account's naming, and
+    // holding it to the fit's threshold would hide exactly the accounts whose
+    // labels are too sparse to trust.
+    labelAccuracy: labelAccuracy(scoped),
   };
 }
 
@@ -585,11 +713,22 @@ function fitEffects(buckets: Bucket[]): {
     [...index.entries()]
       .map(([key, list]) => {
         const deltaKbps = Math.round(effects.get(key) ?? 0);
+        const samples = list.reduce((sum, bucket) => sum + bucket.samples, 0);
+        const byAccount = new Map<string, number>();
+        for (const bucket of list) {
+          byAccount.set(
+            bucket.providerName,
+            (byAccount.get(bucket.providerName) ?? 0) + bucket.samples,
+          );
+        }
+        const top = Math.max(0, ...byAccount.values());
         return {
           key,
-          samples: list.reduce((sum, bucket) => sum + bucket.samples, 0),
+          samples,
           effectiveKbps: baselineKbps + deltaKbps,
           deltaKbps,
+          accounts: byAccount.size,
+          topAccountShare: samples === 0 ? 0 : top / samples,
         };
       })
       .sort((a, b) => b.deltaKbps - a.deltaKbps);
@@ -703,9 +842,47 @@ export interface RulesExport {
      * three months is the person who needs to know which one it was.
      */
     scope: ScopeSummary;
+    /** Tier rules withheld because one account supplied most of the evidence. */
+    confoundedTiers: ConfoundedTier[];
     note: string;
   };
 }
+
+/** A tier rule the export declined to write, and the numbers behind that. */
+export interface ConfoundedTier {
+  tier: string;
+  samples: number;
+  accounts: number;
+  topAccountShare: number;
+  /** What it would have scored had it been exported. */
+  wouldHaveScored: number;
+}
+
+/**
+ * How much of a tier's evidence may come from one account before its rule is
+ * withheld.
+ *
+ * A tier rule is a regex, and Teamarr runs it against every stream from every
+ * provider. So unlike the other two dimensions it makes a claim that has to
+ * travel: "streams whose names say 1080p are worth this much" is asserted about
+ * accounts the number was never measured on. When one account supplies nearly
+ * all the labelled samples -- because it is the only one that labels -- the
+ * effect is that account's, and exporting it applies one provider's quality to
+ * every other provider's occasional token.
+ *
+ * Measured on the install this came from: of four accounts, one labelled 100%
+ * of its streams and the rest 10-15%, so `fhd` was fitted almost entirely from
+ * that one account and read -2196 kbps. Its median bitrate was within 700 kbps
+ * of the reference level; what actually differed was that its streams were
+ * alive 54% of the time against 85%. The tier axis had become a liveness
+ * measurement of a single provider, wearing a resolution's name.
+ *
+ * Accounts and groups are deliberately not guarded this way. Both are wholesale
+ * set membership in Teamarr: a group rule fires only on that group's streams,
+ * so if one account supplies all of them the rule is redundant with the account
+ * rule rather than wrong about anyone.
+ */
+export const MAX_TIER_ACCOUNT_SHARE = 0.8;
 
 function pointsFor(deltaKbps: number, pointsPerMbps: number, maxPoints: number): number {
   const points = Math.round((deltaKbps / 1000) * pointsPerMbps);
@@ -756,10 +933,24 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
     rules.push({ type: 'group', value: group.key, priority: 99, mode: 'score', points });
   }
 
+  const confounded: ConfoundedTier[] = [];
   for (const tier of profile.tiers) {
     if (tier.key === 'unknown' || tier.samples < minSamples) continue;
     const points = pointsFor(tier.deltaKbps, pointsPerMbps, maxPoints);
     if (points === 0) continue;
+    if (tier.topAccountShare > MAX_TIER_ACCOUNT_SHARE) {
+      // Withheld, not dropped. A rule that silently fails to appear is
+      // indistinguishable from one nobody thought to write, and this is the
+      // case where an operator most wants to know the export made a judgement.
+      confounded.push({
+        tier: tier.key,
+        samples: tier.samples,
+        accounts: tier.accounts,
+        topAccountShare: Math.round(tier.topAccountShare * 100) / 100,
+        wouldHaveScored: points,
+      });
+      continue;
+    }
     rules.push({
       type: 'regex',
       value: teamarrPattern(tierPattern(tier.key as Exclude<Tier, 'unknown'>)),
@@ -777,10 +968,16 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
       pointsPerMbps,
       minSamples,
       scope: profile.scope,
+      confoundedTiers: confounded,
       note:
         'Generated by Podium from measured stream quality. Points are the ' +
         "dimension's measured distance from this install's baseline, in " +
-        'megabits, times pointsPerMbps.',
+        'megabits, times pointsPerMbps.' +
+        (confounded.length > 0
+          ? ` ${confounded.length} tier rule(s) withheld: one account supplied ` +
+            'more than 80% of the samples, so the effect describes that account ' +
+            'rather than the tier. See podium.confoundedTiers.'
+          : ''),
     },
   };
 }

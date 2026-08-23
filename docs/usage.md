@@ -600,6 +600,72 @@ inference about streams of the same provenance. The cap keeps the strongest
 inference below the first rung of a measured ladder, so a stream measured at
 10Mbps outranks one that merely comes from a good account.
 
+### When a tier is really an account
+
+A tier rule is the only one of the three that has to travel. `m3u` and `group`
+fire on a set Teamarr can see a stream belongs to; a `regex` is run against
+every stream from every provider, so it asserts something about accounts the
+number was never measured on.
+
+That matters because resolution labels are a naming convention, not a fact
+about the catalogue, and providers differ wildly in whether they use one. On
+the install this was developed against, of four accounts **one labelled 100% of
+its streams and the other three labelled 10–15%**. So the `fhd` effect was
+fitted almost entirely from that single account — and what it measured was not
+resolution at all. Its median bitrate was within 700kbps of the reference
+level; what actually differed was that its streams answered **54% of the time
+against 85%**. The tier axis had become a liveness measurement of one provider,
+wearing a resolution's name.
+
+The fit cannot rescue this on its own, and it fails in a way worth recognising.
+Backfitting cannot split factors that move together, and fitting the tier first
+each round lets it absorb the whole residual — after which the group and account
+find nothing left and re-centring pins them at exactly `0`. A perfectly
+confounded install therefore does not show three modest effects that might
+prompt a second look. It shows **one large tier effect and two dimensions
+reading zero**, which looks like "provider identity does not matter here" and is
+really "provider identity is in the next column, mislabelled".
+
+So a tier whose samples are more than **80%** from one account is withheld from
+the export. The screen still shows the number, marked `one account`, because
+the number is real — what it is a number *about* is not what the row says. The
+file records what was withheld and why, under `podium.confoundedTiers`, rather
+than quietly omitting a rule:
+
+```json
+"confoundedTiers": [
+  { "tier": "fhd", "samples": 157, "accounts": 1,
+    "topAccountShare": 1, "wouldHaveScored": -11 }
+]
+```
+
+Accounts and groups are deliberately not guarded this way. Both are wholesale
+set membership, so a group carried by a single account produces a rule that
+fires only on that group's streams — redundant with the account rule rather
+than wrong about anybody else.
+
+### Do the labels mean anything?
+
+Podium measures the picture it receives, so it can hold each account's own
+resolution claim up against it. This turned out to be worth more than the tier
+effect it began as a by-product of.
+
+The quality screen reports, per account, how often it labels a stream at all
+and how often that label survived being measured. On the install above:
+
+- streams named `1080p` measured **720 in 60% of cases**
+- streams naming **no** tier measured 1080 more often than the labelled ones did
+
+A tier token there is not a weak signal, it is noise — and a Teamarr regex
+written against it scores streams on a claim nobody was checking. Read this
+panel before writing any rule of your own that keys on a resolution token: it
+tells you which accounts you can trust to describe their own product.
+
+Only alive samples with a readable height can testify, since a dead stream has
+no picture to disagree with, and audio-only feeds are excluded outright — a
+radio stream naming no resolution is not a provider being coy. An account that
+never labels gets no row: no claim, no lie.
+
 ### The regex form
 
 Tier rules are emitted as
