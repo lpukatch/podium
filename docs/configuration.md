@@ -101,6 +101,40 @@ holds a Dispatcharr credential.
 | `PODIUM_DEAD_TTL_MAX_MS` | `86400000` | ceiling once that has backed off; [see below](#when-there-is-nothing-to-do) |
 | `PODIUM_UNKNOWN_BITRATE_TTL_MS` | `1800000` | how soon an alive-but-unmeasured stream is tried again; [see below](#streams-whose-bitrate-never-resolved) |
 | `PODIUM_PAUSE_WHEN_WATCHING` | `true` | stop while anyone is streaming |
+| `PODIUM_PROBE_IDLE_PROVIDERS` | `false` | narrow that pause to the provider being watched; [see below](#when-one-viewer-stops-everything) |
+
+### When one viewer stops everything
+
+`PODIUM_PAUSE_WHEN_WATCHING` treats "somebody is watching" as a fact about the
+house. It is really a fact about one provider account, and the gap between the
+two shows up as soon as a session outlasts an evening. A DVR recording, or a
+stream left running by accident, will hold the pause open for as long as it
+lasts -- on one install that was nine hours and 523 passes that fetched the
+channel list, saw a single session, and went back to sleep. The other providers
+had spare connections the entire time.
+
+`PODIUM_PROBE_IDLE_PROVIDERS=true` narrows the pause to the account being
+streamed from. That account is yielded completely -- not trimmed to its spare
+slots, closed -- and the rest carry on under the usual per-lane arithmetic,
+including the `PODIUM_MIN_FREE_SLOTS` reserve. A viewer arriving mid-pass only
+stops the pass if they land on a provider it is actually probing.
+
+Two things to know before turning it on:
+
+- **It costs a catalogue fetch.** The plain pause settles the pass from the
+  activity read alone, which is what lets it skip fetching every stream. Working
+  out which provider to avoid needs those streams, so each pass during viewing
+  now pays the full crawl.
+- **It fails closed, and can look like it is doing nothing.** The mode is only
+  safe while Podium can tell which provider a viewer is on. Dispatcharr names
+  the M3U profile for each live session; when it does not -- or when the
+  activity probe fails outright -- nothing can be attributed and the whole pass
+  pauses exactly as before. The log says so in as many words, rather than
+  blaming provider capacity.
+
+It has no effect unless `PODIUM_PAUSE_WHEN_WATCHING` is on. Pausing switched off
+already means competing for slots on every provider, and this setting only ever
+relaxes a pause.
 
 ## Probing
 

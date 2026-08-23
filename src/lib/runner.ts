@@ -619,6 +619,7 @@ export class Runner {
       maxAgeMs: config.PODIUM_MAX_AGE_MS,
       tickMs: config.PODIUM_TICK_MS,
       pauseWhenWatching: config.PODIUM_PAUSE_WHEN_WATCHING,
+      probeIdleProviders: config.PODIUM_PROBE_IDLE_PROVIDERS,
       minFreeSlots: config.PODIUM_MIN_FREE_SLOTS,
       maxSlice: config.PODIUM_MAX_SLICE,
     };
@@ -852,7 +853,7 @@ export class Runner {
         viewers: laneViewers,
         provider: laneProvider,
       } = laneBudgets(loginsByProvider, streamViewers, activity.viewersByProfile);
-      const limits = pacer.laneLimits(laneBase, activity, laneViewers);
+      const limits = pacer.laneLimits(laneBase, activity, laneViewers, laneProvider);
 
       // Every stream's probe target for the pass: exactly one, drawn from the
       // logins that reach a distinct URL and weighted by the free connections
@@ -914,14 +915,21 @@ export class Runner {
       );
 
       if (limits.size === 0) {
-        // The watching case already returned above. What reaches here is either
-        // idle-but-saturated, or -- with pausing switched off, the only way a
-        // non-idle read gets this far -- an activity probe that failed, which
-        // is still worth naming for what it is rather than blaming capacity.
+        // Three ways to land here, and they send an operator to different
+        // places. Idle-but-saturated is the old one. An activity probe that
+        // failed reaches it whenever the plain pause is off, and deserves to be
+        // named rather than blamed on capacity. And with `probeIdleProviders`
+        // on a non-idle read gets this far by design -- the pacer failing
+        // closed because no viewer could be charged to a provider, which reads
+        // as "no spare capacity" while the real answer is that Podium could not
+        // tell who was on what.
+        const yielded = pacer.yieldedProviders(activity, laneViewers, laneProvider);
         return pause(
           activity.probeFailed
             ? 'paused: cannot reach Dispatcharr to check who is watching; assuming busy'
-            : 'paused: no spare provider capacity',
+            : yielded === 'all'
+              ? 'someone is watching, but Dispatcharr did not say which provider; pausing the pass'
+              : 'paused: no spare provider capacity',
         );
       }
 
@@ -1275,7 +1283,27 @@ export class Runner {
       });
 
       const abort = new AbortFlag();
-      const watcher = this.watchForViewers(client, abort, log, uuidMap);
+      // While yielding per provider, only a viewer arriving on a provider this
+      // pass is actually using has to stop it -- the whole point of the mode is
+      // that someone watching provider B does not interrupt work on A and C.
+      const guard =
+        config.PODIUM_PAUSE_WHEN_WATCHING && config.PODIUM_PROBE_IDLE_PROVIDERS
+          ? {
+              providerOfProfile: new Map(
+                [...loginsByProvider].flatMap(([providerId, logins]) =>
+                  logins
+                    .filter((login) => login.dispatcharrProfileId !== null)
+                    .map((login) => [login.dispatcharrProfileId as number, providerId] as const),
+                ),
+              ),
+              open: new Set(
+                [...limits.keys()]
+                  .map((lane) => laneProvider.get(lane))
+                  .filter((id): id is number => id !== undefined),
+              ),
+            }
+          : undefined;
+      const watcher = this.watchForViewers(client, abort, log, uuidMap, guard);
       let stats: Awaited<ReturnType<typeof runLanes<ProbeResult>>>;
       try {
         stats = await runLanes<ProbeResult>(selected, {
@@ -1566,12 +1594,21 @@ export class Runner {
    * Poll for viewers during the run and abort the moment one appears.
    * A probe already in flight is allowed to finish -- it holds a provider slot
    * either way, so killing it frees nothing.
+   *
+   * `guard` narrows "one appears" to the providers this pass is probing, for
+   * `probeIdleProviders`. Without it the mode would open the other providers'
+   * lanes and then have the very viewer it deliberately yielded to abort the
+   * pass anyway, which is the same stall by a longer route. A session
+   * Dispatcharr named no profile for still aborts: the pacer fails closed on
+   * an unattributable viewer and the run must agree with it, or the pass keeps
+   * probing on a decision the pacer would not have made.
    */
   private watchForViewers(
     client: DispatcharrClient,
     abort: AbortFlag,
     log: (m: string) => void,
     uuidMap?: Map<string, number>,
+    guard?: { providerOfProfile: Map<number, number>; open: Set<number> },
   ): NodeJS.Timeout {
     const config = this.deps.config();
     if (!config.PODIUM_PAUSE_WHEN_WATCHING) {
@@ -1580,9 +1617,17 @@ export class Runner {
     return setInterval(
       async () => {
         try {
-          const ids = await client.activeChannelIds(uuidMap);
-          if (ids.length > 0 && !abort.aborted) {
-            log(`viewer started on channel ${ids[0]} -- stopping this pass`);
+          const sessions = await client.activeSessions(uuidMap);
+          const blocking = guard
+            ? sessions.filter((session) => {
+                if (session.profileId === null) return true;
+                const provider = guard.providerOfProfile.get(session.profileId);
+                return provider === undefined || guard.open.has(provider);
+              })
+            : sessions;
+          const first = blocking[0];
+          if (first && !abort.aborted) {
+            log(`viewer started on channel ${first.channelId} -- stopping this pass`);
             abort.abort();
           }
         } catch {
