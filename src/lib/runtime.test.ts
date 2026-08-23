@@ -369,6 +369,7 @@ describe('pacing', () => {
       maxAgeMs: 3_600_000,
       tickMs: 60_000,
       pauseWhenWatching: true,
+      probeIdleProviders: false,
       minFreeSlots: 1,
       maxSlice: 400,
       ...over,
@@ -931,6 +932,7 @@ describe('lane capacity contract', () => {
       maxAgeMs: 3_600_000,
       tickMs: 60_000,
       pauseWhenWatching: false,
+      probeIdleProviders: false,
       minFreeSlots: 1,
       maxSlice: 400,
     });

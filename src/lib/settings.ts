@@ -99,6 +99,13 @@ export const FIELDS: FieldSpec[] = [
     section: 'behaviour',
   },
   {
+    key: 'PODIUM_PROBE_IDLE_PROVIDERS',
+    kind: 'boolean',
+    label: 'Keep probing providers nobody is watching',
+    help: 'Narrows the pause above from the whole pass to the one account being streamed from, so the others carry on. Useful when a single long session — a recording, or a stream left running — would otherwise stop every check for hours. Podium yields the watched provider entirely, and still pauses everything if it cannot tell which provider a viewer is on. Costs a full catalogue fetch on each pass someone is watching, which the plain pause skips. Does nothing unless the pause above is on.',
+    section: 'behaviour',
+  },
+  {
     key: 'PODIUM_REMOVE_UNMATCHED',
     kind: 'boolean',
     label: 'Remove unmatched streams',

@@ -373,7 +373,10 @@ Two things to know before queueing the whole catalogue:
 
 - On a large install this is hours of probing, and the day you most want it —
   a house full of people with the TV on — is the day it spends most of its time
-  paused for viewers. Queue it in the morning, not at half past five.
+  paused for viewers. Queue it in the morning, not at half past five. If one
+  long session keeps stopping everything, **Keep probing providers nobody is
+  watching** in Settings narrows the pause to the account being streamed from;
+  see [configuration](configuration.md#when-one-viewer-stops-everything).
 - Event channels are the ones a morning re-check helps least. A channel in an
   `after_epg_start` group is held back until its programme is live whether or
   not you asked, which is the whole point of the mode: probing a feed that is

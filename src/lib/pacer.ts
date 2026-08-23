@@ -38,6 +38,14 @@ export interface PacerConfig {
   /** How often to reconsider, in ms. */
   tickMs: number;
   pauseWhenWatching: boolean;
+  /**
+   * Narrow `pauseWhenWatching` from the whole pass to the provider being
+   * watched, so the ones nobody is on keep being checked.
+   *
+   * Inert when `pauseWhenWatching` is off: pausing off already means "compete
+   * politely for slots everywhere", and this only ever relaxes a pause.
+   */
+  probeIdleProviders: boolean;
   /** Never take a provider's last slot. */
   minFreeSlots: number;
   /** Ceiling on one tick's work. */
@@ -60,6 +68,7 @@ export const DEFAULT_PACER: PacerConfig = {
   maxAgeMs: 24 * 3600 * 1000,
   tickMs: 60_000,
   pauseWhenWatching: true,
+  probeIdleProviders: false,
   minFreeSlots: 1,
   maxSlice: 400,
 };
@@ -90,22 +99,80 @@ export class Pacer {
    * `1 - 0 - 1 = 0`, so its lane would never open and its streams would never
    * be checked at all -- and a single-connection provider is a common thing to
    * have.
+   *
+   * `providerOf` maps each lane back to its provider, and is what makes
+   * `probeIdleProviders` possible: lanes are per login, but a viewer occupies
+   * the *account*, so yielding has to be decided one level up from the lane
+   * the arithmetic runs on. Without it the mode cannot tell a watched login's
+   * sibling lane from an unrelated provider's, and falls back to pausing.
    */
   laneLimits(
     base: Map<string, number>,
     activity: Activity,
     viewersByLane: Map<string, number>,
+    providerOf?: Map<string, number>,
   ): Map<string, number> {
     const out = new Map<string, number>();
     if (this.pausedByActivity(activity)) return out;
 
     const reserve = activity.idle ? 0 : this.config.minFreeSlots;
+    const yielded = this.yieldedProviders(activity, viewersByLane, providerOf);
+    if (yielded === 'all') return out;
     for (const [lane, limit] of base) {
+      if (yielded !== 'none') {
+        // A lane whose provider cannot be named is treated as watched. The
+        // point of the mode is to stay off the account somebody is streaming
+        // from, and a lane we cannot attribute might be it.
+        const provider = providerOf?.get(lane);
+        if (provider === undefined || yielded.has(provider)) continue;
+      }
       const inUse = viewersByLane.get(lane) ?? 0;
       const free = limit - inUse - reserve;
       if (free > 0) out.set(lane, free);
     }
     return out;
+  }
+
+  /**
+   * Which providers to stay off while somebody is watching.
+   *
+   * `none` is the ordinary answer -- either nobody is watching, or pausing is
+   * switched off and every lane competes on its own capacity. A set names the
+   * providers carrying viewers, so `probeIdleProviders` can leave those alone
+   * and keep the rest working.
+   *
+   * `all` is the fail-closed answer, and it is the one worth being careful
+   * about. This mode's whole safety argument is "we know which provider the
+   * viewer is on, so we can avoid it" -- when that is not true the argument
+   * collapses and the only honest move is the pause the operator relaxed.
+   * Two ways it goes untrue: the activity probe failed (`busyUnknown` reports
+   * a viewer nothing can be charged to), and a session Dispatcharr named no
+   * M3U profile for. Both surface here as "somebody is watching but no lane
+   * shows a viewer", which is why the emptiness of the count is the test
+   * rather than any flag on the read.
+   *
+   * Public because `Runner` asks the same question a second time to explain a
+   * pause in words -- "every provider is busy" and "we cannot tell who is on
+   * what" send an operator to different places, and restating the test at the
+   * call site is how the two answers drift apart.
+   */
+  yieldedProviders(
+    activity: Activity,
+    viewersByLane: Map<string, number>,
+    providerOf?: Map<string, number>,
+  ): 'none' | 'all' | Set<number> {
+    if (activity.idle) return 'none';
+    if (!this.config.pauseWhenWatching || !this.config.probeIdleProviders) return 'none';
+    if (!providerOf) return 'all';
+
+    const busy = new Set<number>();
+    for (const [lane, viewers] of viewersByLane) {
+      if (viewers <= 0) continue;
+      const provider = providerOf.get(lane);
+      if (provider === undefined) return 'all';
+      busy.add(provider);
+    }
+    return busy.size === 0 ? 'all' : busy;
   }
 
   /**
@@ -120,7 +187,13 @@ export class Pacer {
    * restated by every caller that wants to shortcut it.
    */
   pausedByActivity(activity: Activity): boolean {
-    return this.config.pauseWhenWatching && !activity.idle;
+    if (!this.config.pauseWhenWatching || activity.idle) return false;
+    // `probeIdleProviders` gives up the shortcut deliberately. Deciding which
+    // providers to leave alone needs the per-lane viewer counts, and those are
+    // derived from the stream catalogue this return exists to skip -- so the
+    // mode costs a full crawl on every pass somebody is watching, which is the
+    // trade an operator makes when they turn it on.
+    return !this.config.probeIdleProviders;
   }
 
   /**
