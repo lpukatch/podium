@@ -25,6 +25,19 @@ interface Effect {
   samples: number;
   effectiveKbps: number;
   deltaKbps: number;
+  accounts: number;
+  topAccountShare: number;
+}
+
+interface LabelAccuracy {
+  providerId: number;
+  providerName: string;
+  samples: number;
+  labelled: number;
+  agreed: number;
+  accuracy: number | null;
+  labelledShare: number;
+  commonestMiss: { claimed: string; measured: string; count: number } | null;
 }
 
 interface ScopeSummary {
@@ -139,6 +152,7 @@ interface Profile {
   accounts: Effect[];
   tiers: Effect[];
   groups: Effect[];
+  labelAccuracy: LabelAccuracy[];
 }
 
 const card = 'rounded-xl border border-[var(--color-line)] bg-[var(--color-panel)]';
@@ -512,11 +526,31 @@ export function QualityView() {
           <h3 className="text-base">Quality tiers</h3>
           <p className={`mt-1 text-sm ${muted}`}>
             From the token in the stream&apos;s own name. Exported as regex rules; streams naming no
-            tier are the reference level and get none.
+            tier are the reference level and get none. A tier fitted almost entirely from one
+            account is withheld from the export — see below for whether its labels are worth
+            anything.
           </p>
-          <EffectTable effects={profile?.tiers ?? []} empty="No tier has enough samples yet." />
+          <EffectTable
+            effects={profile?.tiers ?? []}
+            empty="No tier has enough samples yet."
+            warnSingleAccount
+          />
         </section>
       </div>
+
+      <section className={`${card} p-5`}>
+        <h3 className="text-base">Do the labels mean anything?</h3>
+        <p className={`mt-1 max-w-[80ch] text-sm ${muted}`}>
+          Podium measures the picture it receives, so it can hold each account&apos;s own resolution
+          claim up against it. This is the check that says whether a tier rule is worth exporting at
+          all: a regex scoring streams on <code>1080p</code> is only useful where the token is
+          telling the truth. <span className="whitespace-nowrap">Labels</span> is how often this
+          account names a tier; <span className="whitespace-nowrap">Correct</span> is how often the
+          name matched what was measured. An account that never labels cannot be wrong, and gets no
+          row.
+        </p>
+        <LabelAccuracyTable rows={profile?.labelAccuracy ?? []} />
+      </section>
 
       <section className={`${card} p-5`}>
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -957,7 +991,25 @@ export function QualityView() {
   );
 }
 
-function EffectTable({ effects, empty }: { effects: Effect[]; empty: string }) {
+/** Mirrors `MAX_TIER_ACCOUNT_SHARE` in lib/quality.ts. */
+const MAX_TIER_ACCOUNT_SHARE = 0.8;
+
+function EffectTable({
+  effects,
+  empty,
+  warnSingleAccount = false,
+}: {
+  effects: Effect[];
+  empty: string;
+  /**
+   * Flag rows fitted almost entirely from one account.
+   *
+   * Only tiers ask for this, because only a tier rule is a regex Teamarr runs
+   * against every provider's streams -- so it is the only one that carries a
+   * number somewhere it was never measured. See the constant above.
+   */
+  warnSingleAccount?: boolean;
+}) {
   if (effects.length === 0) {
     return <p className={`mt-3 text-sm ${muted}`}>{empty}</p>;
   }
@@ -973,18 +1025,102 @@ function EffectTable({ effects, empty }: { effects: Effect[]; empty: string }) {
           </tr>
         </thead>
         <tbody>
-          {effects.map((effect) => (
-            <tr key={effect.key} className="border-b border-[var(--color-line)]">
-              <td className="py-2 pr-3">{effect.key}</td>
-              <td className="py-2 pr-3 text-right tabular-nums">
-                {effect.samples.toLocaleString()}
-              </td>
-              <td className="py-2 pr-3 text-right tabular-nums">{rate(effect.effectiveKbps)}</td>
-              <td className={`py-2 text-right tabular-nums ${tone(effect.deltaKbps)}`}>
-                {signed(effect.deltaKbps)}
-              </td>
-            </tr>
-          ))}
+          {effects.map((effect) => {
+            const confounded = warnSingleAccount && effect.topAccountShare > MAX_TIER_ACCOUNT_SHARE;
+            return (
+              <tr key={effect.key} className="border-b border-[var(--color-line)]">
+                <td className="py-2 pr-3">
+                  {effect.key}
+                  {confounded && (
+                    <span
+                      className="ml-2 rounded border border-[var(--color-warn)] px-1.5 py-0.5 text-xs text-[var(--color-warn)]"
+                      title={`${Math.round(effect.topAccountShare * 100)}% of these samples come from one account, so this number describes that account rather than the tier. Withheld from the export.`}
+                    >
+                      one account
+                    </span>
+                  )}
+                </td>
+                <td className="py-2 pr-3 text-right tabular-nums">
+                  {effect.samples.toLocaleString()}
+                </td>
+                <td className="py-2 pr-3 text-right tabular-nums">{rate(effect.effectiveKbps)}</td>
+                {/* A confounded delta is shown but not coloured: the number is
+                    real, what it is a number *about* is not what the row says. */}
+                <td
+                  className={`py-2 text-right tabular-nums ${confounded ? muted : tone(effect.deltaKbps)}`}
+                >
+                  {signed(effect.deltaKbps)}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** Percentage, with the sample count that earned it. */
+function pct(value: number): string {
+  return `${Math.round(value * 100)}%`;
+}
+
+function LabelAccuracyTable({ rows }: { rows: LabelAccuracy[] }) {
+  const checked = rows.filter((row) => row.labelled > 0);
+  if (checked.length === 0) {
+    return (
+      <p className={`mt-3 text-sm ${muted}`}>
+        No account has labelled a stream yet, so there is nothing to check.
+      </p>
+    );
+  }
+  return (
+    <div className="mt-3 overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead className={`text-left ${muted}`}>
+          <tr className="border-b border-[var(--color-line)]">
+            <th className="py-2 pr-3 font-normal">Account</th>
+            <th className="py-2 pr-3 text-right font-normal">Labels</th>
+            <th className="py-2 pr-3 text-right font-normal">Correct</th>
+            <th className="py-2 font-normal">Commonest miss</th>
+          </tr>
+        </thead>
+        <tbody>
+          {checked.map((row) => {
+            const accuracy = row.accuracy ?? 0;
+            return (
+              <tr key={row.providerId} className="border-b border-[var(--color-line)]">
+                <td className="py-2 pr-3">{row.providerName}</td>
+                <td className={`py-2 pr-3 text-right tabular-nums ${muted}`}>
+                  {pct(row.labelledShare)}{' '}
+                  <span className="text-xs">
+                    ({row.labelled.toLocaleString()}/{row.samples.toLocaleString()})
+                  </span>
+                </td>
+                <td
+                  className={`py-2 pr-3 text-right tabular-nums ${
+                    accuracy >= 0.8
+                      ? 'text-[var(--color-accent)]'
+                      : accuracy >= 0.5
+                        ? 'text-[var(--color-warn)]'
+                        : 'text-[var(--color-bad)]'
+                  }`}
+                >
+                  {pct(accuracy)}
+                </td>
+                <td className={`py-2 ${muted}`}>
+                  {row.commonestMiss ? (
+                    <>
+                      says {row.commonestMiss.claimed}, measured {row.commonestMiss.measured}{' '}
+                      <span className="text-xs">(×{row.commonestMiss.count.toLocaleString()})</span>
+                    </>
+                  ) : (
+                    '—'
+                  )}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
