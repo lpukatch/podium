@@ -756,6 +756,11 @@ Streams whose names advertise no quality at all are the reference level and get
 no rule — they score their account's effect alone, which is the right answer
 when the name was the only thing to go on.
 
+The vocabulary these rules are drawn from is hand-picked, and on a catalogue
+where nobody labels honestly it fits to nothing. Replacing it with whatever the
+names actually say is [the name miner](miner.md) — designed, not built, with the
+thresholds and the evidence for them written down there.
+
 > [!IMPORTANT]
 > Teamarr's import **replaces** its entire rule set rather than merging, so
 > importing a bare export would delete every rule you wrote by hand. Export
