@@ -1453,7 +1453,15 @@ export class Runner {
       // because it is a report and a report must never fail a pass.
       try {
         this.checkTeamarrRules(runId, channels, streamById, groupNames, providerNames, strategy, {
-          policyFor: (groupId, groupName) => eligibility.policyFor(groupId, groupName).audioOnly,
+          audioOnly: (groupId, groupName) => eligibility.policyFor(groupId, groupName).audioOnly,
+          // Teamarr orders the channels it creates, which are the ones an
+          // operator has marked measure-only or ranked off their own
+          // assignment. Its rules are never evaluated anywhere else, so a
+          // disagreement anywhere else is measuring the wrong population.
+          managed: (groupId, groupName) => {
+            const resolved = eligibility.policyFor(groupId, groupName);
+            return Boolean(resolved.measureOnly) || assignmentIsRule(resolved.mode);
+          },
         });
       } catch (err) {
         log(`rule check failed: ${String(err)}`);
@@ -1947,7 +1955,11 @@ export class Runner {
     groupNames: Map<number, string>,
     providerNames: Map<number, string>,
     strategy: RankStrategy,
-    policy: { policyFor: (groupId: number | null, groupName?: string) => boolean | undefined },
+    policy: {
+      audioOnly: (groupId: number | null, groupName?: string) => boolean | undefined;
+      /** Whether another app owns this channel's ordering. */
+      managed: (groupId: number | null, groupName?: string) => boolean;
+    },
   ): void {
     const { store } = this.deps;
     const stored = store.teamarrRules();
@@ -1984,7 +1996,8 @@ export class Runner {
       inputs.push({
         channelId: channel.id,
         channelName: channel.name,
-        audioOnly: policy.policyFor(channel.groupId, groupName),
+        audioOnly: policy.audioOnly(channel.groupId, groupName),
+        managed: policy.managed(channel.groupId, groupName),
         streams,
       });
     }
@@ -2000,6 +2013,10 @@ export class Runner {
       ambiguous: check.summary.ambiguous,
       deadFirst: check.summary.deadFirst,
       gapKbps: check.summary.gapKbps,
+      managedChannels: check.summary.managedChannels,
+      managedAgreed: check.summary.managedAgreed,
+      managedDeadFirst: check.summary.managedDeadFirst,
+      managedGapKbps: check.summary.managedGapKbps,
       approximate: check.summary.approximate,
       rulesEvaluated: check.rules.evaluated,
       rulesSkipped: check.rules.skipped.length,
@@ -2008,6 +2025,7 @@ export class Runner {
         .map((row) => ({
           channelId: row.channelId,
           channelName: row.channelName,
+          managed: row.managed,
           teamarrStream: row.teamarr.streamId,
           teamarrName: row.teamarr.name,
           teamarrProvider: row.teamarr.providerName,

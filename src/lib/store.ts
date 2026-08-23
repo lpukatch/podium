@@ -299,6 +299,12 @@ CREATE TABLE IF NOT EXISTS rule_checks (
     run_id          TEXT,
     channels        INTEGER NOT NULL,
     agreed          INTEGER NOT NULL,
+    -- The same counts over the channels Teamarr actually orders, which is the
+    -- population its rules are evaluated on and the one worth reading first.
+    managed_channels   INTEGER NOT NULL DEFAULT 0,
+    managed_agreed     INTEGER NOT NULL DEFAULT 0,
+    managed_dead_first INTEGER NOT NULL DEFAULT 0,
+    managed_gap_kbps   INTEGER NOT NULL DEFAULT 0,
     disagreed       INTEGER NOT NULL,
     ambiguous       INTEGER NOT NULL,
     dead_first      INTEGER NOT NULL,
@@ -317,6 +323,7 @@ CREATE TABLE IF NOT EXISTS rule_check_misses (
     checked_at       INTEGER NOT NULL,
     channel_id       INTEGER NOT NULL,
     channel_name     TEXT    NOT NULL,
+    managed          INTEGER NOT NULL DEFAULT 0,
     teamarr_stream   INTEGER NOT NULL,
     teamarr_name     TEXT    NOT NULL,
     teamarr_provider TEXT    NOT NULL,
@@ -679,6 +686,7 @@ export const RULE_CHECK_HISTORY_MS = 90 * 86_400_000;
 export interface StoredRuleMiss {
   channelId: number;
   channelName: string;
+  managed: boolean;
   teamarrStream: number;
   teamarrName: string;
   teamarrProvider: string;
@@ -704,6 +712,10 @@ export interface StoredRuleCheckRow {
   ambiguous: number;
   deadFirst: number;
   gapKbps: number;
+  managedChannels: number;
+  managedAgreed: number;
+  managedDeadFirst: number;
+  managedGapKbps: number;
   approximate: boolean;
   rulesEvaluated: number;
   rulesSkipped: number;
@@ -801,6 +813,13 @@ export class Store {
         // reports how many samples carry one, because that count is what says
         // whether there is yet anything to mine.
         ['quality_samples', "stream_name TEXT NOT NULL DEFAULT ''"],
+        // Checks recorded before the managed split read as unmanaged, which is
+        // the honest default: nothing recorded which channels Teamarr owned.
+        ['rule_checks', 'managed_channels INTEGER NOT NULL DEFAULT 0'],
+        ['rule_checks', 'managed_agreed INTEGER NOT NULL DEFAULT 0'],
+        ['rule_checks', 'managed_dead_first INTEGER NOT NULL DEFAULT 0'],
+        ['rule_checks', 'managed_gap_kbps INTEGER NOT NULL DEFAULT 0'],
+        ['rule_check_misses', 'managed INTEGER NOT NULL DEFAULT 0'],
       ] as const) {
         try {
           this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`);
@@ -1588,8 +1607,9 @@ export class Store {
       this.sql(
         `INSERT OR REPLACE INTO rule_checks
            (checked_at, run_id, channels, agreed, disagreed, ambiguous, dead_first,
-            gap_kbps, approximate, rules_evaluated, rules_skipped)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            gap_kbps, managed_channels, managed_agreed, managed_dead_first,
+            managed_gap_kbps, approximate, rules_evaluated, rules_skipped)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         checkedAt,
         check.runId,
@@ -1599,23 +1619,28 @@ export class Store {
         check.ambiguous,
         check.deadFirst,
         Math.round(check.gapKbps),
+        check.managedChannels,
+        check.managedAgreed,
+        check.managedDeadFirst,
+        Math.round(check.managedGapKbps),
         check.approximate ? 1 : 0,
         check.rulesEvaluated,
         check.rulesSkipped,
       );
       const insert = this.sql(
         `INSERT INTO rule_check_misses
-           (checked_at, channel_id, channel_name, teamarr_stream, teamarr_name,
+           (checked_at, channel_id, channel_name, managed, teamarr_stream, teamarr_name,
             teamarr_provider, teamarr_points, teamarr_bitrate, teamarr_alive,
             teamarr_black, teamarr_matched, podium_stream, podium_name,
             podium_provider, podium_bitrate, gap_kbps)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       for (const miss of check.misses) {
         insert.run(
           checkedAt,
           miss.channelId,
           miss.channelName,
+          miss.managed ? 1 : 0,
           miss.teamarrStream,
           miss.teamarrName,
           miss.teamarrProvider,
@@ -1638,7 +1663,8 @@ export class Store {
   ruleChecks(limit = 30): { history: StoredRuleCheckRow[]; latest: StoredRuleMiss[] } {
     const history = this.sql(
       `SELECT checked_at, run_id, channels, agreed, disagreed, ambiguous, dead_first,
-              gap_kbps, approximate, rules_evaluated, rules_skipped
+              gap_kbps, managed_channels, managed_agreed, managed_dead_first,
+              managed_gap_kbps, approximate, rules_evaluated, rules_skipped
          FROM rule_checks ORDER BY checked_at DESC LIMIT ?`,
     ).all(limit) as Array<Record<string, number | string | null>>;
 
@@ -1651,6 +1677,10 @@ export class Store {
       ambiguous: Number(row.ambiguous),
       deadFirst: Number(row.dead_first),
       gapKbps: Number(row.gap_kbps),
+      managedChannels: Number(row.managed_channels),
+      managedAgreed: Number(row.managed_agreed),
+      managedDeadFirst: Number(row.managed_dead_first),
+      managedGapKbps: Number(row.managed_gap_kbps),
       approximate: Number(row.approximate) === 1,
       rulesEvaluated: Number(row.rules_evaluated),
       rulesSkipped: Number(row.rules_skipped),
@@ -1666,6 +1696,7 @@ export class Store {
       latest: misses.map((row) => ({
         channelId: Number(row.channel_id),
         channelName: String(row.channel_name),
+        managed: Number(row.managed) === 1,
         teamarrStream: Number(row.teamarr_stream),
         teamarrName: String(row.teamarr_name),
         teamarrProvider: String(row.teamarr_provider),

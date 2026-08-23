@@ -668,8 +668,20 @@ What it reports:
 | --- | --- |
 | **agreed** | the rules and the measurements put the same stream first |
 | **disagreed** | they do not, with the measured bitrate given up |
-| **dead first** | the rules put a stream first that does not play, or shows a slate |
+| **dead over live** | the rules put a stream first that does not play while a working one was available |
 | **decided by a tie** | two streams tie at the top, so the rules do not decide the channel at all — whatever Teamarr does next does, and a tie falling the right way is not a working rule set |
+
+The headline counts only the channels **Teamarr orders** — the groups marked
+measure-only, or ranked off their own assignment. Its stream-priority rules are
+evaluated on those and nowhere else, so a disagreement on an ordinary channel is
+a comparison against a population the rules never meet. Measured on a live
+install, 540 channels carried enough verdicts to check and only 224 sat in a
+managed group; without the split, two thirds of the report was noise. The rest
+are still listed, marked *not Teamarr-ordered*.
+
+"dead over live" carries its qualifier for the same reason. A channel where
+every stream is dead also leads with a dead stream, and counting it says "your
+rules are broken" about a provider outage no rule could have avoided.
 
 Each disagreement names the rules that scored the losing stream, which is
 usually the whole explanation: an `m3u` rule worth +20 on a provider that is
