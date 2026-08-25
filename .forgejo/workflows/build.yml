@@ -48,9 +48,9 @@ jobs:
         with:
           driver-opts: network=host
 
-      # Logs in on pull requests too, even though they do not push an image: the
-      # build cache below lives in this same package, so reading and writing
-      # :buildcache needs credentials on every event.
+      # Logs in on pull requests too, even though they do not push an image and no
+      # longer WRITE the cache: :buildcache lives in this same package, so READING
+      # it still needs credentials on every event.
       - name: Login to Container Registry
         uses: docker/login-action@v4
         with:
@@ -84,4 +84,14 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           provenance: false
           cache-from: type=registry,ref=${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}:buildcache
-          cache-to: type=registry,ref=${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}:buildcache,mode=max
+          # Gated exactly like `push:` above, and for the same reason: a PR build
+          # publishes nothing, so writing ~1 GB of mode=max cache from one is pure
+          # churn. Every write replaces the :buildcache tag and orphans the previous
+          # blobs, which Forgejo's GC then has to reap. Measured over the 14 days to
+          # 2026-08-25: 174 build runs, 86 of them PRs — roughly half the cache
+          # writes in this repo shipped nothing.
+          #
+          # PRs still READ the cache via cache-from above; they just stop writing it.
+          # The cost is that a long-lived PR re-does its own delta on each push
+          # instead of caching it, since only main's cache is available to read.
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}/{1}:buildcache,mode=max', vars.REGISTRY, vars.IMAGE_NAME) || '' }}
