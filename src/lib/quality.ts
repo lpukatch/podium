@@ -25,6 +25,9 @@
  */
 
 import { assignmentIsRule, globToRegExp, type PolicyMode } from './eligibility';
+// Type-only, and deliberately: `miner.ts` imports real values from here, so a
+// value import in this direction would be a runtime cycle. Erased at compile.
+import type { ConsolidatedToken } from './miner';
 import type { StoredQualitySample } from './store';
 
 export type Tier = 'uhd' | 'fhd' | 'hd' | 'sd' | 'unknown';
@@ -86,7 +89,7 @@ export function tierOfHeight(height: number): Tier {
  * three; this form matched all three. Letters still terminate, so `HD` does not
  * match inside `HDR`, which is the case the boundary exists for.
  */
-function bounded(tokens: string[]): string {
+export function bounded(tokens: string[]): string {
   return `(?<![A-Za-z0-9])(?:${tokens.join('|')})\\d*(?![A-Za-z])`;
 }
 
@@ -581,6 +584,29 @@ export function buildProfile(
   };
 }
 
+/**
+ * What a set of samples is worth, all in: median bitrate discounted by how
+ * often it fails to arrive at all.
+ *
+ * `median x aliveRate x (1 - blackRate)`. Exported because the name miner
+ * splits arbitrary sample sets on a token and compares the two halves, and it
+ * has to be comparing the same quantity the profile fits and the export scores.
+ * Two implementations of "effective" would be two definitions of better, and
+ * the disagreement would only show up as a mined rule that ranks against the
+ * bucket it was mined from.
+ */
+export function effectiveKbpsOf(list: StoredQualitySample[]): number {
+  const alive = list.filter((sample) => sample.alive);
+  const black = alive.filter((sample) => sample.black);
+  const rated = alive
+    .filter((sample) => sample.measured && !sample.black && sample.bitrateKbps > 0)
+    .map((sample) => sample.bitrateKbps)
+    .sort((a, b) => a - b);
+  const aliveRate = list.length === 0 ? 0 : alive.length / list.length;
+  const blackRate = alive.length === 0 ? 0 : black.length / alive.length;
+  return Math.round(percentile(rated, 0.5) * aliveRate * (1 - blackRate));
+}
+
 function summarise(list: StoredQualitySample[]): Bucket {
   const alive = list.filter((sample) => sample.alive);
   const black = alive.filter((sample) => sample.black);
@@ -615,7 +641,7 @@ function summarise(list: StoredQualitySample[]): Bucket {
     medianBitrateKbps: median,
     p90BitrateKbps: Math.round(percentile(rated, 0.9)),
     medianHeight: Math.round(percentile(heights, 0.5)),
-    effectiveKbps: Math.round(median * aliveRate * (1 - blackRate)),
+    effectiveKbps: effectiveKbpsOf(list),
     lastSampledAt: Math.max(...list.map((sample) => sample.sampledAt)),
   };
 }
@@ -844,6 +870,14 @@ export interface ExportOptions extends ProfileOptions {
    * good account.
    */
   maxPoints?: number;
+  /**
+   * Pass B's consolidations, which *replace* the group rules they subsume.
+   *
+   * Passed in rather than mined here so this stays a function of the profile:
+   * the caller decides whether mining ran at all, and the export behaves
+   * identically when it did not.
+   */
+  consolidated?: ConsolidatedToken[];
 }
 
 /**
@@ -897,6 +931,19 @@ export interface RulesExport {
     scope: ScopeSummary;
     /** Tier rules withheld because one account supplied most of the evidence. */
     confoundedTiers: ConfoundedTier[];
+    /**
+     * Mined regexes, and the group rules each one absorbed.
+     *
+     * Carried so the compression is auditable from the file alone: a group rule
+     * that dropped from +12 to nothing did not stop being measured, it stopped
+     * being *separately* measured, and only this says which regex took it.
+     */
+    minedRegex: Array<{
+      token: string;
+      pattern: string;
+      deltaKbps: number;
+      replacedGroups: string[];
+    }>;
     note: string;
   };
 }
@@ -966,8 +1013,22 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
   const pointsPerMbps = options.pointsPerMbps ?? 5;
   const maxPoints = options.maxPoints ?? 15;
   const minSamples = options.minSamples ?? 20;
+  const consolidated = options.consolidated ?? [];
 
   const rules: TeamarrRule[] = [];
+
+  // What each carrier group keeps once its regex has taken the shared part.
+  //
+  // A consolidating regex has to *replace* the group rules it subsumes, or a
+  // Peacock stream scores its group's points and the regex's on top. So the
+  // carriers are re-emitted at their residual instead of their own effect,
+  // which is exactly additive -- and the residuals that round to nothing are
+  // the compression: four groups all sitting near +2000 become one regex and
+  // silence.
+  const residuals = new Map<string, number>();
+  for (const token of consolidated) {
+    for (const carrier of token.carriers) residuals.set(carrier.group, carrier.residualKbps);
+  }
 
   for (const account of profile.accounts) {
     if (account.samples < minSamples || !account.key.trim()) continue;
@@ -981,9 +1042,18 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
   // number was measured over, rather than one that merely resembles it.
   for (const group of profile.groups) {
     if (group.samples < minSamples || !group.key.trim()) continue;
-    const points = pointsFor(group.deltaKbps, pointsPerMbps, maxPoints);
+    const effect = residuals.get(group.key) ?? group.deltaKbps;
+    const points = pointsFor(effect, pointsPerMbps, maxPoints);
     if (points === 0) continue;
     rules.push({ type: 'group', value: group.key, priority: 99, mode: 'score', points });
+  }
+
+  // Mined regexes last among the scoring rules, so a reader sees the group
+  // rules they replaced immediately above them.
+  for (const token of consolidated) {
+    const points = pointsFor(token.deltaKbps, pointsPerMbps, maxPoints);
+    if (points === 0) continue;
+    rules.push({ type: 'regex', value: token.pattern, priority: 99, mode: 'score', points });
   }
 
   const confounded: ConfoundedTier[] = [];
@@ -1025,10 +1095,23 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
       minSamples,
       scope: profile.scope,
       confoundedTiers: confounded,
+      minedRegex: consolidated.map((token) => ({
+        token: token.token,
+        pattern: token.pattern,
+        deltaKbps: token.deltaKbps,
+        replacedGroups: token.carriers.map((carrier) => carrier.group),
+      })),
       note:
         'Generated by Podium from measured stream quality. Points are the ' +
         "dimension's measured distance from this install's baseline, in " +
-        'megabits, times pointsPerMbps.' +
+        'megabits, times pointsPerMbps. `group` values are Dispatcharr group ' +
+        "names; Teamarr matches them against its own Event Group names, so a " +
+        'group rule scores only where the two are spelled the same.' +
+        (consolidated.length > 0
+          ? ` ${consolidated.length} regex rule(s) were mined from stream names and ` +
+            'REPLACE the group rules they subsume -- those groups are re-emitted at ' +
+            'their residual, so the totals are unchanged. See podium.minedRegex.'
+          : '') +
         (confounded.length > 0
           ? ` ${confounded.length} tier rule(s) withheld: one account supplied ` +
             'more than 80% of the samples, so the effect describes that account ' +

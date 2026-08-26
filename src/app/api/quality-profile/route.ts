@@ -1,7 +1,9 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
+import { mineNames } from '@/lib/miner';
 import {
   buildProfile,
+  inScope,
   mergeTeamarrRules,
   parseGlobs,
   profileQuery,
@@ -65,13 +67,25 @@ export function GET(request: Request) {
     // container booted with rather than the one in force.
     const config = loadConfig(resolveEnv(process.env, store.settings()));
     const scope = scopeOf(url, config);
-    const profile = buildProfile(store.qualitySamples(), { minSamples, scope });
+    const samples = store.qualitySamples();
+    const profile = buildProfile(samples, { minSamples, scope });
+    // Mined from the same population the profile was fitted on -- see
+    // `mineNames`. Pass A's findings are reported; only Pass B's are exported.
+    const miner = mineNames(
+      samples.filter((sample) => inScope(sample, scope)),
+      profile.groups,
+      { minCarrierSamples: minSamples },
+    );
 
     if (url.searchParams.get('format') !== 'teamarr') {
-      return NextResponse.json(profile);
+      return NextResponse.json({ ...profile, miner });
     }
 
-    const body = teamarrRules(profile, { minSamples, pointsPerMbps });
+    const body = teamarrRules(profile, {
+      minSamples,
+      pointsPerMbps,
+      consolidated: miner.passB.consolidated,
+    });
     return new NextResponse(JSON.stringify(body, null, 2), {
       status: 200,
       headers: {
@@ -122,11 +136,19 @@ export async function POST(request: Request) {
 
     store = new Store(loadConfig().dbPath);
     const config = loadConfig(resolveEnv(process.env, store.settings()));
-    const profile = buildProfile(store.qualitySamples(), {
+    const scope = scopeOf(url, config);
+    const samples = store.qualitySamples();
+    const profile = buildProfile(samples, { minSamples, scope });
+    const miner = mineNames(
+      samples.filter((sample) => inScope(sample, scope)),
+      profile.groups,
+      { minCarrierSamples: minSamples },
+    );
+    const generated = teamarrRules(profile, {
       minSamples,
-      scope: scopeOf(url, config),
+      pointsPerMbps,
+      consolidated: miner.passB.consolidated,
     });
-    const generated = teamarrRules(profile, { minSamples, pointsPerMbps });
     const merged = mergeTeamarrRules(rules, generated.rules);
 
     const body = {

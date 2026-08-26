@@ -271,7 +271,22 @@ CREATE TABLE IF NOT EXISTS quality_samples (
     -- bucket towards whichever streams happened to be muxed with metadata.
     measured      INTEGER NOT NULL,
     height        INTEGER NOT NULL,
-    fps           REAL    NOT NULL
+    fps           REAL    NOT NULL,
+    -- The codec ffprobe actually found, not the one the name claims.
+    --
+    -- Here because bitrate is only comparable within a codec. HEVC carries
+    -- roughly the same picture in roughly half the bits, so a bitrate ranking
+    -- reads an HEVC feed as materially worse than an H.264 one it is in fact
+    -- equal to. That is tolerable while codec is invisible and every bucket
+    -- mixes them evenly; it stops being tolerable the moment a name token like
+    -- [H265] gets mined into a rule, because then the export states the
+    -- confound as a fact and applies it to every provider.
+    --
+    -- Recording the measured codec is the way out, and it is the same move the
+    -- rest of this table makes: the name says HEVC, the probe knows. Empty on
+    -- every row written before this column existed, so consumers must treat ''
+    -- as unknown rather than as a codec.
+    video_codec   TEXT    NOT NULL DEFAULT ''
 );
 -- The Teamarr rule set to check each pass against, and what the checks found.
 --
@@ -662,11 +677,25 @@ interface CacheRow {
 /**
  * How many samples a single `(provider, tier)` bucket keeps.
  *
- * Set for the shape of the summary rather than for the disk: a p90 is stable
- * enough to act on somewhere in the low hundreds of samples, and past that the
+ * Sized for the longest *window* anything downstream needs, not for the
+ * summary. The bucket summary was the original consumer and it is satisfied by
+ * a few hundred samples -- a p90 is stable well before that, and past it the
  * extra rows only slow the bucket's response to a provider changing encoder.
+ *
+ * The name miner is not, and it is the binding constraint now. Its durability
+ * guard asks whether a token still predicts the same thing seven days later,
+ * which it can only answer if seven days of samples are still here. Measured on
+ * a live install at 400: the busiest buckets held **0.8 to 3.0 days**, ten of
+ * thirty-five sat exactly at the cap, and the seven-day guard was therefore
+ * unreachable -- not "not yet met", but impossible to meet, on any install, at
+ * any probing rate. `QUALITY_HISTORY_MS` never got near binding.
+ *
+ * 4000 covers seven days at the rates those buckets were actually running
+ * (~500/day at the top end, so ~3500 with room), which puts the whole table
+ * somewhere around fifteen thousand rows. That is nothing for SQLite, and the
+ * trim still bounds it: this is a bigger constant, not an unbounded table.
  */
-export const SAMPLES_PER_BUCKET = 400;
+export const SAMPLES_PER_BUCKET = 4000;
 
 /**
  * Longest stream name kept on a sample.
@@ -759,6 +788,8 @@ export interface QualitySample {
   measured: boolean;
   height: number;
   fps: number;
+  /** Codec ffprobe reported, '' when unknown -- see the column comment. */
+  videoCodec: string;
 }
 
 export interface StoredQualitySample extends QualitySample {
@@ -820,6 +851,10 @@ export class Store {
         ['rule_checks', 'managed_dead_first INTEGER NOT NULL DEFAULT 0'],
         ['rule_checks', 'managed_gap_kbps INTEGER NOT NULL DEFAULT 0'],
         ['rule_check_misses', 'managed INTEGER NOT NULL DEFAULT 0'],
+        // Empty on every sample taken before the codec was recorded. '' is
+        // "not known", which is why the miner's codec guard keys on the name
+        // token rather than on this being absent.
+        ['quality_samples', "video_codec TEXT NOT NULL DEFAULT ''"],
       ] as const) {
         try {
           this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`);
@@ -1508,8 +1543,9 @@ export class Store {
       `INSERT INTO quality_samples
          (provider_id, provider_name, tier, group_id, group_name,
           channel_group_id, channel_group_name, policy_mode, stream_name,
-          audio_only, sampled_at, alive, black, bitrate_kbps, measured, height, fps)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          audio_only, sampled_at, alive, black, bitrate_kbps, measured, height, fps,
+          video_codec)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       sample.providerId,
       sample.providerName,
@@ -1531,6 +1567,7 @@ export class Store {
       sample.measured ? 1 : 0,
       Math.round(sample.height),
       sample.fps,
+      sample.videoCodec,
     );
   }
 
@@ -1729,13 +1766,15 @@ export class Store {
         ? this.sql(
             `SELECT provider_id, provider_name, tier, group_id, group_name,
                     channel_group_id, channel_group_name, policy_mode, stream_name,
-                    audio_only, sampled_at, alive, black, bitrate_kbps, measured, height, fps
+                    audio_only, sampled_at, alive, black, bitrate_kbps, measured, height, fps,
+                    video_codec
                FROM quality_samples ORDER BY sampled_at DESC`,
           ).all()
         : this.sql(
             `SELECT provider_id, provider_name, tier, group_id, group_name,
                     channel_group_id, channel_group_name, policy_mode, stream_name,
-                    audio_only, sampled_at, alive, black, bitrate_kbps, measured, height, fps
+                    audio_only, sampled_at, alive, black, bitrate_kbps, measured, height, fps,
+                    video_codec
                FROM quality_samples WHERE sampled_at >= ? ORDER BY sampled_at DESC`,
           ).all(Date.now() - sinceMs)
     ) as Array<{
@@ -1756,6 +1795,7 @@ export class Store {
       measured: number;
       height: number;
       fps: number;
+      video_codec: string | null;
     }>;
     return rows.map((row) => ({
       providerId: row.provider_id,
@@ -1775,6 +1815,7 @@ export class Store {
       measured: Boolean(row.measured),
       height: row.height,
       fps: row.fps,
+      videoCodec: row.video_codec ?? '',
     }));
   }
 

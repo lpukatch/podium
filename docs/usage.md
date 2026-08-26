@@ -757,9 +757,13 @@ no rule — they score their account's effect alone, which is the right answer
 when the name was the only thing to go on.
 
 The vocabulary these rules are drawn from is hand-picked, and on a catalogue
-where nobody labels honestly it fits to nothing. Replacing it with whatever the
-names actually say is [the name miner](miner.md) — designed, not built, with the
-thresholds and the evidence for them written down there.
+where nobody labels honestly it fits to nothing. [The name miner](miner.md)
+replaces it with whatever the names actually say. Tokens carried by whole groups
+become one regex that **replaces** those groups' rules — the groups are
+re-emitted at their residual, so nothing is scored twice. Tokens that vary
+*within* a group are reported on the quality screen but not yet exported: telling
+a durable one from this week's fixture takes seven days of samples, and the
+guards, the numbers, and what is still missing are all on that page.
 
 > [!IMPORTANT]
 > Teamarr's import **replaces** its entire rule set rather than merging, so

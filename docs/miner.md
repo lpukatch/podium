@@ -1,18 +1,25 @@
-# The name miner (spec)
+# The name miner
 
-Not built. This is the design, the thresholds, and the evidence behind both —
-written down so the numbers can be argued with before any of it ships.
+The design, the thresholds, and the evidence behind both.
+
+**Status.** Pass B (consolidation) ships and exports. Pass A (discrimination)
+runs, reports, and exports nothing — its durability guard cannot be trusted
+until an install has actually held seven days of samples, which no install had
+until `SAMPLES_PER_BUCKET` was raised from 400 to 4000 in the same release. What
+each pass found, and which guard stopped it, is on the quality screen under
+**Mining the names**.
 
 ## What it is for
 
 Teamarr ranks a channel's streams by summing the scoring rules each stream
-matches. Three of its rule types are worth generating:
+matches. Four of its rule types could be generated; three are:
 
 | type | matches on | Podium status |
 | --- | --- | --- |
 | `m3u` | the account a stream came from | **shipping** |
-| `group` | the provider group it was imported under | **shipping** |
-| `regex` | the stream's own name | tier tokens only |
+| `group` | Teamarr's own Event Group name for where the stream came from | **shipping** |
+| `regex` | the stream's own name | tier tokens, plus Pass B |
+| `dispatcharr_group` | the Dispatcharr group of a channel-source stream | not reachable — see below |
 
 The first two are wholesale — a stream either belongs to the set or it does
 not — and Podium fits them jointly (see
@@ -194,23 +201,74 @@ earned it.
 **Slot tokens do not ship.** Positional markers (`EPL01`, `EPL05`) identify a
 schedule slot rather than a stream's quality, and Teamarr rewrites them.
 
-## Readiness
+## Why Pass A does not export yet
 
-Not a sample count — a candidate count. Re-run the dry run and ship when
-candidates clear **20 per side, across ≥2 cells, over ≥7 days**.
-
-Live catalogue at time of writing:
+Not a sample count — a candidate count. Pass A's export turns on when candidates
+clear **20 per side, across ≥2 cells, over ≥7 days**, and on the install this was
+developed against nothing does yet:
 
 ```
-1177 in-scope samples · 843 distinct streams · 123 (account, group) cells · 16 with ≥20
-36 tokens vary inside a cell at ≥5 per side · 12 clear |delta| ≥ 500
-at the real threshold of 20 per side: 0
+1639 in-scope samples · 1304 distinct names · 160 cells · 18 with ≥20
+4 tokens vary inside a cell at ≥20 per side · 0 clear every guard
+window: 3.0 days — short by 4
 ```
 
-The gate is fixture churn, not probing rate: 843 distinct streams behind 1177
-samples means most streams are seen once or twice before the fixture ends. What
-buys volume is matchdays where nothing stalls the prober — which is what
+The binding constraint was never probing rate. It was **retention**:
+`trimQuality` keeps `SAMPLES_PER_BUCKET` samples per `(provider, tier, policy)`,
+and at 400 the busiest buckets held **0.8 to 3.0 days** — ten of thirty-five sat
+exactly at the cap. The seven-day guard was not "not yet met", it was impossible
+to meet, on any install, at any probing rate. `QUALITY_HISTORY_MS` at 90 days
+never came close to binding. 4000 covers seven days at the rates those buckets
+were actually running, for a table around fifteen thousand rows.
+
+Fixture churn is the second constraint and it is real: 1304 distinct names behind
+1639 samples means most streams are seen once before the fixture ends. What buys
+volume is matchdays where nothing stalls the prober — which is what
 `PODIUM_PROBE_IDLE_PROVIDERS` was built for.
+
+## Codec tokens are withheld
+
+`HEVC` cleared every consolidation guard on the live catalogue — four carrier
+groups, no contamination, −3076 kbps at a weighted spread of 667. It is still not
+exported, and the reason is not statistical.
+
+Bitrate is only comparable within a codec. HEVC carries roughly the same picture
+in roughly half the bits, so a codec token's measured deficit is mostly the codec
+being efficient rather than the stream being worse. The four carrier groups
+already have group rules making the same claim, but only about themselves, where
+it is at least true of the population it was measured on. Promoting it to a regex
+is what makes it travel to providers it was never measured on — a −15 on any
+stream whose name says HEVC, including ones that are perfectly good and merely
+smaller.
+
+Withheld rather than dropped, following `confoundedTiers`: the number is reported
+on the quality screen so the judgement is visible.
+
+The real fix is upstream and now underway. `quality_samples.video_codec` records
+what ffprobe found rather than what the name claims, and once enough samples
+carry it the codec can be held constant in the cell the way account, group and
+tier already are — at which point a codec token has no contrast to show and never
+becomes a candidate at all.
+
+## What this does not reach: `dispatcharr_group`
+
+Teamarr has a fourth lever Podium cannot inform. `group` rules resolve against
+Teamarr's own Event Group names; `dispatcharr_group` matches
+`stream.dispatcharr_channel_group`, which is set only for **channel-source**
+streams — curated Dispatcharr channels used as sources. On the live install that
+is 22,724 of 226,414 managed streams, under a single Event Group named
+`Dispatcharr Channels`, with values like `Sports | US` and `Sports UK`.
+
+Podium has never probed one. Channel-source streams carry no `m3u_account`, so
+they map to provider `0`, and the sample table has zero rows from them. Reaching
+that lever is a probing change, not an export change, and it is not addressed
+here.
+
+Note also that Podium's exported `group` values are *Dispatcharr* group names
+while Teamarr matches *Event Group* names. On the install this was developed
+against all 18 exported group rules matched, because the Event Groups were named
+to mirror the Dispatcharr groups — but that is naming discipline, not a
+guarantee, and the export says so in its `note`.
 
 ## What it does not replace
 
