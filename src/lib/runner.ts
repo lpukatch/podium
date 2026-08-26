@@ -1318,6 +1318,11 @@ export class Runner {
                 measured: Boolean(best.bitrateMeasured),
                 height: best.height,
                 fps: best.fps,
+                // The measured codec, not the claimed one. Bitrate only
+                // compares within a codec, so this is what lets a later fit
+                // hold it constant instead of charging HEVC's efficiency to
+                // whichever name token happened to travel with it.
+                videoCodec: best.videoCodec ?? '',
               });
             } catch (err) {
               log(`quality sample failed for stream ${streamId}: ${String(err)}`);

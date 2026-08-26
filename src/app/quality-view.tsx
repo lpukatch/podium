@@ -154,6 +154,59 @@ interface Profile {
   tiers: Effect[];
   groups: Effect[];
   labelAccuracy: LabelAccuracy[];
+  miner?: MinerReport;
+}
+
+type MinerGuard = 'samples' | 'effect' | 'cells' | 'duration' | 'stability';
+
+interface NameCandidate {
+  token: string;
+  effectKbps: number;
+  cells: number;
+  support: number;
+  spanDays: number;
+  stable: boolean;
+  blockedBy: MinerGuard[];
+  examples: string[];
+}
+
+interface Carrier {
+  group: string;
+  samples: number;
+  deltaKbps: number;
+  residualKbps: number;
+}
+
+interface ConsolidatedToken {
+  token: string;
+  pattern: string;
+  deltaKbps: number;
+  samples: number;
+  carriers: Carrier[];
+}
+
+interface MinerReport {
+  windowDays: number;
+  durationShortfallDays: number;
+  cells: number;
+  cellsWithBothSides: number;
+  passA: {
+    candidates: NameCandidate[];
+    clearing: number;
+    blockedBy: Array<{ guard: MinerGuard; count: number }>;
+  };
+  passB: {
+    consolidated: ConsolidatedToken[];
+    rejected: Array<{
+      token: string;
+      carrierGroups: number;
+      ambiguousGroups: number;
+      deltaKbps: number;
+      spreadKbps: number;
+      reason: string;
+    }>;
+    confoundedCodecs: ConsolidatedToken[];
+  };
 }
 
 const card = 'rounded-xl border border-[var(--color-line)] bg-[var(--color-panel)]';
@@ -538,6 +591,19 @@ export function QualityView() {
           />
         </section>
       </div>
+
+      <section className={`${card} p-5`}>
+        <h3 className="text-base">Mining the names</h3>
+        <p className={`mt-1 max-w-[80ch] text-sm ${muted}`}>
+          The account and group rules are wholesale — a stream either came from there or it did not.
+          The stream&apos;s own name is the only per-stream lever, and rather than guess at a
+          vocabulary Podium measures which tokens actually predict anything. Tokens carried by whole
+          groups are exported as regex rules that <em>replace</em> those groups&apos; rules; tokens
+          that vary within a bucket are reported here and not yet exported, because telling a
+          durable one from this week&apos;s fixture takes a week of samples.
+        </p>
+        <MinerPanel report={profile?.miner} />
+      </section>
 
       <section className={`${card} p-5`}>
         <h3 className="text-base">Do the labels mean anything?</h3>
@@ -1068,6 +1134,150 @@ function EffectTable({
 /** Percentage, with the sample count that earned it. */
 function pct(value: number): string {
   return `${Math.round(value * 100)}%`;
+}
+
+/** What each guard means, in the terms the operator can act on. */
+const GUARD_LABEL: Record<MinerGuard, string> = {
+  samples: 'too few samples either side of the split',
+  effect: 'difference too small to survive the points rounding',
+  cells: 'seen in only one bucket — that is a channel, not a pattern',
+  duration: 'has not been predicting the same thing for long enough',
+  stability: 'flips sign across the window — it is fitting a schedule',
+};
+
+/**
+ * What the miner found, and what is stopping it.
+ *
+ * The panel exists because the miner is silent by design: on a fresh install it
+ * finds nothing for at least a week, and "nothing" is indistinguishable from
+ * "broken" unless something says which guard the candidates are dying on. Pass
+ * A's findings are reported here and deliberately not exported yet.
+ */
+function MinerPanel({ report }: { report: MinerReport | undefined }) {
+  if (!report) return <p className={`mt-3 text-sm ${muted}`}>No samples yet.</p>;
+
+  const short = report.durationShortfallDays > 0;
+  return (
+    <div className="mt-4 space-y-5">
+      <div className="flex flex-wrap items-center gap-4 text-sm tabular-nums">
+        <span>
+          <span className={muted}>Window </span>
+          {report.windowDays} d
+        </span>
+        <span>
+          <span className={muted}>Buckets </span>
+          {report.cells}
+        </span>
+        <span>
+          <span className={muted}>Splittable </span>
+          {report.cellsWithBothSides}
+        </span>
+        <span>
+          <span className={muted}>Candidates </span>
+          {report.passA.candidates.length}
+        </span>
+        <span>
+          <span className={muted}>Clearing </span>
+          {report.passA.clearing}
+        </span>
+      </div>
+
+      {short && (
+        <p className="text-sm">
+          Needs <strong>{report.durationShortfallDays} more days</strong> of samples before any name
+          rule can clear the durability guard. Nothing to do but keep probing.
+        </p>
+      )}
+
+      {report.passB.consolidated.length > 0 && (
+        <div>
+          <h4 className="text-sm font-medium">Exported as regex rules</h4>
+          <table className="mt-2 w-full text-sm tabular-nums">
+            <thead className={`text-left ${muted}`}>
+              <tr>
+                <th className="py-1 font-normal">Token</th>
+                <th className="py-1 text-right font-normal">Effect</th>
+                <th className="py-1 text-right font-normal">Replaces</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.passB.consolidated.map((token) => (
+                <tr key={token.token} className="border-[var(--color-line)] border-t">
+                  <td className="py-1">
+                    <code>{token.token}</code>
+                  </td>
+                  <td className={`py-1 text-right ${tone(token.deltaKbps)}`}>
+                    {signed(token.deltaKbps)}
+                  </td>
+                  <td className={`py-1 text-right ${muted}`}>
+                    {token.carriers.length} group rules
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {report.passB.confoundedCodecs.length > 0 && (
+        <div>
+          <h4 className="text-sm font-medium">Withheld — names a codec</h4>
+          <p className={`mt-1 max-w-[80ch] text-sm ${muted}`}>
+            These cleared every guard. They are held back anyway because bitrate is not comparable
+            across codecs: HEVC carries roughly the same picture in roughly half the bits, so the
+            measured deficit is mostly the codec being efficient rather than the stream being worse.
+            Exporting it would penalise every stream whose name says so, at every provider.
+          </p>
+          <ul className="mt-2 space-y-1 text-sm tabular-nums">
+            {report.passB.confoundedCodecs.map((token) => (
+              <li key={token.token}>
+                <code>{token.token}</code>{' '}
+                <span className={muted}>
+                  would have scored {signed(token.deltaKbps)} across {token.carriers.length} groups
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {report.passA.candidates.length > 0 && (
+        <div>
+          <h4 className="text-sm font-medium">Name candidates, not yet exported</h4>
+          <table className="mt-2 w-full text-sm tabular-nums">
+            <thead className={`text-left ${muted}`}>
+              <tr>
+                <th className="py-1 font-normal">Token</th>
+                <th className="py-1 text-right font-normal">Effect</th>
+                <th className="py-1 text-right font-normal">Buckets</th>
+                <th className="py-1 text-right font-normal">Span</th>
+                <th className="py-1 font-normal"> Blocked by</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.passA.candidates.slice(0, 12).map((candidate) => (
+                <tr key={candidate.token} className="border-[var(--color-line)] border-t">
+                  <td className="py-1">
+                    <code>{candidate.token}</code>
+                  </td>
+                  <td className={`py-1 text-right ${tone(candidate.effectKbps)}`}>
+                    {signed(candidate.effectKbps)}
+                  </td>
+                  <td className="py-1 text-right">{candidate.cells}</td>
+                  <td className="py-1 text-right">{candidate.spanDays} d</td>
+                  <td className={`py-1 pl-3 ${muted}`}>
+                    {candidate.blockedBy.length === 0
+                      ? 'clears every guard'
+                      : GUARD_LABEL[candidate.blockedBy[0] as MinerGuard]}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function LabelAccuracyTable({ rows }: { rows: LabelAccuracy[] }) {

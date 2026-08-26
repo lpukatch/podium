@@ -131,6 +131,7 @@ network, and set `PODIUM_AUTH_TOKEN` if it goes anywhere else —
 | --- | --- |
 | **[Usage](docs/usage.md)** | Matching streams to channels, section qualifiers, group policy, ranking, and importing existing rules |
 | **[Configuration](docs/configuration.md)** | Every environment variable, who can reach it, concurrency limits, and how to keep a settled install quiet |
+| **[Name miner](docs/miner.md)** | Learning `regex` rules from stream names instead of a hand-picked vocabulary — thresholds, guards, and the evidence behind them |
 | **[Contributing](CONTRIBUTING.md)** | Development setup, and how PRs land given the mirror |
 
 ## Development

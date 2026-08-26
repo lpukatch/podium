@@ -33,6 +33,7 @@ function sample(over: Partial<StoredQualitySample> = {}): StoredQualitySample {
     measured: true,
     height: 1080,
     fps: 50,
+    videoCodec: 'h264',
     ...over,
   };
 }
@@ -587,6 +588,7 @@ describe('names on samples', () => {
       measured: true,
       height: 1080,
       fps: 50,
+      videoCodec: 'h264',
     });
     expect(store.qualitySamples()[0]!.streamName).toHaveLength(MAX_STREAM_NAME);
     store.close();
@@ -638,6 +640,7 @@ describe('store', () => {
       measured: true,
       height: 1080,
       fps: 50,
+      videoCodec: 'h264',
     });
     store.pruneOutside(new Set([1, 2, 3]));
     store.prune(-1);
@@ -666,6 +669,7 @@ describe('store', () => {
         measured: true,
         height: 1080,
         fps: 50,
+        videoCodec: 'h264',
       });
     }
     store.trimQuality(10);
@@ -699,6 +703,7 @@ describe('store', () => {
           measured: true,
           height: 1080,
           fps: 50,
+          videoCodec: 'h264',
         });
       }
     }
@@ -734,6 +739,7 @@ describe('store', () => {
         measured: true,
         height: 1080,
         fps: 50,
+        videoCodec: 'h264',
       });
 
     for (let i = 0; i < 3; i += 1) write('after_epg_start');

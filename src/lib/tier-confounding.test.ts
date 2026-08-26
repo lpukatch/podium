@@ -36,6 +36,7 @@ function sample(over: Partial<StoredQualitySample> = {}): StoredQualitySample {
     measured: true,
     height: 1080,
     fps: 50,
+    videoCodec: 'h264',
     ...over,
   };
 }
