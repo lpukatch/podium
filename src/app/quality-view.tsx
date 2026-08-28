@@ -2,211 +2,32 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
-interface Bucket {
-  providerId: number;
-  providerName: string;
-  tier: string;
-  groupId: number | null;
-  groupName: string;
-  audioOnly: boolean;
-  samples: number;
-  aliveRate: number;
-  blackRate: number;
-  measuredSamples: number;
-  medianBitrateKbps: number;
-  p90BitrateKbps: number;
-  medianHeight: number;
-  effectiveKbps: number;
-  lastSampledAt: number;
-}
+/**
+ * Types come from the modules that produce them, never re-declared here.
+ *
+ * Every interface below used to be a hand-copied mirror of a library type. The
+ * copies compiled whatever the server actually sent, so a field renamed in
+ * `quality.ts` or `teamarr.ts` reached this file as a silent `undefined` at
+ * runtime rather than as a type error at build time -- which is the one job the
+ * type checker was there to do. `import type` is erased entirely, so nothing
+ * here reaches the browser bundle; only `MAX_TIER_ACCOUNT_SHARE` is a real
+ * import, and `quality.ts` pulls in nothing but pure functions.
+ */
+import type { MinerGuard, MinerReport } from '@/lib/miner';
+import type { Effect, LabelAccuracy, QualityProfile, ScopeSummary } from '@/lib/quality';
+import { MAX_TIER_ACCOUNT_SHARE } from '@/lib/quality';
+import type { StoredRuleCheckRow, StoredRuleMiss } from '@/lib/store';
+import type { RuleCheck } from '@/lib/teamarr';
 
-interface Effect {
-  key: string;
-  samples: number;
-  effectiveKbps: number;
-  deltaKbps: number;
-  vsReferenceKbps: number | null;
-  accounts: number;
-  topAccountShare: number;
-}
+/** What `/api/quality-profile` returns: the profile, with the miner's findings. */
+type Profile = QualityProfile & { miner?: MinerReport };
 
-interface LabelAccuracy {
-  providerId: number;
-  providerName: string;
-  samples: number;
-  labelled: number;
-  agreed: number;
-  accuracy: number | null;
-  labelledShare: number;
-  commonestMiss: { claimed: string; measured: string; count: number } | null;
-}
-
-interface ScopeSummary {
-  eventOnly: boolean;
-  include: string[];
-  exclude: string[];
-  inScope: number;
-  excluded: number;
-  notIncluded: number;
-  notEvent: number;
-  unrecorded: number;
-}
-
-interface MatchedRule {
-  type: string;
-  value: string;
-  points: number;
-}
-
-interface PickView {
-  streamId: number;
-  name: string;
-  providerName: string;
-  groupName: string;
-  points: number;
-  matched: MatchedRule[];
-  bitrateKbps: number;
-  height: number;
-  alive: boolean;
-  black: boolean;
-}
-
-interface ChannelCheck {
-  channelId: number;
-  channelName: string;
-  streams: number;
-  managed: boolean;
-  agree: boolean;
-  ambiguous: boolean;
-  teamarr: PickView;
-  podium: PickView;
-  gapKbps: number;
-}
-
-interface RuleCheck {
-  generatedAt: number;
-  rules: { evaluated: number; skipped: Array<{ type: string; value: string; reason: string }> };
-  summary: {
-    channels: number;
-    agreed: number;
-    disagreed: number;
-    ambiguous: number;
-    deadFirst: number;
-    gapKbps: number;
-    managedChannels: number;
-    managedAgreed: number;
-    managedDeadFirst: number;
-    managedGapKbps: number;
-    approximate: boolean;
-  };
-  channels: ChannelCheck[];
-}
-
-interface StoredMiss {
-  channelId: number;
-  channelName: string;
-  managed: boolean;
-  teamarrName: string;
-  teamarrProvider: string;
-  teamarrPoints: number;
-  teamarrBitrate: number;
-  teamarrAlive: boolean;
-  teamarrBlack: boolean;
-  teamarrMatched: MatchedRule[];
-  podiumName: string;
-  podiumProvider: string;
-  podiumBitrate: number;
-  gapKbps: number;
-}
-
-interface StoredCheck {
-  checkedAt: number;
-  channels: number;
-  agreed: number;
-  disagreed: number;
-  ambiguous: number;
-  deadFirst: number;
-  gapKbps: number;
-  managedChannels: number;
-  managedAgreed: number;
-  managedDeadFirst: number;
-  managedGapKbps: number;
-  approximate: boolean;
-}
-
+/** What `GET /api/rule-check` returns. */
 interface CheckHistory {
   rulesUploadedAt: number | null;
   ruleCount: number;
-  history: StoredCheck[];
-  latest: StoredMiss[];
-}
-
-interface Profile {
-  generatedAt: number;
-  totalSamples: number;
-  recordedSamples: number;
-  namedSamples: number;
-  scope: ScopeSummary;
-  audioOnlySamples: number;
-  baselineKbps: number;
-  buckets: Bucket[];
-  accounts: Effect[];
-  tiers: Effect[];
-  groups: Effect[];
-  labelAccuracy: LabelAccuracy[];
-  miner?: MinerReport;
-}
-
-type MinerGuard = 'samples' | 'effect' | 'cells' | 'duration' | 'stability';
-
-interface NameCandidate {
-  token: string;
-  effectKbps: number;
-  cells: number;
-  support: number;
-  spanDays: number;
-  stable: boolean;
-  blockedBy: MinerGuard[];
-  examples: string[];
-}
-
-interface Carrier {
-  group: string;
-  samples: number;
-  deltaKbps: number;
-  residualKbps: number;
-}
-
-interface ConsolidatedToken {
-  token: string;
-  pattern: string;
-  deltaKbps: number;
-  samples: number;
-  carriers: Carrier[];
-}
-
-interface MinerReport {
-  windowDays: number;
-  durationShortfallDays: number;
-  cells: number;
-  cellsWithBothSides: number;
-  passA: {
-    candidates: NameCandidate[];
-    clearing: number;
-    blockedBy: Array<{ guard: MinerGuard; count: number }>;
-  };
-  passB: {
-    consolidated: ConsolidatedToken[];
-    rejected: Array<{
-      token: string;
-      carrierGroups: number;
-      ambiguousGroups: number;
-      deltaKbps: number;
-      spreadKbps: number;
-      reason: string;
-    }>;
-    confoundedCodecs: ConsolidatedToken[];
-  };
+  history: StoredRuleCheckRow[];
+  latest: StoredRuleMiss[];
 }
 
 const card = 'rounded-xl border border-[var(--color-line)] bg-[var(--color-panel)]';
@@ -928,7 +749,7 @@ export function QualityView() {
                   <table className="w-full text-sm">
                     <thead className={`text-left ${muted}`}>
                       <tr className="border-b border-[var(--color-line)]">
-                        <th className="py-2 pr-3 font-normal">Pass</th>
+                        <th className="py-2 pr-3 font-normal">Found</th>
                         <th className="py-2 pr-3 text-right font-normal">Managed</th>
                         <th className="py-2 pr-3 text-right font-normal">Agreed</th>
                         <th className="py-2 pr-3 text-right font-normal">Picked worse</th>
@@ -939,7 +760,18 @@ export function QualityView() {
                     <tbody>
                       {history.history.slice(0, 10).map((row) => (
                         <tr key={row.checkedAt} className="border-b border-[var(--color-line)]">
-                          <td className={`py-2 pr-3 ${muted}`}>{ago(row.checkedAt)}</td>
+                          <td className={`py-2 pr-3 ${muted}`}>
+                            {ago(row.checkedAt)}
+                            {row.repeated > 0 && (
+                              // A row is one distinct finding, not one pass, so
+                              // say how long it has been standing -- otherwise a
+                              // result that has held all week reads as a single
+                              // stale check from whenever it was first seen.
+                              <span className="ml-1 whitespace-nowrap">
+                                · held for {row.repeated + 1} passes
+                              </span>
+                            )}
+                          </td>
                           <td className="py-2 pr-3 text-right tabular-nums">
                             {row.managedChannels}
                           </td>
@@ -1053,9 +885,6 @@ export function QualityView() {
     </div>
   );
 }
-
-/** Mirrors `MAX_TIER_ACCOUNT_SHARE` in lib/quality.ts. */
-const MAX_TIER_ACCOUNT_SHARE = 0.8;
 
 function EffectTable({
   effects,
