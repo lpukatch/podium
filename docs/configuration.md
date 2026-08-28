@@ -146,6 +146,34 @@ relaxes a pause.
 | `PODIUM_MIN_BITRATE_KBPS` | `500` | below this counts as dead |
 | `PODIUM_DETECT_BLACK` | `true` | black-screen detection |
 
+## Quality priors
+
+Which probes the learned priors — and the Teamarr rules exported from them —
+are allowed to measure. These are the **Settings → Quality priors** fields, and
+setting them in the environment is the same as editing them there: everything
+below is stored, so a value set here is the starting point rather than the last
+word.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `PODIUM_QUALITY_EVENT_ONLY` | `true` | count a probe only when its channel sat in a group set to `after_epg_start` or `assigned` |
+| `PODIUM_QUALITY_INCLUDE_GROUPS` | *(empty)* | globs — `* SPORT*, *PPV*` — that admit a group whatever its policy says |
+| `PODIUM_QUALITY_EXCLUDE_GROUPS` | *(empty)* | globs — `*VOD*, *MOVIE*, *24/7*` — that drop a sample however it was admitted |
+
+The globs are comma- or newline-separated and are matched against **both** the
+provider group and the channel group, using the same `*`/`?` syntax as the group
+policy patterns.
+
+None of this deletes anything. Every settled verdict is recorded whatever the
+scope says; the gate is applied when the profile is *built*, so narrowing it
+costs nothing permanent and widening it takes effect on the next read rather
+than after another month of probing. `PODIUM_QUALITY_INCLUDE_GROUPS` is the only
+one that reaches backwards — samples recorded before the policy was tracked
+carry none, and naming their groups is what puts them back in scope.
+
+Why the gate exists at all, and how to read what it dropped, is in
+[Usage → What it learns from](usage.md#what-it-learns-from).
+
 ## Writing back
 
 | Variable | Default | Notes |

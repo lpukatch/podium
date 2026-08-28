@@ -414,6 +414,49 @@ declares one. Podium reads a few seconds of the stream, which also gives it the
 black-screen check from the same read, so it costs one provider connection
 rather than two.
 
+### Bitrate is not comparable across codecs
+
+HEVC delivers the same picture at a fraction of the bitrate, so comparing the
+two numbers directly under-ranks it. The **Prefer H.265** checkbox cannot fix
+that on its own: it adds a flat bonus, while the advantage it is paying for
+scales with the bitrate itself. At the default weights the bonus is worth 0.05,
+where being encoded at half the rate costs 0.15 — so the better-encoded stream
+loses by 0.10 and stays there.
+
+Two fields under **Settings → Stream ordering → Advanced** handle this.
+
+| Field | New installs | Upgrades | What it does |
+| --- | --- | --- | --- |
+| **HEVC bitrate factor** | `1.6` | `1` | what one kbps of HEVC is worth in H.264 kbps when the bitrate is scored |
+| **UHD full-marks bitrate** | `24000` | `12000` | the bitrate that scores full marks above 1080p |
+
+At `1.6` a 5600kbps HEVC feed is scored as the equal of a 9000kbps H.264 one,
+which is the comparison the bitrate term was always meant to be making. The
+figure is deliberately below the 2× the codec's headline efficiency claim would
+suggest: what providers ship is a transcode rather than a tuned encode, and
+overstating it promotes thin HEVC feeds over healthy H.264 ones. Across the 85
+channels on one install that carry both codecs, HEVC takes the top slot on 24 of
+them at `1`, 32 at `1.6`, and 47 at `2` — and by `2` feeds are winning at half
+the effective bitrate of what they displace.
+
+Setting the factor above 1 also stops **Prefer H.265** adding a bonus of its
+own, because the efficiency is then already priced into the bitrate and paying
+for it twice overturns real bitrate deficits. The codec weight still does its
+other job: sinking mpeg2video and anything else that is neither codec.
+
+The second field exists because the ceiling that suits 1080p starves four times
+the pixels. On one live install 18 of 25 4K streams sat at or above 12000kbps,
+so every one scored a flat 1.0 and the bitrate term could no longer tell a
+13Mbps UHD feed from a 20Mbps one — six channels had two or more streams tied
+that way. Raising it only above 1080p leaves the 1080p population, which is most
+of every catalogue, exactly where it was.
+
+Both default to inert values on an existing install, for the same reason the
+audio weight does: upgrading must not reshuffle a lineup nobody asked to change.
+Turning them on will move channels — on the install they were measured against,
+the top slot changed on 10 of 413 channels, every one of them a channel carrying
+both codecs.
+
 **Extra logins on one provider add capacity.** A Dispatcharr M3U account can
 carry several profiles — separate logins to the same upstream, each with its own
 connection cap. Podium treats them as a pool. Each login gets its own lane at
