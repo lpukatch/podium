@@ -1,5 +1,10 @@
 import { NextResponse } from 'next/server';
-import { DEFAULT_WEIGHTS, NEW_INSTALL_AUDIO } from '@/lib/scoring';
+import {
+  DEFAULT_WEIGHTS,
+  NEW_INSTALL_AUDIO,
+  NEW_INSTALL_HEVC_FACTOR,
+  NEW_INSTALL_UHD_BITRATE_KBPS,
+} from '@/lib/scoring';
 import { ordering, readRulesDoc, snapshot, writeRulesDoc } from '@/lib/server/state';
 
 export const dynamic = 'force-dynamic';
@@ -8,11 +13,26 @@ export const dynamic = 'force-dynamic';
 const WEIGHT_KEYS = ['resolution', 'bitrate', 'fps', 'codec', 'audio'] as const;
 type WeightKey = (typeof WEIGHT_KEYS)[number];
 
+/**
+ * The knobs that are not weights in [0, 1].
+ *
+ * `hevcBitrateFactor` is a multiplier and `uhdBitrateKbps` a bitrate, so
+ * neither belongs on the weight sliders -- but both have to travel with the
+ * block, because PUT replaces `ordering` wholesale. Left out of the payload
+ * they would be silently reset to the inert defaults the first time anyone
+ * saved the ranking form, quietly undoing what a new install was seeded with.
+ */
+interface ScaleKnobs {
+  preferH265: boolean;
+  hevcBitrateFactor: number;
+  uhdBitrateKbps: number;
+}
+
 export interface OrderingResponse {
   mode: 'quality' | 'provider' | 'alias';
   providerPreference: string[];
-  weights: Record<WeightKey, number> & { preferH265: boolean };
-  defaults: Record<WeightKey, number> & { preferH265: boolean };
+  weights: Record<WeightKey, number> & ScaleKnobs;
+  defaults: Record<WeightKey, number> & ScaleKnobs;
   providers: { id: number; name: string }[];
 }
 
@@ -39,16 +59,20 @@ export async function GET() {
       codec: pick('codec'),
       audio: pick('audio'),
       preferH265: merged.preferH265,
+      hevcBitrateFactor: merged.hevcBitrateFactor,
+      uhdBitrateKbps: merged.uhdBitrateKbps,
     };
     const defaults = {
       resolution: DEFAULT_WEIGHTS.resolution,
       bitrate: DEFAULT_WEIGHTS.bitrate,
       fps: DEFAULT_WEIGHTS.fps,
       codec: DEFAULT_WEIGHTS.codec,
-      // What a new install is seeded with, not the 0 that keeps upgrades still:
-      // "reset" should hand back what podium ships today.
+      // What a new install is seeded with, not the inert values that keep
+      // upgrades still: "reset" should hand back what podium ships today.
       audio: NEW_INSTALL_AUDIO,
       preferH265: DEFAULT_WEIGHTS.preferH265,
+      hevcBitrateFactor: NEW_INSTALL_HEVC_FACTOR,
+      uhdBitrateKbps: NEW_INSTALL_UHD_BITRATE_KBPS,
     };
 
     return NextResponse.json({
@@ -88,6 +112,12 @@ export async function PUT(request: Request) {
 
     const w = body.weights ?? {};
     const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+    // These two fall back to the code defaults rather than to 0, which is not a
+    // value either can take: a 0 factor would erase every HEVC stream's bitrate
+    // and a 0 ceiling would divide by nothing. An older client that does not
+    // send them leaves the install on today's behaviour instead of a broken one.
+    const positive = (v: unknown, fallback: number) =>
+      typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : fallback;
     const weights = {
       resolution: num(w.resolution),
       bitrate: num(w.bitrate),
@@ -95,6 +125,8 @@ export async function PUT(request: Request) {
       codec: num(w.codec),
       audio: num(w.audio),
       prefer_h265: Boolean(w.preferH265),
+      hevc_bitrate_factor: positive(w.hevcBitrateFactor, DEFAULT_WEIGHTS.hevcBitrateFactor),
+      uhd_bitrate_kbps: positive(w.uhdBitrateKbps, DEFAULT_WEIGHTS.uhdBitrateKbps),
     };
 
     const doc = readRulesDoc();

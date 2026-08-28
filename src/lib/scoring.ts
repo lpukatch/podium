@@ -12,6 +12,14 @@ import type { ProbeResult } from './probe';
 const MAX_HEIGHT = 2160;
 const MAX_BITRATE_KBPS = 12_000;
 const MAX_FPS = 60;
+/**
+ * Where `weights.uhdBitrateKbps` takes over from `MAX_BITRATE_KBPS`.
+ *
+ * The same boundary `tierOfHeight` in quality.ts calls `uhd`, and generous for
+ * the same reason: 2160 and 1920-tall letterboxed feeds are both UHD in
+ * practice.
+ */
+const UHD_HEIGHT = 1800;
 /** 5.1. Anything wider (7.1) is still a full score rather than a bonus. */
 const MAX_AUDIO_CHANNELS = 6;
 /** What a good E-AC-3 5.1 track on these providers runs at. */
@@ -45,8 +53,55 @@ export interface Weights {
    * unwatchable. Ranking such a stream merely last still leaves it ahead of an
    * honestly-dead one, and it is not a usable fallback -- so it sinks with the
    * dead instead.
+   *
+   * Deliberately *not* scaled by `hevcBitrateFactor`. This is a health check,
+   * not a quality comparison: at 1080p a 300kbps feed is unwatchable whatever
+   * encoded it, and letting the factor lower the floor would admit streams the
+   * floor exists to reject.
    */
   minBitrateKbps: number;
+  /**
+   * What one kbps of HEVC is worth in H.264 kbps, for the bitrate term only.
+   *
+   * The term this fixes: `bitrate` and `codec` are added independently, so the
+   * codec bonus is a flat `weights.codec * 0.5` -- 0.05 at the default weights
+   * -- while HEVC's advantage is *multiplicative on the bitrate*. Against a
+   * perceptually equal pair (h264 9000kbps vs hevc 4500kbps) the bitrate term
+   * costs HEVC 0.150 and the codec bonus repays 0.050, so the better-encoded
+   * stream loses by 0.100. Measured on a live install: an HEVC 1080p feed at
+   * 7038kbps scored 0.6621 against 0.6874 for an H.264 one at 9371kbps, and
+   * would have needed 7871kbps merely to tie -- when 5000 should already win.
+   *
+   * A flat bonus cannot represent a multiplicative gain, so the correction
+   * belongs on the bitrate, not beside it -- and once it is there, the `codec`
+   * term stops paying for efficiency too. See `score`: above 1.0 the two codecs
+   * are level on that term, or the same advantage is counted twice.
+   *
+   * Defaults to 1.0 -- no correction -- for the same reason `audio` defaults
+   * to 0. An existing rules file cannot mention a term that did not exist when
+   * it was written, and this one reorders channels: on the install it was
+   * measured against, the full seeded configuration moves slot 0 on 10 of 413
+   * multi-stream channels, every one of them among the 85 that rank the two
+   * codecs against each other. New installs are seeded with
+   * `NEW_INSTALL_HEVC_FACTOR`, which is the value we would pick freely.
+   */
+  hevcBitrateFactor: number;
+  /**
+   * The bitrate that scores full marks above `UHD_HEIGHT`.
+   *
+   * `MAX_BITRATE_KBPS` is calibrated for 1080p, and a ceiling that suits 1080p
+   * starves four times the pixels: on a live install 18 of 25 2160p streams sat
+   * at or above it, so every one scored a flat 1.0 and the bitrate term could
+   * not tell a 13Mbps UHD feed from a 20Mbps one. Six channels had two or more
+   * streams tied that way, leaving their order to fps and codec alone.
+   *
+   * Applying `hevcBitrateFactor` makes that worse, since UHD is where HEVC is
+   * most common -- which is why the two ship together rather than separately.
+   *
+   * Defaults to `MAX_BITRATE_KBPS`, which is exactly today's flat behaviour;
+   * new installs are seeded with `NEW_INSTALL_UHD_BITRATE_KBPS`.
+   */
+  uhdBitrateKbps: number;
 }
 
 export const DEFAULT_WEIGHTS: Weights = {
@@ -62,6 +117,10 @@ export const DEFAULT_WEIGHTS: Weights = {
   audio: 0,
   preferH265: true,
   minBitrateKbps: 500,
+  // Both inert: 1.0 applies no codec correction, and a UHD ceiling equal to
+  // MAX_BITRATE_KBPS is the flat ceiling every install has had until now.
+  hevcBitrateFactor: 1,
+  uhdBitrateKbps: MAX_BITRATE_KBPS,
 };
 
 /**
@@ -70,6 +129,47 @@ export const DEFAULT_WEIGHTS: Weights = {
  * Also what "Reset to defaults" restores, since it is what podium ships today.
  */
 export const NEW_INSTALL_AUDIO = 0.1;
+
+/**
+ * HEVC's bitrate equivalence for a fresh install.
+ *
+ * 1.6 rather than the 2.0 the codec's headline BD-rate figure would suggest.
+ * That figure is measured on encoder comparisons at fixed quality; what these
+ * providers actually ship is a transcode whose HEVC ladder is not tuned as hard
+ * as the marketing case, and overstating the factor promotes thin HEVC feeds
+ * over healthy H.264 ones. Swept against a live install, over the 85 channels
+ * that carry both codecs: HEVC takes slot 0 on 24 of them at 1.0, 25 at 1.3, 32
+ * at 1.6 and 47 at 2.0 -- and the jump to 2.0 is where feeds start winning at
+ * half the effective bitrate of what they displace. Seeded rather than
+ * defaulted for the reason in `Weights`.
+ */
+export const NEW_INSTALL_HEVC_FACTOR = 1.6;
+
+/**
+ * The UHD bitrate ceiling for a fresh install: twice `MAX_BITRATE_KBPS`.
+ *
+ * Chosen to stop the saturation rather than to model UHD exactly -- at 24000
+ * the live install's saturated streams fall from 23 to 20 and its 2160p score
+ * ties from 11 to 9, while the 1080p population, which is 60% of every stream
+ * measured, is untouched. A per-resolution reference table was tried first and
+ * was worse in both directions: it saturated 606 of 2405 streams and tripled
+ * the ties, because a 1080p reference low enough to matter clamps every healthy
+ * 1080p feed to 1.0 and stops discriminating exactly where the streams are.
+ */
+export const NEW_INSTALL_UHD_BITRATE_KBPS = 24_000;
+
+/**
+ * A stream's bitrate in the units the bitrate term is normalised in.
+ *
+ * H.264 is the reference codec, so it and everything else pass through
+ * unchanged: the factor describes HEVC's efficiency specifically, and applying
+ * a guessed one to, say, mpeg2video would invent an advantage nobody measured.
+ */
+export function effectiveBitrateKbps(result: ProbeResult, weights: Weights): number {
+  const codec = (result.videoCodec || '').toLowerCase();
+  const hevc = codec === 'hevc' || codec === 'h265';
+  return result.bitrateKbps * (hevc ? weights.hevcBitrateFactor : 1);
+}
 
 /** True when a stream is alive but too degraded to be worth offering. */
 export function isUsable(
@@ -144,14 +244,32 @@ export function score(
   }
 
   const resolution = result.height ? Math.min(result.height / MAX_HEIGHT, 1) : 0;
-  const bitrate = result.bitrateKbps ? Math.min(result.bitrateKbps / MAX_BITRATE_KBPS, 1) : 0;
+  // The ceiling follows the picture, not the stream: a UHD feed is judged
+  // against what UHD costs. See `Weights.uhdBitrateKbps`.
+  const ceiling = result.height >= UHD_HEIGHT ? weights.uhdBitrateKbps : MAX_BITRATE_KBPS;
+  const bitrate =
+    result.bitrateKbps && ceiling > 0
+      ? Math.min(effectiveBitrateKbps(result, weights) / ceiling, 1)
+      : 0;
   const fps = result.fps ? Math.min(result.fps / MAX_FPS, 1) : 0;
 
   let codec = 0;
   const name = (result.videoCodec || '').toLowerCase();
-  if (name === 'hevc' || name === 'h265') codec = weights.preferH265 ? 1 : 0.5;
-  else if (name === 'h264' || name === 'avc') codec = weights.preferH265 ? 0.5 : 1;
-  else if (name) codec = 0.25;
+  const isHevc = name === 'hevc' || name === 'h265';
+  const isH264 = name === 'h264' || name === 'avc';
+  if (isHevc || isH264) {
+    // Once `hevcBitrateFactor` prices HEVC's efficiency into the bitrate term,
+    // paying for it again here counts it twice -- and the second payment is a
+    // flat bonus that does not know how big the first one was, so it overturns
+    // real bitrate deficits. Measured on a live install at the seeded factor:
+    // 20 of the 25 channels that changed hands did so on this bonus *despite*
+    // the HEVC stream having the lower effective bitrate, one of them at
+    // 4594kbps against 7847. Above 1.0 the two codecs are therefore level here
+    // and the bitrate term alone separates them, which is the whole point of
+    // moving the correction onto it. `codec` still earns its weight: it is what
+    // sinks mpeg2video and anything else that is neither.
+    codec = weights.hevcBitrateFactor > 1 ? 1 : isHevc === weights.preferH265 ? 1 : 0.5;
+  } else if (name) codec = 0.25;
 
   // Divided by the weights rather than assumed to sum to 1.
   //
