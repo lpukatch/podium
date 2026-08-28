@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ProbeResult } from './probe';
 import { DEFAULT_STRATEGY } from './scoring';
-import { Store } from './store';
+import { MAX_MISSES_PER_CHECK, Store } from './store';
 import { checkRules, compileRules, factsFor, type RuleInput, toJsRegExp } from './teamarr';
 
 const LIVE_RULES: RuleInput[] = [
@@ -408,6 +408,120 @@ describe('what a pass keeps', () => {
     // miss happened would explain it with a rule that was not in force.
     expect(latest[0]?.teamarrMatched).toEqual([{ type: 'm3u', value: 'Provider A', points: 20 }]);
     expect(latest[0]?.podiumName).toBe('EPL01: Hull v Man Utd FHD');
+    store.close();
+  });
+
+  it('collapses passes that keep finding the same thing', () => {
+    // A pass runs the check every couple of minutes and almost always finds
+    // exactly what the last one did. Storing each is what put 137,571 miss rows
+    // on a live install inside six days.
+    const store = new Store(':memory:');
+    const check = (checkedAt: number, runId: string, gapKbps = 10_000) => ({
+      checkedAt,
+      runId,
+      channels: 12,
+      agreed: 11,
+      disagreed: 1,
+      ambiguous: 0,
+      deadFirst: 0,
+      gapKbps,
+      managedChannels: 5,
+      managedAgreed: 4,
+      managedDeadFirst: 0,
+      managedGapKbps: gapKbps,
+      approximate: false,
+      rulesEvaluated: 6,
+      rulesSkipped: 0,
+      misses: [
+        {
+          channelId: 47,
+          channelName: 'EPL01',
+          managed: true,
+          teamarrStream: 1,
+          teamarrName: 'EPL01: Hull v Man Utd',
+          teamarrProvider: 'Provider A',
+          teamarrPoints: 20,
+          teamarrBitrate: 2000,
+          teamarrAlive: true,
+          teamarrBlack: false,
+          teamarrMatched: [{ type: 'm3u', value: 'Provider A', points: 20 }],
+          podiumStream: 2,
+          podiumName: 'EPL01: Hull v Man Utd FHD',
+          podiumProvider: 'Provider C',
+          podiumBitrate: 12_000,
+          gapKbps,
+        },
+      ],
+    });
+
+    store.recordRuleCheck(check(1_700_000_000_000, 'run-1'));
+    store.recordRuleCheck(check(1_700_000_060_000, 'run-2'));
+    store.recordRuleCheck(check(1_700_000_120_000, 'run-3'));
+
+    let { history, latest } = store.ruleChecks();
+    expect(history).toHaveLength(1);
+    expect(history[0]?.repeated).toBe(2);
+    // The row still says when it was last confirmed, not only when it was found.
+    expect(history[0]?.checkedAt).toBe(1_700_000_000_000);
+    expect(history[0]?.lastCheckedAt).toBe(1_700_000_120_000);
+    // One copy of the miss, not three.
+    expect(latest).toHaveLength(1);
+
+    // A different result is a new finding, and starts its own row.
+    store.recordRuleCheck(check(1_700_000_180_000, 'run-4', 9000));
+    ({ history, latest } = store.ruleChecks());
+    expect(history).toHaveLength(2);
+    expect(history[0]?.repeated).toBe(0);
+    expect(history[0]?.gapKbps).toBe(9000);
+    expect(latest[0]?.gapKbps).toBe(9000);
+    store.close();
+  });
+
+  it('caps how many misses one check can write', () => {
+    const store = new Store(':memory:');
+    const misses = Array.from({ length: MAX_MISSES_PER_CHECK + 50 }, (_, i) => ({
+      channelId: i,
+      channelName: `Channel ${i}`,
+      managed: true,
+      teamarrStream: i * 2,
+      teamarrName: 'a',
+      teamarrProvider: 'Provider A',
+      teamarrPoints: 20,
+      teamarrBitrate: 2000,
+      teamarrAlive: true,
+      teamarrBlack: false,
+      teamarrMatched: [],
+      podiumStream: i * 2 + 1,
+      podiumName: 'b',
+      podiumProvider: 'Provider C',
+      podiumBitrate: 12_000,
+      // Descending, as checkRules returns them: widest gap first.
+      gapKbps: 100_000 - i,
+    }));
+    store.recordRuleCheck({
+      checkedAt: 1_700_000_000_000,
+      runId: 'run-1',
+      channels: misses.length,
+      agreed: 0,
+      disagreed: misses.length,
+      ambiguous: 0,
+      deadFirst: 0,
+      gapKbps: 1,
+      managedChannels: misses.length,
+      managedAgreed: 0,
+      managedDeadFirst: 0,
+      managedGapKbps: 1,
+      approximate: false,
+      rulesEvaluated: 6,
+      rulesSkipped: 0,
+      misses,
+    });
+    const { history, latest } = store.ruleChecks();
+    expect(latest).toHaveLength(MAX_MISSES_PER_CHECK);
+    // The widest gaps are the ones kept, and the true count is still on the
+    // summary rather than inferred from how many rows survived.
+    expect(latest[0]?.gapKbps).toBe(100_000);
+    expect(history[0]?.disagreed).toBe(misses.length);
     store.close();
   });
 

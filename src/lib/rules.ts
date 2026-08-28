@@ -17,7 +17,11 @@ import {
   Matcher,
 } from './matcher';
 import { DEFAULT_ORDERING, type OrderingConfig } from './ordering';
-import { NEW_INSTALL_AUDIO } from './scoring';
+import {
+  NEW_INSTALL_AUDIO,
+  NEW_INSTALL_HEVC_FACTOR,
+  NEW_INSTALL_UHD_BITRATE_KBPS,
+} from './scoring';
 
 const patternSchema = z.object({
   pattern: z.string(),
@@ -65,6 +69,8 @@ const orderingWeightsSchema = z
     audio: z.coerce.number().optional(),
     prefer_h265: z.boolean().optional(),
     min_bitrate_kbps: z.coerce.number().optional(),
+    hevc_bitrate_factor: z.coerce.number().optional(),
+    uhd_bitrate_kbps: z.coerce.number().optional(),
   })
   .optional();
 
@@ -183,6 +189,8 @@ function parseOrdering(doc: RulesDoc): OrderingConfig {
       ...(w.audio !== undefined ? { audio: w.audio } : {}),
       ...(w.prefer_h265 !== undefined ? { preferH265: w.prefer_h265 } : {}),
       ...(w.min_bitrate_kbps !== undefined ? { minBitrateKbps: w.min_bitrate_kbps } : {}),
+      ...(w.hevc_bitrate_factor !== undefined ? { hevcBitrateFactor: w.hevc_bitrate_factor } : {}),
+      ...(w.uhd_bitrate_kbps !== undefined ? { uhdBitrateKbps: w.uhd_bitrate_kbps } : {}),
     },
   };
 }
@@ -190,18 +198,24 @@ function parseOrdering(doc: RulesDoc): OrderingConfig {
 /**
  * An empty ruleset. What a fresh install has before anything is imported.
  *
- * It carries one opinion: `audio` at `NEW_INSTALL_AUDIO`. The weight defaults
- * to 0 in code so that an existing rules file -- which cannot mention a term
- * that did not exist when it was written -- keeps the exact ordering it had.
- * Seeding it here is what makes "off for upgrades, on for new installs"
- * expressible at all, since the two are indistinguishable by the time the
- * weights are read.
+ * It carries the opinions Podium would hold freely: `audio`, and the two
+ * bitrate corrections. Each defaults to an inert value in code so that an
+ * existing rules file -- which cannot mention a term that did not exist when it
+ * was written -- keeps the exact ordering it had. Seeding them here is what
+ * makes "off for upgrades, on for new installs" expressible at all, since the
+ * two are indistinguishable by the time the weights are read.
  */
 export const EMPTY_RULES_DOC = {
   schema: 2,
   defaults: {},
   channels: [],
-  ordering: { weights: { audio: NEW_INSTALL_AUDIO } },
+  ordering: {
+    weights: {
+      audio: NEW_INSTALL_AUDIO,
+      hevc_bitrate_factor: NEW_INSTALL_HEVC_FACTOR,
+      uhd_bitrate_kbps: NEW_INSTALL_UHD_BITRATE_KBPS,
+    },
+  },
 };
 
 /**

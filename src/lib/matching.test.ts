@@ -18,8 +18,11 @@ import {
   audioScore,
   DEFAULT_STRATEGY,
   DEFAULT_WEIGHTS,
+  effectiveBitrateKbps,
   isUsable,
   NEW_INSTALL_AUDIO,
+  NEW_INSTALL_HEVC_FACTOR,
+  NEW_INSTALL_UHD_BITRATE_KBPS,
   type RankStrategy,
   rank,
   score,
@@ -442,16 +445,112 @@ describe('scoring', () => {
     const h265 = alive({ videoCodec: 'hevc' });
     const h264 = alive({ videoCodec: 'h264' });
     expect(score(h265)).toBeGreaterThan(score(h264));
-    const flipped = {
-      resolution: 0.35,
-      bitrate: 0.4,
-      fps: 0.15,
-      codec: 0.1,
-      audio: 0,
-      preferH265: false,
-      minBitrateKbps: 500,
-    };
+    // Spread rather than spelled out: every term added to `Weights` since has
+    // an inert default, and restating them here only invites this to drift
+    // into testing a weight set nobody runs.
+    const flipped = { ...DEFAULT_WEIGHTS, preferH265: false };
     expect(score(h264, flipped)).toBeGreaterThan(score(h265, flipped));
+  });
+
+  it('leaves an upgraded install on the flat bitrate scale', () => {
+    // Both corrections default to inert, so a rules file that predates them
+    // ranks exactly as it did. This is the guarantee, not an implementation
+    // detail: the whole point of seeding them in EMPTY_RULES_DOC instead of
+    // DEFAULT_WEIGHTS is that an upgrade must not reshuffle anybody's channels.
+    expect(DEFAULT_WEIGHTS.hevcBitrateFactor).toBe(1);
+    const hevc = alive({ videoCodec: 'hevc', bitrateKbps: 6000 });
+    const h264 = alive({ videoCodec: 'h264', bitrateKbps: 6000 });
+    // Same effective bitrate: the only gap left is the flat codec bonus.
+    const gap = score(hevc) - score(h264);
+    const sum =
+      DEFAULT_WEIGHTS.resolution +
+      DEFAULT_WEIGHTS.bitrate +
+      DEFAULT_WEIGHTS.fps +
+      DEFAULT_WEIGHTS.codec +
+      DEFAULT_WEIGHTS.audio;
+    expect(gap).toBeCloseTo((DEFAULT_WEIGHTS.codec * 0.5) / sum, 6);
+  });
+
+  it('scores HEVC on its effective bitrate once the factor is set', () => {
+    // The defect the factor exists for: at 1.0 a 5625kbps HEVC feed loses to a
+    // 9000kbps H.264 one, because the flat codec bonus (0.05) cannot repay what
+    // the bitrate gap costs (0.1125).
+    const weights = { ...DEFAULT_WEIGHTS, audio: NEW_INSTALL_AUDIO };
+    const equivalent = 9000 / NEW_INSTALL_HEVC_FACTOR;
+    const hevc = alive({ videoCodec: 'hevc', bitrateKbps: equivalent });
+    const h264 = alive({ videoCodec: 'h264', bitrateKbps: 9000 });
+    expect(score(hevc, weights)).toBeLessThan(score(h264, weights));
+
+    // With the factor set they are the same stream as far as the model is
+    // concerned, and score identically. Not "HEVC now wins": that would be the
+    // double-count coming back, since nothing here separates them any more.
+    const corrected = { ...weights, hevcBitrateFactor: NEW_INSTALL_HEVC_FACTOR };
+    expect(score(hevc, corrected)).toBe(score(h264, corrected));
+
+    // A hair above the equivalence and it wins outright, which is the whole
+    // behaviour: the bitrate term, not a bonus beside it, decides.
+    const richer = alive({ videoCodec: 'hevc', bitrateKbps: equivalent + 500 });
+    expect(score(richer, corrected)).toBeGreaterThan(score(h264, corrected));
+  });
+
+  it('applies the factor to hevc and h265 spellings only', () => {
+    const corrected = { ...DEFAULT_WEIGHTS, hevcBitrateFactor: 2 };
+    for (const codec of ['hevc', 'h265']) {
+      expect(effectiveBitrateKbps(alive({ videoCodec: codec, bitrateKbps: 3000 }), corrected)).toBe(
+        6000,
+      );
+    }
+    // mpeg2video is *less* efficient than H.264, so inventing a factor for it
+    // would hand it an advantage nobody measured.
+    for (const codec of ['h264', 'avc', 'mpeg2video', '']) {
+      expect(effectiveBitrateKbps(alive({ videoCodec: codec, bitrateKbps: 3000 }), corrected)).toBe(
+        3000,
+      );
+    }
+  });
+
+  it('stops the codec term paying for efficiency twice', () => {
+    // With the factor on, an HEVC stream that is *behind* on effective bitrate
+    // must lose. It used to win anyway: the flat codec bonus is blind to how
+    // big the bitrate gap it is overturning was, and on a live install it
+    // carried 20 of 25 channels that changed hands, one at 4594kbps effective
+    // against 7847.
+    const w = {
+      ...DEFAULT_WEIGHTS,
+      audio: NEW_INSTALL_AUDIO,
+      hevcBitrateFactor: NEW_INSTALL_HEVC_FACTOR,
+    };
+    // 4000 * 1.6 = 6400 effective, against 8000. Same everything else.
+    const hevc = alive({ videoCodec: 'hevc', bitrateKbps: 4000 });
+    const h264 = alive({ videoCodec: 'h264', bitrateKbps: 8000 });
+    expect(effectiveBitrateKbps(hevc, w)).toBeLessThan(effectiveBitrateKbps(h264, w));
+    expect(score(hevc, w)).toBeLessThan(score(h264, w));
+
+    // The term still separates a codec that is neither from one that is.
+    const mpeg2 = alive({ videoCodec: 'mpeg2video', bitrateKbps: 8000 });
+    expect(score(mpeg2, w)).toBeLessThan(score(h264, w));
+
+    // And with the factor off, preferH265 behaves exactly as it always did --
+    // that is the upgrade path, and it must not have moved.
+    const off = { ...w, hevcBitrateFactor: 1 };
+    const same = (codec: string) => alive({ videoCodec: codec, bitrateKbps: 6000 });
+    expect(score(same('hevc'), off)).toBeGreaterThan(score(same('h264'), off));
+  });
+
+  it('gives UHD its own full-marks bitrate', () => {
+    // A ceiling calibrated for 1080p cannot separate two 4K feeds: at 12000
+    // both of these score a flat 1.0 on bitrate and the term stops saying
+    // anything. The 1080p population must not move when that is fixed.
+    const flat = { ...DEFAULT_WEIGHTS, uhdBitrateKbps: 12_000 };
+    const good = alive({ height: 2160, bitrateKbps: 13_000 });
+    const better = alive({ height: 2160, bitrateKbps: 20_000 });
+    expect(score(better, flat)).toBe(score(good, flat));
+
+    const raised = { ...DEFAULT_WEIGHTS, uhdBitrateKbps: NEW_INSTALL_UHD_BITRATE_KBPS };
+    expect(score(better, raised)).toBeGreaterThan(score(good, raised));
+    // Below the UHD boundary nothing changed.
+    const hd = alive({ height: 1080, bitrateKbps: 9000 });
+    expect(score(hd, raised)).toBe(score(hd, flat));
   });
 });
 

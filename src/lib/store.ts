@@ -32,6 +32,7 @@
  */
 
 import Database from 'better-sqlite3';
+import { createHash } from 'crypto';
 import { mkdirSync } from 'fs';
 import { dirname } from 'path';
 import type { ProbeResult } from './probe';
@@ -308,10 +309,27 @@ CREATE TABLE IF NOT EXISTS teamarr_rules (
     uploaded_at  INTEGER NOT NULL
 );
 
--- One row per pass that ran a check.
+-- One row per *distinct* check result, not per pass that ran one.
+--
+-- A pass runs the check whenever a rule set has been uploaded, which on a
+-- settled install is every couple of minutes and around 500 times a day -- all
+-- of them saying the same thing. Storing each would put a row and a fresh copy
+-- of every miss on disk to record that nothing had changed since the last one;
+-- measured on a live install it was 2,658 checks and 137,571 misses inside six
+-- days, on course for roughly a million rows against the 90-day window.
+--
+-- So an identical result updates the row it repeats instead of inserting after
+-- it: repeated counts the passes that agreed and last_checked_at says when it
+-- was last confirmed. The history then reads as the sequence of things that
+-- changed, which is what anybody scrolling it is looking for anyway.
 CREATE TABLE IF NOT EXISTS rule_checks (
     checked_at      INTEGER PRIMARY KEY,
     run_id          TEXT,
+    -- Digest of the summary and the miss set: what "identical" means above.
+    fingerprint     TEXT    NOT NULL DEFAULT '',
+    -- Further passes that reached the same result. 0 means seen once.
+    repeated        INTEGER NOT NULL DEFAULT 0,
+    last_checked_at INTEGER,
     channels        INTEGER NOT NULL,
     agreed          INTEGER NOT NULL,
     -- The same counts over the channels Teamarr actually orders, which is the
@@ -712,6 +730,18 @@ export const QUALITY_HISTORY_MS = 90 * 86_400_000;
 /** How long a rule check is worth keeping. Long enough to cover a season's shape. */
 export const RULE_CHECK_HISTORY_MS = 90 * 86_400_000;
 
+/**
+ * Most misses kept for one check.
+ *
+ * Deduplication already bounds the common case; this bounds the pathological
+ * one, where a rule set disagrees on hundreds of channels and every edit to it
+ * writes a fresh copy of all of them. `checkRules` returns disagreements first
+ * and widest-gap first, so the front of the list is the part worth reading and
+ * the tail is where a reader stops. The true count is never lost -- `disagreed`
+ * on the summary row is the whole number, and the UI reads it from there.
+ */
+export const MAX_MISSES_PER_CHECK = 200;
+
 export interface StoredRuleMiss {
   channelId: number;
   channelName: string;
@@ -748,10 +778,65 @@ export interface StoredRuleCheckRow {
   approximate: boolean;
   rulesEvaluated: number;
   rulesSkipped: number;
+  /**
+   * Further passes that reached this same result, 0 when seen once.
+   *
+   * A history row is one distinct finding rather than one pass, so this is how
+   * long it has been standing. See the `rule_checks` table comment.
+   */
+  repeated: number;
+  /** When it was last confirmed. Equals `checkedAt` until something repeats. */
+  lastCheckedAt: number;
 }
 
-export interface StoredRuleCheck extends StoredRuleCheckRow {
+/**
+ * A check as the caller produces it.
+ *
+ * `repeated` and `lastCheckedAt` are the store's bookkeeping, not the caller's
+ * -- whether this result is new or a repeat is only knowable against what is
+ * already on disk -- so they are omitted here rather than passed in and ignored.
+ */
+export interface StoredRuleCheck extends Omit<StoredRuleCheckRow, 'repeated' | 'lastCheckedAt'> {
   misses: StoredRuleMiss[];
+}
+
+/**
+ * What makes two checks "the same result".
+ *
+ * The summary counts, plus the identity of each disagreement: which channel,
+ * which stream each side picked, and the gap between them. Deliberately not the
+ * stream *names* or the matched-rule blame line -- a channel renamed in
+ * Dispatcharr is not a new finding about the rules, and neither is a rule set
+ * re-uploaded unchanged.
+ *
+ * Misses arrive sorted (disagreements first, widest gap first) and that order
+ * is stable for a stable result, so this hashes them as they come rather than
+ * re-sorting. Digested rather than stored whole because the string runs to tens
+ * of kilobytes on a set that disagrees widely, and the column only ever has to
+ * answer "same or not".
+ */
+function ruleCheckFingerprint(check: StoredRuleCheck, misses: StoredRuleMiss[]): string {
+  const parts = [
+    check.channels,
+    check.agreed,
+    check.disagreed,
+    check.ambiguous,
+    check.deadFirst,
+    Math.round(check.gapKbps),
+    check.managedChannels,
+    check.managedAgreed,
+    check.managedDeadFirst,
+    Math.round(check.managedGapKbps),
+    check.approximate ? 1 : 0,
+    check.rulesEvaluated,
+    check.rulesSkipped,
+    ...misses.map((m) =>
+      [m.channelId, m.teamarrStream, m.podiumStream, Math.round(m.gapKbps), m.managed ? 1 : 0].join(
+        ':',
+      ),
+    ),
+  ];
+  return createHash('sha1').update(parts.join('|')).digest('hex');
 }
 
 function parseMatched(raw: string): Array<{ type: string; value: string; points: number }> {
@@ -851,6 +936,13 @@ export class Store {
         ['rule_checks', 'managed_dead_first INTEGER NOT NULL DEFAULT 0'],
         ['rule_checks', 'managed_gap_kbps INTEGER NOT NULL DEFAULT 0'],
         ['rule_check_misses', 'managed INTEGER NOT NULL DEFAULT 0'],
+        // Rows written before checks were deduplicated carry no fingerprint.
+        // '' never matches a real digest, so each stays its own history entry
+        // rather than being collapsed retroactively into something it was not
+        // compared against.
+        ['rule_checks', "fingerprint TEXT NOT NULL DEFAULT ''"],
+        ['rule_checks', 'repeated INTEGER NOT NULL DEFAULT 0'],
+        ['rule_checks', 'last_checked_at INTEGER'],
         // Empty on every sample taken before the codec was recorded. '' is
         // "not known", which is why the miner's codec guard keys on the name
         // token rather than on this being absent.
@@ -1637,19 +1729,46 @@ export class Store {
     }
   }
 
-  /** Record one pass's check, summary and misses together. */
+  /**
+   * Record one pass's check, summary and misses together.
+   *
+   * A result identical to the newest stored one bumps that row's `repeated`
+   * count instead of inserting -- see the `rule_checks` table comment for why.
+   * "Identical" is the summary plus which channels disagreed, which streams the
+   * two sides picked, and by how much; it deliberately ignores `runId` and the
+   * clock, since those differ on every pass and would defeat the whole thing.
+   */
   recordRuleCheck(check: StoredRuleCheck): void {
     const checkedAt = check.checkedAt;
+    const misses = check.misses.slice(0, MAX_MISSES_PER_CHECK);
+    const fingerprint = ruleCheckFingerprint(check, misses);
+
+    const previous = this.sql(
+      'SELECT checked_at, fingerprint FROM rule_checks ORDER BY checked_at DESC LIMIT 1',
+    ).get() as { checked_at: number; fingerprint: string } | undefined;
+
+    if (previous?.fingerprint && previous.fingerprint === fingerprint) {
+      this.sql(
+        `UPDATE rule_checks
+            SET repeated = repeated + 1, last_checked_at = ?, run_id = ?
+          WHERE checked_at = ?`,
+      ).run(checkedAt, check.runId, previous.checked_at);
+      return;
+    }
+
     this.db.transaction(() => {
       this.sql(
         `INSERT OR REPLACE INTO rule_checks
-           (checked_at, run_id, channels, agreed, disagreed, ambiguous, dead_first,
+           (checked_at, run_id, fingerprint, repeated, last_checked_at,
+            channels, agreed, disagreed, ambiguous, dead_first,
             gap_kbps, managed_channels, managed_agreed, managed_dead_first,
             managed_gap_kbps, approximate, rules_evaluated, rules_skipped)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         checkedAt,
         check.runId,
+        fingerprint,
+        checkedAt,
         check.channels,
         check.agreed,
         check.disagreed,
@@ -1672,7 +1791,7 @@ export class Store {
             podium_provider, podium_bitrate, gap_kbps)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
-      for (const miss of check.misses) {
+      for (const miss of misses) {
         insert.run(
           checkedAt,
           miss.channelId,
@@ -1701,7 +1820,8 @@ export class Store {
     const history = this.sql(
       `SELECT checked_at, run_id, channels, agreed, disagreed, ambiguous, dead_first,
               gap_kbps, managed_channels, managed_agreed, managed_dead_first,
-              managed_gap_kbps, approximate, rules_evaluated, rules_skipped
+              managed_gap_kbps, approximate, rules_evaluated, rules_skipped,
+              repeated, last_checked_at
          FROM rule_checks ORDER BY checked_at DESC LIMIT ?`,
     ).all(limit) as Array<Record<string, number | string | null>>;
 
@@ -1721,6 +1841,10 @@ export class Store {
       approximate: Number(row.approximate) === 1,
       rulesEvaluated: Number(row.rules_evaluated),
       rulesSkipped: Number(row.rules_skipped),
+      repeated: Number(row.repeated ?? 0),
+      // Rows written before deduplication have no last_checked_at; they were
+      // seen exactly once, so the time they were checked is the answer.
+      lastCheckedAt: Number(row.last_checked_at ?? row.checked_at),
     }));
 
     if (rows.length === 0) return { history: [], latest: [] };
