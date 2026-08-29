@@ -376,6 +376,32 @@ export interface LabelAccuracy {
   commonestMiss: { claimed: string; measured: string; count: number } | null;
 }
 
+/**
+ * Where this install's watchable streams actually sit, in kbps.
+ *
+ * The export's one measured lever is a `stats_metric` bitrate ladder, and a
+ * ladder is only worth anything if its rungs fall inside the distribution it is
+ * sorting. Hand-picked thresholds do not: a rule set found in the field carried
+ * rungs at 10000 and 15000 kbps against a catalogue whose median watchable
+ * stream measured 6602, so the first rung cleared 5.7% of streams and the
+ * second 0.4%. Both were dead weight, and neither looked wrong from the outside
+ * -- a rung that never fires and a rung that fires correctly are the same line
+ * in a JSON file.
+ *
+ * So the rungs are read off the population instead. Quartiles rather than
+ * anything cleverer, because the job is only to cut the field into "better than
+ * most", "top quarter", "top tenth" -- and because a percentile moves with the
+ * catalogue, which is the property a hand-picked number lacks.
+ */
+export interface BitrateLadder {
+  /** Samples the percentiles were taken over. */
+  samples: number;
+  /** The rungs themselves, ascending: p50, p75, p90. */
+  rungsKbps: number[];
+  /** Which percentile each rung came from, same order. */
+  percentiles: number[];
+}
+
 export interface QualityProfile {
   generatedAt: number;
   /**
@@ -423,6 +449,8 @@ export interface QualityProfile {
   groups: Effect[];
   /** Per account, whether its own resolution labels survive being measured. */
   labelAccuracy: LabelAccuracy[];
+  /** Where the watchable streams sit, for the exported bitrate ladder. */
+  bitrateLadder: BitrateLadder;
 }
 
 export interface ProfileOptions {
@@ -511,6 +539,40 @@ function labelAccuracy(samples: StoredQualitySample[]): LabelAccuracy[] {
 }
 
 /** Summarise raw samples into per-bucket and per-dimension effects. */
+/** The value at `q` (0-1) of an ascending list, nearest-rank. */
+function percentileOf(ascending: number[], q: number): number {
+  if (ascending.length === 0) return 0;
+  const index = Math.min(ascending.length - 1, Math.max(0, Math.round(q * (ascending.length - 1))));
+  return Math.round(ascending[index]!);
+}
+
+/** The percentiles the ladder's rungs are taken from, ascending. */
+const LADDER_PERCENTILES = [0.5, 0.75, 0.9];
+
+/**
+ * The bitrate ladder, read off the streams a rule would actually be sorting.
+ *
+ * Dead and black streams are excluded, and so are audio-only ones. Not to
+ * flatter the numbers: a ladder is a statement about how good a *watchable*
+ * stream is, and the streams that are not watchable are the liveness rules'
+ * business. Leaving them in would drag every rung down toward zero and hand
+ * back a ladder whose bottom rung is cleared by a black screen.
+ */
+function buildLadder(scoped: StoredQualitySample[]): BitrateLadder {
+  const kbps = scoped
+    .filter(
+      (sample) => !sample.audioOnly && sample.alive && !sample.black && sample.bitrateKbps > 0,
+    )
+    .map((sample) => sample.bitrateKbps)
+    .sort((a, b) => a - b);
+
+  return {
+    samples: kbps.length,
+    rungsKbps: LADDER_PERCENTILES.map((q) => percentileOf(kbps, q)),
+    percentiles: [...LADDER_PERCENTILES],
+  };
+}
+
 export function buildProfile(
   samples: StoredQualitySample[],
   options: ProfileOptions = {},
@@ -581,6 +643,9 @@ export function buildProfile(
     // holding it to the fit's threshold would hide exactly the accounts whose
     // labels are too sparse to trust.
     labelAccuracy: labelAccuracy(scoped),
+    // Same population as the fit, for the same reason: a ladder exported
+    // alongside these effects has to be describing the streams they describe.
+    bitrateLadder: buildLadder(scoped),
   };
 }
 
@@ -823,16 +888,28 @@ function fitEffects(buckets: Bucket[]): {
 /** One rule in Teamarr's `stream-ordering-rules.json`. */
 export interface TeamarrRule {
   /**
-   * The three Teamarr matches Podium can speak to.
+   * The four Teamarr matches Podium can speak to.
    *
    * `m3u` and `group` are wholesale -- a stream either came from that account
-   * or that group -- and `regex` is the only per-stream lever, matched against
-   * the stream's name. Teamarr has others (`stats_metric`, `epg_match`,
-   * `stream_type`); they are somebody else's opinion to write, and
-   * `stats_metric` in particular already reads the bitrate Podium publishes to
-   * Dispatcharr, so duplicating it here would score the same measurement twice.
+   * or that group -- and `regex` is the only lever that reads the stream's own
+   * name. Those three are *priors*: statements about where a stream came from,
+   * which is all that can be said about a stream nobody has probed.
+   *
+   * `stats_metric` is the fourth and it is not a prior at all. It reads the
+   * `stream_stats` Podium itself publishes to Dispatcharr, so it is the one
+   * rule type that can carry a measurement of *this* stream into Teamarr's
+   * scorer. It was withheld at first on the grounds that exporting it would
+   * score the same measurement twice, which is true of a bitrate the account
+   * effect has already been fitted from -- and false of the two things that
+   * matter most: whether the stream is alive, and whether it is a black screen.
+   * No prior expresses those, no amount of provenance predicts them, and a rule
+   * set without them ranks a dead stream from a good account above a working
+   * one from a mediocre account. Measured on a live install, that was 27 of 61
+   * disagreements.
+   *
+   * `epg_match` and `stream_type` remain somebody else's opinion to write.
    */
-  type: 'm3u' | 'group' | 'regex';
+  type: 'm3u' | 'group' | 'regex' | 'stats_metric';
   value: string;
   /**
    * Ignored by Teamarr for `score` rules -- bands only apply to `priority`
@@ -878,6 +955,35 @@ export interface ExportOptions extends ProfileOptions {
    * identically when it did not.
    */
   consolidated?: ConsolidatedToken[];
+  /**
+   * What a stream measured dead, or measured as a black screen, gives up.
+   *
+   * Deliberately outside `maxPoints`, which is the one place in this export
+   * where that cap is wrong to apply. The cap exists so that a *prior* can
+   * never outrank a *measurement* -- and this is the measurement. Capping it at
+   * 15 would put a dead stream one account-rule away from winning its channel,
+   * which is the failure the rule exists to stop.
+   *
+   * Large enough to sink beneath any plausible stack of priors: three generated
+   * rules at the ±15 cap, plus whatever an operator has hand-written. Teamarr
+   * clamps a score to ±(BAND_STRIDE/2 - 1), so there is a great deal of room
+   * and no reason to be shy with it.
+   *
+   * Set to 0 to suppress both liveness rules.
+   */
+  deadPoints?: number;
+  /**
+   * What each rung of the bitrate ladder is worth.
+   *
+   * Flat per rung, so the ladder is a step function: below the median nothing,
+   * then one step per quartile. Three rungs at the default put a top-decile
+   * stream 24 points clear of a median one -- more than any single prior can
+   * move it, which is the point, and still short of the liveness penalty, which
+   * is also the point.
+   *
+   * Set to 0 to suppress the ladder.
+   */
+  bitratePoints?: number;
 }
 
 /**
@@ -896,6 +1002,8 @@ export interface ExportOptions extends ProfileOptions {
 export function profileQuery(params: URLSearchParams): {
   minSamples: number;
   pointsPerMbps: number;
+  deadPoints: number;
+  bitratePoints: number;
 } {
   const number = (key: string, fallback: number, min: number, max: number): number => {
     const raw = params.get(key);
@@ -909,6 +1017,10 @@ export function profileQuery(params: URLSearchParams): {
   return {
     minSamples: Math.round(number('minSamples', 20, 1, 100_000)),
     pointsPerMbps: number('pointsPerMbps', 5, 0, 10_000),
+    // Clamped to zero or below: this is a demotion, and a positive value would
+    // reward a stream for having measured dead. `0` suppresses it.
+    deadPoints: Math.round(number('deadPoints', -100, -100_000, 0)),
+    bitratePoints: Math.round(number('bitratePoints', 8, 0, 10_000)),
   };
 }
 
@@ -931,6 +1043,19 @@ export interface RulesExport {
     scope: ScopeSummary;
     /** Tier rules withheld because one account supplied most of the evidence. */
     confoundedTiers: ConfoundedTier[];
+    /**
+     * The `stats_metric` half: what a measurement is worth here, and why.
+     *
+     * Carried because the ladder's thresholds are the one thing in this file
+     * that will look arbitrary in three months. They are not -- they are this
+     * catalogue's quartiles on the day it was exported -- and the only way to
+     * show that is to ship the percentiles beside them.
+     */
+    measured: {
+      deadPoints: number;
+      bitratePoints: number;
+      ladder: BitrateLadder;
+    };
     /**
      * Mined regexes, and the group rules each one absorbed.
      *
@@ -1014,8 +1139,58 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
   const maxPoints = options.maxPoints ?? 15;
   const minSamples = options.minSamples ?? 20;
   const consolidated = options.consolidated ?? [];
+  const deadPoints = options.deadPoints ?? -100;
+  const bitratePoints = options.bitratePoints ?? 8;
 
   const rules: TeamarrRule[] = [];
+
+  // The measured rules first, because they are the only ones in this file that
+  // describe the stream in front of you rather than the company it keeps.
+  //
+  // Demotion only, and no matching reward for being alive. A stream Podium has
+  // never probed carries no `alive` key at all, so `_resolve_stat_value`
+  // returns null and neither rule fires -- it scores its priors and nothing
+  // else, which is the right answer when nobody has looked at it. A positive
+  // "alive" rule would instead push every unprobed stream below every probed
+  // one, and at kickoff the unprobed streams are most of them.
+  if (deadPoints !== 0) {
+    rules.push({
+      type: 'stats_metric',
+      value: 'alive|=|0',
+      priority: 99,
+      mode: 'score',
+      points: deadPoints,
+    });
+    rules.push({
+      type: 'stats_metric',
+      value: 'blank_detected|=|1',
+      priority: 99,
+      mode: 'score',
+      points: deadPoints,
+    });
+  }
+
+  // The ladder, at this install's own quartiles. Rungs are cumulative -- a
+  // stream above p90 matches all three -- which is what makes a flat per-rung
+  // value read as a monotonic preference rather than three unrelated opinions.
+  //
+  // De-duplicated: on a thin or very uniform catalogue two percentiles can land
+  // on the same number, and emitting the same threshold twice would silently
+  // double that rung's worth.
+  if (bitratePoints !== 0) {
+    const seen = new Set<number>();
+    for (const rung of profile.bitrateLadder.rungsKbps) {
+      if (rung <= 0 || seen.has(rung)) continue;
+      seen.add(rung);
+      rules.push({
+        type: 'stats_metric',
+        value: `ffmpeg_output_bitrate|>=|${rung}`,
+        priority: 99,
+        mode: 'score',
+        points: bitratePoints,
+      });
+    }
+  }
 
   // What each carrier group keeps once its regex has taken the shared part.
   //
@@ -1095,6 +1270,7 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
       minSamples,
       scope: profile.scope,
       confoundedTiers: confounded,
+      measured: { deadPoints, bitratePoints, ladder: profile.bitrateLadder },
       minedRegex: consolidated.map((token) => ({
         token: token.token,
         pattern: token.pattern,
@@ -1107,6 +1283,15 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
         'megabits, times pointsPerMbps. `group` values are Dispatcharr group ' +
         'names; Teamarr matches them against its own Event Group names, so a ' +
         'group rule scores only where the two are spelled the same.' +
+        (deadPoints !== 0 || bitratePoints !== 0
+          ? ' `stats_metric` rules read the stream_stats Podium publishes to ' +
+            'Dispatcharr, so they score a measurement of the stream itself ' +
+            'rather than a prior about where it came from. Merging REPLACES ' +
+            'any existing single-condition stats_metric rule on the same ' +
+            'metric and comparator, whatever its threshold -- a recalibrated ' +
+            'ladder has different rungs, and keeping the old ones would score ' +
+            'the same bitrate twice. See podium.measured.'
+          : '') +
         (consolidated.length > 0
           ? ` ${consolidated.length} regex rule(s) were mined from stream names and ` +
             'REPLACE the group rules they subsume -- those groups are re-emitted at ' +
@@ -1122,6 +1307,25 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
 }
 
 /**
+ * The `metric|comparator` a single-condition `stats_metric` rule is about,
+ * or null for anything else.
+ *
+ * Teamarr's `stats_metric` value is `metric|comparator|threshold`, and it also
+ * takes several conditions joined by `;`. A multi-condition rule is somebody
+ * making a compound point -- "at least 4Mbps *and* at least 50fps" -- and it is
+ * not the same opinion as any rung of a generated ladder, so it is deliberately
+ * not recognised here and survives a merge untouched.
+ */
+function statsFamily(rule: { type: string; value: string }): string | null {
+  if (rule.type !== 'stats_metric') return null;
+  const value = rule.value.trim();
+  if (value.includes(';')) return null;
+  const parts = value.split('|');
+  if (parts.length < 2) return null;
+  return `${parts[0]!.trim().toLowerCase()}|${parts[1]!.trim()}`;
+}
+
+/**
  * Podium's rules folded into a rule set someone already has.
  *
  * Teamarr's import replaces the entire rule set rather than merging, so
@@ -1134,6 +1338,22 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
  * else untouched, in its original order. So re-importing after a month of
  * fresh samples updates the numbers in place instead of stacking a second set
  * of points on top of the first.
+ *
+ * `stats_metric` is the exception, and has to be. A bitrate ladder is not a
+ * fixed set of rules whose points get updated: it is N rungs at percentiles
+ * that *move*, so last month's `>=|6602` and this month's `>=|7100` are the
+ * same opinion wearing different numbers, and matching them by value would
+ * leave both in the file scoring the same stream twice. So a generated
+ * single-condition `stats_metric` rule supersedes every existing
+ * single-condition rule on that same metric and comparator, whatever its
+ * threshold, and the fresh set is appended whole.
+ *
+ * That is a bigger claim than the 1:1 rule makes, and it is the right one: an
+ * operator's hand-written `ffmpeg_output_bitrate >= 10000` is an attempt at
+ * exactly the job the ladder now does from measurement, and keeping both is
+ * strictly worse than keeping either. Other metrics -- `source_fps`,
+ * `resolution_height` -- are untouched, because Podium generates nothing that
+ * competes with them.
  */
 export function mergeTeamarrRules<T extends { type: string; value: string; mode?: string }>(
   existing: T[],
@@ -1142,18 +1362,35 @@ export function mergeTeamarrRules<T extends { type: string; value: string; mode?
   const key = (rule: { type: string; value: string; mode?: string }): string =>
     `${rule.type} ${rule.value.trim().toLowerCase()} ${rule.mode ?? 'priority'}`;
 
-  const byKey = new Map(generated.map((rule) => [key(rule), rule]));
+  // Families this export has an opinion about; existing members are superseded
+  // wholesale rather than matched one for one.
+  const families = new Set<string>();
+  for (const rule of generated) {
+    const family = statsFamily(rule);
+    if (family) families.add(family);
+  }
+
+  const byKey = new Map<string, TeamarrRule>();
+  for (const rule of generated) {
+    if (!statsFamily(rule)) byKey.set(key(rule), rule);
+  }
   const used = new Set<string>();
 
-  const merged: Array<T | TeamarrRule> = existing.map((rule) => {
+  const merged: Array<T | TeamarrRule> = [];
+  for (const rule of existing) {
+    const family = statsFamily(rule);
+    if (family && families.has(family)) continue;
     const replacement = byKey.get(key(rule));
-    if (!replacement) return rule;
-    used.add(key(rule));
-    return replacement;
-  });
+    if (replacement) {
+      used.add(key(rule));
+      merged.push(replacement);
+      continue;
+    }
+    merged.push(rule);
+  }
 
   for (const rule of generated) {
-    if (!used.has(key(rule))) merged.push(rule);
+    if (statsFamily(rule) || !used.has(key(rule))) merged.push(rule);
   }
   return merged;
 }

@@ -601,12 +601,48 @@ Teamarr sums the rules a stream matches, so a good account, a good group and an
 `FHD` token add up — no probe on Teamarr's side, and the ordering applies to a
 stream the moment it appears.
 
-The three are what Teamarr can match on, and they split the way its matcher
-does: `m3u` and `group` are wholesale — a stream either came from that account
-or that group — while `regex` is the only rule that reads the stream's own
-name. Podium writes no `stats_metric` rules, deliberately: those already read
-the `ffmpeg_output_bitrate` Podium publishes to Dispatcharr, so generating them
-here would score the same measurement twice.
+Those three are **priors**: statements about where a stream came from, which is
+all that can be said about one nobody has probed. They split the way Teamarr's
+matcher does — `m3u` and `group` are wholesale, a stream either came from that
+account or that group, while `regex` is the only one that reads the stream's
+own name.
+
+The export also writes `stats_metric` rules, and those are not priors at all.
+They read the `stream_stats` Podium publishes to Dispatcharr, so they score a
+measurement of *the stream in front of you*. Three kinds:
+
+```
+alive|=|0                      -100
+blank_detected|=|1             -100
+ffmpeg_output_bitrate|>=|6602    +8    <- your p50
+ffmpeg_output_bitrate|>=|8047    +8    <- your p75
+ffmpeg_output_bitrate|>=|9444    +8    <- your p90
+```
+
+The two liveness rules are the ones that matter most, because no prior can
+express them. Provenance does not predict whether a stream is up right now, so
+without them a rule set ranks a dead stream from a good account above a working
+one from a mediocre account — measured on a live install, that was 27 of 61
+disagreements, and 20 channels leading with a dead or black stream while a
+working one sat below it.
+
+They demote only. Nothing rewards a stream for being alive: a stream Podium has
+never probed carries no `alive` key at all, so neither rule fires and it scores
+its priors and nothing else — the right answer when nobody has looked at it. A
+positive rule would instead push every unprobed stream below every probed one,
+and at kickoff the unprobed streams are most of them.
+
+The **bitrate ladder is read off your own catalogue**, at the median, upper
+quartile and top decile of your watchable streams. Hand-picked thresholds go
+stale invisibly: a rule set found in the field carried rungs at 10000 and 15000
+kbps against a catalogue whose median watchable stream measured 6602, so the
+first cleared 5.7% of streams and the second 0.4%. Both looked exactly like
+rules that worked. Dead and black streams are excluded from the percentiles —
+they are the liveness rules' business, and leaving them in drags every rung
+toward zero until the bottom one is cleared by a black screen.
+
+`?deadPoints=` and `?bitratePoints=` tune the two; set either to `0` to
+suppress it.
 
 ### Which dimension gets the credit
 
@@ -678,12 +714,17 @@ install above they were 18% of all probes and 30% of the untagged tier.
 home feed" as an opinion of comparable strength rather than one that drowns it.
 Raise it if your own rules use larger numbers — only the ratio matters.
 
-No generated rule exceeds **±15** whatever it fitted. Teamarr scores a stream
-it has measurements for from `stats_metric` rules reading the bitrate Podium
-published — a reading of *that stream* — while everything generated here is an
-inference about streams of the same provenance. The cap keeps the strongest
-inference below the first rung of a measured ladder, so a stream measured at
-10Mbps outranks one that merely comes from a good account.
+No generated **prior** exceeds **±15** whatever it fitted — an `m3u`, `group`
+or `regex` rule is an inference about streams of the same provenance, and the
+cap keeps the strongest inference below the first rung of the measured ladder,
+so a stream measured at 10Mbps outranks one that merely comes from a good
+account.
+
+The `stats_metric` rules sit outside that cap, and have to. The cap exists so a
+prior never outranks a measurement; these *are* the measurement. Capping the
+liveness rules at 15 would leave a dead stream one account rule away from
+winning its channel, which is the failure they exist to stop — so they are
+worth −100 by default, comfortably beneath any plausible stack of priors.
 
 ### The unlabelled reference level
 
