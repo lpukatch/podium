@@ -377,20 +377,43 @@ describe('teamarrRules', () => {
 
   it('keeps a prior below a measured stream, whatever it fitted', () => {
     // Teamarr scores a probed stream from stats_metric rules reading the
-    // bitrate Podium published -- a reading of that stream. Everything here is
-    // an inference about streams like it. On the rule set this was calibrated
-    // against the first rung of the measured ladder is +20, so a cap of 15
-    // means no inference ever outranks a measurement.
+    // stream_stats Podium published -- a reading of that stream. The other
+    // three types are inferences about streams like it, and the cap is what
+    // stops an inference outranking a measurement however extreme its fit.
+    // Distinct providerIds, or both halves land in one cell and the fit has no
+    // account contrast to find -- which emits no prior at all and makes the
+    // assertion below vacuous.
     const extreme = buildProfile(
       [
-        ...many(100, { providerName: 'Ludicrous', bitrateKbps: 200_000 }),
-        ...many(100, { providerName: 'Dire', bitrateKbps: 100 }),
+        ...many(100, { providerId: 1, providerName: 'Ludicrous', bitrateKbps: 200_000 }),
+        ...many(100, { providerId: 2, providerName: 'Dire', bitrateKbps: 100 }),
       ],
       { minSamples: 20 },
     );
-    for (const rule of teamarrRules(extreme).rules) {
+    const priors = teamarrRules(extreme).rules.filter((rule) => rule.type !== 'stats_metric');
+    expect(priors.length).toBeGreaterThan(0);
+    for (const rule of priors) {
       expect(Math.abs(rule.points)).toBeLessThanOrEqual(15);
     }
+  });
+
+  it('sinks a dead stream below every prior it could possibly carry', () => {
+    // The other half of the same invariant, and the reason the liveness rules
+    // sit outside the cap: a stream measured dead has to lose to a working one
+    // even when it holds a full hand of favourable priors.
+    const extreme = buildProfile(
+      [
+        ...many(100, { providerId: 1, providerName: 'Ludicrous', bitrateKbps: 200_000 }),
+        ...many(100, { providerId: 2, providerName: 'Dire', bitrateKbps: 100 }),
+      ],
+      { minSamples: 20 },
+    );
+    const { rules } = teamarrRules(extreme);
+    const dead = rules.find((rule) => rule.value === 'alive|=|0')!;
+    const bestCase = rules
+      .filter((rule) => rule.type !== 'stats_metric' && rule.points > 0)
+      .reduce((sum, rule) => sum + rule.points, 0);
+    expect(dead.points + bestCase).toBeLessThan(0);
   });
 
   it('emits a regex Teamarr reads the same way Podium did', () => {
@@ -750,5 +773,180 @@ describe('store', () => {
     expect(kept.filter((s) => s.policyMode === 'after_epg_start')).toHaveLength(3);
     expect(kept.filter((s) => s.policyMode === 'always')).toHaveLength(5);
     store.close();
+  });
+});
+
+describe('teamarrRules stats_metric export', () => {
+  const watchable = (count: number, kbps: number) =>
+    many(count, { policyMode: 'always', bitrateKbps: kbps, measured: true });
+
+  it('reads the ladder off this catalogue rather than a hand-picked number', () => {
+    // 100 streams evenly spread 1000..10000. The rungs have to land inside
+    // that, not at somebody else's 10000/15000.
+    const spread = Array.from({ length: 100 }, (_, i) =>
+      sample({ bitrateKbps: 1000 + i * 91, measured: true }),
+    );
+    const profile = buildProfile(spread, { minSamples: 20 });
+    const rungs = profile.bitrateLadder.rungsKbps;
+
+    expect(rungs).toHaveLength(3);
+    expect(rungs[0]).toBeLessThan(rungs[1]!);
+    expect(rungs[1]).toBeLessThan(rungs[2]!);
+    for (const rung of rungs) {
+      expect(rung).toBeGreaterThanOrEqual(1000);
+      expect(rung).toBeLessThanOrEqual(10_000);
+    }
+
+    const ladder = teamarrRules(profile).rules.filter((rule) =>
+      rule.value.startsWith('ffmpeg_output_bitrate'),
+    );
+    expect(ladder.map((rule) => rule.value)).toEqual(
+      rungs.map((rung) => `ffmpeg_output_bitrate|>=|${rung}`),
+    );
+  });
+
+  it('excludes dead and black streams from the ladder', () => {
+    // Otherwise the bottom rung is cleared by a black screen, and the rule
+    // meant to reward a good picture rewards the absence of one.
+    const profile = buildProfile(
+      [
+        ...watchable(50, 8000),
+        ...many(50, { alive: false, bitrateKbps: 0, height: 0 }),
+        ...many(50, { black: true, bitrateKbps: 200 }),
+      ],
+      { minSamples: 20 },
+    );
+    expect(profile.bitrateLadder.samples).toBe(50);
+    expect(profile.bitrateLadder.rungsKbps.every((rung) => rung === 8000)).toBe(true);
+  });
+
+  it('emits one rung when the quartiles collapse onto one number', () => {
+    // A uniform catalogue puts p50, p75 and p90 on the same value; emitting it
+    // three times would silently triple what that rung is worth.
+    const profile = buildProfile(watchable(60, 6000), { minSamples: 20 });
+    const ladder = teamarrRules(profile).rules.filter((rule) =>
+      rule.value.startsWith('ffmpeg_output_bitrate'),
+    );
+    expect(ladder).toHaveLength(1);
+  });
+
+  it('demotes a measured-dead stream and says nothing about an unprobed one', () => {
+    const profile = buildProfile(watchable(60, 6000), { minSamples: 20 });
+    const { rules } = teamarrRules(profile);
+
+    const dead = rules.find((rule) => rule.value === 'alive|=|0')!;
+    const black = rules.find((rule) => rule.value === 'blank_detected|=|1')!;
+    expect(dead.points).toBeLessThan(0);
+    expect(black.points).toBeLessThan(0);
+    // No rule rewards being alive: a stream nobody has probed carries no
+    // `alive` key, so a positive rule would sink every unprobed stream beneath
+    // every probed one, and at kickoff the unprobed are most of them.
+    expect(rules.some((rule) => rule.value === 'alive|=|1')).toBe(false);
+  });
+
+  it('can be turned off without disturbing the priors', () => {
+    const profile = buildProfile(watchable(60, 6000), { minSamples: 20 });
+    const { rules } = teamarrRules(profile, { deadPoints: 0, bitratePoints: 0 });
+    expect(rules.some((rule) => rule.type === 'stats_metric')).toBe(false);
+  });
+
+  it('records the percentiles the rungs came from', () => {
+    // The thresholds are the one thing here that will look arbitrary later.
+    const profile = buildProfile(watchable(60, 6000), { minSamples: 20 });
+    const { podium } = teamarrRules(profile);
+    expect(podium.measured.ladder.percentiles).toEqual([0.5, 0.75, 0.9]);
+    expect(podium.measured.ladder.samples).toBe(60);
+    expect(podium.measured.deadPoints).toBeLessThan(0);
+  });
+});
+
+describe('mergeTeamarrRules and stats_metric families', () => {
+  const ladder: TeamarrRule[] = [
+    { type: 'stats_metric', value: 'alive|=|0', priority: 99, mode: 'score', points: -100 },
+    {
+      type: 'stats_metric',
+      value: 'ffmpeg_output_bitrate|>=|6000',
+      priority: 99,
+      mode: 'score',
+      points: 8,
+    },
+    {
+      type: 'stats_metric',
+      value: 'ffmpeg_output_bitrate|>=|8000',
+      priority: 99,
+      mode: 'score',
+      points: 8,
+    },
+  ];
+
+  it('supersedes an old ladder instead of stacking a second one on top', () => {
+    // The live case: hand-written rungs at 10000/15000, recalibrated to 6000/
+    // 8000. Matching by value would keep all four and score the same bitrate
+    // twice.
+    const existing = [
+      {
+        type: 'stats_metric',
+        value: 'ffmpeg_output_bitrate|>=|10000',
+        priority: 99,
+        mode: 'score',
+        points: 20,
+      },
+      {
+        type: 'stats_metric',
+        value: 'ffmpeg_output_bitrate|>=|15000',
+        priority: 99,
+        mode: 'score',
+        points: 20,
+      },
+    ];
+    const merged = mergeTeamarrRules(existing, ladder);
+
+    const bitrate = merged.filter((rule) => rule.value.startsWith('ffmpeg_output_bitrate'));
+    expect(bitrate.map((rule) => rule.value)).toEqual([
+      'ffmpeg_output_bitrate|>=|6000',
+      'ffmpeg_output_bitrate|>=|8000',
+    ]);
+  });
+
+  it('emits every rung rather than collapsing them to one', () => {
+    // A family key shared by three generated rungs must not make them
+    // interchangeable -- that would drop two of the three.
+    const merged = mergeTeamarrRules([], ladder);
+    expect(merged).toHaveLength(3);
+  });
+
+  it('leaves a metric Podium has no opinion about alone', () => {
+    const existing = [
+      { type: 'stats_metric', value: 'source_fps|>=|50', priority: 99, mode: 'score', points: 5 },
+    ];
+    const merged = mergeTeamarrRules(existing, ladder);
+    expect(merged.some((rule) => rule.value === 'source_fps|>=|50')).toBe(true);
+    expect(merged).toHaveLength(4);
+  });
+
+  it('leaves a compound condition alone', () => {
+    // "at least 4Mbps AND at least 50fps" is a different opinion from any rung
+    // of a ladder, and replacing it would quietly drop the fps half.
+    const existing = [
+      {
+        type: 'stats_metric',
+        value: 'ffmpeg_output_bitrate|>=|4000;source_fps|>=|50',
+        priority: 99,
+        mode: 'score',
+        points: 25,
+      },
+    ];
+    const merged = mergeTeamarrRules(existing, ladder);
+    expect(merged.some((rule) => rule.value.includes(';'))).toBe(true);
+  });
+
+  it('replaces a liveness rule on the same metric whatever its threshold', () => {
+    const existing = [
+      { type: 'stats_metric', value: 'alive|=|1', priority: 99, mode: 'score', points: 5 },
+    ];
+    const merged = mergeTeamarrRules(existing, ladder);
+    const liveness = merged.filter((rule) => rule.value.startsWith('alive|'));
+    expect(liveness).toHaveLength(1);
+    expect(liveness[0]!.value).toBe('alive|=|0');
   });
 });

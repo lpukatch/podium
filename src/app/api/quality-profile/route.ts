@@ -60,7 +60,7 @@ export function GET(request: Request) {
   let store: Store | null = null;
   try {
     const url = new URL(request.url);
-    const { minSamples, pointsPerMbps } = profileQuery(url.searchParams);
+    const { minSamples, pointsPerMbps, deadPoints, bitratePoints } = profileQuery(url.searchParams);
     store = new Store(loadConfig().dbPath);
     // Settings-resolved, not the raw environment: the scope is edited in the UI
     // and stored, and reading it from `process.env` would report the gate the
@@ -84,6 +84,8 @@ export function GET(request: Request) {
     const body = teamarrRules(profile, {
       minSamples,
       pointsPerMbps,
+      deadPoints,
+      bitratePoints,
       consolidated: miner.passB.consolidated,
     });
     return new NextResponse(JSON.stringify(body, null, 2), {
@@ -113,7 +115,7 @@ export async function POST(request: Request) {
   let store: Store | null = null;
   try {
     const url = new URL(request.url);
-    const { minSamples, pointsPerMbps } = profileQuery(url.searchParams);
+    const { minSamples, pointsPerMbps, deadPoints, bitratePoints } = profileQuery(url.searchParams);
 
     const parsed = (await request.json()) as unknown;
     const container = parsed as { rules?: unknown };
@@ -147,6 +149,8 @@ export async function POST(request: Request) {
     const generated = teamarrRules(profile, {
       minSamples,
       pointsPerMbps,
+      deadPoints,
+      bitratePoints,
       consolidated: miner.passB.consolidated,
     });
     const merged = mergeTeamarrRules(rules, generated.rules);

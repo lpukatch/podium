@@ -41,6 +41,8 @@ describe('query defaults', () => {
     expect(profileQuery(new URLSearchParams())).toEqual({
       minSamples: 20,
       pointsPerMbps: 5,
+      deadPoints: -100,
+      bitratePoints: 8,
     });
   });
 
@@ -48,6 +50,8 @@ describe('query defaults', () => {
     expect(profileQuery(new URLSearchParams('pointsPerMbps=&minSamples='))).toEqual({
       minSamples: 20,
       pointsPerMbps: 5,
+      deadPoints: -100,
+      bitratePoints: 8,
     });
   });
 
@@ -55,11 +59,26 @@ describe('query defaults', () => {
     expect(profileQuery(new URLSearchParams('minSamples=0&pointsPerMbps=99999'))).toEqual({
       minSamples: 1,
       pointsPerMbps: 10_000,
+      deadPoints: -100,
+      bitratePoints: 8,
     });
   });
 
   it('falls back rather than zeroing on nonsense', () => {
     expect(profileQuery(new URLSearchParams('pointsPerMbps=lots')).pointsPerMbps).toBe(5);
+  });
+
+  it('takes an explicit zero as a request to suppress, not as absent', () => {
+    // The one place `0` has to survive the blank-is-absent rule: it is how a
+    // caller turns the liveness rules or the ladder off.
+    const query = profileQuery(new URLSearchParams('deadPoints=0&bitratePoints=0'));
+    expect(query.deadPoints).toBe(0);
+    expect(query.bitratePoints).toBe(0);
+  });
+
+  it('will not let a demotion be written as a promotion', () => {
+    // A positive deadPoints would reward a stream for having measured dead.
+    expect(profileQuery(new URLSearchParams('deadPoints=50')).deadPoints).toBe(0);
   });
 
   it('exports rules for the URL the documentation gives', () => {
