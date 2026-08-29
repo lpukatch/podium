@@ -23,7 +23,7 @@ export interface FieldSpec {
   label: string;
   help: string;
   /** Grouping for the settings page. */
-  section: 'dispatcharr' | 'behaviour' | 'probing' | 'quality';
+  section: 'dispatcharr' | 'behaviour' | 'probing' | 'quality' | 'teamarr';
   /**
    * Stored units per displayed unit.
    *
@@ -223,6 +223,39 @@ export const FIELDS: FieldSpec[] = [
     section: 'behaviour',
     min: 1,
     max: 10_000,
+  },
+  {
+    key: 'PODIUM_TEAMARR_URL',
+    kind: 'string',
+    label: 'Teamarr URL',
+    help: 'Where Teamarr answers, e.g. http://teamarr:9195. Leave empty and nothing is ever pushed — the export stays a file you download. In-cluster service DNS where possible; an Ingress hairpins out and back.',
+    section: 'teamarr',
+  },
+  {
+    key: 'PODIUM_TEAMARR_SYNC',
+    kind: 'boolean',
+    label: 'Push on a schedule',
+    help: 'Off, the Sync button on the Quality page is the only thing that writes to Teamarr. On, the same push also runs on the interval below. Either way the push is refused unless it can be shown not to make the ordering worse — see the Quality page for what the last one did.',
+    section: 'teamarr',
+  },
+  {
+    key: 'PODIUM_TEAMARR_SYNC_MS',
+    kind: 'number',
+    label: 'Push every (hours)',
+    help: 'Only used when the schedule above is on. A rule set is fitted over months and moves by single points between one day and the next, so pushing more often mostly spends writes to say nothing. 24 is daily.',
+    section: 'teamarr',
+    scale: 3_600_000,
+    min: 1,
+    max: 720,
+  },
+  {
+    key: 'PODIUM_TEAMARR_MIN_SAMPLES',
+    kind: 'number',
+    label: 'Fewest samples to push from',
+    help: 'A push is refused until the profile is fitted on at least this many in-scope samples. The guard is for the cleared-database case: a few hours of samples still produce confident-looking rules, and an unattended push would hand Teamarr a whole catalogue ordering derived from one evening.',
+    section: 'teamarr',
+    min: 0,
+    max: 1_000_000,
   },
   {
     key: 'PODIUM_QUALITY_EVENT_ONLY',

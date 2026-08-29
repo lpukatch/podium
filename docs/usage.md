@@ -644,6 +644,51 @@ toward zero until the bottom one is cleared by a black screen.
 `?deadPoints=` and `?bitratePoints=` tune the two; set either to `0` to
 suppress it.
 
+### Pushing straight to Teamarr
+
+Set **Teamarr URL** in Settings — `http://teamarr:9195` on the same cluster —
+and the four-step file shuffle collapses into one button on the Quality page.
+Podium reads the rules Teamarr is running, merges its own in exactly as the file
+route does, and writes the result back.
+
+The reason that is safe to do unattended is not the HTTP call. It is that Podium
+can already answer the question an automatic write has to answer first: *would
+this make the ordering worse?* Every push scores both rule sets — the one
+Teamarr is running and the one about to replace it — against the measurements,
+over the same channels in the same pass, and **refuses on any regression**:
+
+- fewer channels agreeing with the measurements, or
+- any rise in channels led by a dead or black stream.
+
+The second can veto on its own, even where agreement improves. A channel led by
+a dead stream is not a rounding error in a percentage.
+
+Ties pass, because a set that changes nothing measurable still carries fresher
+numbers and an install with a stable catalogue would otherwise never update.
+
+**Preview a push** runs every one of those checks and reports what would happen
+without writing — the only honest way to ask what tonight's scheduled push would
+do.
+
+Two more guards sit in front of the comparison. Nothing is pushed until the
+profile is fitted on at least **Fewest samples to push from** in-scope samples
+(200 by default): a few hours of samples still fit confident-looking rules, and
+this is what stops a database cleared overnight becoming a whole catalogue's
+ordering by morning. And the merged set is validated against the shape Teamarr's
+own importer enforces before it is sent, because a `PUT` Teamarr rejects halfway
+is not a no-op.
+
+**Push on a schedule** runs the same thing on an interval, daily by default. It
+is off until you turn it on, and the button is unaffected either way. Due-ness is
+measured from the last *attempt*, not the last successful push — a refusal is a
+completed decision, and retrying it every 30 seconds would fetch a catalogue each
+time to reach the same conclusion.
+
+What the last push did, refusals included, is on the Quality page. That matters
+more than it sounds: a declined push leaves Teamarr byte-identical, so without
+the record there is no way to tell a scheduled sync that ran and chose not to act
+from one that never ran at all.
+
 ### Which dimension gets the credit
 
 The three factors are estimated broadest first — account, then group, then

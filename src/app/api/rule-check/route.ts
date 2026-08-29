@@ -1,16 +1,9 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
-import { assignmentIsRule, Eligibility } from '@/lib/eligibility';
-import { resolveOrdering } from '@/lib/ordering';
-import { groupPatterns, ordering, policies, snapshot } from '@/lib/server/state';
+import { checkInputs } from '@/lib/rule-check-inputs';
+import { snapshot } from '@/lib/server/state';
 import { Store } from '@/lib/store';
-import {
-  type ChannelInput,
-  checkRules,
-  factsFor,
-  type RuleInput,
-  type StreamFacts,
-} from '@/lib/teamarr';
+import { checkRules, type RuleInput } from '@/lib/teamarr';
 
 export const dynamic = 'force-dynamic';
 
@@ -70,62 +63,10 @@ export async function POST(request: Request) {
     );
 
     const snap = await snapshot();
-    const config = loadConfig();
-    store = new Store(config.dbPath);
-
-    const providerNames = new Map(snap.providers.map((p) => [p.id, p.name]));
-    const groupNames = new Map(snap.groups.map((g) => [g.id, g.name]));
-    const strategy = resolveOrdering(ordering(), providerNames, config.PODIUM_MIN_BITRATE_KBPS);
-    // Audio-only channels rank on audio, so ranking them as video would report
-    // every radio channel as a disagreement with itself.
-    const eligibility = new Eligibility(policies(), undefined, groupPatterns());
-    const streamById = new Map(snap.streams.map((s) => [s.id, s]));
-
-    // Every verdict in one read rather than per channel: a stream on several
-    // channels is one row, and the chunking already lives in the store.
-    const verdicts = store.verdicts([...new Set(snap.channels.flatMap((c) => c.streams))]);
-
-    const channels: ChannelInput[] = [];
-    for (const channel of snap.channels) {
-      if (channel.hidden_from_output) continue;
-      const groupName = channel.groupId === null ? undefined : groupNames.get(channel.groupId);
-      const policy = eligibility.policyFor(channel.groupId, groupName);
-
-      const streams: Array<{ facts: StreamFacts; stepOrder: number }> = [];
-      channel.streams.forEach((streamId, position) => {
-        const stream = streamById.get(streamId);
-        const verdict = verdicts.get(streamId);
-        // Unmeasured streams are left out rather than ranked last. This report
-        // is about where rules disagree with a measurement, and a stream nobody
-        // has probed cannot disagree with anything -- including it would
-        // manufacture findings out of what Podium has said least about.
-        if (!stream || !verdict) return;
-        streams.push({
-          facts: factsFor(
-            {
-              id: streamId,
-              name: stream.name,
-              providerName: providerNames.get(stream.providerId) ?? '',
-              groupName: stream.groupId === null ? '' : (groupNames.get(stream.groupId) ?? ''),
-            },
-            verdict.result,
-            strategy,
-          ),
-          stepOrder: position,
-        });
-      });
-
-      if (streams.length < 2) continue;
-      channels.push({
-        channelId: channel.id,
-        channelName: channel.name,
-        audioOnly: policy.audioOnly,
-        // Teamarr orders what it creates: the groups marked measure-only, or
-        // ranked off their own assignment. Its rules reach nothing else.
-        managed: Boolean(policy.measureOnly) || assignmentIsRule(policy.mode),
-        streams,
-      });
-    }
+    store = new Store(loadConfig().dbPath);
+    // Shared with the Teamarr push, which scores two rule sets over this same
+    // assembly -- see `checkInputs`. Two copies would compare two populations.
+    const { channels, strategy } = checkInputs(snap, store);
 
     // Kept, so every later pass re-runs this without anybody being present.
     // The uploaded set is the only copy Podium can have -- there is no way to

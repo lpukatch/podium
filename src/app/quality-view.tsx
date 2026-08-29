@@ -30,6 +30,107 @@ interface CheckHistory {
   latest: StoredRuleMiss[];
 }
 
+/** How a rule set scored, in the terms two of them are compared on. */
+interface SyncScore {
+  channels: number;
+  agreed: number;
+  deadFirst: number;
+  gapKbps: number;
+}
+
+/** What one push did, including the ones that declined to write. */
+interface SyncOutcome {
+  at: number;
+  pushed: boolean;
+  reason?: string;
+  error?: string;
+  rules?: { existing: number; generated: number; replaced: number; total: number };
+  before?: SyncScore;
+  after?: SyncScore;
+  approximate?: boolean;
+}
+
+/** What `GET /api/teamarr-sync` returns. */
+interface SyncStatus {
+  configured: boolean;
+  scheduled: boolean;
+  everyMs?: number;
+  minSamples?: number;
+  last?: SyncOutcome | null;
+}
+
+/**
+ * What the last push did.
+ *
+ * The refusals matter more than the successes here: a declined push leaves
+ * Teamarr byte-identical, so without this the operator cannot tell a scheduled
+ * sync that ran and chose not to act from one that never ran.
+ */
+function SyncReport({ outcome }: { outcome: SyncOutcome }) {
+  const when = new Date(outcome.at).toLocaleString();
+  const tone = outcome.error
+    ? 'text-[var(--color-bad)]'
+    : outcome.pushed
+      ? 'text-[var(--color-good)]'
+      : 'text-[var(--color-muted)]';
+  const headline = outcome.error
+    ? `Failed — ${outcome.error}`
+    : outcome.pushed
+      ? `Pushed ${outcome.rules?.total ?? 0} rules`
+      : (outcome.reason ?? 'Nothing written');
+  return (
+    <div className="mt-3 rounded-lg border border-[var(--color-line)] p-3 text-sm">
+      <div className={tone}>{headline}</div>
+      <div className={`mt-1 text-xs ${muted}`}>{when}</div>
+      {outcome.rules && (
+        <div className={`mt-2 text-xs ${muted}`}>
+          {outcome.rules.existing} of yours kept · {outcome.rules.generated} from Podium ·{' '}
+          {outcome.rules.replaced} updated in place
+        </div>
+      )}
+      {outcome.before && outcome.after && (
+        <table className="mt-2 text-xs">
+          <thead>
+            <tr className={muted}>
+              <th className="pr-4 text-left font-normal" />
+              <th className="pr-4 text-right font-normal">Now</th>
+              <th className="text-right font-normal">Proposed</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td className="pr-4">Channels agreeing</td>
+              <td className="pr-4 text-right tabular-nums">
+                {outcome.before.agreed}/{outcome.before.channels}
+              </td>
+              <td className="text-right tabular-nums">
+                {outcome.after.agreed}/{outcome.after.channels}
+              </td>
+            </tr>
+            <tr>
+              <td className="pr-4">Led by a dead stream</td>
+              <td className="pr-4 text-right tabular-nums">{outcome.before.deadFirst}</td>
+              <td className="text-right tabular-nums">{outcome.after.deadFirst}</td>
+            </tr>
+            <tr>
+              <td className="pr-4">Bitrate given up</td>
+              <td className="pr-4 text-right tabular-nums">{outcome.before.gapKbps} kbps</td>
+              <td className="text-right tabular-nums">{outcome.after.gapKbps} kbps</td>
+            </tr>
+          </tbody>
+        </table>
+      )}
+      {outcome.approximate && (
+        <p className={`mt-2 max-w-[60ch] text-xs ${muted}`}>
+          Approximate: the set carries rules Podium cannot evaluate — <code>epg_match</code> and{' '}
+          <code>stream_type</code> are Teamarr&apos;s own state. Both columns are scored the same
+          way, so the comparison holds even where the absolute numbers do not.
+        </p>
+      )}
+    </div>
+  );
+}
+
 const card = 'rounded-xl border border-[var(--color-line)] bg-[var(--color-panel)]';
 const btn =
   'rounded-lg border border-[var(--color-line)] bg-[var(--color-panel)] px-4 py-2 text-[15px] hover:border-[var(--color-accent)] disabled:opacity-50';
@@ -117,6 +218,8 @@ export function QualityView() {
   const [ungated, setUngated] = useState(false);
   const [merging, setMerging] = useState(false);
   const [merged, setMerged] = useState('');
+  const [syncing, setSyncing] = useState(false);
+  const [sync, setSync] = useState<SyncStatus | null>(null);
   const [checking, setChecking] = useState(false);
   const [check, setCheck] = useState<RuleCheck | null>(null);
   const [history, setHistory] = useState<CheckHistory | null>(null);
@@ -166,6 +269,49 @@ export function QualityView() {
   const query =
     `minSamples=${minSamples}&pointsPerMbps=${pointsPerMbps}` +
     (ungated ? '&eventOnly=0&include=&exclude=' : '');
+
+  const loadSync = useCallback(async () => {
+    try {
+      const resp = await fetch('/api/teamarr-sync');
+      const body = await resp.json();
+      if (resp.ok && !body.error) setSync(body as SyncStatus);
+    } catch {
+      // The panel is an extra; failing to read it must not take the page down.
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadSync();
+  }, [loadSync]);
+
+  /**
+   * Push straight to Teamarr, or preview what a push would do.
+   *
+   * The preview is the point of having two buttons. A scheduled push runs
+   * unattended and can decline, and "what would tonight do" is not a question
+   * you can answer by doing it.
+   */
+  const pushToTeamarr = async (dryRun: boolean) => {
+    setSyncing(true);
+    setError('');
+    try {
+      const resp = await fetch(`/api/teamarr-sync?${dryRun ? 'dryRun=1' : ''}`, { method: 'POST' });
+      const body = await resp.json();
+      if (!resp.ok || body.error) {
+        setError(String(body.error ?? `HTTP ${resp.status}`));
+        return;
+      }
+      setSync((prev: SyncStatus | null) => ({
+        ...(prev ?? { configured: true, scheduled: false }),
+        last: body,
+      }));
+      if (!dryRun) void loadSync();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   /**
    * Merge Podium's rules into the file Teamarr exported.
@@ -548,9 +694,10 @@ export function QualityView() {
             />
             <span className={`mt-1 block text-xs ${muted}`}>
               Only the ratio against your own rules matters. Raise it if those use larger numbers.
-              No generated rule exceeds ±15 either way: Teamarr already scores a measured stream
-              from the bitrate Podium publishes, and a prior about streams like it should never
-              outrank a reading of the stream itself.
+              No generated <em>prior</em> exceeds ±15 either way — an account, group or name rule is
+              an inference about streams of the same provenance, and it should never outrank a
+              reading of the stream itself. The <code>stats_metric</code> rules sit outside that cap
+              on purpose: they are the reading.
             </span>
           </label>
         </div>
@@ -590,6 +737,49 @@ export function QualityView() {
           A rule Podium also generated is updated in place rather than added twice, so re-importing
           next month refreshes the numbers instead of stacking a second set of points.
         </p>
+
+        <div className="mt-5 border-t border-[var(--color-line)] pt-4">
+          <h4 className="text-sm font-medium">Push straight to Teamarr</h4>
+          {!sync?.configured ? (
+            <p className={`mt-1 max-w-[70ch] text-sm ${muted}`}>
+              Set <strong>Teamarr URL</strong> in Settings and the four steps above collapse into
+              one button: Podium reads the rules Teamarr is running, merges its own in, and writes
+              the result back. Until then the file download is the only route.
+            </p>
+          ) : (
+            <>
+              <p className={`mt-1 max-w-[70ch] text-sm ${muted}`}>
+                Reads what Teamarr is running, merges these rules in and writes the result back —
+                the same merge as the file route, without the file. Before writing, both rule sets
+                are scored against what Podium has measured, and the push is{' '}
+                <strong>refused if the ordering would get worse</strong>: fewer channels agreeing,
+                or any rise in channels led by a dead stream.
+                {sync.scheduled
+                  ? ` It also runs on its own every ${Math.round((sync.everyMs ?? 0) / 3_600_000)}h.`
+                  : ' The schedule is off, so this button is the only thing that writes.'}
+              </p>
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  className={btn}
+                  disabled={syncing}
+                  onClick={() => void pushToTeamarr(true)}
+                >
+                  {syncing ? 'Working…' : 'Preview a push'}
+                </button>
+                <button
+                  type="button"
+                  className={btn}
+                  disabled={syncing}
+                  onClick={() => void pushToTeamarr(false)}
+                >
+                  {syncing ? 'Working…' : 'Sync to Teamarr now'}
+                </button>
+              </div>
+              {sync.last && <SyncReport outcome={sync.last} />}
+            </>
+          )}
+        </div>
       </section>
 
       <section className={`${card} p-5`}>
