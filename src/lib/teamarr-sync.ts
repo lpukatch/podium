@@ -23,8 +23,8 @@ import { buildProfile, inScope, mergeTeamarrRules, scopeFromConfig, teamarrRules
 import { checkInputs } from './rule-check-inputs';
 import { snapshot } from './server/state';
 import type { Store } from './store';
-import { TeamarrClient, type TeamarrRuleRow } from './teamarr-client';
 import { checkRules, type RuleInput } from './teamarr';
+import { TeamarrClient, type TeamarrRuleRow } from './teamarr-client';
 
 /** How a rule set scored, in the terms worth comparing two of them on. */
 export interface SyncScore {
