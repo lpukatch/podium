@@ -1848,6 +1848,26 @@ export class Store {
     })();
   }
 
+  /**
+   * The largest managed-channel population any check has scored since `since`.
+   *
+   * What tells a thin evening apart from a small install. The regression guard
+   * needs to know whether the handful of channels it can see right now is all
+   * this install has ever had -- in which case that is simply its size, and
+   * waiting for more would wait forever -- or the low point of a catalogue that
+   * runs to hundreds when the fixtures are on. Only the peak answers that; a
+   * mean is dragged down by the same quiet hours being asked about.
+   *
+   * Zero when nothing has been checked yet, which reads as "no evidence of a
+   * bigger population" and lets the first push through.
+   */
+  peakManagedChannels(since: number): number {
+    const row = this.sql(
+      'SELECT max(managed_channels) AS peak FROM rule_checks WHERE checked_at >= ?',
+    ).get(since) as { peak: number | null } | undefined;
+    return row?.peak ?? 0;
+  }
+
   /** Recent checks, newest first, with the misses of the newest attached. */
   ruleChecks(limit = 30): { history: StoredRuleCheckRow[]; latest: StoredRuleMiss[] } {
     const history = this.sql(

@@ -168,12 +168,30 @@ word.
 | `PODIUM_TEAMARR_SYNC` | `false` | also push on the interval below. Off, the Quality page's button is the only thing that writes |
 | `PODIUM_TEAMARR_SYNC_MS` | `86400000` | how often the scheduled push runs. A day |
 | `PODIUM_TEAMARR_MIN_SAMPLES` | `200` | in-scope samples the profile must be fitted on before anything is pushed |
+| `PODIUM_TEAMARR_MIN_CHANNELS` | `20` | channels the comparison below must cover before a *scheduled* push is trusted |
 
 Every push — button or scheduled — scores the rules Teamarr is running against
 the set about to replace them, over the same channels from the same verdicts,
 and refuses if the ordering would get worse: fewer channels agreeing with the
 measurements, or any rise in channels led by a dead or black stream. See
 [usage](usage.md#pushing-straight-to-teamarr).
+
+That comparison only covers channels Teamarr orders **that currently carry two
+probed streams**, and an event channel's streams do not outlast the fixture — so
+how much it can see depends on the hour the push happens to fire. One install
+ranged between 0 and 236 channels over a week: a median of 96 in the evening
+against 24 before breakfast. Two channels agreeing identically before and after
+produce the same "no regression" as two hundred, so a push landing in a quiet
+hour is effectively unchecked.
+
+A scheduled push therefore **defers** rather than writing when it cannot see at
+least `PODIUM_TEAMARR_MIN_CHANNELS`, and retries within the hour instead of
+surrendering its turn until tomorrow — which walks the schedule towards a window
+where the answer means something. The bar is the *lower* of that setting and the
+busiest the install has been in the last week, so an install that never has that
+many orderable channels is at its normal size rather than having a quiet hour,
+and is never held back. Pressing the button on the Quality page is unaffected:
+the floor stands in for an operator who is not there.
 
 The globs are comma- or newline-separated and are matched against **both** the
 provider group and the channel group, using the same `*`/`?` syntax as the group

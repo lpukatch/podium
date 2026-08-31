@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { regression, type SyncScore } from './teamarr-sync';
+import { regression, type SyncScore, underpowered } from './teamarr-sync';
 
 const score = (over: Partial<SyncScore> = {}): SyncScore => ({
   channels: 100,
@@ -71,5 +71,47 @@ describe('regression — what refuses an unattended push', () => {
     // by bitrate recovered somewhere else.
     const worse = regression(score(), score({ agreed: 90, deadFirst: 6, gapKbps: 0 }));
     expect(worse).toContain('dead or black');
+  });
+});
+
+describe('underpowered — when the guard cannot see enough to be trusted', () => {
+  // The live numbers this exists for: one install's orderable population ran
+  // between 0 and 236 channels over a week, median 96 in the evening against 24
+  // before breakfast, because an event channel's streams do not outlast the
+  // fixture. `regression` compares two counts and never says how many there
+  // were, so the 2-channel reading and the 236-channel one are indistinguishable
+  // once it has spoken.
+  it('defers a push it could only check on a handful of channels', () => {
+    const thin = underpowered(2, 20, 96);
+    expect(thin).toContain('only be checked on 2');
+    expect(thin).toContain('96 channels');
+  });
+
+  it('allows a push checked on enough channels', () => {
+    expect(underpowered(96, 20, 236)).toBeNull();
+  });
+
+  it('allows a population exactly at the floor', () => {
+    expect(underpowered(20, 20, 200)).toBeNull();
+  });
+
+  it('does not block a small install at its own normal size', () => {
+    // The failure an absolute floor would cause, and the reason the bar is
+    // `min(floor, peak)`. An install that never has twenty orderable channels
+    // is not having a quiet hour -- that is its size. Blocking it would defer
+    // every attempt, retry hourly forever and never push again.
+    expect(underpowered(8, 20, 8)).toBeNull();
+  });
+
+  it('still catches a small install at a genuinely thin moment', () => {
+    // The converse, so the concession above cannot pass everything: an install
+    // whose peak is 8 is still deferred at 1, because 1 < min(20, 8).
+    expect(underpowered(1, 20, 8)).toContain('only be checked on 1');
+  });
+
+  it('lets a first push through, with no history to judge it against', () => {
+    // A peak of zero is the absence of evidence, not evidence of thinness, and
+    // the history that would unblock this only exists once a push has happened.
+    expect(underpowered(0, 20, 0)).toBeNull();
   });
 });

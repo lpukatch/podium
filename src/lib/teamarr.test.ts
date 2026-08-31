@@ -538,3 +538,81 @@ describe('what a pass keeps', () => {
     store.close();
   });
 });
+
+const CHECK_DAY = 86_400_000;
+
+/** A check carrying one miss, so both tables get a row of their own to sweep. */
+const recordCheck = (store: Store, checkedAt: number, managedChannels: number): void =>
+  store.recordRuleCheck({
+    checkedAt,
+    runId: `run-${checkedAt}`,
+    channels: managedChannels,
+    agreed: 0,
+    disagreed: 1,
+    ambiguous: 0,
+    deadFirst: 0,
+    gapKbps: 11,
+    managedChannels,
+    managedAgreed: 0,
+    managedDeadFirst: 0,
+    managedGapKbps: 11,
+    approximate: true,
+    rulesEvaluated: 42,
+    rulesSkipped: 2,
+    misses: [
+      {
+        channelId: 47,
+        channelName: 'EPL01',
+        managed: true,
+        teamarrStream: 1,
+        teamarrName: 'EPL01 SD',
+        teamarrProvider: 'Provider A',
+        teamarrPoints: 20,
+        teamarrBitrate: 2000,
+        teamarrAlive: true,
+        teamarrBlack: false,
+        teamarrMatched: [{ type: 'm3u', value: 'Provider A', points: 20 }],
+        podiumStream: 2,
+        podiumName: 'EPL01 FHD',
+        podiumProvider: 'Provider C',
+        podiumBitrate: 12_000,
+        gapKbps: 11,
+      },
+    ],
+  });
+
+describe('what the guard can look back on', () => {
+  it('reports the busiest population in the window, not the latest', () => {
+    // What tells a thin evening apart from a small install. The push fires at
+    // whatever hour the last one did, so the reading it gets is not
+    // representative of anything -- only the peak says how big this install
+    // actually gets.
+    const store = new Store(':memory:');
+    const now = Date.now();
+    recordCheck(store, now - 2 * CHECK_DAY, 96);
+    recordCheck(store, now - CHECK_DAY, 24);
+    recordCheck(store, now - 60_000, 2);
+
+    expect(store.peakManagedChannels(now - 7 * CHECK_DAY)).toBe(96);
+    store.close();
+  });
+
+  it('forgets a peak that has fallen out of the window', () => {
+    // A catalogue that has genuinely shrunk should stop being judged against
+    // the size it used to be, or it would defer forever waiting for channels
+    // the provider no longer carries.
+    const store = new Store(':memory:');
+    const now = Date.now();
+    recordCheck(store, now - 30 * CHECK_DAY, 236);
+    recordCheck(store, now - 60_000, 8);
+
+    expect(store.peakManagedChannels(now - 7 * CHECK_DAY)).toBe(8);
+    store.close();
+  });
+
+  it('reports no peak before anything has been checked', () => {
+    const store = new Store(':memory:');
+    expect(store.peakManagedChannels(Date.now() - 7 * CHECK_DAY)).toBe(0);
+    store.close();
+  });
+});
