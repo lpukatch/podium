@@ -655,13 +655,30 @@ The reason that is safe to do unattended is not the HTTP call. It is that Podium
 can already answer the question an automatic write has to answer first: *would
 this make the ordering worse?* Every push scores both rule sets — the one
 Teamarr is running and the one about to replace it — against the measurements,
-over the same channels in the same pass, and **refuses on any regression**:
+over the same channels in the same pass, and **refuses on a regression**:
 
-- fewer channels agreeing with the measurements, or
-- any rise in channels led by a dead or black stream.
+- any rise in channels led by a dead or black stream, or
+- fewer channels agreeing with the measurements **and** more measured bitrate
+  given up.
 
-The second can veto on its own, even where agreement improves. A channel led by
+The first can veto on its own, even where agreement improves. A channel led by
 a dead stream is not a rounding error in a percentage.
+
+The second is a conjunction on purpose. Agreement counts channels, and channels
+are not equally wrong: a disagreement is recorded whenever the rules' first pick
+is not the measurements' first pick, *including* where the two streams are
+indistinguishable — which on a real catalogue is the common case, because the
+near-duplicates a channel carries are usually the same broadcast from two
+providers. On a live install, six channels flipped to disagreeing and three of
+them had the rules picking a stream of equal or **higher** bitrate, with two
+more differing by about 10 kbps out of seven megabits. Counting those as a
+regression refuses a push that is, by the only measure a viewer notices,
+slightly better. The bitrate given up supplies the magnitude the count throws
+away, so both have to move the wrong way.
+
+Bitrate alone still gates nothing. A set that gives up more while agreeing at
+least as often has moved streams the measurements do not rank — the operator's
+call, not a refusal.
 
 Ties pass, because a set that changes nothing measurable still carries fresher
 numbers and an install with a stable catalogue would otherwise never update.

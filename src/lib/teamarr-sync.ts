@@ -87,11 +87,36 @@ function scoreOf(summary: {
 /**
  * Whether the proposed set is allowed to replace the current one.
  *
- * Two tests, and they are deliberately not the same one. Agreement is the
- * headline, but a set can agree marginally less while fixing the failure that
- * actually reaches a viewer -- so a rise in `deadFirst` is refused on its own,
- * whatever the agreement did. A channel led by a dead stream is not a rounding
- * error in a percentage; it is a black screen.
+ * Two tests, and they are deliberately not the same one. A rise in `deadFirst`
+ * is refused on its own, whatever the agreement did: a set can agree marginally
+ * less while fixing the failure that actually reaches a viewer, and a channel
+ * led by a dead stream is not a rounding error in a percentage; it is a black
+ * screen.
+ *
+ * The agreement test is the one that needs care, because agreement is a *count
+ * of channels* and channels are not equally wrong. `checkRules` records a
+ * disagreement whenever the rules' first pick is not the measurements' first
+ * pick, including where the two streams are indistinguishable -- and on a real
+ * catalogue that case is not rare but typical, because the near-duplicates a
+ * channel carries are usually the same broadcast from two providers. Measured
+ * on a live install: of six channels a push flipped to disagreeing, three had
+ * the rules picking a stream of *equal or higher* bitrate than the one the
+ * measurements preferred, and two more differed by about 10 kbps out of seven
+ * megabits. The set gave up 220 kbps *less* in total. Counting those six as a
+ * regression refuses a push that is, by the only measure that reaches a viewer,
+ * slightly better.
+ *
+ * So agreement has to fall *and* the ordering has to give up more measured
+ * bitrate for it to count. `gapKbps` supplies the magnitude the count throws
+ * away: it sums `max(0, podium - teamarr)` over the disagreements, so a channel
+ * where the rules pick something no worse contributes exactly nothing. Both
+ * numbers come from one pass over one population -- see `checkInputs` -- so the
+ * delta is a property of the rules and not of how many streams got measured
+ * last night.
+ *
+ * Note what this does *not* do: gap alone still gates nothing. A set that gives
+ * up more bitrate while agreeing at least as often has moved streams the
+ * measurements do not rank, and that is the operator's call, not a refusal.
  *
  * Ties pass. A push that changes nothing measurable still carries fresher
  * numbers, and refusing it would mean an install whose catalogue is stable
@@ -101,8 +126,12 @@ export function regression(before: SyncScore, after: SyncScore): string | null {
   if (after.deadFirst > before.deadFirst) {
     return `it would put a dead or black stream first on ${after.deadFirst} channels, up from ${before.deadFirst}`;
   }
-  if (after.agreed < before.agreed) {
-    return `it would agree with the measurements on ${after.agreed} of ${after.channels} channels, down from ${before.agreed}`;
+  if (after.agreed < before.agreed && after.gapKbps > before.gapKbps) {
+    return (
+      `it would agree with the measurements on ${after.agreed} of ${after.channels} ` +
+      `channels, down from ${before.agreed}, and give up ` +
+      `${after.gapKbps - before.gapKbps} kbps more`
+    );
   }
   return null;
 }
