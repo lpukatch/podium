@@ -56,6 +56,10 @@ interface SyncStatus {
   scheduled: boolean;
   everyMs?: number;
   minSamples?: number;
+  /** When a push was last *attempted* — successes, refusals and failures alike. */
+  lastAttemptAt?: number | null;
+  /** When the schedule fires next, or null when nothing is scheduled. */
+  nextAt?: number | null;
   last?: SyncOutcome | null;
 }
 
@@ -194,6 +198,21 @@ function ago(at: number): string {
   if (hours < 1) return 'under an hour ago';
   if (hours < 48) return `${Math.round(hours)}h ago`;
   return `${Math.round(hours / 24)}d ago`;
+}
+
+/**
+ * The same, forwards.
+ *
+ * A time already past reads as "due now" rather than as a negative interval:
+ * the worker checks on its heartbeat, so a run a minute overdue is not late,
+ * it is about to happen.
+ */
+function until(at: number): string {
+  const hours = (at - Date.now()) / 3_600_000;
+  if (hours <= 0) return 'due now';
+  if (hours < 1) return 'in under an hour';
+  if (hours < 48) return `in ${Math.round(hours)}h`;
+  return `in ${Math.round(hours / 24)}d`;
 }
 
 /**
@@ -752,12 +771,21 @@ export function QualityView() {
                 Reads what Teamarr is running, merges these rules in and writes the result back —
                 the same merge as the file route, without the file. Before writing, both rule sets
                 are scored against what Podium has measured, and the push is{' '}
-                <strong>refused if the ordering would get worse</strong>: fewer channels agreeing,
-                or any rise in channels led by a dead stream.
+                <strong>refused if the ordering would get worse</strong>: any rise in channels led
+                by a dead stream, or fewer channels agreeing <em>and</em> more measured bitrate
+                given up.
                 {sync.scheduled
                   ? ` It also runs on its own every ${Math.round((sync.everyMs ?? 0) / 3_600_000)}h.`
                   : ' The schedule is off, so this button is the only thing that writes.'}
               </p>
+              <div className={`mt-2 text-xs ${muted}`}>
+                {sync.lastAttemptAt
+                  ? `Last sync ${ago(sync.lastAttemptAt)}`
+                  : 'No push has run yet'}
+                {sync.scheduled && sync.nextAt
+                  ? ` · next ${until(sync.nextAt)}`
+                  : ' · not scheduled'}
+              </div>
               <div className="mt-3 flex flex-wrap items-center gap-3">
                 <button
                   type="button"

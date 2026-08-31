@@ -685,7 +685,26 @@ numbers and an install with a stable catalogue would otherwise never update.
 
 **Preview a push** runs every one of those checks and reports what would happen
 without writing — the only honest way to ask what tonight's scheduled push would
-do.
+do. The panel also carries a **Last sync … · next …** line, so a schedule that
+has quietly stopped running is visible without reading a log.
+
+**Test connection**, in Settings beside the Teamarr URL, answers the question a
+push can only answer by attempting one. It reports the rule count and the type
+breakdown rather than a bare "connected", because anything can answer 200 and
+what matters is whether *Teamarr's* rules API did — and where Podium has pushed
+before, it compares what is live against what it last sent:
+
+- *Exactly what Podium pushed on …* — the write landed and is still there.
+- *Podium has not pushed here yet* — the normal state before the first push.
+- *2 rule(s) Podium did not push, 1 rule(s) Podium pushed are gone* — somebody
+  has edited the rules in Teamarr since. Not an error, but worth knowing before
+  pushing again, since the merge will fold those edits in.
+
+A rule's points are part of its identity for that comparison, so a rule retuned
+by hand reads as one rule gone and one added rather than as no change. A set
+containing the same rules in a different order is reported as exactly that: for
+scoring rules order is cosmetic, but the first *priority* rule a stream matches
+sets its band, so a reordered set is not provably the same ordering.
 
 Two more guards sit in front of the comparison. Nothing is pushed until the
 profile is fitted on at least **Fewest samples to push from** in-scope samples
