@@ -181,6 +181,33 @@ export const configSchema = z.object({
    * unrecorded and leaves them out until either new probes accumulate or
    * PODIUM_QUALITY_INCLUDE_GROUPS names the groups they came from.
    */
+  /**
+   * Where Teamarr lives, for the rules push. Empty disables it entirely.
+   *
+   * In-cluster service DNS for the same reason as Dispatcharr's: an Ingress
+   * hairpins out and back for a call that never leaves the cluster.
+   */
+  PODIUM_TEAMARR_URL: z.string().default(''),
+  PODIUM_TEAMARR_SYNC: bool(false),
+  /**
+   * How often the scheduled push runs. Daily by default.
+   *
+   * A rule set is a slow-moving thing -- it is fitted over months of samples,
+   * and the numbers move by single points between one day and the next. Pushing
+   * more often would spend Teamarr writes to say nothing.
+   */
+  PODIUM_TEAMARR_SYNC_MS: num(86_400_000),
+  /**
+   * In-scope samples the profile must be built from before anything is pushed.
+   *
+   * The guard exists because of a real accident: a database cleared overnight
+   * leaves an install fitting confident-looking rules on a few hours of
+   * samples, and an unattended push would then hand Teamarr a whole catalogue's
+   * ordering derived from one evening. A refusal is recoverable; a bad push
+   * that nobody watched happen is not.
+   */
+  PODIUM_TEAMARR_MIN_SAMPLES: num(200),
+
   PODIUM_QUALITY_EVENT_ONLY: bool(true),
   /**
    * Globs that put a group in scope whatever its policy says, comma- or

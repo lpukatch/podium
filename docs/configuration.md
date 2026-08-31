@@ -160,6 +160,21 @@ word.
 | `PODIUM_QUALITY_INCLUDE_GROUPS` | *(empty)* | globs — `* SPORT*, *PPV*` — that admit a group whatever its policy says |
 | `PODIUM_QUALITY_EXCLUDE_GROUPS` | *(empty)* | globs — `*VOD*, *MOVIE*, *24/7*` — that drop a sample however it was admitted |
 
+## Pushing rules to Teamarr
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `PODIUM_TEAMARR_URL` | *(empty)* | where Teamarr answers, e.g. `http://teamarr:9195`. Empty disables the push entirely — the export stays a file you download |
+| `PODIUM_TEAMARR_SYNC` | `false` | also push on the interval below. Off, the Quality page's button is the only thing that writes |
+| `PODIUM_TEAMARR_SYNC_MS` | `86400000` | how often the scheduled push runs. A day |
+| `PODIUM_TEAMARR_MIN_SAMPLES` | `200` | in-scope samples the profile must be fitted on before anything is pushed |
+
+Every push — button or scheduled — scores the rules Teamarr is running against
+the set about to replace them, over the same channels from the same verdicts,
+and refuses if the ordering would get worse: fewer channels agreeing with the
+measurements, or any rise in channels led by a dead or black stream. See
+[usage](usage.md#pushing-straight-to-teamarr).
+
 The globs are comma- or newline-separated and are matched against **both** the
 provider group and the channel group, using the same `*`/`?` syntax as the group
 policy patterns.

@@ -7,7 +7,7 @@ interface Field {
   kind: 'string' | 'secret' | 'boolean' | 'number';
   label: string;
   help: string;
-  section: 'dispatcharr' | 'behaviour' | 'probing' | 'quality';
+  section: 'dispatcharr' | 'behaviour' | 'probing' | 'quality' | 'teamarr';
   value: string;
   isSet: boolean;
   source: 'stored' | 'environment' | 'default';
@@ -28,6 +28,12 @@ const SECTIONS: Array<{ id: Field['section']; title: string; blurb: string }> = 
     blurb: 'What Podium is allowed to change, and how hard it works.',
   },
   { id: 'probing', title: 'Probing', blurb: 'How each stream is judged.' },
+  {
+    id: 'teamarr',
+    title: 'Teamarr',
+    blurb:
+      'Pushing the fitted rules to Teamarr, instead of downloading a file and importing it by hand. Every push is refused unless it can be shown not to make the ordering worse.',
+  },
   {
     id: 'quality',
     title: 'Quality priors',

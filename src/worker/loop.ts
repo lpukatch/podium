@@ -18,6 +18,7 @@ import { RulesSource } from '../lib/rules-source';
 import { Runner, type RunSummary } from '../lib/runner';
 import { resolveEnv } from '../lib/settings';
 import { Store } from '../lib/store';
+import { syncToTeamarr } from '../lib/teamarr-sync';
 
 export type Log = (message: string) => void;
 
@@ -185,6 +186,10 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
   let running = false;
   let wakeRequested = false;
   let lastMark = 0;
+  // Guards re-entry the way `running` does for a pass: the push fetches a
+  // catalogue and scores it twice, so two at once would race each other into
+  // Teamarr's whole-set replacement.
+  let syncing = false;
 
   /**
    * Read live, so changing the check interval in the UI takes effect on the
@@ -250,6 +255,67 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
       log(idle ? `nothing due; sleeping until ${clock(nextAt)}` : `next pass at ${clock(nextAt)}`);
       timer = setTimeout(() => void tick(), waitMs);
     }
+  };
+
+  /**
+   * Push the fitted rules to Teamarr when one is due.
+   *
+   * Rides the heartbeat rather than a timer of its own, for the same reason
+   * `checkWake` does: the interval is read live, so turning the schedule on in
+   * the UI takes effect within 30 seconds instead of on the next restart.
+   *
+   * Due-ness is measured from the last *attempt*, not the last successful
+   * push. A refusal is a completed decision -- the guard did its job -- and
+   * retrying it every 30 seconds would fetch a catalogue each time to reach
+   * the same conclusion.
+   */
+  const checkSync = (): void => {
+    if (stopping || !holding || syncing) return;
+    const live = currentConfig();
+    if (!live.PODIUM_TEAMARR_SYNC || !live.PODIUM_TEAMARR_URL.trim()) return;
+    let lastAt = 0;
+    try {
+      lastAt = store.teamarrSync()?.ranAt ?? 0;
+    } catch {
+      // An unreadable row must not stop the loop; the next beat asks again.
+      return;
+    }
+    if (Date.now() - lastAt < live.PODIUM_TEAMARR_SYNC_MS) return;
+
+    syncing = true;
+    void (async () => {
+      try {
+        const outcome = await syncToTeamarr(store, live);
+        store.saveTeamarrSync(outcome);
+        if (outcome.pushed) {
+          log(
+            `pushed ${outcome.rules?.total ?? 0} rules to Teamarr ` +
+              `(${outcome.rules?.replaced ?? 0} updated in place); agreement ` +
+              `${outcome.before?.agreed}/${outcome.before?.channels} -> ` +
+              `${outcome.after?.agreed}/${outcome.after?.channels}`,
+          );
+        } else {
+          log(
+            `Teamarr push did not write: ${outcome.error ?? outcome.reason ?? 'no reason given'}`,
+          );
+        }
+      } catch (error) {
+        // Recorded as well as logged, so a push that has been failing all week
+        // is visible on the Quality page rather than only in a rotated log.
+        try {
+          store.saveTeamarrSync({
+            at: Date.now(),
+            pushed: false,
+            error: String(error).slice(0, 300),
+          });
+        } catch {
+          // Nothing further to do; the next beat retries the whole thing.
+        }
+        log(`Teamarr push failed: ${String(error)}`);
+      } finally {
+        syncing = false;
+      }
+    })();
   };
 
   /**
@@ -321,6 +387,7 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
     beat = setInterval(() => {
       store.heartbeat(owner);
       checkWake();
+      checkSync();
     }, 30_000);
     beat.unref?.();
 

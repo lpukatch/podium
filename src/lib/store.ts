@@ -309,6 +309,18 @@ CREATE TABLE IF NOT EXISTS teamarr_rules (
     uploaded_at  INTEGER NOT NULL
 );
 
+-- What the last push to Teamarr did, including the ones that declined to write.
+--
+-- One row, overwritten. A refusal is the interesting case and the one with no
+-- other trace: a push that declines leaves Teamarr byte-identical, so without
+-- this the only evidence a scheduled sync ran at all -- and chose not to act --
+-- is a log line that has long since rotated.
+CREATE TABLE IF NOT EXISTS teamarr_sync (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    ran_at      INTEGER NOT NULL,
+    outcome     TEXT    NOT NULL
+);
+
 -- One row per *distinct* check result, not per pass that ran one.
 --
 -- A pass runs the check whenever a rule set has been uploaded, which on a
@@ -1710,6 +1722,27 @@ export class Store {
       `INSERT INTO teamarr_rules (id, rules, uploaded_at) VALUES (1, ?, ?)
          ON CONFLICT(id) DO UPDATE SET rules = excluded.rules, uploaded_at = excluded.uploaded_at`,
     ).run(JSON.stringify(rules), Date.now());
+  }
+
+  /** Record the last sync attempt, pushed or not. */
+  saveTeamarrSync(outcome: unknown): void {
+    this.sql(
+      `INSERT INTO teamarr_sync (id, ran_at, outcome) VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET ran_at = excluded.ran_at, outcome = excluded.outcome`,
+    ).run(Date.now(), JSON.stringify(outcome));
+  }
+
+  /** The last sync attempt, or null if none has run. */
+  teamarrSync(): { ranAt: number; outcome: unknown } | null {
+    const row = this.sql('SELECT ran_at, outcome FROM teamarr_sync WHERE id = 1').get() as
+      | { ran_at: number; outcome: string }
+      | undefined;
+    if (!row) return null;
+    try {
+      return { ranAt: row.ran_at, outcome: JSON.parse(row.outcome) as unknown };
+    } catch {
+      return null;
+    }
   }
 
   teamarrRules(): { rules: unknown[]; uploadedAt: number } | null {
