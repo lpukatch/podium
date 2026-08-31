@@ -103,7 +103,7 @@ function SyncReport({ outcome }: { outcome: SyncOutcome }) {
           </thead>
           <tbody>
             <tr>
-              <td className="pr-4">Channels agreeing</td>
+              <td className="pr-4">Agreed</td>
               <td className="pr-4 text-right tabular-nums">
                 {outcome.before.agreed}/{outcome.before.channels}
               </td>
@@ -112,12 +112,12 @@ function SyncReport({ outcome }: { outcome: SyncOutcome }) {
               </td>
             </tr>
             <tr>
-              <td className="pr-4">Led by a dead stream</td>
+              <td className="pr-4">Dead first</td>
               <td className="pr-4 text-right tabular-nums">{outcome.before.deadFirst}</td>
               <td className="text-right tabular-nums">{outcome.after.deadFirst}</td>
             </tr>
             <tr>
-              <td className="pr-4">Bitrate given up</td>
+              <td className="pr-4">Bitrate lost</td>
               <td className="pr-4 text-right tabular-nums">{outcome.before.gapKbps} kbps</td>
               <td className="text-right tabular-nums">{outcome.after.gapKbps} kbps</td>
             </tr>
@@ -126,9 +126,9 @@ function SyncReport({ outcome }: { outcome: SyncOutcome }) {
       )}
       {outcome.approximate && (
         <p className={`mt-2 max-w-[60ch] text-xs ${muted}`}>
-          Approximate: the set carries rules Podium cannot evaluate — <code>epg_match</code> and{' '}
-          <code>stream_type</code> are Teamarr&apos;s own state. Both columns are scored the same
-          way, so the comparison holds even where the absolute numbers do not.
+          Approximate: <code>epg_match</code> and <code>stream_type</code> rules read Teamarr&apos;s
+          own state and cannot be scored here. Both columns are scored the same way, so the
+          comparison still holds.
         </p>
       )}
     </div>
@@ -439,9 +439,8 @@ export function QualityView() {
       <div className={`m-5 p-5 ${card}`}>
         <h2 className="text-lg">Nothing measured yet</h2>
         <p className={`mt-2 text-sm ${muted}`}>
-          Podium records what it learns about a provider each time it probes, so this fills in as
-          passes run — no extra probing, and it accumulates in dry-run too. A few days of ordinary
-          passes is usually enough for the first buckets to clear the sample floor.
+          This fills in as passes run, including dry-run passes. No extra probing is needed. A few
+          days is usually enough for the first buckets to clear the sample floor.
         </p>
       </div>
     );
@@ -459,10 +458,10 @@ export function QualityView() {
           them. {describeScope(profile.scope)}{' '}
           {profile.scope.unrecorded > 0 && (
             <>
-              {profile.scope.unrecorded.toLocaleString()} of them were probed before Podium recorded
-              which channel a probe was for, so their policy cannot be read — name their groups
-              under <strong>Always learn from groups matching</strong> in Settings to use them, or
-              leave them and let new passes accumulate.
+              {profile.scope.unrecorded.toLocaleString()} were probed before Podium recorded which
+              channel a probe was for, so their policy cannot be read. Name their groups under{' '}
+              <strong>Always learn from groups matching</strong> in Settings to use them, or let new
+              passes accumulate.
             </>
           )}
         </p>
@@ -502,9 +501,8 @@ export function QualityView() {
           </span>
         </div>
         <p className={`mt-2 max-w-[70ch] text-sm ${muted}`}>
-          What a stream from each provenance is worth, measured rather than claimed. Effects are
-          fitted against each other, so a group is compared against other groups at the same tier on
-          the same account rather than against the install as a whole.
+          What a stream is worth based on where it came from. Groups are compared against other
+          groups at the same tier on the same account, not against the whole install.
         </p>
 
         {profile && (
@@ -516,10 +514,9 @@ export function QualityView() {
                 {drops.length > 0 && (
                   <>
                     {(profile.recordedSamples - profile.totalSamples).toLocaleString()} of{' '}
-                    {profile.recordedSamples.toLocaleString()} samples sit outside it —{' '}
-                    {drops.map((d) => `${d.count.toLocaleString()} ${d.label}`).join(', ')}. They
-                    are kept, not deleted: widening the scope in Settings brings them back with no
-                    waiting.
+                    {profile.recordedSamples.toLocaleString()} samples sit outside it (
+                    {drops.map((d) => `${d.count.toLocaleString()} ${d.label}`).join(', ')}). They
+                    are kept, so widening the scope in Settings brings them straight back.
                   </>
                 )}
               </p>
@@ -540,9 +537,8 @@ export function QualityView() {
       <section className={`${card} p-5`}>
         <h3 className="text-base">Groups</h3>
         <p className={`mt-1 max-w-[70ch] text-sm ${muted}`}>
-          The strongest signal Podium has — a group is how a provider organises what it sells, and a
-          sports package and a VOD dump are not the same product. Exported as Teamarr Group rules,
-          matched on the name exactly as the provider writes it.
+          The strongest signal Podium has. Exported as Teamarr Group rules, matched on the group
+          name exactly as the provider writes it.
         </p>
         <EffectTable
           effects={profile?.groups ?? []}
@@ -565,10 +561,9 @@ export function QualityView() {
         <section className={`${card} p-5`}>
           <h3 className="text-base">Quality tiers</h3>
           <p className={`mt-1 text-sm ${muted}`}>
-            From the token in the stream&apos;s own name. Exported as regex rules; streams naming no
-            tier match none of them, so they are the reference level and every other tier is quoted
-            as its distance from them. A tier fitted almost entirely from one account is withheld
-            from the export — see below for whether its labels are worth anything.
+            Read from the stream&apos;s name, exported as regex rules. Unlabelled streams match no
+            rule, so they are the reference; other tiers show their distance from it. A tier drawn
+            almost entirely from one account is not exported.
           </p>
           <EffectTable
             effects={profile?.tiers ?? []}
@@ -581,26 +576,23 @@ export function QualityView() {
       <section className={`${card} p-5`}>
         <h3 className="text-base">Mining the names</h3>
         <p className={`mt-1 max-w-[80ch] text-sm ${muted}`}>
-          The account and group rules are wholesale — a stream either came from there or it did not.
-          The stream&apos;s own name is the only per-stream lever, and rather than guess at a
-          vocabulary Podium measures which tokens actually predict anything. Tokens carried by whole
-          groups are exported as regex rules that <em>replace</em> those groups&apos; rules; tokens
-          that vary within a bucket are reported here and not yet exported, because telling a
-          durable one from this week&apos;s fixture takes a week of samples.
+          Account and group rules cover every stream from a source. A stream&apos;s name is the only
+          per-stream signal, so Podium measures which name tokens actually predict bitrate. Tokens
+          that hold across a whole group are exported as regex rules that <em>replace</em> that
+          group&apos;s rule; tokens that vary within a group are listed here and need about a week
+          of samples first.
         </p>
         <MinerPanel report={profile?.miner} />
       </section>
 
       <section className={`${card} p-5`}>
-        <h3 className="text-base">Do the labels mean anything?</h3>
+        <h3 className="text-base">Label accuracy</h3>
         <p className={`mt-1 max-w-[80ch] text-sm ${muted}`}>
-          Podium measures the picture it receives, so it can hold each account&apos;s own resolution
-          claim up against it. This is the check that says whether a tier rule is worth exporting at
-          all: a regex scoring streams on <code>1080p</code> is only useful where the token is
-          telling the truth. <span className="whitespace-nowrap">Labels</span> is how often this
-          account names a tier; <span className="whitespace-nowrap">Correct</span> is how often the
-          name matched what was measured. An account that never labels cannot be wrong, and gets no
-          row.
+          Podium measures the picture each account actually delivers, so it can check the resolution
+          each one claims. <span className="whitespace-nowrap">Labels</span> is how often an account
+          names a tier; <span className="whitespace-nowrap">Correct</span> is how often that name
+          matched the measurement. Low accuracy means a tier regex is not worth exporting. Accounts
+          that never label get no row.
         </p>
         <LabelAccuracyTable rows={profile?.labelAccuracy ?? []} />
       </section>
@@ -678,10 +670,9 @@ export function QualityView() {
           </table>
         </div>
         <p className={`mt-3 text-sm ${muted}`}>
-          Bitrates are measured ones only — a container&apos;s declared figure, a dead stream&apos;s
-          zero and a slate&apos;s trickle all describe something other than what a viewer receives.
-          How often those happen is the alive and black columns. Faded rows are below the sample
-          floor and contribute nothing.
+          Only measured bitrates count — declared figures, dead streams and slates are excluded. The
+          Alive and Black columns say how often those happen. Faded rows are below the sample floor
+          and contribute nothing.
         </p>
       </section>
 
@@ -698,8 +689,7 @@ export function QualityView() {
               className={`mt-1 ${input}`}
             />
             <span className={`mt-1 block text-xs ${muted}`}>
-              Below this a bucket is measured but contributes nothing. A reading off four streams is
-              noise with a number attached.
+              Buckets below this are still measured but do not contribute to any rule.
             </span>
           </label>
           <label className="block">
@@ -712,11 +702,10 @@ export function QualityView() {
               className={`mt-1 ${input}`}
             />
             <span className={`mt-1 block text-xs ${muted}`}>
-              Only the ratio against your own rules matters. Raise it if those use larger numbers.
-              No generated <em>prior</em> exceeds ±15 either way — an account, group or name rule is
-              an inference about streams of the same provenance, and it should never outrank a
-              reading of the stream itself. The <code>stats_metric</code> rules sit outside that cap
-              on purpose: they are the reading.
+              Only the ratio against your own rules matters; raise it if yours use larger numbers.
+              Generated account, group and name rules are capped at ±15 so they cannot outrank a
+              direct measurement of the stream. <code>stats_metric</code> rules are exempt — they
+              are the measurement.
             </span>
           </label>
         </div>
@@ -744,38 +733,34 @@ export function QualityView() {
 
         {ungated && (
           <p className="mt-3 max-w-[70ch] text-sm text-[var(--color-bad)]">
-            The scope is switched off, so these rules would be fitted on every probe this install
-            has taken — VOD and filler included — and evaluated on fixtures. Turn it back on above
-            before exporting unless you mean that.
+            The scope is off, so these rules would be fitted on every probe this install has taken,
+            VOD and filler included. Turn it back on above before exporting unless you mean that.
           </p>
         )}
 
         <p className={`mt-3 max-w-[70ch] text-sm ${muted}`}>
-          Teamarr&apos;s import <strong>replaces</strong> its whole rule set. Export your rules from
-          Teamarr and merge them here first, or the import will delete everything you wrote by hand.
-          A rule Podium also generated is updated in place rather than added twice, so re-importing
-          next month refreshes the numbers instead of stacking a second set of points.
+          Teamarr&apos;s import <strong>replaces</strong> its entire rule set. Export your rules
+          from Teamarr and merge them here first, or your hand-written rules will be deleted. Rules
+          Podium generated before are updated in place, so re-importing refreshes the numbers rather
+          than stacking a second set.
         </p>
 
         <div className="mt-5 border-t border-[var(--color-line)] pt-4">
           <h4 className="text-sm font-medium">Push straight to Teamarr</h4>
           {!sync?.configured ? (
             <p className={`mt-1 max-w-[70ch] text-sm ${muted}`}>
-              Set <strong>Teamarr URL</strong> in Settings and the four steps above collapse into
-              one button: Podium reads the rules Teamarr is running, merges its own in, and writes
-              the result back. Until then the file download is the only route.
+              Set <strong>Teamarr URL</strong> in Settings to replace the file steps above with one
+              button: Podium reads the rules Teamarr is running, merges its own in, and writes the
+              result back.
             </p>
           ) : (
             <>
               <p className={`mt-1 max-w-[70ch] text-sm ${muted}`}>
-                Reads what Teamarr is running, merges these rules in and writes the result back —
-                the same merge as the file route, without the file. Before writing, both rule sets
-                are scored against what Podium has measured, and the push is{' '}
-                <strong>refused if the ordering would get worse</strong>: any rise in channels led
-                by a dead stream, or fewer channels agreeing <em>and</em> more measured bitrate
-                given up.
+                The same merge as the file route, without the file. Both rule sets are scored first
+                and the push is <strong>refused if the ordering would get worse</strong>: any rise
+                in Dead first, or fewer Agreed <em>and</em> more Bitrate lost.
                 {sync.scheduled
-                  ? ` It also runs on its own every ${Math.round((sync.everyMs ?? 0) / 3_600_000)}h.`
+                  ? ` Also runs on its own every ${Math.round((sync.everyMs ?? 0) / 3_600_000)}h.`
                   : ' The schedule is off, so this button is the only thing that writes.'}
               </p>
               <div className={`mt-2 text-xs ${muted}`}>
@@ -811,18 +796,13 @@ export function QualityView() {
       </section>
 
       <section className={`${card} p-5`}>
-        <h3 className="text-base">Check the rules you are running</h3>
+        <h3 className="text-base">Score your Teamarr rules</h3>
         <p className={`mt-1 max-w-[75ch] text-sm ${muted}`}>
-          A scoring rule cannot be checked from inside Teamarr: a +20 that matches nothing, a regex
-          pinned to the wrong end of a name and a rule that works all look the same in the file, and
-          the only visible consequence is which stream somebody gets weeks later. Upload your rules
-          and Podium scores them against every channel <em>Teamarr orders</em> that it has measured
-          — the stream your rules put first, beside the stream the measurements say should be first.
-          Channels Teamarr does not order are left out: its rules are never evaluated on them, so a
-          disagreement there judges the rules on a population they will never see. Nothing is
-          written and no stream is probed, so run it after every edit. The set you upload is kept
-          and re-checked by every later pass — which is the only way a fixture channel is ever
-          checked, since its streams are gone by the next morning.
+          Upload the rules Teamarr is running and Podium scores them against every channel it has
+          measured that Teamarr orders — the stream your rules put first, beside the stream the
+          measurements say should be first. Nothing is written and nothing is probed, so run it
+          after every edit. The set is kept and re-scored on every later pass, which is the only way
+          a fixture channel gets checked at all.
         </p>
 
         <div className="mt-4 flex flex-wrap items-center gap-3">
@@ -843,22 +823,21 @@ export function QualityView() {
           {check && (
             <span className="text-sm">
               <strong>{check.summary.managedAgreed}</strong> of {check.summary.managedChannels}{' '}
-              Teamarr-managed channels agree
+              Teamarr-ordered channels agreed
               {check.summary.managedChannels - check.summary.managedAgreed > 0 && (
                 <span className="text-[var(--color-bad)]">
                   {' '}
-                  · {check.summary.managedChannels - check.summary.managedAgreed} pick a worse
-                  stream
+                  · {check.summary.managedChannels - check.summary.managedAgreed} picked worse
                 </span>
               )}
               {check.summary.managedDeadFirst > 0 && (
                 <span className="text-[var(--color-bad)]">
                   {' '}
-                  · {check.summary.managedDeadFirst} pick a dead stream over a working one
+                  · {check.summary.managedDeadFirst} dead first
                 </span>
               )}
               {check.summary.ambiguous > 0 && (
-                <span className={muted}> · {check.summary.ambiguous} decided by a tie</span>
+                <span className={muted}> · {check.summary.ambiguous} tied</span>
               )}
             </span>
           )}
@@ -866,8 +845,7 @@ export function QualityView() {
 
         {check && check.summary.managedGapKbps > 0 && (
           <p className={`mt-3 max-w-[75ch] text-sm ${muted}`}>
-            Across these disagreements, {rate(check.summary.managedGapKbps)} of measured bitrate
-            goes to the stream that is not chosen.
+            Bitrate lost across these disagreements: {rate(check.summary.managedGapKbps)}.
           </p>
         )}
 
@@ -875,9 +853,7 @@ export function QualityView() {
           <p className={`mt-3 max-w-[75ch] text-sm ${muted}`}>
             {check.rules.evaluated} rules scored; {check.rules.skipped.length} could not be:{' '}
             {check.rules.skipped.map((rule) => `${rule.type} (${rule.reason})`).join('; ')}. Those
-            read Teamarr&apos;s own state, so this comparison is approximate — a rule that applies
-            to every stream on a channel cancels out and changes no ordering, but that cannot be
-            shown from here.
+            read Teamarr&apos;s own state, so this comparison is approximate.
           </p>
         )}
 
@@ -887,10 +863,10 @@ export function QualityView() {
               <thead className={`text-left ${muted}`}>
                 <tr className="border-b border-[var(--color-line)]">
                   <th className="py-2 pr-3 font-normal">Channel</th>
-                  <th className="py-2 pr-3 font-normal">Your rules pick</th>
+                  <th className="py-2 pr-3 font-normal">Your rules picked</th>
                   <th className="py-2 pr-3 text-right font-normal">Scored</th>
-                  <th className="py-2 pr-3 font-normal">Measurement picks</th>
-                  <th className="py-2 text-right font-normal">Given up</th>
+                  <th className="py-2 pr-3 font-normal">Measurement picked</th>
+                  <th className="py-2 text-right font-normal">Bitrate lost</th>
                 </tr>
               </thead>
               <tbody>
@@ -950,16 +926,15 @@ export function QualityView() {
         {history && history.rulesUploadedAt !== null && (
           <div className="mt-5 border-t border-[var(--color-line)] pt-4">
             <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
-              <h4 className="text-sm font-semibold">Checked automatically each pass</h4>
+              <h4 className="text-sm font-semibold">Re-scored each pass</h4>
               <span className={`text-sm ${muted}`}>
                 {history.ruleCount} rules, uploaded {ago(history.rulesUploadedAt)}
               </span>
             </div>
             {history.history.length === 0 ? (
               <p className={`mt-2 max-w-[75ch] text-sm ${muted}`}>
-                No pass has run since these rules were uploaded. The next one will check them while
-                its verdicts are fresh, which is the only moment a fixture channel can be checked at
-                all — by tomorrow its streams are gone and there is nothing left to compare.
+                No pass has run since these rules were uploaded. The next one will score them while
+                its verdicts are fresh.
               </p>
             ) : (
               <>
@@ -968,11 +943,11 @@ export function QualityView() {
                     <thead className={`text-left ${muted}`}>
                       <tr className="border-b border-[var(--color-line)]">
                         <th className="py-2 pr-3 font-normal">Found</th>
-                        <th className="py-2 pr-3 text-right font-normal">Managed</th>
+                        <th className="py-2 pr-3 text-right font-normal">Channels</th>
                         <th className="py-2 pr-3 text-right font-normal">Agreed</th>
                         <th className="py-2 pr-3 text-right font-normal">Picked worse</th>
-                        <th className="py-2 pr-3 text-right font-normal">Dead over live</th>
-                        <th className="py-2 text-right font-normal">Given up</th>
+                        <th className="py-2 pr-3 text-right font-normal">Dead first</th>
+                        <th className="py-2 text-right font-normal">Bitrate lost</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1022,18 +997,17 @@ export function QualityView() {
                 {history.latest.length > 0 && (
                   <>
                     <p className={`mt-3 max-w-[75ch] text-sm ${muted}`}>
-                      What the most recent pass got wrong, worst first. These name the streams as
-                      they stood at the time — a fixture&apos;s are gone by now, which is why the
-                      row is kept rather than re-derived.
+                      What the most recent pass got wrong, worst first. Streams are named as they
+                      stood at the time.
                     </p>
                     <div className="mt-2 overflow-x-auto">
                       <table className="w-full text-sm">
                         <thead className={`text-left ${muted}`}>
                           <tr className="border-b border-[var(--color-line)]">
                             <th className="py-2 pr-3 font-normal">Channel</th>
-                            <th className="py-2 pr-3 font-normal">Rules picked</th>
+                            <th className="py-2 pr-3 font-normal">Your rules picked</th>
                             <th className="py-2 pr-3 font-normal">Measurement picked</th>
-                            <th className="py-2 text-right font-normal">Given up</th>
+                            <th className="py-2 text-right font-normal">Bitrate lost</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -1094,9 +1068,8 @@ export function QualityView() {
 
         {check && check.summary.disagreed === 0 && check.summary.channels > 0 && (
           <p className={`mt-3 text-sm ${muted}`}>
-            Every measured channel puts the same stream first under your rules as it would under the
-            measurements. Worth re-running as the priors fill in — a rule set that is right today is
-            right about the providers you have today.
+            Every measured channel puts the same stream first under your rules as under the
+            measurements. Worth re-running as more samples come in.
           </p>
         )}
       </section>
@@ -1147,7 +1120,7 @@ function EffectTable({
                   {confounded && (
                     <span
                       className="ml-2 rounded border border-[var(--color-warn)] px-1.5 py-0.5 text-xs text-[var(--color-warn)]"
-                      title={`${Math.round(effect.topAccountShare * 100)}% of these samples come from one account, so this number describes that account rather than the tier. Withheld from the export.`}
+                      title={`${Math.round(effect.topAccountShare * 100)}% of these samples come from one account, so this number describes that account rather than the tier. Not exported.`}
                     >
                       one account
                     </span>
@@ -1186,10 +1159,10 @@ function pct(value: number): string {
 /** What each guard means, in the terms the operator can act on. */
 const GUARD_LABEL: Record<MinerGuard, string> = {
   samples: 'too few samples either side of the split',
-  effect: 'difference too small to survive the points rounding',
-  cells: 'seen in only one bucket — that is a channel, not a pattern',
-  duration: 'has not been predicting the same thing for long enough',
-  stability: 'flips sign across the window — it is fitting a schedule',
+  effect: 'difference too small to survive points rounding',
+  cells: 'seen in only one bucket, so it is a channel, not a pattern',
+  duration: 'not predicting the same thing for long enough yet',
+  stability: 'flips sign across the window, so it is fitting a schedule',
 };
 
 /**
@@ -1232,7 +1205,7 @@ function MinerPanel({ report }: { report: MinerReport | undefined }) {
       {short && (
         <p className="text-sm">
           Needs <strong>{report.durationShortfallDays} more days</strong> of samples before any name
-          rule can clear the durability guard. Nothing to do but keep probing.
+          rule can be exported.
         </p>
       )}
 
@@ -1270,10 +1243,8 @@ function MinerPanel({ report }: { report: MinerReport | undefined }) {
         <div>
           <h4 className="text-sm font-medium">Withheld — names a codec</h4>
           <p className={`mt-1 max-w-[80ch] text-sm ${muted}`}>
-            These cleared every guard. They are held back anyway because bitrate is not comparable
-            across codecs: HEVC carries roughly the same picture in roughly half the bits, so the
-            measured deficit is mostly the codec being efficient rather than the stream being worse.
-            Exporting it would penalise every stream whose name says so, at every provider.
+            These cleared every guard but are held back anyway: HEVC uses about half the bits for
+            the same picture, so the deficit is the codec, not the stream.
           </p>
           <ul className="mt-2 space-y-1 text-sm tabular-nums">
             {report.passB.confoundedCodecs.map((token) => (
