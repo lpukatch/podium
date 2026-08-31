@@ -59,6 +59,7 @@ export function SettingsView() {
   const [note, setNote] = useState('');
   const [error, setError] = useState('');
   const [test, setTest] = useState<{ ok: boolean; text: string } | null>(null);
+  const [teamarrTest, setTeamarrTest] = useState<{ ok: boolean; text: string } | null>(null);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
 
   const load = useCallback(async () => {
@@ -145,6 +146,44 @@ export function SettingsView() {
       );
     } catch (e) {
       setTest({ ok: false, text: String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runTeamarrTest = async () => {
+    setBusy(true);
+    setTeamarrTest(null);
+    try {
+      const resp = await fetch('/api/teamarr-sync/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(edits),
+      });
+      const body = await resp.json();
+      if (!body.ok) {
+        setTeamarrTest({ ok: false, text: body.error ?? 'failed' });
+        return;
+      }
+
+      const types = Object.entries(body.byType as Record<string, number>)
+        .sort((a, b) => b[1] - a[1])
+        .map(([type, count]) => `${count} ${type}`)
+        .join(', ');
+      // The rule count and breakdown are the part that proves it reached the
+      // right instance: anything can answer, only Teamarr answers with these.
+      let text = `Connected. ${body.total} rule(s) — ${types}.`;
+      if (body.neverPushed) {
+        text += ' Podium has not pushed here yet.';
+      } else if (body.drift) {
+        text += ` Since Podium's last push: ${body.drift}.`;
+      } else {
+        const when = body.lastPushedAt ? new Date(body.lastPushedAt).toLocaleString() : 'unknown';
+        text += ` Exactly what Podium pushed on ${when}.`;
+      }
+      setTeamarrTest({ ok: true, text });
+    } catch (e) {
+      setTeamarrTest({ ok: false, text: String(e) });
     } finally {
       setBusy(false);
     }
@@ -295,6 +334,28 @@ export function SettingsView() {
                     }`}
                   >
                     {test.text}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {section.id === 'teamarr' && (
+              <div className="mt-4 flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  className={btn}
+                  disabled={busy}
+                  onClick={() => void runTeamarrTest()}
+                >
+                  {busy ? 'Testing…' : 'Test connection'}
+                </button>
+                {teamarrTest && (
+                  <span
+                    className={`text-sm ${
+                      teamarrTest.ok ? 'text-[var(--color-accent)]' : 'text-[var(--color-bad)]'
+                    }`}
+                  >
+                    {teamarrTest.text}
                   </span>
                 )}
               </div>

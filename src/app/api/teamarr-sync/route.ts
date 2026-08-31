@@ -20,11 +20,26 @@ export function GET() {
     store = new Store(loadConfig().dbPath);
     const config = loadConfig(resolveEnv(process.env, store.settings()));
     const last = store.teamarrSync();
+    // The row's own write time, not `outcome.at`. They differ by milliseconds,
+    // but this is the one the scheduler measures its interval from, so it is
+    // the only one that predicts the next run correctly -- and it is written
+    // for refusals and failures too, which is what stops a declining install
+    // from retrying every heartbeat.
+    const lastAttemptAt = last?.ranAt ?? null;
     return NextResponse.json({
       configured: Boolean(config.PODIUM_TEAMARR_URL.trim()),
       scheduled: config.PODIUM_TEAMARR_SYNC,
       everyMs: config.PODIUM_TEAMARR_SYNC_MS,
       minSamples: config.PODIUM_TEAMARR_MIN_SAMPLES,
+      lastAttemptAt,
+      // Computed here rather than in the browser so it follows the scheduler's
+      // rule rather than a second copy of it. Null when nothing is scheduled:
+      // there is no next run to name, and a date implying otherwise is worse
+      // than no date. A schedule that has never run is due immediately.
+      nextAt: config.PODIUM_TEAMARR_SYNC
+        ? (lastAttemptAt ?? Date.now() - config.PODIUM_TEAMARR_SYNC_MS) +
+          config.PODIUM_TEAMARR_SYNC_MS
+        : null,
       last: last?.outcome ?? null,
     });
   } catch (error) {
