@@ -534,44 +534,52 @@ export function QualityView() {
         )}
       </section>
 
+      {/* Groups, accounts and tiers are one finding read three ways, not three
+          features: the same fit, the same four columns, differing only in which
+          key the effect is attributed to. Three cards made that look like three
+          things to learn. */}
       <section className={`${card} p-5`}>
-        <h3 className="text-base">Groups</h3>
+        <h3 className="text-base">What predicts quality</h3>
         <p className={`mt-1 max-w-[70ch] text-sm ${muted}`}>
-          The strongest signal Podium has. Exported as Teamarr Group rules, matched on the group
-          name exactly as the provider writes it.
+          Each row is a measured effect, exported as one Teamarr rule.
         </p>
-        <EffectTable
-          effects={profile?.groups ?? []}
-          empty="No group has cleared the sample floor yet."
-        />
+
+        <div className="mt-4 space-y-5">
+          <div>
+            <h4 className="text-sm font-medium">Groups</h4>
+            <p className={`mt-0.5 text-sm ${muted}`}>
+              The strongest signal. Matched on the group name exactly as the provider writes it.
+            </p>
+            <EffectTable
+              effects={profile?.groups ?? []}
+              empty="No group has cleared the sample floor yet."
+            />
+          </div>
+
+          <div>
+            <h4 className="text-sm font-medium">Provider accounts</h4>
+            <p className={`mt-0.5 text-sm ${muted}`}>Every stream from the account.</p>
+            <EffectTable
+              effects={profile?.accounts ?? []}
+              empty="No account has enough samples yet."
+            />
+          </div>
+
+          <div>
+            <h4 className="text-sm font-medium">Quality tiers</h4>
+            <p className={`mt-0.5 max-w-[70ch] text-sm ${muted}`}>
+              Read from the stream&apos;s name. Unlabelled streams match no rule, so they are the
+              reference; other tiers show their distance from it. A tier drawn almost entirely from
+              one account is not exported.
+            </p>
+            <EffectTable
+              effects={profile?.tiers ?? []}
+              empty="No tier has enough samples yet."
+              warnSingleAccount
+            />
+          </div>
+        </div>
       </section>
-
-      <div className="grid gap-4 md:grid-cols-2">
-        <section className={`${card} p-5`}>
-          <h3 className="text-base">Provider accounts</h3>
-          <p className={`mt-1 text-sm ${muted}`}>
-            Exported as Teamarr M3U Account rules — wholesale, like groups.
-          </p>
-          <EffectTable
-            effects={profile?.accounts ?? []}
-            empty="No account has enough samples yet."
-          />
-        </section>
-
-        <section className={`${card} p-5`}>
-          <h3 className="text-base">Quality tiers</h3>
-          <p className={`mt-1 text-sm ${muted}`}>
-            Read from the stream&apos;s name, exported as regex rules. Unlabelled streams match no
-            rule, so they are the reference; other tiers show their distance from it. A tier drawn
-            almost entirely from one account is not exported.
-          </p>
-          <EffectTable
-            effects={profile?.tiers ?? []}
-            empty="No tier has enough samples yet."
-            warnSingleAccount
-          />
-        </section>
-      </div>
 
       <section className={`${card} p-5`}>
         <h3 className="text-base">Mining the names</h3>
@@ -676,9 +684,19 @@ export function QualityView() {
         </p>
       </section>
 
+      {/* Sending rules and scoring them were two cards that shared the same
+          uploaded file, the same replace-the-whole-set hazard and the same three
+          metrics. They are the two halves of one loop -- ship a change, see what
+          it did -- so they read as one card with three steps. */}
       <section className={`${card} p-5`}>
-        <h3 className="text-base">Export to Teamarr</h3>
-        <div className="mt-3 grid gap-4 sm:grid-cols-2">
+        <h3 className="text-base">Teamarr</h3>
+        <p className={`mt-1 max-w-[70ch] text-sm ${muted}`}>
+          Turn what Podium measured into Teamarr scoring rules, then score the rules Teamarr is
+          running against the same measurements.
+        </p>
+
+        <h4 className="mt-5 text-sm font-medium">1 · Rule settings</h4>
+        <div className="mt-2 grid gap-4 sm:grid-cols-2">
           <label className="block">
             <span className={`text-sm ${muted}`}>Minimum samples per bucket</span>
             <input
@@ -710,93 +728,72 @@ export function QualityView() {
           </label>
         </div>
 
-        <div className="mt-4 flex flex-wrap items-center gap-3">
-          <a className={btn} href={`/api/quality-profile?format=teamarr&${query}`} download>
-            Download rules
-          </a>
-          <label className={`${btn} cursor-pointer`}>
-            {merging ? 'Merging…' : 'Merge into my Teamarr rules…'}
-            <input
-              type="file"
-              accept="application/json,.json"
-              className="hidden"
-              disabled={merging}
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                e.target.value = '';
-                if (file) void mergeInto(file);
-              }}
-            />
-          </label>
-          {merged && <span className={`text-sm ${muted}`}>{merged}</span>}
-        </div>
+        <h4 className="mt-5 text-sm font-medium">2 · Send them</h4>
 
         {ungated && (
-          <p className="mt-3 max-w-[70ch] text-sm text-[var(--color-bad)]">
+          <p className="mt-2 max-w-[70ch] text-sm text-[var(--color-bad)]">
             The scope is off, so these rules would be fitted on every probe this install has taken,
             VOD and filler included. Turn it back on above before exporting unless you mean that.
           </p>
         )}
 
-        <p className={`mt-3 max-w-[70ch] text-sm ${muted}`}>
-          Teamarr&apos;s import <strong>replaces</strong> its entire rule set. Export your rules
-          from Teamarr and merge them here first, or your hand-written rules will be deleted. Rules
-          Podium generated before are updated in place, so re-importing refreshes the numbers rather
-          than stacking a second set.
-        </p>
-
-        <div className="mt-5 border-t border-[var(--color-line)] pt-4">
-          <h4 className="text-sm font-medium">Push straight to Teamarr</h4>
-          {!sync?.configured ? (
+        {sync?.configured ? (
+          <>
             <p className={`mt-1 max-w-[70ch] text-sm ${muted}`}>
-              Set <strong>Teamarr URL</strong> in Settings to replace the file steps above with one
-              button: Podium reads the rules Teamarr is running, merges its own in, and writes the
-              result back.
+              Podium reads the rules Teamarr is running, merges its own in, and writes the result
+              back. Both rule sets are scored first and the push is{' '}
+              <strong>refused if the ordering would get worse</strong>: any rise in Dead first, or
+              fewer Agreed <em>and</em> more Bitrate lost.
+              {sync.scheduled
+                ? ` Also runs on its own every ${Math.round((sync.everyMs ?? 0) / 3_600_000)}h.`
+                : ' The schedule is off, so this button is the only thing that writes.'}
             </p>
-          ) : (
-            <>
-              <p className={`mt-1 max-w-[70ch] text-sm ${muted}`}>
-                The same merge as the file route, without the file. Both rule sets are scored first
-                and the push is <strong>refused if the ordering would get worse</strong>: any rise
-                in Dead first, or fewer Agreed <em>and</em> more Bitrate lost.
-                {sync.scheduled
-                  ? ` Also runs on its own every ${Math.round((sync.everyMs ?? 0) / 3_600_000)}h.`
-                  : ' The schedule is off, so this button is the only thing that writes.'}
-              </p>
-              <div className={`mt-2 text-xs ${muted}`}>
-                {sync.lastAttemptAt
-                  ? `Last sync ${ago(sync.lastAttemptAt)}`
-                  : 'No push has run yet'}
-                {sync.scheduled && sync.nextAt
-                  ? ` · next ${until(sync.nextAt)}`
-                  : ' · not scheduled'}
-              </div>
-              <div className="mt-3 flex flex-wrap items-center gap-3">
-                <button
-                  type="button"
-                  className={btn}
-                  disabled={syncing}
-                  onClick={() => void pushToTeamarr(true)}
-                >
-                  {syncing ? 'Working…' : 'Preview a push'}
-                </button>
-                <button
-                  type="button"
-                  className={btn}
-                  disabled={syncing}
-                  onClick={() => void pushToTeamarr(false)}
-                >
-                  {syncing ? 'Working…' : 'Sync to Teamarr now'}
-                </button>
-              </div>
-              {sync.last && <SyncReport outcome={sync.last} />}
-            </>
-          )}
-        </div>
-      </section>
+            <div className={`mt-2 text-xs ${muted}`}>
+              {sync.lastAttemptAt ? `Last sync ${ago(sync.lastAttemptAt)}` : 'No push has run yet'}
+              {sync.scheduled && sync.nextAt ? ` · next ${until(sync.nextAt)}` : ' · not scheduled'}
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                className={btn}
+                disabled={syncing}
+                onClick={() => void pushToTeamarr(true)}
+              >
+                {syncing ? 'Working…' : 'Preview a push'}
+              </button>
+              <button
+                type="button"
+                className={btn}
+                disabled={syncing}
+                onClick={() => void pushToTeamarr(false)}
+              >
+                {syncing ? 'Working…' : 'Sync to Teamarr now'}
+              </button>
+            </div>
+            {sync.last && <SyncReport outcome={sync.last} />}
 
-      <section className={`${card} p-5`}>
-        <h3 className="text-base">Score your Teamarr rules</h3>
+            {/* Folded away once the push works. The file route is four manual
+                steps and the whole replace-the-set hazard, all of it moot the
+                moment Podium can write to Teamarr itself -- but it is still the
+                fallback when the push is refused or the instance is elsewhere. */}
+            <details className="mt-4">
+              <summary className={`cursor-pointer text-sm ${muted}`}>Use a file instead</summary>
+              <FileExport query={query} merging={merging} merged={merged} onMerge={mergeInto} />
+            </details>
+          </>
+        ) : (
+          <>
+            <p className={`mt-1 max-w-[70ch] text-sm ${muted}`}>
+              Set <strong>Teamarr URL</strong> in Settings to replace these steps with one button
+              that writes to Teamarr directly.
+            </p>
+            <FileExport query={query} merging={merging} merged={merged} onMerge={mergeInto} />
+          </>
+        )}
+
+        <h4 className="mt-6 border-t border-[var(--color-line)] pt-4 text-sm font-medium">
+          3 · Score the rules you are running
+        </h4>
         <p className={`mt-1 max-w-[75ch] text-sm ${muted}`}>
           Upload the rules Teamarr is running and Podium scores them against every channel it has
           measured that Teamarr orders — the stream your rules put first, beside the stream the
@@ -924,9 +921,11 @@ export function QualityView() {
             fixture: a live check can only see channels whose streams still
             exist, and an event channel's are gone by morning. */}
         {history && history.rulesUploadedAt !== null && (
-          <div className="mt-5 border-t border-[var(--color-line)] pt-4">
+          <div className="mt-5">
             <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
-              <h4 className="text-sm font-semibold">Re-scored each pass</h4>
+              {/* A sub-block of step 3, not a fourth step: the numbered headings
+                  above are the only things that carry that weight. */}
+              <h5 className="text-sm font-medium">Re-scored each pass</h5>
               <span className={`text-sm ${muted}`}>
                 {history.ruleCount} rules, uploaded {ago(history.rulesUploadedAt)}
               </span>
@@ -1074,6 +1073,58 @@ export function QualityView() {
         )}
       </section>
     </div>
+  );
+}
+
+/**
+ * The download-and-merge route, for installs Podium cannot write to itself.
+ *
+ * Extracted because it renders in two places that must not drift: inline when
+ * no Teamarr URL is set, and folded away behind a disclosure when one is. The
+ * replace-the-whole-set warning travels with the buttons it is about -- it is
+ * only true of this route, and stating it beside the push was what made the two
+ * halves of the page look like the same hazard twice.
+ */
+function FileExport({
+  query,
+  merging,
+  merged,
+  onMerge,
+}: {
+  query: string;
+  merging: boolean;
+  merged: string;
+  onMerge: (file: File) => Promise<void>;
+}) {
+  return (
+    <>
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <a className={btn} href={`/api/quality-profile?format=teamarr&${query}`} download>
+          Download rules
+        </a>
+        <label className={`${btn} cursor-pointer`}>
+          {merging ? 'Merging…' : 'Merge into my Teamarr rules…'}
+          <input
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            disabled={merging}
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              e.target.value = '';
+              if (file) void onMerge(file);
+            }}
+          />
+        </label>
+        {merged && <span className={`text-sm ${muted}`}>{merged}</span>}
+      </div>
+      <p className={`mt-3 max-w-[70ch] text-sm ${muted}`}>
+        Teamarr&apos;s import <strong>replaces</strong> its entire rule set. Export your rules from
+        Teamarr and merge them here first, or your hand-written rules will be deleted. Rules Podium
+        generated before are updated in place, so re-importing refreshes the numbers rather than
+        stacking a second set.
+      </p>
+    </>
   );
 }
 
