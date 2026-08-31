@@ -112,7 +112,7 @@ const MODES: Array<{ value: Mode; label: string; hint: string }> = [
   {
     value: 'assigned',
     label: 'Assigned',
-    hint: 'Normal schedule, and a channel with no rule is ranked off the streams it already carries. For lineups you have already set by hand — podium only reorders, it never assigns.',
+    hint: 'Normal schedule, and a channel with no rule is ranked off the streams it already carries. For lineups you have already set by hand: Podium only reorders, it never assigns.',
   },
 ];
 
