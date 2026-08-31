@@ -616,3 +616,35 @@ describe('what the guard can look back on', () => {
     store.close();
   });
 });
+
+describe('how long a check is worth keeping', () => {
+  it('sweeps the misses long before the summary they hang off', () => {
+    // The two retentions are deliberately different: on a live install the
+    // misses were 90% of the database, and they answer a question nobody asks
+    // about a channel that stopped existing months ago. The summary row is
+    // seventeen integers and carries the season's shape.
+    const store = new Store(':memory:');
+    recordCheck(store, Date.now() - 30 * CHECK_DAY, 96);
+
+    store.startRun('sweep');
+
+    const { history, latest } = store.ruleChecks();
+    expect(history).toHaveLength(1);
+    expect(history[0]?.managedChannels).toBe(96);
+    expect(latest).toEqual([]);
+    store.close();
+  });
+
+  it('keeps the misses of a check still inside the miss window', () => {
+    const store = new Store(':memory:');
+    recordCheck(store, Date.now() - 3 * CHECK_DAY, 96);
+
+    store.startRun('sweep');
+
+    const { history, latest } = store.ruleChecks();
+    expect(history).toHaveLength(1);
+    expect(latest).toHaveLength(1);
+    expect(latest[0]?.podiumName).toBe('EPL01 FHD');
+    store.close();
+  });
+});

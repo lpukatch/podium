@@ -743,6 +743,29 @@ export const QUALITY_HISTORY_MS = 90 * 86_400_000;
 export const RULE_CHECK_HISTORY_MS = 90 * 86_400_000;
 
 /**
+ * How long the per-channel misses behind a check are worth keeping.
+ *
+ * Deliberately far shorter than the summary rows they hang off, because the two
+ * are read for different things and cost wildly different amounts. A summary
+ * row is seventeen integers and answers "is the rule set drifting?", which is a
+ * question about months. A miss is a wide row per disagreeing channel -- names,
+ * providers, the matched-rule blame line -- and answers "which rule did this?",
+ * which nobody asks about a channel that stopped existing in June.
+ *
+ * The cost is not hypothetical. On a live install the misses and their index
+ * were 38.2 MB of a 42.6 MB database -- 90% of it -- after eight days, growing
+ * at ~18k rows a day. Swept at the summary's 90 days they would have reached
+ * ~1.6M rows and roughly 400 MB before the first row was ever pruned, and the
+ * install was still nine days into that. Fourteen days keeps every miss anyone
+ * would open while holding the table near a tenth of that.
+ *
+ * Nothing in the UI reads misses off an older row: the Quality page renders
+ * `history` as summary counts and only ever attaches `latest`, the newest
+ * check's. See `ruleChecks`.
+ */
+export const RULE_CHECK_MISS_HISTORY_MS = 14 * 86_400_000;
+
+/**
  * Most misses kept for one check.
  *
  * Deduplication already bounds the common case; this bounds the pathological
@@ -1163,10 +1186,14 @@ export class Store {
     // is cheap enough to pay every pass rather than only at boot.
     this.trimQuality();
     // Same sweep, same reason. A check is a handful of rows per pass, but a
-    // pass runs hourly forever.
-    const cutoff = now - RULE_CHECK_HISTORY_MS;
-    this.sql('DELETE FROM rule_check_misses WHERE checked_at < ?').run(cutoff);
-    this.sql('DELETE FROM rule_checks WHERE checked_at < ?').run(cutoff);
+    // pass runs hourly forever. The misses go first and on their own clock --
+    // they are the bulk of the database and are read over days, while the
+    // summary rows they hang off are read over months. See
+    // `RULE_CHECK_MISS_HISTORY_MS`.
+    this.sql('DELETE FROM rule_check_misses WHERE checked_at < ?').run(
+      now - RULE_CHECK_MISS_HISTORY_MS,
+    );
+    this.sql('DELETE FROM rule_checks WHERE checked_at < ?').run(now - RULE_CHECK_HISTORY_MS);
   }
 
   finishRun(runId: string, fields: RunUpdate = {}): void {
