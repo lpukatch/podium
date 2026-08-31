@@ -40,6 +40,16 @@ export interface SyncOutcome {
   at: number;
   /** Whether the rules reached Teamarr. False covers both refusals and errors. */
   pushed: boolean;
+  /**
+   * Nothing was wrong; the guard just could not see enough to say so.
+   *
+   * Distinct from a refusal because it predicts the opposite thing about the
+   * near future: a refusal is a decision that will hold until the rules or the
+   * measurements change, while a deferral is a decision about *now* that is
+   * likely to go the other way in a couple of hours. The scheduler reads this
+   * to retry within the hour rather than tomorrow -- see `DEFER_RETRY_MS`.
+   */
+  deferred?: boolean;
   /** Present when nothing was pushed: the one sentence saying why. */
   reason?: string;
   /** Present when the push failed outright rather than being declined. */
@@ -59,6 +69,17 @@ export interface SyncOptions {
    * "what would the scheduled push do tonight" without doing it.
    */
   dryRun?: boolean;
+  /**
+   * Nobody is watching this one.
+   *
+   * Set by the worker's schedule and by nothing else. It gates the
+   * population floor, which exists to stand in for the operator who is not
+   * there -- see `underpowered`. A push somebody clicked is attended by
+   * definition, and the Quality page offers no way past a deferral, so
+   * applying the floor to it would strand them behind a guard whose whole
+   * purpose they are already serving.
+   */
+  scheduled?: boolean;
   /**
    * Push even where the simulation says the ordering gets worse.
    *
@@ -136,6 +157,53 @@ export function regression(before: SyncScore, after: SyncScore): string | null {
   return null;
 }
 
+/** How far back to look for evidence that this install gets busier than it is now. */
+export const PEAK_WINDOW_MS = 7 * 86_400_000;
+
+/**
+ * How soon a deferred push tries again.
+ *
+ * Short enough that a push deferred at breakfast still happens the same day
+ * rather than surrendering its turn to tomorrow -- which is the trap a plain
+ * refusal would fall into, since due-ness is measured from the last attempt and
+ * a deferral is an attempt. Long enough that an install which is simply quiet
+ * costs one catalogue fetch an hour rather than one every thirty seconds.
+ */
+export const DEFER_RETRY_MS = 3_600_000;
+
+/**
+ * Whether the guard saw enough channels for its verdict to mean anything.
+ *
+ * `regression` compares two counts of channels, and says nothing about how many
+ * there were. That is the gap this closes. `checkRules` only scores channels
+ * Teamarr orders that currently carry two probed streams, and an event
+ * channel's streams do not outlast the fixture -- so the population is a
+ * function of when the push fires, not of the rules being pushed. Two channels
+ * agreeing identically before and after produce exactly the same "no
+ * regression" as two hundred, and the difference never reaches the operator.
+ *
+ * The floor is `min(floor, peak)` rather than `floor`, and that is the whole
+ * design. An absolute floor asks every install to be big, so one that never has
+ * twenty orderable channels would defer at every attempt, retry hourly forever
+ * and never push again -- turning a safety check into an outage. Comparing
+ * against what this install has actually reached in the last week separates the
+ * two cases the count alone conflates: a catalogue of hundreds seen at its low
+ * point, which is worth waiting out, and a small install seen at its normal
+ * size, which is as good as its evidence will ever get.
+ *
+ * A `peak` of zero -- nothing checked yet -- lets the push through. There is no
+ * evidence of a fuller population to wait for, and a first push blocked by the
+ * absence of the history that only pushing produces would never unblock.
+ */
+export function underpowered(channels: number, floor: number, peak: number): string | null {
+  const wanted = Math.min(floor, peak);
+  if (channels >= wanted) return null;
+  return (
+    `the ordering could only be checked on ${channels} of the ${peak} channels ` +
+    `this install reaches, which is too thin to tell a safe push from a bad one`
+  );
+}
+
 /**
  * Fit, merge, check and push.
  *
@@ -201,6 +269,19 @@ export async function syncToTeamarr(
     after: scoreOf(after.summary),
     approximate,
   };
+
+  // Before the regression test rather than after it, because a regression
+  // found on a population this thin is the same unreliable reading as the
+  // agreement that produced it -- deferring re-asks the question when the
+  // answer is worth having, where refusing would bank the doubtful one.
+  if (!options.force && (options.scheduled || options.dryRun)) {
+    const thin = underpowered(
+      before.summary.channels,
+      config.PODIUM_TEAMARR_MIN_CHANNELS,
+      store.peakManagedChannels(at - PEAK_WINDOW_MS),
+    );
+    if (thin) return { ...outcome, deferred: true, reason: `deferred: ${thin}` };
+  }
 
   // Only where there was something to compare. An install whose channels carry
   // no verdicts yet scores 0 against 0, which is not evidence of anything.

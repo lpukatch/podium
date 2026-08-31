@@ -18,7 +18,7 @@ import { RulesSource } from '../lib/rules-source';
 import { Runner, type RunSummary } from '../lib/runner';
 import { resolveEnv } from '../lib/settings';
 import { Store } from '../lib/store';
-import { syncToTeamarr } from '../lib/teamarr-sync';
+import { DEFER_RETRY_MS, syncToTeamarr } from '../lib/teamarr-sync';
 
 export type Log = (message: string) => void;
 
@@ -274,18 +274,30 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
     const live = currentConfig();
     if (!live.PODIUM_TEAMARR_SYNC || !live.PODIUM_TEAMARR_URL.trim()) return;
     let lastAt = 0;
+    let lastDeferred = false;
     try {
-      lastAt = store.teamarrSync()?.ranAt ?? 0;
+      const last = store.teamarrSync();
+      lastAt = last?.ranAt ?? 0;
+      lastDeferred = (last?.outcome as { deferred?: boolean } | null)?.deferred === true;
     } catch {
       // An unreadable row must not stop the loop; the next beat asks again.
       return;
     }
-    if (Date.now() - lastAt < live.PODIUM_TEAMARR_SYNC_MS) return;
+    // A deferral is an attempt, so it moves the clock like any other -- which
+    // would hand a push deferred at breakfast to tomorrow, at the same
+    // unhelpful hour, forever. Retry it within the hour instead, which walks
+    // the schedule towards a window where the guard can actually see something.
+    // Never *slower* than the configured interval: an install that syncs more
+    // often than hourly is not made to wait longer by a deferral.
+    const wait = lastDeferred
+      ? Math.min(DEFER_RETRY_MS, live.PODIUM_TEAMARR_SYNC_MS)
+      : live.PODIUM_TEAMARR_SYNC_MS;
+    if (Date.now() - lastAt < wait) return;
 
     syncing = true;
     void (async () => {
       try {
-        const outcome = await syncToTeamarr(store, live);
+        const outcome = await syncToTeamarr(store, live, { scheduled: true });
         store.saveTeamarrSync(outcome);
         if (outcome.pushed) {
           log(

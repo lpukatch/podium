@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
 import { resolveEnv } from '@/lib/settings';
 import { Store } from '@/lib/store';
-import { syncToTeamarr } from '@/lib/teamarr-sync';
+import { DEFER_RETRY_MS, syncToTeamarr } from '@/lib/teamarr-sync';
 
 export const dynamic = 'force-dynamic';
 
@@ -26,20 +26,33 @@ export function GET() {
     // for refusals and failures too, which is what stops a declining install
     // from retrying every heartbeat.
     const lastAttemptAt = last?.ranAt ?? null;
+    // A deferred push is retried within the hour rather than tomorrow, so the
+    // wait to the *next* attempt is not the configured cadence -- see
+    // `checkSync`, whose two values these are, so the page cannot promise a
+    // time the worker has no intention of keeping.
+    //
+    // Reported separately from `everyMs` on purpose. That one is the schedule
+    // the operator set and the page describes in words ("runs every 24h");
+    // collapsing the two would have the sentence read "every 1h" for as long
+    // as a deferral stood, describing the retry as though the schedule itself
+    // had changed.
+    const deferred = (last?.outcome as { deferred?: boolean } | null)?.deferred === true;
+    const waitMs = deferred
+      ? Math.min(DEFER_RETRY_MS, config.PODIUM_TEAMARR_SYNC_MS)
+      : config.PODIUM_TEAMARR_SYNC_MS;
     return NextResponse.json({
       configured: Boolean(config.PODIUM_TEAMARR_URL.trim()),
       scheduled: config.PODIUM_TEAMARR_SYNC,
       everyMs: config.PODIUM_TEAMARR_SYNC_MS,
+      deferred,
       minSamples: config.PODIUM_TEAMARR_MIN_SAMPLES,
+      minChannels: config.PODIUM_TEAMARR_MIN_CHANNELS,
       lastAttemptAt,
       // Computed here rather than in the browser so it follows the scheduler's
       // rule rather than a second copy of it. Null when nothing is scheduled:
       // there is no next run to name, and a date implying otherwise is worse
       // than no date. A schedule that has never run is due immediately.
-      nextAt: config.PODIUM_TEAMARR_SYNC
-        ? (lastAttemptAt ?? Date.now() - config.PODIUM_TEAMARR_SYNC_MS) +
-          config.PODIUM_TEAMARR_SYNC_MS
-        : null,
+      nextAt: config.PODIUM_TEAMARR_SYNC ? (lastAttemptAt ?? Date.now() - waitMs) + waitMs : null,
       last: last?.outcome ?? null,
     });
   } catch (error) {

@@ -258,6 +258,15 @@ export const FIELDS: FieldSpec[] = [
     max: 1_000_000,
   },
   {
+    key: 'PODIUM_TEAMARR_MIN_CHANNELS',
+    kind: 'number',
+    label: 'Fewest channels to check against',
+    help: 'A scheduled push waits, and retries within the hour, until it can compare the old and new rules on at least this many channels. Only event channels currently carrying two probed streams can be compared, so the number collapses overnight and a push landing then is effectively unchecked. Installs that never reach this many are not held back.',
+    section: 'teamarr',
+    min: 0,
+    max: 10_000,
+  },
+  {
     key: 'PODIUM_QUALITY_EVENT_ONLY',
     kind: 'boolean',
     label: 'Learn only from event channels',

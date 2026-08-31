@@ -42,6 +42,8 @@ interface SyncScore {
 interface SyncOutcome {
   at: number;
   pushed: boolean;
+  /** Nothing was wrong; the guard could not see enough channels to say so. */
+  deferred?: boolean;
   reason?: string;
   error?: string;
   rules?: { existing: number; generated: number; replaced: number; total: number };
@@ -56,6 +58,9 @@ interface SyncStatus {
   scheduled: boolean;
   everyMs?: number;
   minSamples?: number;
+  minChannels?: number;
+  /** The last attempt deferred, so `nextAt` is a retry rather than the cadence. */
+  deferred?: boolean;
   /** When a push was last *attempted* — successes, refusals and failures alike. */
   lastAttemptAt?: number | null;
   /** When the schedule fires next, or null when nothing is scheduled. */

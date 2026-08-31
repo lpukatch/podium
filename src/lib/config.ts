@@ -207,6 +207,24 @@ export const configSchema = z.object({
    * that nobody watched happen is not.
    */
   PODIUM_TEAMARR_MIN_SAMPLES: num(200),
+  /**
+   * Channels the regression guard must be able to score before it is trusted.
+   *
+   * `checkRules` judges a push over the channels Teamarr orders *that currently
+   * carry two probed streams*, and an event channel's streams do not outlast
+   * the fixture -- so that population is a function of the time of day the push
+   * happens to fire. On a live install it ran between 0 and 236 channels over
+   * one week, median 96 in the evening against 24 before breakfast. The guard
+   * itself never says so: two channels that agree identically before and after
+   * produce the same "no regression" as two hundred.
+   *
+   * A push that cannot be checked is not refused, because there may be nothing
+   * wrong with it -- it is deferred, and retried within the hour, which walks
+   * the schedule towards a window where the answer means something. See
+   * `underpowered`, which also explains why an install that never has this many
+   * channels is not blocked forever by it.
+   */
+  PODIUM_TEAMARR_MIN_CHANNELS: num(20),
 
   PODIUM_QUALITY_EVENT_ONLY: bool(true),
   /**
