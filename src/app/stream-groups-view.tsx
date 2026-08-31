@@ -126,10 +126,10 @@ export function StreamGroupsView() {
         </span>
       </div>
       <p className="mt-1.5 text-sm text-[var(--color-muted)]">
-        Groups your providers import. Switching one off takes its streams out of matching entirely —
+        Groups your providers import. Switching one off takes its streams out of matching entirely:
         no alias, contains or regex can claim them. Use it for PPV, per-fixture event feeds and
-        auto-built groups, which otherwise get picked up by any{' '}
-        <span className="mono">contains</span> that names a team.
+        auto-built groups, which any <span className="mono">contains</span> that names a team would
+        otherwise pick up.
       </p>
 
       {error && (

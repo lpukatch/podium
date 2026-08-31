@@ -588,7 +588,7 @@ export function ProgressView() {
         <div className={`${card} mt-4 p-5`}>
           <h3 className={heading}>Provider lanes</h3>
           <p className="mt-1.5 text-sm text-[var(--color-muted)]">
-            Each provider drains independently. A slow lane no longer blocks the others.
+            Each provider drains independently, so a slow lane does not block the others.
           </p>
           <ul className="mt-3">
             {p.lanes.map((lane) => {

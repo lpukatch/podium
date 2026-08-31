@@ -310,13 +310,13 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
 
           {(result.unprobed?.length ?? 0) > 0 && (
             <p className="mt-3 text-sm text-[var(--color-warn)]">
-              {result.unprobed?.length} stream(s) this rule claims went unprobed — no spare provider
+              {result.unprobed?.length} stream(s) this rule claims went unprobed: no spare provider
               capacity, or past the {result.probeLimit} probe cap (
               {(result.unprobed ?? [])
                 .map((u) => `${u.name} · ${u.provider}`)
                 .join(', ')
                 .slice(0, 120)}
-              ). They stay on the channel, unranked and after the ranked ones, and nothing can be
+              ). They stay on the channel, ranked after the ones that were probed, and cannot be
               unassigned until a check gets a verdict for them.
             </p>
           )}

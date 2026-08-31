@@ -368,6 +368,10 @@ export function OrderingView() {
                   inputMode="decimal"
                   className={`${input} mt-1`}
                 />
+                <span className="mt-1 block">
+                  What one kbps of HEVC is worth in H.264 kbps. The codec checkbox adds a flat bonus
+                  instead, which cannot scale with the bitrate. New installs: 1.6.
+                </span>
               </label>
               <label className="block text-xs text-[var(--color-muted)]">
                 UHD full-marks bitrate (kbps)
@@ -377,26 +381,28 @@ export function OrderingView() {
                   inputMode="numeric"
                   className={`${input} mt-1`}
                 />
+                <span className="mt-1 block">
+                  The bitrate that scores full marks above 1080p. The 12000 that suits 1080p leaves
+                  most 4K streams tied at the ceiling. New installs: 24000.
+                </span>
               </label>
             </div>
             <p className="mt-2 text-xs text-[var(--color-muted)]">
               Relative weights for the quality score (higher = more important). They are normalised
-              by their total, so what matters is their size relative to each other.
-            </p>
-            <p className="mt-1 text-xs text-[var(--color-muted)]">
-              The two fields above are not weights. <strong>HEVC bitrate factor</strong> is what one
-              kbps of HEVC is worth in H.264 kbps when the bitrate is scored — the codec checkbox
-              adds a flat bonus, which cannot express an efficiency gain that scales with the
-              bitrate itself. New installs start at 1.6; installs that predate the setting stay at 1
-              (no correction) until you raise it. <strong>UHD full-marks bitrate</strong> is the
-              bitrate that scores full marks above 1080p, where the 12000 that suits 1080p leaves
-              most 4K streams tied at the ceiling. New installs start at 24000.
+              by their total, so only their size relative to each other matters. The two fields
+              above are not weights.
             </p>
             <p className="mt-1 text-xs text-[var(--color-muted)]">
               Audio prefers surround where a channel is carried both with and without it. New
-              installs start at 0.1, which decides between streams whose video already ties without
-              letting audio outrank resolution or bitrate; installs that predate the setting stay at
-              0 until you raise it.
+              installs: 0.1, which breaks a tie between streams whose video already matches without
+              letting audio outrank resolution or bitrate.
+            </p>
+            {/* Said once. Each of these three settings used to carry its own
+                copy of it, which is most of why this small print ran to a
+                hundred words. */}
+            <p className="mt-1 text-xs text-[var(--color-muted)]">
+              Installs that predate any of these three settings keep the old behaviour until you
+              raise the value.
             </p>
             <button
               type="button"
