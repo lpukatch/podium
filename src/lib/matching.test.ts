@@ -124,6 +124,32 @@ describe('normalize', () => {
     expect(n.prefixes).toEqual(['XX', 'SPORT']);
   });
 
+  it('lifts a square-bracketed prefix', () => {
+    // "[USA] COMEDY CENTRAL HD" and "US: COMEDY CENTRAL HD" sit side by side in
+    // the same catalogue. The bracketed one used to lift nothing, so it was the
+    // one copy no `@` qualifier and no region denylist could reach.
+    const n = normalize('[USA] COMEDY CENTRAL HD');
+    expect(n.name).toBe('COMEDY CENTRAL');
+    expect(n.prefixes).toEqual(['USA']);
+    expect(n.quality.tier).toBe('hd');
+    // Still a bracket too: a `~USA` written before this existed keeps working.
+    expect(n.brackets).toEqual(['USA']);
+  });
+
+  it('lifts a bracketed prefix ahead of a punctuated one', () => {
+    const n = normalize('[USA] SPORTS: ESPN FHD');
+    expect(n.name).toBe('ESPN');
+    expect(n.prefixes).toEqual(['USA', 'SPORTS']);
+  });
+
+  it('leaves a bracket that is not at the front out of the prefixes', () => {
+    // Only the leading position reads as a section. A bracket written next to
+    // the name is a variant marker and stays reachable by `~` alone.
+    const n = normalize('FS1 4K (Event Only)');
+    expect(n.prefixes).toEqual([]);
+    expect(n.brackets).toEqual(['Event Only']);
+  });
+
   it('strips market tags that trail the quality marker', () => {
     const n = normalize('Sports Alpha 1 HD TH MY');
     expect(n.name).toBe('Sports Alpha 1');
@@ -1062,6 +1088,35 @@ describe('matcher', () => {
     const m = matcherFor({ channel_id: 1, aliases: ['TNT'] });
     const index = m.buildIndex([stream(10, 'TNT HD'), stream(11, 'TNT - HD')]);
     expect(m.match(m.rules.get(1)!, index).map(([id]) => id)).toEqual([10, 11]);
+  });
+
+  it('includes and excludes on a bracketed section', () => {
+    // The ask this came from: keep the [USA] copy, drop the [PL] one, with the
+    // provider writing both as brackets and the punctuated sections alongside.
+    const m = matcherFor({
+      channel_id: 1,
+      aliases: ['@US @USA Comedy Central', '@!PL Comedy Central'],
+    });
+    const index = m.buildIndex([
+      stream(10, '[USA] COMEDY CENTRAL HD'),
+      stream(11, 'US: COMEDY CENTRAL HD'),
+      stream(12, '[PL] COMEDY CENTRAL HD'),
+      stream(13, 'PL: Comedy Central FHD'),
+      stream(14, 'GO: COMEDY CENTRAL'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index).map(([id]) => id)).toEqual([10, 11, 14]);
+  });
+
+  it('applies the region denylist to a bracketed section', () => {
+    const m = matcherFor(
+      { channel_id: 1, aliases: ['Comedy Central'] },
+      { exclude_regions: ['PL'] },
+    );
+    const index = m.buildIndex([
+      stream(10, '[USA] COMEDY CENTRAL HD'),
+      stream(11, '[PL] COMEDY CENTRAL HD'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
   });
 
   it('accepts any of several required prefixes', () => {

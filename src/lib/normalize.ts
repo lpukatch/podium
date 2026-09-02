@@ -72,6 +72,25 @@ const SEPARATORS = /\s*[:|]\s*/;
  * bracket keys as part of the name.
  */
 const LEADING_SEPARATOR = /^[\s:|]+/;
+/**
+ * A bracketed segment at the *front* of the name.
+ *
+ * Providers write the section in brackets as readily as they punctuate it --
+ * "[USA] Comedy Central HD" sits in the same catalogue as "US: Comedy Central
+ * HD" and "USA | Comedy Central" and means the same thing by it. Stripped as
+ * decoration along with every other bracket, that section was the one spelling
+ * an `@` qualifier could not name and the region denylist could not see, so
+ * "include USA, drop PL" silently skipped exactly the streams written this way.
+ */
+const LEADING_BRACKET = /^[\s:|]*[[(]([^\])]*)[\])]/;
+
+/**
+ * How many words a leading segment may run to before it stops reading as one.
+ *
+ * A section marker is short ("USA", "NFL Teams", "US East"); a longer head is
+ * the name itself with punctuation in it, and lifting that empties the name.
+ */
+const MAX_PREFIX_WORDS = 4;
 
 export interface Quality {
   tier: string;
@@ -127,7 +146,25 @@ function tierFor(height: number): string {
 
 export function normalize(raw: string, maxPrefixSegments = 3): NormalizedName {
   const brackets: string[] = [];
-  let text = fold(raw).replace(BRACKETED, (group) => {
+  const prefixes: string[] = [];
+  let text = fold(raw);
+
+  // Leading brackets first, while their position is still known -- the strip
+  // below flattens every bracket to a space, and after it "[USA] CNN" and
+  // "CNN (USA feed)" are indistinguishable. Kept in `brackets` as well as
+  // lifted: a `~USA` written against one of these names before this existed
+  // still means what it meant.
+  for (let i = 0; i < maxPrefixSegments; i++) {
+    const match = LEADING_BRACKET.exec(text);
+    if (!match) break;
+    const inner = match[1]!.trim();
+    if (!inner || inner.split(/\s+/).length > MAX_PREFIX_WORDS) break;
+    prefixes.push(inner);
+    brackets.push(inner);
+    text = text.slice(match[0].length);
+  }
+
+  text = text.replace(BRACKETED, (group) => {
     const inner = group.slice(1, -1).trim();
     if (inner) brackets.push(inner);
     return ' ';
@@ -139,15 +176,14 @@ export function normalize(raw: string, maxPrefixSegments = 3): NormalizedName {
 
   // Leading "COUNTRY:" / "CATEGORY |" segments. Bounded, so a name that simply
   // contains a colon does not get eaten.
-  const prefixes: string[] = [];
-  for (let i = 0; i < maxPrefixSegments; i++) {
+  for (let i = prefixes.length; i < maxPrefixSegments; i++) {
     // Dropped per segment, not once: a bracketed segment leaves the *next*
     // segment's opening delimiter at the front of what remains.
     text = text.replace(LEADING_SEPARATOR, '');
     const match = SEPARATORS.exec(text);
     if (!match || match.index > 25) break;
     const head = text.slice(0, match.index).trim();
-    if (!head || head.split(/\s+/).length > 4) break;
+    if (!head || head.split(/\s+/).length > MAX_PREFIX_WORDS) break;
     prefixes.push(head);
     text = text.slice(match.index + match[0].length);
   }
