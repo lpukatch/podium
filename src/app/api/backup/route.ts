@@ -8,7 +8,7 @@ import {
   wouldBreakAuth,
 } from '@/lib/backup';
 import { loadConfig } from '@/lib/config';
-import { rulesDocSchema } from '@/lib/rules';
+import { loadRules } from '@/lib/rules';
 import { readRulesDoc, writeRulesDoc } from '@/lib/server/state';
 import { Store } from '@/lib/store';
 
@@ -30,9 +30,13 @@ export function GET() {
   try {
     store = new Store(loadConfig().dbPath);
     const config = store.exportConfig();
-    // Parsed rather than passed through: a rules file that has drifted out of
-    // schema should fail the export loudly, not ship inside a "backup".
-    const rules = rulesDocSchema.parse(readRulesDoc());
+    // Validated, then shipped unchanged. A rules file that has drifted out of
+    // schema should fail the export loudly rather than ship inside a "backup"
+    // -- but the doc that goes in the bundle is the one on disk, not the one
+    // the schema hands back: `rulesDocSchema` declares the keys the loader
+    // reads and zod drops the rest, and `group_patterns` is not among them.
+    const rules = readRulesDoc();
+    loadRules(rules);
     const body = JSON.stringify(
       { kind: 'podium-backup', version: BACKUP_VERSION, createdAt: Date.now(), rules, ...config },
       null,
@@ -42,6 +46,9 @@ export function GET() {
       headers: {
         'Content-Type': 'application/json',
         'Content-Disposition': `attachment; filename="${backupFilename()}"`,
+        // This body carries a credential in the clear. Nothing on the way to
+        // the browser -- or in it -- should keep a copy.
+        'Cache-Control': 'no-store',
       },
     });
   } catch (error) {

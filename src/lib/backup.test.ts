@@ -41,6 +41,18 @@ describe('backup bundle', () => {
     expect(() => parseBundle({ ...bundle(), version: 2 })).toThrow();
   });
 
+  it('carries rules keys the loader does not read', () => {
+    // `group_patterns` is written by the group-policy UI and read by the
+    // matcher, but `rulesDocSchema` never declared it. A bundle that parsed
+    // the doc through that schema would drop every group policy on the floor
+    // -- out of the backup, and out of rules.json on the way back in.
+    const patterns = [{ pattern: 'sports*', mode: 'live_only', audio_only: true }];
+    const { bundle: parsed } = parseBundle(
+      bundle({ rules: { ...EMPTY_RULES_DOC, group_patterns: patterns } }),
+    );
+    expect(parsed.rules.group_patterns).toEqual(patterns);
+  });
+
   it('rejects wrong shapes inside the bundle', () => {
     expect(() => parseBundle({ ...bundle(), settings: 'nope' })).toThrow();
     expect(() => parseBundle({ ...bundle(), assignBlocks: {} })).toThrow();
@@ -129,6 +141,21 @@ describe('config snapshot round-trip', () => {
     expect(store.assignBlocks(2)).toEqual(new Set([20]));
   });
 
+  it('survives a bundle carrying the same block twice', () => {
+    // Schema-valid but internally inconsistent. This has to not throw: by the
+    // time restoreConfig runs, rules.json has already been replaced.
+    store.restoreConfig({
+      settings: {},
+      teamarrRules: null,
+      assignBlocks: [
+        { channelId: 4, streamId: 40, blockedAt: 1 },
+        { channelId: 4, streamId: 40, blockedAt: 2 },
+      ],
+    });
+
+    expect(store.assignBlocks(4)).toEqual(new Set([40]));
+  });
+
   it('leaves live state alone', () => {
     store.setProgress({ ...store.getProgress(), phase: 'probing', probed: 3, total: 9 });
     const before = store.getProgress();
@@ -152,9 +179,8 @@ describe('config snapshot round-trip', () => {
         assignBlocks: [],
       });
 
-      // The version is MAX(updated_at), and both the worker's liveConfig()
-      // and the web's config() cache on it: a version that went backwards
-      // would leave every process running the pre-restore settings forever.
+      // The version is MAX(updated_at) and the web's config() caches on it:
+      // the restore has to move it, not carry the bundle's date backwards.
       expect(store.settingsVersion()).toBe(2_000_000);
     } finally {
       vi.useRealTimers();

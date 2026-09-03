@@ -26,16 +26,18 @@ export function BackupView() {
       const body = await resp.json();
       if (!resp.ok || body.error) {
         setError(body.error ?? `HTTP ${resp.status}`);
+        setBusy(false);
         return;
       }
       // Every card on this tab holds its own fetched copy of the state that
       // just changed underneath it, and there is no shared refetch to call --
-      // a reload is the honest refresh for an action this rare.
+      // a reload is the honest refresh for an action this rare. `busy` stays
+      // set through it on purpose: clearing it would re-arm the confirm button
+      // for the moment before the page goes away.
       setNote('Restored — reloading…');
       setTimeout(() => window.location.reload(), 600);
     } catch (e) {
       setError(String(e));
-    } finally {
       setBusy(false);
     }
   };

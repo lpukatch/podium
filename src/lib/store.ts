@@ -2189,10 +2189,11 @@ export class Store {
       this.sql('DELETE FROM teamarr_rules').run();
       this.sql('DELETE FROM assign_blocks').run();
 
-      // A fresh timestamp, not the bundle's: both the worker's liveConfig()
-      // and the web's config() cache on settingsVersion() = MAX(updated_at),
-      // and a restored older stamp would leave every process running the
-      // pre-restore settings indefinitely.
+      // A fresh timestamp, not the bundle's. settingsVersion() is
+      // MAX(updated_at) and the web's config() caches on it, so the stamp is
+      // the signal "these settings are not the ones you are holding" -- which
+      // is exactly what a restore is, whatever date the bundle was written on.
+      // Writing the bundle's stamp would put that signal in the past.
       const now = Date.now();
       const putSetting = this.sql('INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)');
       for (const [key, value] of Object.entries(snapshot.settings)) {
@@ -2209,8 +2210,12 @@ export class Store {
         );
       }
 
+      // OR REPLACE, because a bundle is not trusted to be internally
+      // consistent: two rows for the same (channel, stream) pass the schema,
+      // and a UNIQUE failure here would land after rules.json was already
+      // replaced -- the one split-write the route works to avoid.
       const block = this.sql(
-        'INSERT INTO assign_blocks (channel_id, stream_id, blocked_at) VALUES (?, ?, ?)',
+        'INSERT OR REPLACE INTO assign_blocks (channel_id, stream_id, blocked_at) VALUES (?, ?, ?)',
       );
       for (const b of snapshot.assignBlocks) {
         block.run(b.channelId, b.streamId, b.blockedAt);

@@ -14,7 +14,7 @@
 
 import { z } from 'zod';
 import { loadConfig, requireCredentials } from './config';
-import { type LoadReport, loadRules, rulesDocSchema } from './rules';
+import { type LoadReport, loadRules } from './rules';
 import { FIELD_KEYS, resolveEnv } from './settings';
 
 export const BACKUP_VERSION = 1;
@@ -23,8 +23,17 @@ export const backupBundleSchema = z.object({
   kind: z.literal('podium-backup'),
   version: z.literal(BACKUP_VERSION),
   createdAt: z.number().int().nonnegative(),
-  /** The rules doc exactly as it would be written to rules.json. */
-  rules: rulesDocSchema,
+  /**
+   * The rules doc exactly as it sits on disk, carried through unparsed.
+   *
+   * Deliberately not `rulesDocSchema`: that schema declares the keys the
+   * loader reads and zod drops the rest, and `group_patterns` -- written by
+   * the group-policy UI, read by the matcher -- is not among them. Parsing
+   * the doc *into* the bundle would drop those patterns from the backup and,
+   * on restore, from rules.json. So the doc travels byte-for-byte and the
+   * validation happens beside it, in `parseBundle`.
+   */
+  rules: z.record(z.string(), z.unknown()),
   /** Stored settings rows, credentials included. */
   settings: z.record(z.string(), z.string()),
   /** The uploaded Teamarr rule set, or null when none was stored. */
@@ -51,8 +60,10 @@ export type BackupBundle = z.infer<typeof backupBundleSchema>;
  *
  * The load round-trip is the rule the import script established: a rules file
  * that does not parse must never reach disk, because it takes the next worker
- * boot down with it. Schema validation alone is not that guarantee --
- * `rulesDocSchema` accepts what `loadRules` refines and compiles.
+ * boot down with it. It is also the only validation the rules half gets -- the
+ * bundle schema keeps the doc verbatim -- and it is the stronger of the two,
+ * since `loadRules` runs `rulesDocSchema` itself and then refines and compiles
+ * what it accepts.
  */
 export function parseBundle(raw: unknown): { bundle: BackupBundle; loadReport: LoadReport } {
   const bundle = backupBundleSchema.parse(raw);
