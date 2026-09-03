@@ -60,8 +60,29 @@ const BRACKETED = /\[[^\]]*\]|\([^)]*\)/g;
 /**
  * Unicode decoration the providers love: superscripts, modifier letters, and
  * the bidi isolates that wrap many names ("⁨Movie Network East⁩").
+ *
+ * Deleted rather than spaced, because every one of these is a modifier hung off
+ * the character before it -- "HBOᴴᴰ" is "HBO", not "HBO" and something else.
  */
-const DECORATION = /[¹²³ʰ-˿ᴬ-ᶿ⁰-₟⁦-⁩]+/g;
+const DECORATION = /[¹²³ʰ-˿ᴬ-ᶿ⁰-₟⁦-⁩]+/gu;
+/**
+ * Marker glyphs providers stamp on a stream to flag a feature: ◉ for catch-up,
+ * ▶ ⏺ ● for recording or 24/7, ★ for a promoted feed, and a long tail of
+ * others that changes whenever a provider redesigns its list.
+ *
+ * Swept as a Unicode class rather than a hand-kept list of the ones seen so
+ * far. "Symbol, other" is precisely the category nothing is *named* with, so
+ * membership is the evidence -- and the next glyph a provider invents is
+ * already covered, which a literal list can only be by another code change.
+ *
+ * Left out of the class deliberately: `+` and `$` `€` are Sm/Sc, not So, so
+ * "AMC+" and "Paramount+" keep the character that makes them their own channel.
+ *
+ * Replaced with a space, not deleted, because a marker is a word of its own
+ * however the provider spaced it -- "CNN◉FHD" has to leave two tokens behind or
+ * the tail scan never sees the FHD.
+ */
+const SYMBOLS = /\p{So}+/gu;
 const SEPARATORS = /\s*[:|]\s*/;
 /**
  * An opening delimiter, which carries no information on its own.
@@ -129,12 +150,102 @@ export interface NormalizedName {
   isTimeshift: boolean;
 }
 
+/**
+ * Extra noise to remove, from the rules file rather than from this module.
+ *
+ * `SYMBOLS` retires the whole glyph class in one go, but it can only reach
+ * things Unicode agrees are symbols. The rest of what providers stamp on a name
+ * is *words* -- "CATCHUP", "24/7", "NEW" -- and no category covers those,
+ * because each one is only noise on the catalogue it appears in. Left to code
+ * that means a release every time a provider invents a badge; the operator
+ * looking at the name can simply say so instead.
+ *
+ * Entries are literal text, not patterns: what an operator has in front of them
+ * is the string, and a regex here would fail silently and unreadably when it
+ * was wrong.
+ */
+export type StripList = readonly string[];
+
+const NO_STRIP: StripList = [];
+
+/** A character a word can be made of -- what an entry needs a boundary against. */
+const WORDISH = /[\p{L}\p{N}]/u;
+
+/**
+ * One strip entry as regex source, bounded only where a boundary means anything.
+ *
+ * "HD" must not eat the tail of "GOLD", so an entry that starts or ends in a
+ * word character gets a lookaround on that side. A glyph or a punctuated entry
+ * gets none: `\b` next to "◉" or "24/7" asserts against the neighbouring
+ * character rather than the entry, which is how a naive `\b` on both sides
+ * silently matches nothing at all.
+ */
+function entrySource(entry: string): string {
+  const body = entry.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const left = WORDISH.test(entry[0]!) ? '(?<![\\p{L}\\p{N}])' : '';
+  const right = WORDISH.test(entry[entry.length - 1]!) ? '(?![\\p{L}\\p{N}])' : '';
+  return `${left}${body}${right}`;
+}
+
+/**
+ * The strip list compiled to one alternation, memoised on the list's contents.
+ *
+ * Compiled once per distinct list rather than per name: `buildIndex`
+ * normalises every stream on the install -- 21,900 of them -- and rebuilding
+ * this regex inside that loop would cost more than the match it performs. The
+ * cache is keyed on content rather than identity because the list is rebuilt
+ * from the rules file on every load.
+ *
+ * Dropped wholesale past a bound rather than grown without one. In steady state
+ * there is a single list per process, but the editor previews a candidate entry
+ * against the live catalogue on every keystroke, and each of those is a list
+ * nothing will ask for again.
+ */
+const stripCache = new Map<string, RegExp | null>();
+
+const STRIP_CACHE_MAX = 64;
+
+function stripPattern(strip: StripList): RegExp | null {
+  if (strip.length === 0) return null;
+  const cacheKey = strip.join('\u0000');
+  const cached = stripCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+  if (stripCache.size >= STRIP_CACHE_MAX) stripCache.clear();
+
+  // Entries are folded the same way the name is, and matched against the folded
+  // text -- otherwise an entry typed with an accent, or with the decoration the
+  // operator copied it out of the name with, could never meet the name it came
+  // from.
+  const sources = strip
+    .map((entry) => foldBase(entry).trim())
+    .filter((entry) => entry.length > 0)
+    .map(entrySource);
+
+  const pattern = sources.length > 0 ? new RegExp(sources.join('|'), 'giu') : null;
+  stripCache.set(cacheKey, pattern);
+  return pattern;
+}
+
 /** Strip accents and decoration so 'Águila' and 'Aguila' compare equal. */
-function fold(text: string): string {
+function foldBase(text: string): string {
   return text
     .replace(DECORATION, '')
+    .replace(SYMBOLS, ' ')
     .normalize('NFKD')
     .replace(/\p{Diacritic}/gu, '');
+}
+
+/**
+ * `foldBase` plus whatever the operator added.
+ *
+ * The strip runs last, on already-folded text, so an entry and the name it is
+ * meant to delete are compared in the same shape -- and so a badly chosen entry
+ * can only remove text, never change how the built-in decoration is read.
+ */
+function fold(text: string, strip: StripList = NO_STRIP): string {
+  const base = foldBase(text);
+  const pattern = stripPattern(strip);
+  return pattern ? base.replace(pattern, ' ') : base;
 }
 
 function tierFor(height: number): string {
@@ -144,10 +255,14 @@ function tierFor(height: number): string {
   return 'sd';
 }
 
-export function normalize(raw: string, maxPrefixSegments = 3): NormalizedName {
+export function normalize(
+  raw: string,
+  maxPrefixSegments = 3,
+  strip: StripList = NO_STRIP,
+): NormalizedName {
   const brackets: string[] = [];
   const prefixes: string[] = [];
-  let text = fold(raw);
+  let text = fold(raw, strip);
 
   // Leading brackets first, while their position is still known -- the strip
   // below flattens every bracket to a space, and after it "[USA] CNN" and

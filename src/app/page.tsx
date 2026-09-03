@@ -4,6 +4,7 @@ import { LoaderCircle } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BackupView } from './backup-view';
 import { CheckPanel } from './check-panel';
+import { NameNoiseView } from './name-noise-view';
 import { OrderingView } from './ordering-view';
 import { ProgressView } from './progress-view';
 import { QualityView } from './quality-view';
@@ -844,6 +845,11 @@ export default function Page() {
                     rest of the global config, not on any one channel. */}
                 <div className="mt-4">
                   <StreamGroupsView />
+                </div>
+                {/* Same altitude: what every rule in the file reads, rather
+                    than what any one channel says. */}
+                <div className="mt-4">
+                  <NameNoiseView />
                 </div>
                 <div className="mt-4">
                   <BackupView />

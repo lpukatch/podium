@@ -89,6 +89,63 @@ describe('normalize', () => {
     expect(normalize('⁨HBO East⁩ ᴴᴰ').name).toBe('HBO East');
   });
 
+  it('sweeps provider badge glyphs out of the name', () => {
+    expect(normalize('◉ HBO East').name).toBe('HBO East');
+    expect(normalize('HBO East ◉').name).toBe('HBO East');
+    expect(normalize('USA: ◉ HBO East').name).toBe('HBO East');
+    // Glued to the text rather than spaced, which is how half of them arrive.
+    expect(normalize('◉HBO East').name).toBe('HBO East');
+    // Every sibling marker, without a code change per glyph.
+    for (const glyph of ['⏺', '●', '▶', '★', '♪', '🔴']) {
+      expect(normalize(`${glyph} HBO East`).name).toBe('HBO East');
+    }
+  });
+
+  it('reads quality past a trailing badge glyph', () => {
+    // The scan runs right-to-left and stops at the first thing it does not
+    // know, so an unswept glyph at the tail hid every token to its left: the
+    // name kept the resolution and the stream ranked with no quality at all.
+    const n = normalize('US: CNN 1080p ◉');
+    expect(n.name).toBe('CNN');
+    expect(n.quality.height).toBe(1080);
+    expect(matchKey(n.name)).toBe('cnn');
+
+    const hevc = normalize('US: CNN FHD H265 ◉');
+    expect(hevc.name).toBe('CNN');
+    expect(hevc.quality.tier).toBe('fhd');
+    expect(hevc.quality.codec).toBe('hevc');
+  });
+
+  it('lifts a prefix a badge glyph was welded to', () => {
+    // "◉ USA" is not "USA", so the region and radio guards -- both exact
+    // compares against the segment -- silently stopped seeing it.
+    expect(normalize('◉ USA: CNN FHD').prefixes).toEqual(['USA']);
+    expect(normalize('◉ RADIO: Coast FM').prefixes).toEqual(['RADIO']);
+    expect(normalize('[◉] US: CNN FHD').prefixes).toEqual(['US']);
+  });
+
+  it('keeps the symbols that tell channels apart', () => {
+    // `+` is Sm, not So: "AMC" and "AMC+" stay two channels.
+    expect(matchKey(normalize('AMC+ HD').name)).toBe('amc+');
+    expect(matchKey(normalize('AMC HD').name)).toBe('amc');
+    expect(normalize('AMC+ HD').name).not.toBe(normalize('AMC HD').name);
+  });
+
+  it('deletes operator-configured noise words', () => {
+    const strip = ['CATCHUP', '24/7'];
+    expect(normalize('US: CNN CATCHUP FHD', 3, strip).name).toBe('CNN');
+    expect(normalize('US: CNN CATCHUP FHD', 3, strip).quality.tier).toBe('fhd');
+    expect(normalize('24/7 Simpsons', 3, strip).name).toBe('Simpsons');
+    // Case-folded, like every other comparison here.
+    expect(normalize('CNN catchup', 3, strip).name).toBe('CNN');
+  });
+
+  it('bounds a noise word so it cannot eat part of a name', () => {
+    const strip = ['HD', 'ALT'];
+    expect(normalize('GOLD Channel', 3, strip).name).toBe('GOLD Channel');
+    expect(normalize('Alterna Sports', 3, strip).name).toBe('Alterna Sports');
+  });
+
   it('detects timeshift channels', () => {
     expect(normalize('HBO +1').isTimeshift).toBe(true);
     expect(normalize('HBO East').isTimeshift).toBe(false);
@@ -767,6 +824,40 @@ describe('matcher', () => {
     const m = matcherFor({ channel_id: 1, aliases: ['HBO East'], exclude: ['HBO East'] });
     const index = m.buildIndex([stream(10, 'HBO East')]);
     expect(m.match(m.rules.get(1)!, index)).toEqual([]);
+  });
+
+  it('claims a badged stream from an unbadged alias', () => {
+    // The whole point: the badge is the provider's, so it should never have to
+    // be written into the rules file to be survived.
+    const m = matcherFor({ channel_id: 1, aliases: ['HBO East'] });
+    const index = m.buildIndex([
+      stream(10, '◉ USA: HBO East FHD'),
+      stream(11, 'USA: HBO East 1080p ◉'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([
+      [10, 0],
+      [11, 0],
+    ]);
+  });
+
+  it('applies the operator strip list from the rules defaults', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['HBO East'] }, { strip: ['CATCHUP'] });
+    const index = m.buildIndex([stream(10, 'USA: HBO East CATCHUP FHD')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('strips an alias the same way it strips a name', () => {
+    // An alias carrying the badge already -- every one written before the sweep
+    // existed -- has to keep meaning what it meant.
+    const m = matcherFor({ channel_id: 1, aliases: ['◉ HBO East'] }, { strip: ['CATCHUP'] });
+    const index = m.buildIndex([stream(10, 'USA: HBO East FHD')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('sees a region prefix a badge was welded to', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['HBO East'] }, { exclude_regions: ['PL'] });
+    const index = m.buildIndex([stream(10, '◉ PL: HBO East FHD'), stream(11, 'US: HBO East FHD')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[11, 0]]);
   });
 
   it('excludes a quality variant by its tail token', () => {

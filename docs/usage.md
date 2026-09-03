@@ -54,6 +54,47 @@ putting one back is a job for Dispatcharr. To clear several at once, use the
 tick under **Check now** instead, which removes everything the rule does not
 claim as part of applying the new order.
 
+### Badges and noise words
+
+Providers stamp markers on a name to flag a feature — `◉` for catch-up, `▶` `⏺`
+`●` for a 24/7 or recorded feed, `★` for a promoted one. Those are swept off
+centrally, so an alias never has to carry one:
+
+```
+◉ USA: HBO East FHD      ->  HBO East
+USA: HBO East 1080p ◉    ->  HBO East, 1080p
+```
+
+The sweep is the Unicode "Symbol, other" category rather than a list of the
+glyphs seen so far, so a marker a provider invents next month is already
+covered. `+` is not in it: `AMC` and `AMC+` stay two channels.
+
+A trailing badge was the one that cost you more than typing. Quality tokens are
+read right-to-left and the scan stops at the first thing it does not recognise,
+so `HBO East 1080p ◉` kept the `1080p` welded to the name *and* went into
+ranking with no resolution at all.
+
+What no category can cover is the badges spelled as **words** — `CATCHUP`,
+`24/7`, `NEW` — because each one is only noise on the catalogue it appears in.
+Name them yourself:
+
+```json
+"defaults": { "strip": ["CATCHUP", "24/7"] }
+```
+
+Each entry is literal text, not a pattern, matched case-insensitively and
+deleted from every stream name before anything else reads it — so the tokens
+behind it are still parsed and the alias stays a plain name. A word-shaped entry
+only matches a whole word: `"HD"` will not eat the end of `GOLD`.
+
+**Settings → Name noise** is the same list with the answer attached: type a word
+and it says how many stream names it changes and what four of them become,
+before you save it. Worth using, because a strip entry is the one rule that acts
+on every channel at once.
+
+Aliases go through exactly the same treatment, so a badge already written into
+one keeps working.
+
 ## Sections
 
 Normalising `AU:` and `US:` away is right until the prefix *is* the difference.
