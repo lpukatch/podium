@@ -51,6 +51,8 @@ const defaultsSchema = z
     exclude_radio: z.boolean().optional(),
     /** Provider group name globs whose streams nothing may claim. */
     exclude_groups: z.array(z.string()).optional(),
+    /** Literal text deleted from every stream name. See `Guards.strip`. */
+    strip: z.array(z.string()).optional(),
     max_prefix_segments: z.coerce.number().optional(),
     case_sensitive: z.boolean().optional(),
     require_exact_match: z.boolean().optional(),
@@ -270,6 +272,7 @@ export function loadRules(raw: unknown): LoadReport {
     excludeGroups: (defaults.exclude_groups ?? [])
       .map((glob) => glob.trim())
       .filter((glob) => glob.length > 0),
+    strip: (defaults.strip ?? []).map((entry) => entry.trim()).filter((entry) => entry.length > 0),
   };
 
   const flags = caseSensitive ? '' : 'i';

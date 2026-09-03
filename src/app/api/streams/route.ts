@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { leadingWord, matchKey, normalize } from '@/lib/normalize';
+import { leadingWord, matchKey } from '@/lib/normalize';
 import { index, matcher, snapshot } from '@/lib/server/state';
 
 export const dynamic = 'force-dynamic';
@@ -64,7 +64,7 @@ export async function GET(request: Request) {
     const buckets = new Map<string, Bucket>();
 
     for (const stream of snap.streams) {
-      const norm = idx.normalized.get(stream.id) ?? normalize(stream.name);
+      const norm = idx.normalized.get(stream.id) ?? m.normalize(stream.name);
       const key = m.key(norm.name);
       // Match on the folded key first (so "nbc4wrc" finds "NBC 4 WRC"), and
       // fall back to a raw substring so a search including a prefix still works.

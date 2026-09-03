@@ -20,7 +20,14 @@
  */
 
 import { globToRegExp } from './eligibility';
-import { matchKey, type NormalizedName, normalize, qualityKeys, tailKeys } from './normalize';
+import {
+  matchKey,
+  type NormalizedName,
+  normalize,
+  qualityKeys,
+  type StripList,
+  tailKeys,
+} from './normalize';
 
 export interface StreamLike {
   id: number;
@@ -68,6 +75,16 @@ export interface Guards {
    * actually thinking of, while its id is an implementation detail.
    */
   excludeGroups: string[];
+  /**
+   * Extra text to delete from every stream name before anything reads it.
+   *
+   * The badge glyphs providers stamp on a name are handled centrally and need
+   * no configuration, but the word-shaped ones -- "CATCHUP", "24/7", "NEW" --
+   * differ per catalogue and cannot be enumerated in advance. This is where an
+   * operator says so, instead of writing the badge into every alias that has to
+   * survive it. See `StripList`.
+   */
+  strip: StripList;
 }
 
 export const DEFAULT_GUARDS: Guards = {
@@ -76,6 +93,7 @@ export const DEFAULT_GUARDS: Guards = {
   radio: true,
   maxPrefixSegments: 3,
   excludeGroups: [],
+  strip: [],
 };
 
 /** Streams normalised once and bucketed by match key. */
@@ -350,6 +368,29 @@ export class Matcher {
   }
 
   /**
+   * A name normalised under this ruleset's guards.
+   *
+   * A method rather than a bare `normalize` call at each site, because
+   * `maxPrefixSegments` and `strip` are both config: a caller that forgets one
+   * silently reads a *different* name than matching does, and the two only
+   * disagree on exactly the streams the config was added for.
+   */
+  normalize(name: string): NormalizedName {
+    return normalize(name, this.guards.maxPrefixSegments, this.guards.strip);
+  }
+
+  /**
+   * The same, under a strip list that is not (yet) the ruleset's.
+   *
+   * So the editor can answer "what would this entry do" against the live
+   * catalogue without saving it first -- a strip entry acts on every channel at
+   * once, which is the worst kind of rule to find out about afterwards.
+   */
+  normalizeWith(name: string, strip: StripList): NormalizedName {
+    return normalize(name, this.guards.maxPrefixSegments, strip);
+  }
+
+  /**
    * Key an alias the same way a stream name is keyed.
    *
    * Aliases and stream names must go through *identical* processing or they can
@@ -360,7 +401,7 @@ export class Matcher {
    * channels matched nothing at all.
    */
   aliasKey(alias: string): string {
-    return this.key(normalize(alias, this.guards.maxPrefixSegments).name);
+    return this.key(this.normalize(alias).name);
   }
 
   /** An alias line split into its prefix qualifiers and its lookup key. */
@@ -430,7 +471,7 @@ export class Matcher {
     };
 
     for (const stream of streams) {
-      const norm = normalize(stream.name, this.guards.maxPrefixSegments);
+      const norm = this.normalize(stream.name);
       normalized.set(stream.id, norm);
       folded.set(stream.id, norm.name.toLowerCase());
       push(byKey, this.key(norm.name), stream);

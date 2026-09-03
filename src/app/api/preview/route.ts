@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
 import type { ChannelRule } from '@/lib/matcher';
-import { normalize } from '@/lib/normalize';
 import type { ProbeResult } from '@/lib/probe';
 import { parseProviders } from '@/lib/rules';
 import { index, matcher, snapshot } from '@/lib/server/state';
@@ -71,7 +70,7 @@ export async function POST(request: Request) {
     const describe = (id: number, step: number | null) => {
       const stream = streamById.get(id);
       if (!stream) return null;
-      const norm = normalize(stream.name);
+      const norm = m.normalize(stream.name);
       return {
         id,
         raw: stream.name,
