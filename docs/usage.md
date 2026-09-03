@@ -11,6 +11,7 @@ alone. For environment variables and tuning, see
   - [Channel groups](#channel-groups)
 - [Ranking](#ranking)
 - [Importing existing rules](#importing-existing-rules)
+- [Backup and restore](#backup-and-restore)
 
 ## Matching
 
@@ -1057,3 +1058,18 @@ the same streams.
 > [!WARNING]
 > An exported config may embed a live Dispatcharr API key. Keep it out of
 > version control.
+
+## Backup and restore
+
+**Settings → Backup** downloads everything you configured — your rules,
+settings, Teamarr rules and assignment blocks — as one JSON file. Import the
+same kind of file there to put it back.
+
+Restore replaces: what the backup carries overwrites what is there now, for
+all four of those things at once. Measured data — probe verdicts, quality
+history, run history — is neither backed up nor touched; it re-accumulates on
+its own.
+
+> [!WARNING]
+> A backup file contains your Dispatcharr API key or password in the clear.
+> Treat it like one.

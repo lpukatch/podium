@@ -411,6 +411,13 @@ export interface RefreshMarks {
 
 export const NO_MARKS: RefreshMarks = { all: null, byGroup: new Map() };
 
+/** The configurable half of the database, as a backup bundle carries it. */
+export interface ConfigSnapshot {
+  settings: Record<string, string>;
+  teamarrRules: { rules: unknown[]; uploadedAt: number } | null;
+  assignBlocks: Array<{ channelId: number; streamId: number; blockedAt: number }>;
+}
+
 /**
  * The instant a channel in this group was last told to re-check from scratch.
  *
@@ -2093,6 +2100,18 @@ export class Store {
     return new Set(rows.map((r) => r.stream_id));
   }
 
+  /** Every assignment block, for the backup export. */
+  allAssignBlocks(): ConfigSnapshot['assignBlocks'] {
+    const rows = this.sql(
+      'SELECT channel_id, stream_id, blocked_at FROM assign_blocks ORDER BY channel_id, stream_id',
+    ).all() as Array<{ channel_id: number; stream_id: number; blocked_at: number }>;
+    return rows.map((r) => ({
+      channelId: r.channel_id,
+      streamId: r.stream_id,
+      blockedAt: r.blocked_at,
+    }));
+  }
+
   /** Undo a block, for a stream someone wants back in the running. */
   unblockAssignment(channelId: number, streamId: number): void {
     this.sql('DELETE FROM assign_blocks WHERE channel_id = ? AND stream_id = ?').run(
@@ -2142,6 +2161,65 @@ export class Store {
       this.sql('DELETE FROM catalogue_state').run();
       this.sql('DELETE FROM assign_blocks').run();
       this.sql('DELETE FROM quality_samples').run();
+    })();
+  }
+
+  /** The configurable half of the database, as one consistent read. */
+  exportConfig(): ConfigSnapshot {
+    // One transaction so the reads cannot tear across a concurrent worker
+    // write: a backup is a snapshot of one moment, not a blend of two.
+    return this.db.transaction(() => ({
+      settings: this.settings(),
+      teamarrRules: this.teamarrRules(),
+      assignBlocks: this.allAssignBlocks(),
+    }))();
+  }
+
+  /**
+   * Replace the configurable half of the database from a backup.
+   *
+   * Replace, not merge: a restore means "make it be what the backup says", and
+   * merging would silently keep settings the user believed they had undone.
+   * Never touches live state (worker_lock, progress) or history -- those
+   * describe this install's runs, not its configuration.
+   */
+  restoreConfig(snapshot: ConfigSnapshot): void {
+    this.db.transaction(() => {
+      this.sql('DELETE FROM settings').run();
+      this.sql('DELETE FROM teamarr_rules').run();
+      this.sql('DELETE FROM assign_blocks').run();
+
+      // A fresh timestamp, not the bundle's. settingsVersion() is
+      // MAX(updated_at) and the web's config() caches on it, so the stamp is
+      // the signal "these settings are not the ones you are holding" -- which
+      // is exactly what a restore is, whatever date the bundle was written on.
+      // Writing the bundle's stamp would put that signal in the past.
+      const now = Date.now();
+      const putSetting = this.sql('INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)');
+      for (const [key, value] of Object.entries(snapshot.settings)) {
+        putSetting.run(key, value, now);
+      }
+
+      // uploaded_at kept from the bundle, unlike saveTeamarrRules' "now": the
+      // rule-check screen shows this date, and it should stay the date the
+      // rules were actually uploaded.
+      if (snapshot.teamarrRules) {
+        this.sql('INSERT INTO teamarr_rules (id, rules, uploaded_at) VALUES (1, ?, ?)').run(
+          JSON.stringify(snapshot.teamarrRules.rules),
+          snapshot.teamarrRules.uploadedAt,
+        );
+      }
+
+      // OR REPLACE, because a bundle is not trusted to be internally
+      // consistent: two rows for the same (channel, stream) pass the schema,
+      // and a UNIQUE failure here would land after rules.json was already
+      // replaced -- the one split-write the route works to avoid.
+      const block = this.sql(
+        'INSERT OR REPLACE INTO assign_blocks (channel_id, stream_id, blocked_at) VALUES (?, ?, ?)',
+      );
+      for (const b of snapshot.assignBlocks) {
+        block.run(b.channelId, b.streamId, b.blockedAt);
+      }
     })();
   }
 

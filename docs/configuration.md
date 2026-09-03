@@ -14,6 +14,10 @@ A value still coming from the environment is labelled `from environment`, and
 clearing a field in the UI hands it back — so a setting you changed once and
 forgot cannot silently shadow the environment you thought you were running.
 
+All of it — settings, rules, Teamarr rules — can be carried to another install
+through **Settings → Backup**; see
+[usage.md](usage.md#backup-and-restore).
+
 - [Connecting to Dispatcharr](#connecting-to-dispatcharr)
 - [Who can reach it](#who-can-reach-it)
 - [Pacing](#pacing)
