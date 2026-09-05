@@ -780,29 +780,64 @@ describe('teamarrRules stats_metric export', () => {
   const watchable = (count: number, kbps: number) =>
     many(count, { policyMode: 'always', bitrateKbps: kbps, measured: true });
 
-  it('reads the ladder off this catalogue rather than a hand-picked number', () => {
-    // 100 streams evenly spread 1000..10000. The rungs have to land inside
-    // that, not at somebody else's 10000/15000.
-    const spread = Array.from({ length: 100 }, (_, i) =>
-      sample({ bitrateKbps: 1000 + i * 91, measured: true }),
+  /** 100 streams evenly spread 1000..10000 kbps. */
+  const spreadProfile = () =>
+    buildProfile(
+      Array.from({ length: 100 }, (_, i) => sample({ bitrateKbps: 1000 + i * 91, measured: true })),
+      { minSamples: 20 },
     );
-    const profile = buildProfile(spread, { minSamples: 20 });
-    const rungs = profile.bitrateLadder.rungsKbps;
 
-    expect(rungs).toHaveLength(3);
-    expect(rungs[0]).toBeLessThan(rungs[1]!);
-    expect(rungs[1]).toBeLessThan(rungs[2]!);
-    for (const rung of rungs) {
-      expect(rung).toBeGreaterThanOrEqual(1000);
-      expect(rung).toBeLessThanOrEqual(10_000);
+  /** What the emitted ladder is worth to a stream measured at `kbps`. */
+  const ladderScore = (rules: TeamarrRule[], kbps: number): number =>
+    rules
+      .filter((rule) => rule.value.startsWith('ffmpeg_output_bitrate'))
+      .reduce((sum, rule) => {
+        const [, operator, threshold] = rule.value.split('|');
+        const target = Number(threshold);
+        const hit = operator === '<' ? kbps < target : kbps >= target;
+        return hit ? sum + rule.points : sum;
+      }, 0);
+
+  it('reads the ladder off this catalogue rather than a hand-picked number', () => {
+    // The steps have to land inside the catalogue, not at somebody else's
+    // 10000/15000.
+    const profile = spreadProfile();
+    const { floorKbps, rungsKbps } = profile.bitrateLadder;
+
+    expect(rungsKbps).toHaveLength(2);
+    expect(floorKbps).toBeLessThan(rungsKbps[0]!);
+    expect(rungsKbps[0]).toBeLessThan(rungsKbps[1]!);
+    for (const step of [floorKbps, ...rungsKbps]) {
+      expect(step).toBeGreaterThanOrEqual(1000);
+      expect(step).toBeLessThanOrEqual(10_000);
     }
 
     const ladder = teamarrRules(profile).rules.filter((rule) =>
       rule.value.startsWith('ffmpeg_output_bitrate'),
     );
-    expect(ladder.map((rule) => rule.value)).toEqual(
-      rungs.map((rung) => `ffmpeg_output_bitrate|>=|${rung}`),
-    );
+    expect(ladder.map((rule) => rule.value)).toEqual([
+      `ffmpeg_output_bitrate|<|${floorKbps}`,
+      ...rungsKbps.map((rung) => `ffmpeg_output_bitrate|>=|${rung}`),
+    ]);
+  });
+
+  it('scores a stream nobody has probed the same as a median one', () => {
+    // The whole reason the ladder is centred rather than resting on zero. A
+    // stats_metric rule does not fire on absent stream_stats, so a
+    // promotion-only ladder would rank every unprobed stream beneath every
+    // probed one -- and on event inventory the probed set is the long-lived
+    // linear feeds, not the better streams.
+    const profile = spreadProfile();
+    const { rules } = teamarrRules(profile);
+    const { floorKbps, rungsKbps } = profile.bitrateLadder;
+
+    // An unprobed stream matches no bitrate rule at all: 0 by construction.
+    expect(ladderScore(rules, floorKbps)).toBe(0);
+    expect(ladderScore(rules, rungsKbps[0]! - 1)).toBe(0);
+
+    expect(ladderScore(rules, floorKbps - 1)).toBeLessThan(0);
+    expect(ladderScore(rules, rungsKbps[0]!)).toBeGreaterThan(0);
+    expect(ladderScore(rules, rungsKbps[1]!)).toBeGreaterThan(ladderScore(rules, rungsKbps[0]!));
   });
 
   it('excludes dead and black streams from the ladder', () => {
@@ -817,17 +852,22 @@ describe('teamarrRules stats_metric export', () => {
       { minSamples: 20 },
     );
     expect(profile.bitrateLadder.samples).toBe(50);
+    expect(profile.bitrateLadder.floorKbps).toBe(8000);
     expect(profile.bitrateLadder.rungsKbps.every((rung) => rung === 8000)).toBe(true);
   });
 
-  it('emits one rung when the quartiles collapse onto one number', () => {
-    // A uniform catalogue puts p50, p75 and p90 on the same value; emitting it
-    // three times would silently triple what that rung is worth.
+  it('drops a rung that collapses onto the floor rather than de-duplicating it', () => {
+    // A uniform catalogue puts p50, p75 and p90 on the same value. A `>=` rung
+    // there fires on everything the floor did not demote -- a flat bonus for
+    // having been probed, which is exactly what the floor exists to remove. So
+    // the promotions go and the demotion stays.
     const profile = buildProfile(watchable(60, 6000), { minSamples: 20 });
-    const ladder = teamarrRules(profile).rules.filter((rule) =>
-      rule.value.startsWith('ffmpeg_output_bitrate'),
-    );
-    expect(ladder).toHaveLength(1);
+    const { rules } = teamarrRules(profile);
+    const ladder = rules.filter((rule) => rule.value.startsWith('ffmpeg_output_bitrate'));
+
+    expect(ladder.map((rule) => rule.value)).toEqual(['ffmpeg_output_bitrate|<|6000']);
+    expect(ladder[0]!.points).toBeLessThan(0);
+    expect(ladderScore(rules, 6000)).toBe(0);
   });
 
   it('demotes a measured-dead stream and says nothing about an unprobed one', () => {
@@ -854,7 +894,8 @@ describe('teamarrRules stats_metric export', () => {
     // The thresholds are the one thing here that will look arbitrary later.
     const profile = buildProfile(watchable(60, 6000), { minSamples: 20 });
     const { podium } = teamarrRules(profile);
-    expect(podium.measured.ladder.percentiles).toEqual([0.5, 0.75, 0.9]);
+    expect(podium.measured.ladder.floorPercentile).toBe(0.5);
+    expect(podium.measured.ladder.percentiles).toEqual([0.75, 0.9]);
     expect(podium.measured.ladder.samples).toBe(60);
     expect(podium.measured.deadPoints).toBeLessThan(0);
   });
@@ -863,6 +904,13 @@ describe('teamarrRules stats_metric export', () => {
 describe('mergeTeamarrRules and stats_metric families', () => {
   const ladder: TeamarrRule[] = [
     { type: 'stats_metric', value: 'alive|=|0', priority: 99, mode: 'score', points: -100 },
+    {
+      type: 'stats_metric',
+      value: 'ffmpeg_output_bitrate|<|4000',
+      priority: 99,
+      mode: 'score',
+      points: -8,
+    },
     {
       type: 'stats_metric',
       value: 'ffmpeg_output_bitrate|>=|6000',
@@ -882,8 +930,16 @@ describe('mergeTeamarrRules and stats_metric families', () => {
   it('supersedes an old ladder instead of stacking a second one on top', () => {
     // The live case: hand-written rungs at 10000/15000, recalibrated to 6000/
     // 8000. Matching by value would keep all four and score the same bitrate
-    // twice.
+    // twice. A stale floor from a previous push goes the same way -- the two
+    // comparators are separate families, and each has to clear its own.
     const existing = [
+      {
+        type: 'stats_metric',
+        value: 'ffmpeg_output_bitrate|<|3000',
+        priority: 99,
+        mode: 'score',
+        points: -8,
+      },
       {
         type: 'stats_metric',
         value: 'ffmpeg_output_bitrate|>=|10000',
@@ -903,16 +959,17 @@ describe('mergeTeamarrRules and stats_metric families', () => {
 
     const bitrate = merged.filter((rule) => rule.value.startsWith('ffmpeg_output_bitrate'));
     expect(bitrate.map((rule) => rule.value)).toEqual([
+      'ffmpeg_output_bitrate|<|4000',
       'ffmpeg_output_bitrate|>=|6000',
       'ffmpeg_output_bitrate|>=|8000',
     ]);
   });
 
-  it('emits every rung rather than collapsing them to one', () => {
-    // A family key shared by three generated rungs must not make them
-    // interchangeable -- that would drop two of the three.
+  it('emits every step rather than collapsing them to one', () => {
+    // A family key shared by two generated rungs must not make them
+    // interchangeable -- that would drop one of the two.
     const merged = mergeTeamarrRules([], ladder);
-    expect(merged).toHaveLength(3);
+    expect(merged).toHaveLength(4);
   });
 
   it('leaves a metric Podium has no opinion about alone', () => {
@@ -921,7 +978,7 @@ describe('mergeTeamarrRules and stats_metric families', () => {
     ];
     const merged = mergeTeamarrRules(existing, ladder);
     expect(merged.some((rule) => rule.value === 'source_fps|>=|50')).toBe(true);
-    expect(merged).toHaveLength(4);
+    expect(merged).toHaveLength(5);
   });
 
   it('leaves a compound condition alone', () => {

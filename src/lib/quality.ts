@@ -392,13 +392,39 @@ export interface LabelAccuracy {
  * anything cleverer, because the job is only to cut the field into "better than
  * most", "top quarter", "top tenth" -- and because a percentile moves with the
  * catalogue, which is the property a hand-picked number lacks.
+ *
+ * The ladder is centred on the median rather than resting on zero, and that is
+ * the part that matters most. A `stats_metric` rule does not fire on a stream
+ * with no `stream_stats` at all -- Teamarr's `_match_stats_metric` returns
+ * false on absent stats, it does not read them as zero -- so a promotion-only
+ * ladder scores every unprobed stream 0 and every probed one somewhere above
+ * it. That ranks *having been looked at* rather than being any good, and on
+ * event inventory the two are not remotely the same thing: the streams Podium
+ * has probed are the ones that sat still long enough to probe, which skews
+ * hard toward the long-lived linear feeds Teamarr attaches by EPG match and
+ * away from the per-event streams that appear an hour before kickoff.
+ *
+ * Centring it removes that. `floorKbps` demotes a stream *measured* below the
+ * median, the rungs promote one measured above the upper quartile, and 0 --
+ * the score of a stream nobody has probed -- lands where a median stream
+ * lands. Absent stats then read as "no opinion", which is the only honest
+ * thing they can mean.
  */
 export interface BitrateLadder {
   /** Samples the percentiles were taken over. */
   samples: number;
-  /** The rungs themselves, ascending: p50, p75, p90. */
+  /**
+   * Measured below this and a stream is demoted: the median.
+   *
+   * The ladder's zero point, not its bottom rung. It is what makes an unscored
+   * stream sit level with a median one instead of beneath the whole field.
+   */
+  floorKbps: number;
+  /** Which percentile `floorKbps` came from. */
+  floorPercentile: number;
+  /** The promotion rungs, ascending: p75, p90. */
   rungsKbps: number[];
-  /** Which percentile each rung came from, same order. */
+  /** Which percentile each rung came from, same order as `rungsKbps`. */
   percentiles: number[];
 }
 
@@ -546,8 +572,11 @@ function percentileOf(ascending: number[], q: number): number {
   return Math.round(ascending[index]!);
 }
 
-/** The percentiles the ladder's rungs are taken from, ascending. */
-const LADDER_PERCENTILES = [0.5, 0.75, 0.9];
+/** The percentile the ladder's demotion floor -- and so its zero point -- sits at. */
+const LADDER_FLOOR_PERCENTILE = 0.5;
+
+/** The percentiles the ladder's promotion rungs are taken from, ascending. */
+const LADDER_PERCENTILES = [0.75, 0.9];
 
 /**
  * The bitrate ladder, read off the streams a rule would actually be sorting.
@@ -568,6 +597,8 @@ function buildLadder(scoped: StoredQualitySample[]): BitrateLadder {
 
   return {
     samples: kbps.length,
+    floorKbps: percentileOf(kbps, LADDER_FLOOR_PERCENTILE),
+    floorPercentile: LADDER_FLOOR_PERCENTILE,
     rungsKbps: LADDER_PERCENTILES.map((q) => percentileOf(kbps, q)),
     percentiles: [...LADDER_PERCENTILES],
   };
@@ -942,9 +973,14 @@ export interface ExportOptions extends ProfileOptions {
    * from `stats_metric` rules reading the bitrate Podium publishes -- a real
    * reading of that stream -- while everything generated here is an inference
    * about streams from the same provenance. The cap keeps the strongest
-   * inference below the first rung of a measured ladder, so a stream that has
-   * actually been measured at 10Mbps outranks one that merely comes from a
-   * good account.
+   * inference inside the measured ladder's span, so a stream actually measured
+   * in the top decile outranks one that merely comes from a good account.
+   *
+   * It is a cap on any *single* prior, not on their sum, and deliberately so: a
+   * stream carrying a good account, a good group and a good tier has three
+   * independent reasons to be worth trying, and that is a different claim from
+   * any one of them. The invariant that has to hold whatever they stack to is
+   * the liveness one, and `deadPoints` is sized for it.
    */
   maxPoints?: number;
   /**
@@ -973,13 +1009,18 @@ export interface ExportOptions extends ProfileOptions {
    */
   deadPoints?: number;
   /**
-   * What each rung of the bitrate ladder is worth.
+   * What each step of the bitrate ladder is worth.
    *
-   * Flat per rung, so the ladder is a step function: below the median nothing,
-   * then one step per quartile. Three rungs at the default put a top-decile
-   * stream 24 points clear of a median one -- more than any single prior can
-   * move it, which is the point, and still short of the liveness penalty, which
-   * is also the point.
+   * Flat per step, so the ladder is a step function centred on the median: one
+   * step down below it, one step up per quartile above. At the default that
+   * spans −8 to +16, putting a top-decile stream 24 points clear of a
+   * bottom-half one -- more than any single prior can move it, which is the
+   * point, and still short of the liveness penalty, which is also the point.
+   *
+   * The span is the same as it was when all three steps were promotions; what
+   * changed is where zero sits in it. Zero is the score of a stream carrying no
+   * `stream_stats`, and it now means "a median stream" rather than "the worst
+   * stream in the catalogue".
    *
    * Set to 0 to suppress the ladder.
    */
@@ -1170,17 +1211,38 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
     });
   }
 
-  // The ladder, at this install's own quartiles. Rungs are cumulative -- a
-  // stream above p90 matches all three -- which is what makes a flat per-rung
-  // value read as a monotonic preference rather than three unrelated opinions.
+  // The ladder, at this install's own quartiles, centred on the median.
   //
-  // De-duplicated: on a thin or very uniform catalogue two percentiles can land
-  // on the same number, and emitting the same threshold twice would silently
-  // double that rung's worth.
+  // The floor is the rule that keeps this honest. Without it every rung is a
+  // promotion, so a stream carrying no `stream_stats` scores 0 and loses to
+  // every probed stream in the catalogue -- which is the same failure the
+  // liveness rules avoid by demoting only, arriving through the other door.
+  // With it, 0 is the median: measured worse than the field is demoted,
+  // measured better is promoted, and never measured is an opinion nobody has.
+  //
+  // Rungs are cumulative -- a stream above p90 matches both -- which is what
+  // makes a flat per-rung value read as a monotonic preference rather than two
+  // unrelated opinions.
+  //
+  // A rung at or below the floor is dropped rather than de-duplicated. On a
+  // thin or uniform catalogue the quartiles collapse onto one number, and a
+  // `>=` at the floor is not a discrimination at all: it fires on everything
+  // the floor did not demote, which is a flat bonus for having been probed,
+  // reintroducing exactly what the floor was added to remove.
   if (bitratePoints !== 0) {
+    const { floorKbps, rungsKbps } = profile.bitrateLadder;
+    if (floorKbps > 0) {
+      rules.push({
+        type: 'stats_metric',
+        value: `ffmpeg_output_bitrate|<|${floorKbps}`,
+        priority: 99,
+        mode: 'score',
+        points: -bitratePoints,
+      });
+    }
     const seen = new Set<number>();
-    for (const rung of profile.bitrateLadder.rungsKbps) {
-      if (rung <= 0 || seen.has(rung)) continue;
+    for (const rung of rungsKbps) {
+      if (rung <= floorKbps || rung <= 0 || seen.has(rung)) continue;
       seen.add(rung);
       rules.push({
         type: 'stats_metric',
@@ -1286,11 +1348,15 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
         (deadPoints !== 0 || bitratePoints !== 0
           ? ' `stats_metric` rules read the stream_stats Podium publishes to ' +
             'Dispatcharr, so they score a measurement of the stream itself ' +
-            'rather than a prior about where it came from. Merging REPLACES ' +
-            'any existing single-condition stats_metric rule on the same ' +
-            'metric and comparator, whatever its threshold -- a recalibrated ' +
-            'ladder has different rungs, and keeping the old ones would score ' +
-            'the same bitrate twice. See podium.measured.'
+            'rather than a prior about where it came from. The bitrate ladder ' +
+            "is centred on this catalogue's median: a stream measured below " +
+            'it is demoted, one measured above the upper quartile is promoted, ' +
+            'and a stream with no stream_stats scores 0 and so sits level with ' +
+            'a median one -- absent stats are not a low reading. Merging ' +
+            'REPLACES any existing single-condition stats_metric rule on the ' +
+            'same metric and comparator, whatever its threshold -- a ' +
+            'recalibrated ladder has different rungs, and keeping the old ones ' +
+            'would score the same bitrate twice. See podium.measured.'
           : '') +
         (consolidated.length > 0
           ? ` ${consolidated.length} regex rule(s) were mined from stream names and ` +

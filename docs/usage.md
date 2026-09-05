@@ -656,7 +656,7 @@ measurement of *the stream in front of you*. Three kinds:
 ```
 alive|=|0                      -100
 blank_detected|=|1             -100
-ffmpeg_output_bitrate|>=|6602    +8    <- your p50
+ffmpeg_output_bitrate|<|6602     -8    <- your p50
 ffmpeg_output_bitrate|>=|8047    +8    <- your p75
 ffmpeg_output_bitrate|>=|9444    +8    <- your p90
 ```
@@ -682,6 +682,28 @@ first cleared 5.7% of streams and the second 0.4%. Both looked exactly like
 rules that worked. Dead and black streams are excluded from the percentiles —
 they are the liveness rules' business, and leaving them in drags every rung
 toward zero until the bottom one is cleared by a black screen.
+
+The ladder is **centred on the median**, and that is the part worth
+understanding. Teamarr's `stats_metric` matcher does not fire on a stream with
+no `stream_stats` at all — absent stats are not read as zero, they are read as
+no match — so a ladder made only of promotions scores every unprobed stream 0
+and every probed one above it. That ranks *having been probed*, not being any
+good, and on event inventory the two are nothing like the same thing: the
+streams Podium has measured are the ones that sat still long enough to measure,
+which skews hard toward the long-lived linear feeds Teamarr attaches by EPG
+match and away from the per-event streams that appear an hour before kickoff. A
+bitrate rule built that way is an `epg_match` bonus wearing a bitrate's name.
+
+So the bottom step is a **demotion below the median** rather than a promotion
+above it. A stream measured worse than your field loses points, one measured
+better gains them, and 0 — the score of a stream nobody has probed — lands level
+with a median stream. The span is unchanged; where zero sits in it is not.
+
+On a catalogue uniform enough that p50, p75 and p90 collapse onto one number,
+the promotions are **dropped rather than de-duplicated**: a `>=` at the median
+fires on everything the demotion did not catch, which is a flat bonus for having
+been probed, and reintroduces exactly what centring the ladder removed. What
+ships is the demotion alone.
 
 `?deadPoints=` and `?bitratePoints=` tune the two; set either to `0` to
 suppress it.
@@ -839,9 +861,8 @@ Raise it if your own rules use larger numbers — only the ratio matters.
 
 No generated **prior** exceeds **±15** whatever it fitted — an `m3u`, `group`
 or `regex` rule is an inference about streams of the same provenance, and the
-cap keeps the strongest inference below the first rung of the measured ladder,
-so a stream measured at 10Mbps outranks one that merely comes from a good
-account.
+cap keeps the strongest inference inside the measured ladder's span, so a stream
+measured in your top decile outranks one that merely comes from a good account.
 
 The `stats_metric` rules sit outside that cap, and have to. The cap exists so a
 prior never outranks a measurement; these *are* the measurement. Capping the
@@ -1041,13 +1062,57 @@ Each disagreement names the rules that scored the losing stream, which is
 usually the whole explanation: an `m3u` rule worth +20 on a provider that is
 running 2Mbps tonight, against a provider with no rule at all running 12.
 
-Two rule types cannot be simulated. `epg_match` and `stream_type` read Teamarr's
-own state, so a set carrying them is reported as **approximate** rather than
-scored as though those rules were absent — a `stream_type` rule that applies to
-every stream on a channel cancels out and changes no ordering, but that cannot
-be shown from here. `priority`-mode rules are skipped for a different reason:
-they sort into bands rather than adding, so summing them would produce a number
-Teamarr never computes.
+`priority`-mode rules are skipped: they sort into bands rather than adding, so
+summing them would produce a number Teamarr never computes. A `stream_type` rule
+carrying a team filter — `team|nyy,bos` — is skipped too, because Teamarr
+resolves those keys through its own team cache of aliases and per-league
+spellings, and approximating that would move a channel's verdict on a guess
+about somebody else's data.
+
+Anything skipped makes the report **approximate**: not wrong, but not provably
+right either. Both columns of the push's before/after comparison are scored the
+same way, so the comparison still holds.
+
+#### What Teamarr knows and Dispatcharr does not
+
+`epg_match` and `stream_type` used to be on that skipped list, and between them
+they made most real rule sets approximate. Neither is derivable from anything
+Podium can see: `epg_match` is true for a stream Teamarr attached from EPG
+programme data rather than from its name, and `stream_type` says whether it
+matched as an event or a team feed. Both live in Teamarr's own tables.
+
+With a **Teamarr URL** configured, Podium now reads them — one call per channel
+it is about to score — and evaluates both rule types instead of declaring them.
+It mirrors Teamarr's own gate while doing it: an EPG-matched stream never
+matches a `stream_type` rule, because those streams also carry a match type, and
+without the gate an `event` rule listed above the EPG rule would capture them
+first. Teamarr fixed that as its own bug; a simulation missing it would report
+the bug back at you.
+
+That read is not free, which is why it is scoped and capped. There is no bulk
+endpoint, and each call makes Teamarr refresh its stats cache from Dispatcharr
+for any stream whose reading is absent or over an hour old — so only the
+channels the check will actually score are asked about, at most 250 of them,
+lowest channel id first so a capped read is the same read twice running. If
+Teamarr cannot be reached the check runs exactly as it did before, marked
+approximate; it is a reporting feature, not a dependency.
+
+#### Stats coverage, and who actually has it
+
+The same read answers a question the export could not previously ask. A
+`stats_metric` rule does not fire on a stream with no `stream_stats`, so it only
+ever sorts the probed part of the catalogue — and the push now reports how large
+that part is, split by how each stream was attached:
+
+> 94% of the streams carrying stats are EPG-matched (81% of EPG-matched streams
+> have a reading, against 4% of the rest)
+
+That split is the thing to watch. EPG-matched streams are long-lived linear
+feeds that sit still long enough to probe; per-event streams appear an hour
+before kickoff and are gone by morning. The wider the gap, the more a bitrate
+rule is scoring *how a stream was attached* rather than how good it is. Centring
+the bitrate ladder on the median removes the worst of it — see above — but the
+number is worth knowing before deciding what `bitratePoints` should be.
 
 #### It runs itself after the first upload
 

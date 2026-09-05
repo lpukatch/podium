@@ -14,14 +14,16 @@
  * which rule did it.
  *
  * The simulation is honest about its limits rather than complete. `epg_match`
- * and `stream_type` are Teamarr's own state, unknowable from here, and a rule
- * set carrying them is reported as approximate rather than silently scored as
- * though those rules were absent.
+ * and `stream_type` read Teamarr's own attach-time state, which Dispatcharr
+ * does not carry; where `teamarr-match.ts` has read it they are scored, and
+ * where it has not the rule set is reported as approximate rather than silently
+ * scored as though those rules were absent.
  */
 
 import type { ProbeResult } from './probe';
 import { type RankEntry, type RankStrategy, rank } from './scoring';
 import { statsPayload } from './stats';
+import type { StreamMatch } from './teamarr-match';
 
 /** A rule as it appears in `stream-ordering-rules.json`. */
 export interface RuleInput {
@@ -64,6 +66,15 @@ export interface StreamFacts {
    * whole report misleading rather than merely incomplete.
    */
   stats: Record<string, unknown>;
+  /**
+   * How Teamarr attached this stream to this channel, where that was read.
+   *
+   * Undefined means nobody asked -- no Teamarr URL, or the read failed -- and
+   * is not the same as a stream Teamarr attached by name. `compileRules` is
+   * told once, for the whole set, which of the two it is, because a rule is
+   * compiled before any stream is in hand.
+   */
+  match?: StreamMatch;
   result: ProbeResult;
 }
 
@@ -106,6 +117,18 @@ export function toJsRegExp(pattern: string): RegExp {
   return new RegExp(source, flags);
 }
 
+export interface CompileOptions {
+  /**
+   * Whether `facts.match` was read, and so whether Teamarr's attach-time rules
+   * can be evaluated.
+   *
+   * A property of the run rather than of a stream: the read either happened or
+   * it did not, and a stream missing from a successful read is a stream Teamarr
+   * does not have on that channel -- which is an answer, not an absence.
+   */
+  matchKnown?: boolean;
+}
+
 /**
  * Parse a rule set into what can be simulated, and what cannot.
  *
@@ -113,10 +136,14 @@ export function toJsRegExp(pattern: string): RegExp {
  * summing, so mixing the two here would produce a number that is not the one
  * Teamarr computes -- reported as skipped instead.
  */
-export function compileRules(rules: RuleInput[]): {
+export function compileRules(
+  rules: RuleInput[],
+  options: CompileOptions = {},
+): {
   compiled: CompiledRule[];
   skipped: SkippedRule[];
 } {
+  const matchKnown = Boolean(options.matchKnown);
   const compiled: CompiledRule[] = [];
   const skipped: SkippedRule[] = [];
 
@@ -176,11 +203,46 @@ export function compileRules(rules: RuleInput[]): {
           return Number.isFinite(actual) && compare(actual, target);
         },
       });
+    } else if (type === 'epg_match') {
+      // Teamarr's `_match_epg_match` is this one comparison and nothing else:
+      // a stream attached from EPG programme data carries `epg`, and every
+      // name-matching method (cache, alias, pattern, fuzzy, user_corrected)
+      // carries its own name.
+      if (!matchKnown) {
+        skip('Teamarr-side state that was not read this run');
+        continue;
+      }
+      compiled.push({ type, value, points, test: (facts) => facts.match?.matchMethod === 'epg' });
+    } else if (type === 'stream_type') {
+      if (!matchKnown) {
+        skip('Teamarr-side state that was not read this run');
+        continue;
+      }
+      const [wanted, keys] = value.split('|');
+      // `team|nyy,bos` filters the match down to streams naming one of those
+      // teams, and Teamarr resolves the names through its own team cache --
+      // aliases, abbreviations and per-league spellings that exist nowhere on
+      // this side. Approximating it would move a channel's verdict on a guess
+      // about somebody else's data, which is worse than declaring the gap.
+      if (keys?.trim()) {
+        skip("stream_type team filter reads Teamarr's team cache");
+        continue;
+      }
+      const wantedType = (wanted ?? '').trim();
+      compiled.push({
+        type,
+        value,
+        points,
+        // Teamarr gates this on the EPG match first, and so must this: an
+        // EPG-matched stream also carries a `match_type`, so without the gate
+        // an `event` rule would capture the streams an `epg_match` rule is
+        // there to score. Teamarr fixed that as its own bug (#448); a
+        // simulation that skipped it would report the bug back.
+        test: (facts) =>
+          facts.match?.matchMethod !== 'epg' && facts.match?.matchType === wantedType,
+      });
     } else {
-      // `epg_match` and `stream_type` are Teamarr's own state. Guessing at them
-      // would be worse than declaring them: a wrong guess moves a channel's
-      // verdict without saying it did.
-      skip('Teamarr-side state Podium cannot see');
+      skip(`Podium cannot evaluate a "${type}" rule`);
     }
   }
   return { compiled, skipped };
@@ -312,8 +374,9 @@ export function checkRules(
   channels: ChannelInput[],
   rules: RuleInput[],
   strategy: RankStrategy,
+  options: CompileOptions = {},
 ): RuleCheck {
-  const { compiled, skipped } = compileRules(rules);
+  const { compiled, skipped } = compileRules(rules, options);
   const rows: ChannelCheck[] = [];
 
   for (const channel of channels) {
@@ -430,7 +493,13 @@ export function checkRules(
 
 /** Build the facts a rule is evaluated against, from what a probe returned. */
 export function factsFor(
-  stream: { id: number; name: string; providerName: string; groupName: string },
+  stream: {
+    id: number;
+    name: string;
+    providerName: string;
+    groupName: string;
+    match?: StreamMatch;
+  },
   result: ProbeResult,
   strategy: RankStrategy,
 ): StreamFacts {
@@ -440,6 +509,7 @@ export function factsFor(
     providerName: stream.providerName,
     groupName: stream.groupName,
     stats: statsPayload(result, strategy.weights) as unknown as Record<string, unknown>,
+    match: stream.match,
     result,
   };
 }
