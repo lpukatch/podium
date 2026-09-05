@@ -728,7 +728,9 @@ export function QualityView() {
               Only the ratio against your own rules matters; raise it if yours use larger numbers.
               Generated account, group and name rules are capped at ±15 so they cannot outrank a
               direct measurement of the stream. <code>stats_metric</code> rules are exempt — they
-              are the measurement.
+              are the measurement. The bitrate ladder is centred on your median, so a stream Teamarr
+              has no stats for scores 0 and sits level with a median one rather than beneath every
+              stream Podium happens to have probed.
             </span>
           </label>
         </div>
