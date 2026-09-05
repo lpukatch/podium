@@ -20,11 +20,12 @@
 import type { Config } from './config';
 import { mineNames } from './miner';
 import { buildProfile, inScope, mergeTeamarrRules, scopeFromConfig, teamarrRules } from './quality';
-import { checkInputs } from './rule-check-inputs';
+import { applyMatches, checkInputs, scoredChannelIds } from './rule-check-inputs';
 import { snapshot } from './server/state';
 import type { Store } from './store';
 import { checkRules, type RuleInput } from './teamarr';
 import { TeamarrClient, type TeamarrRuleRow } from './teamarr-client';
+import { describeSkew, type MatchCoverage, tryReadMatches } from './teamarr-match';
 
 /** How a rule set scored, in the terms worth comparing two of them on. */
 export interface SyncScore {
@@ -59,6 +60,17 @@ export interface SyncOutcome {
   after?: SyncScore;
   /** Whether the simulation had to skip rules it cannot evaluate. */
   approximate?: boolean;
+  /**
+   * How much of what Teamarr scores carries a stats reading, by match method.
+   *
+   * Absent when Teamarr could not be read. Recorded on the outcome rather than
+   * left in a log because it is the only thing that says whether the exported
+   * bitrate ladder is sorting the catalogue or sorting the part of it that
+   * happened to sit still long enough to probe.
+   */
+  coverage?: MatchCoverage;
+  /** That coverage in a sentence, when there is a skew worth naming. */
+  skew?: string;
 }
 
 export interface SyncOptions {
@@ -252,8 +264,17 @@ export async function syncToTeamarr(
   // -- see `checkInputs`. Two assemblies would compare two populations.
   const snap = await snapshot();
   const { channels, strategy } = checkInputs(snap, store);
-  const before = checkRules(channels, existing as RuleInput[], strategy);
-  const after = checkRules(channels, merged as RuleInput[], strategy);
+
+  // Teamarr's own attach-time state, for the channels about to be scored. Read
+  // once and applied to both sides, because a rule set carrying `epg_match`
+  // that can be evaluated on one side and not the other is not a comparison.
+  const match = await tryReadMatches(client, scoredChannelIds(channels));
+  if (match.known) applyMatches(channels, match.index);
+
+  const before = checkRules(channels, existing as RuleInput[], strategy, {
+    matchKnown: match.known,
+  });
+  const after = checkRules(channels, merged as RuleInput[], strategy, { matchKnown: match.known });
   const approximate = before.summary.approximate || after.summary.approximate;
 
   const outcome: SyncOutcome = {
@@ -268,6 +289,8 @@ export async function syncToTeamarr(
     before: scoreOf(before.summary),
     after: scoreOf(after.summary),
     approximate,
+    coverage: match.known ? match.coverage : undefined,
+    skew: match.known ? (describeSkew(match.coverage) ?? undefined) : undefined,
   };
 
   // Before the regression test rather than after it, because a regression

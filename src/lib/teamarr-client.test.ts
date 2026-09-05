@@ -1,5 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import { compareRules, summarise, type TeamarrRuleRow, validateRules } from './teamarr-client';
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  compareRules,
+  summarise,
+  TeamarrClient,
+  type TeamarrRuleRow,
+  validateRules,
+} from './teamarr-client';
 
 const ok: TeamarrRuleRow[] = [
   { type: 'm3u', value: 'Provider A', priority: 99, mode: 'score', points: 6 },
@@ -105,5 +111,104 @@ describe('compareRules — has the push stayed put', () => {
     // ordering. Say which case it is rather than calling it identical.
     const reordered = [set()[1]!, set()[0]!];
     expect(compareRules(reordered, set())).toBe('the same 2 rules, in a different order');
+  });
+});
+
+/**
+ * The two channel reads, against the shapes Teamarr's API actually returns.
+ *
+ * Stubbed at `fetch` rather than mocked higher up, because what is being pinned
+ * is the translation between Teamarr's snake_case rows and the fields Podium
+ * reads off them -- which is the part that breaks silently when Teamarr renames
+ * something.
+ */
+const originalFetch = globalThis.fetch;
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
+
+function stubFetch(body: unknown, status = 200) {
+  const urls: string[] = [];
+  globalThis.fetch = (async (url: string) => {
+    urls.push(String(url));
+    return {
+      ok: status < 400,
+      status,
+      text: async () => JSON.stringify(body),
+    } as Response;
+  }) as unknown as typeof fetch;
+  return urls;
+}
+
+describe('managedChannels', () => {
+  it('reads the two ids it takes to find a channel twice', async () => {
+    const urls = stubFetch({
+      channels: [{ id: 7, dispatcharr_channel_id: 412, channel_name: 'MLB: NYY @ BOS' }],
+      total: 1,
+    });
+    const rows = await new TeamarrClient('http://teamarr:9195').managedChannels();
+
+    expect(rows).toEqual([{ id: 7, dispatcharrChannelId: 412 }]);
+    expect(urls[0]).toBe('http://teamarr:9195/api/v1/channels/managed');
+  });
+
+  it('drops a channel Teamarr has created but not yet synced', async () => {
+    // No Dispatcharr id means there is nothing on Podium's side to attach its
+    // streams to, and asking about it would spend a request to learn that.
+    stubFetch({ channels: [{ id: 7, dispatcharr_channel_id: null }, { id: 8 }], total: 2 });
+    expect(await new TeamarrClient('http://teamarr:9195').managedChannels()).toEqual([]);
+  });
+
+  it('names the instance rather than the parser when the shape is wrong', async () => {
+    stubFetch({ detail: 'not this app' });
+    await expect(new TeamarrClient('http://teamarr:9195').managedChannels()).rejects.toThrow(
+      'is this Teamarr?',
+    );
+  });
+});
+
+describe('channelStreams', () => {
+  it('carries back the fields Dispatcharr does not hold', async () => {
+    const urls = stubFetch({
+      streams: [
+        {
+          dispatcharr_stream_id: 900,
+          match_method: 'epg',
+          match_type: 'event',
+          stream_stats: { ffmpeg_output_bitrate: 6600 },
+        },
+        { dispatcharr_stream_id: 901, match_method: 'fuzzy', match_type: 'team' },
+      ],
+      stats_refreshed: false,
+    });
+    const rows = await new TeamarrClient('http://teamarr:9195').channelStreams(7);
+
+    expect(urls[0]).toBe('http://teamarr:9195/api/v1/channels/managed/7/streams');
+    expect(rows[0]).toEqual({
+      dispatcharrStreamId: 900,
+      matchMethod: 'epg',
+      matchType: 'event',
+      hasStats: true,
+    });
+    expect(rows[1]?.hasStats).toBe(false);
+  });
+
+  it('reads an empty stats object as no reading', async () => {
+    // Teamarr writes `{}` where Dispatcharr answered without stats, and a
+    // `stats_metric` rule does not fire on it -- so counting it as coverage
+    // would overstate the one number this read exists to produce.
+    stubFetch({ streams: [{ dispatcharr_stream_id: 900, stream_stats: {} }] });
+    const rows = await new TeamarrClient('http://teamarr:9195').channelStreams(7);
+    expect(rows[0]).toEqual({
+      dispatcharrStreamId: 900,
+      matchMethod: null,
+      matchType: null,
+      hasStats: false,
+    });
+  });
+
+  it('treats a channel with no streams array as a channel with no streams', async () => {
+    stubFetch({});
+    expect(await new TeamarrClient('http://teamarr:9195').channelStreams(7)).toEqual([]);
   });
 });

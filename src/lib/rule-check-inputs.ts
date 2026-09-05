@@ -15,6 +15,7 @@ import type { RankStrategy } from './scoring';
 import { groupPatterns, ordering, policies, type Snapshot } from './server/state';
 import type { Store } from './store';
 import { type ChannelInput, factsFor, type StreamFacts } from './teamarr';
+import { type MatchIndex, matchKey } from './teamarr-match';
 
 export interface CheckInputs {
   channels: ChannelInput[];
@@ -28,6 +29,10 @@ export interface CheckInputs {
  * where rules disagree with a measurement, and a stream nobody has probed
  * cannot disagree with anything -- including it would manufacture findings out
  * of what Podium has said least about.
+ *
+ * Teamarr's own attach-time state is filled in afterwards, by `applyMatches`.
+ * It cannot be gathered here: reading it costs one HTTP call per channel, and
+ * which channels are worth paying for is what this function works out.
  */
 export function checkInputs(snap: Snapshot, store: Store): CheckInputs {
   const config = loadConfig();
@@ -82,4 +87,32 @@ export function checkInputs(snap: Snapshot, store: Store): CheckInputs {
   }
 
   return { channels, strategy };
+}
+
+/**
+ * Fill in what Teamarr knows about each stream, once it has been read.
+ *
+ * In place, on facts that were built moments ago and nothing else holds. The
+ * alternative is assembling the whole thing twice -- once to learn which
+ * channels are worth an HTTP call and once to use the answer -- and a second
+ * assembly is precisely the bug the module comment warns about.
+ *
+ * A stream missing from the index is left with no `match`, and reads as neither
+ * an EPG match nor an event. That is the same answer Teamarr gives for a row it
+ * does not hold, which is what a stream Podium can see and Teamarr has not
+ * attached actually is. What it must not be confused with is a run where
+ * nothing was read at all -- that is `matchKnown`, and it belongs to the run,
+ * not the stream.
+ */
+export function applyMatches(channels: ChannelInput[], match: MatchIndex): void {
+  for (const channel of channels) {
+    for (const { facts } of channel.streams) {
+      facts.match = match.get(matchKey(channel.channelId, facts.streamId));
+    }
+  }
+}
+
+/** The channels a read should cover: the ones the check will actually score. */
+export function scoredChannelIds(channels: ChannelInput[]): number[] {
+  return channels.filter((channel) => channel.managed).map((channel) => channel.channelId);
 }

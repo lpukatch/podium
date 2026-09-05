@@ -1,9 +1,11 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
-import { checkInputs } from '@/lib/rule-check-inputs';
+import { applyMatches, checkInputs, scoredChannelIds } from '@/lib/rule-check-inputs';
 import { snapshot } from '@/lib/server/state';
 import { Store } from '@/lib/store';
 import { checkRules, type RuleInput } from '@/lib/teamarr';
+import { TeamarrClient } from '@/lib/teamarr-client';
+import { describeSkew, tryReadMatches } from '@/lib/teamarr-match';
 
 export const dynamic = 'force-dynamic';
 
@@ -63,18 +65,34 @@ export async function POST(request: Request) {
     );
 
     const snap = await snapshot();
-    store = new Store(loadConfig().dbPath);
+    const config = loadConfig();
+    store = new Store(config.dbPath);
     // Shared with the Teamarr push, which scores two rule sets over this same
     // assembly -- see `checkInputs`. Two copies would compare two populations.
     const { channels, strategy } = checkInputs(snap, store);
 
-    // Kept, so every later pass re-runs this without anybody being present.
-    // The uploaded set is the only copy Podium can have -- there is no way to
-    // read one out of Teamarr -- and a check that only runs when somebody is at
-    // the keyboard cannot see a Saturday fixture at all.
+    // `epg_match` and `stream_type` are Teamarr's own attach-time state. With a
+    // URL configured they can be read and scored; without one the check runs
+    // exactly as it always has, and says so through `approximate`. A rules file
+    // posted here is often somebody else's, so this is also the case where the
+    // two rule types are most likely to turn up.
+    const url = config.PODIUM_TEAMARR_URL.trim();
+    const match = url
+      ? await tryReadMatches(new TeamarrClient(url), scoredChannelIds(channels))
+      : null;
+    if (match?.known) applyMatches(channels, match.index);
+
+    // Kept, so every later pass re-runs this without anybody being present. A
+    // check that only runs when somebody is at the keyboard cannot see a
+    // Saturday fixture at all.
     store.saveTeamarrRules(rules);
 
-    return NextResponse.json(checkRules(channels, rules, strategy));
+    const check = checkRules(channels, rules, strategy, { matchKnown: Boolean(match?.known) });
+    return NextResponse.json({
+      ...check,
+      coverage: match?.known ? match.coverage : undefined,
+      skew: match?.known ? (describeSkew(match.coverage) ?? undefined) : undefined,
+    });
   } catch (error) {
     return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
   } finally {

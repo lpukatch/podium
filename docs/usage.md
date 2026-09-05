@@ -1020,13 +1020,57 @@ Each disagreement names the rules that scored the losing stream, which is
 usually the whole explanation: an `m3u` rule worth +20 on a provider that is
 running 2Mbps tonight, against a provider with no rule at all running 12.
 
-Two rule types cannot be simulated. `epg_match` and `stream_type` read Teamarr's
-own state, so a set carrying them is reported as **approximate** rather than
-scored as though those rules were absent — a `stream_type` rule that applies to
-every stream on a channel cancels out and changes no ordering, but that cannot
-be shown from here. `priority`-mode rules are skipped for a different reason:
-they sort into bands rather than adding, so summing them would produce a number
-Teamarr never computes.
+`priority`-mode rules are skipped: they sort into bands rather than adding, so
+summing them would produce a number Teamarr never computes. A `stream_type` rule
+carrying a team filter — `team|nyy,bos` — is skipped too, because Teamarr
+resolves those keys through its own team cache of aliases and per-league
+spellings, and approximating that would move a channel's verdict on a guess
+about somebody else's data.
+
+Anything skipped makes the report **approximate**: not wrong, but not provably
+right either. Both columns of the push's before/after comparison are scored the
+same way, so the comparison still holds.
+
+#### What Teamarr knows and Dispatcharr does not
+
+`epg_match` and `stream_type` used to be on that skipped list, and between them
+they made most real rule sets approximate. Neither is derivable from anything
+Podium can see: `epg_match` is true for a stream Teamarr attached from EPG
+programme data rather than from its name, and `stream_type` says whether it
+matched as an event or a team feed. Both live in Teamarr's own tables.
+
+With a **Teamarr URL** configured, Podium now reads them — one call per channel
+it is about to score — and evaluates both rule types instead of declaring them.
+It mirrors Teamarr's own gate while doing it: an EPG-matched stream never
+matches a `stream_type` rule, because those streams also carry a match type, and
+without the gate an `event` rule listed above the EPG rule would capture them
+first. Teamarr fixed that as its own bug; a simulation missing it would report
+the bug back at you.
+
+That read is not free, which is why it is scoped and capped. There is no bulk
+endpoint, and each call makes Teamarr refresh its stats cache from Dispatcharr
+for any stream whose reading is absent or over an hour old — so only the
+channels the check will actually score are asked about, at most 250 of them,
+lowest channel id first so a capped read is the same read twice running. If
+Teamarr cannot be reached the check runs exactly as it did before, marked
+approximate; it is a reporting feature, not a dependency.
+
+#### Stats coverage, and who actually has it
+
+The same read answers a question the export could not previously ask. A
+`stats_metric` rule does not fire on a stream with no `stream_stats`, so it only
+ever sorts the probed part of the catalogue — and the push now reports how large
+that part is, split by how each stream was attached:
+
+> 94% of the streams carrying stats are EPG-matched (81% of EPG-matched streams
+> have a reading, against 4% of the rest)
+
+That split is the thing to watch. EPG-matched streams are long-lived linear
+feeds that sit still long enough to probe; per-event streams appear an hour
+before kickoff and are gone by morning. The wider the gap, the more a bitrate
+rule is scoring *how a stream was attached* rather than how good it is. Centring
+the bitrate ladder on the median removes the worst of it — see above — but the
+number is worth knowing before deciding what `bitratePoints` should be.
 
 #### It runs itself after the first upload
 

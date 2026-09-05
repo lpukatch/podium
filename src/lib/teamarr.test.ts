@@ -10,7 +10,14 @@ import { describe, expect, it } from 'vitest';
 import type { ProbeResult } from './probe';
 import { DEFAULT_STRATEGY } from './scoring';
 import { MAX_MISSES_PER_CHECK, Store } from './store';
-import { checkRules, compileRules, factsFor, type RuleInput, toJsRegExp } from './teamarr';
+import {
+  checkRules,
+  compileRules,
+  factsFor,
+  type RuleInput,
+  scoreStream,
+  toJsRegExp,
+} from './teamarr';
 
 const LIVE_RULES: RuleInput[] = [
   { type: 'stream_type', value: 'team', priority: 99, mode: 'score', points: -50 },
@@ -58,7 +65,12 @@ const result = (over: Partial<ProbeResult> = {}): ProbeResult => ({
 
 const facts = (
   id: number,
-  over: { name?: string; providerName?: string; groupName?: string } = {},
+  over: {
+    name?: string;
+    providerName?: string;
+    groupName?: string;
+    match?: { matchMethod: string | null; matchType: string | null };
+  } = {},
   probe: Partial<ProbeResult> = {},
 ) =>
   factsFor(
@@ -67,6 +79,7 @@ const facts = (
       name: over.name ?? `Stream ${id}`,
       providerName: over.providerName ?? 'Provider C',
       groupName: over.groupName ?? 'Sports | EPL',
+      match: over.match,
     },
     result(probe),
     DEFAULT_STRATEGY,
@@ -96,9 +109,72 @@ describe('compileRules', () => {
   it('evaluates what it can and declares what it cannot', () => {
     const { compiled, skipped } = compileRules(LIVE_RULES);
     expect(compiled).toHaveLength(6);
-    // Teamarr's own state. Guessing would move a channel's verdict without
-    // saying it did, which is worse than reporting the report as partial.
+    // Teamarr's own state, and nobody read it this run. Guessing would move a
+    // channel's verdict without saying it did, which is worse than reporting
+    // the report as partial.
     expect(skipped.map((rule) => rule.type).sort()).toEqual(['epg_match', 'stream_type']);
+  });
+
+  it('evaluates the Teamarr-side rules once the match state has been read', () => {
+    // The whole point of reading it: a rule set carrying these two stops
+    // dragging the push's comparison toward a regression nobody can check.
+    const { compiled, skipped } = compileRules(LIVE_RULES, { matchKnown: true });
+    expect(compiled).toHaveLength(8);
+    expect(skipped).toHaveLength(0);
+  });
+
+  it('scores epg_match on the one field Teamarr compares', () => {
+    const { compiled } = compileRules(
+      [{ type: 'epg_match', value: '', mode: 'score', points: 10 }],
+      { matchKnown: true },
+    );
+    const points = (match: { matchMethod: string | null; matchType: string | null } | undefined) =>
+      scoreStream(facts(1, { match }), compiled).points;
+
+    expect(points({ matchMethod: 'epg', matchType: 'event' })).toBe(10);
+    // Every name-matching method is not an EPG match, and neither is a stream
+    // Teamarr does not hold on this channel at all.
+    expect(points({ matchMethod: 'fuzzy', matchType: 'event' })).toBe(0);
+    expect(points(undefined)).toBe(0);
+  });
+
+  it('keeps an event rule off an EPG-matched stream, the way Teamarr does', () => {
+    // Teamarr's `_match_stream_type` returns false outright for an EPG match,
+    // because those streams also carry a match_type -- without the gate an
+    // `event` rule listed above the EPG rule captures them first. A simulation
+    // missing that would report Teamarr's own fixed bug back at the operator.
+    const { compiled } = compileRules(
+      [{ type: 'stream_type', value: 'event', mode: 'score', points: 5 }],
+      { matchKnown: true },
+    );
+    const points = (match: { matchMethod: string | null; matchType: string | null }) =>
+      scoreStream(facts(1, { match }), compiled).points;
+
+    expect(points({ matchMethod: 'cache', matchType: 'event' })).toBe(5);
+    expect(points({ matchMethod: 'epg', matchType: 'event' })).toBe(0);
+    expect(points({ matchMethod: 'cache', matchType: 'team' })).toBe(0);
+  });
+
+  it("declines the team filter rather than guessing at Teamarr's team cache", () => {
+    // `team|nyy,bos` resolves those keys through aliases and per-league
+    // spellings that exist nowhere on this side.
+    const { compiled, skipped } = compileRules(
+      [{ type: 'stream_type', value: 'team|nyy,bos', mode: 'score', points: 5 }],
+      { matchKnown: true },
+    );
+    expect(compiled).toHaveLength(0);
+    expect(skipped[0]?.reason).toContain('team cache');
+  });
+
+  it('takes a bare team rule even though the filtered form is refused', () => {
+    const { compiled } = compileRules(
+      [{ type: 'stream_type', value: 'team|', mode: 'score', points: 5 }],
+      { matchKnown: true },
+    );
+    expect(
+      scoreStream(facts(1, { match: { matchMethod: 'alias', matchType: 'team' } }), compiled)
+        .points,
+    ).toBe(5);
   });
 
   it('refuses a priority-mode rule rather than adding its points', () => {

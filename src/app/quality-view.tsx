@@ -18,6 +18,7 @@ import type { Effect, LabelAccuracy, QualityProfile, ScopeSummary } from '@/lib/
 import { MAX_TIER_ACCOUNT_SHARE } from '@/lib/quality';
 import type { StoredRuleCheckRow, StoredRuleMiss } from '@/lib/store';
 import type { RuleCheck } from '@/lib/teamarr';
+import type { MatchCoverage } from '@/lib/teamarr-match';
 
 /** What `/api/quality-profile` returns: the profile, with the miner's findings. */
 type Profile = QualityProfile & { miner?: MinerReport };
@@ -50,6 +51,10 @@ interface SyncOutcome {
   before?: SyncScore;
   after?: SyncScore;
   approximate?: boolean;
+  /** Stats coverage across what Teamarr scores, split by how it attached each stream. */
+  coverage?: MatchCoverage;
+  /** That coverage in a sentence, when there is a skew worth naming. */
+  skew?: string;
 }
 
 /** What `GET /api/teamarr-sync` returns. */
@@ -129,11 +134,17 @@ function SyncReport({ outcome }: { outcome: SyncOutcome }) {
           </tbody>
         </table>
       )}
+      {outcome.skew && (
+        <p className={`mt-2 max-w-[60ch] text-xs ${muted}`}>
+          {outcome.skew}. A <code>stats_metric</code> rule only sorts the streams Teamarr holds a
+          reading for, so the wider that split, the more a bitrate rule is scoring how a stream was
+          attached rather than how good it is.
+        </p>
+      )}
       {outcome.approximate && (
         <p className={`mt-2 max-w-[60ch] text-xs ${muted}`}>
-          Approximate: <code>epg_match</code> and <code>stream_type</code> rules read Teamarr&apos;s
-          own state and cannot be scored here. Both columns are scored the same way, so the
-          comparison still holds.
+          Approximate: the set carries rules this cannot evaluate — see the rule check for which.
+          Both columns are scored the same way, so the comparison still holds.
         </p>
       )}
     </div>
