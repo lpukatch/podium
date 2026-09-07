@@ -36,7 +36,7 @@ import { createHash } from 'crypto';
 import { mkdirSync } from 'fs';
 import { dirname } from 'path';
 import type { ProbeResult } from './probe';
-import { pickBestVariant, type VariantVerdict } from './variants';
+import { pickBestVariant, verdictStatus, type VariantVerdict } from './variants';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS probe_cache (
@@ -930,6 +930,19 @@ export interface CacheEntry {
   result: ProbeResult | null;
 }
 
+/**
+ * One stream the cache reports dead or black-screened, folded the way every
+ * page that names a verdict reads it. `deadStreak` belongs to the row that
+ * won the fold, so it is the streak of *this* verdict -- how many consecutive
+ * checks have said the same thing.
+ */
+export interface DeadStreamRow {
+  streamId: number;
+  probedAt: number;
+  deadStreak: number;
+  result: ProbeResult;
+}
+
 export class Store {
   private readonly db: Database.Database;
   private readonly statements = new Map<string, Database.Statement>();
@@ -1291,6 +1304,86 @@ export class Store {
           out.set(streamId, { probedAt, alive: best.alive, result: best });
         }
       }
+    }
+    return out;
+  }
+
+  /**
+   * Every stream whose folded verdict is dead or a black screen -- the same
+   * per-stream status the channel editor shows, collected for the whole cache
+   * at once. Until now that status was only reachable one channel at a time.
+   *
+   * The candidate set is SQL, the fold is `verdicts()`'s, for the same two
+   * reasons it folds there. A cache written by the per-login probing that
+   * preceded pooling holds a row per login, and those rows must read as one
+   * stream: dead only when *every* login is (`MAX(alive) = 0`, the same
+   * definition `cacheStats` counts by), so a stream with one working login
+   * never appears here. And the fold -- not the row -- decides the status,
+   * because `pickBestVariant` prefers a usable login to a black-screened one
+   * and a stream is only listed when the verdict that survives is itself dead
+   * or black. Black-screened-but-alive streams reach this list through the
+   * `json_extract` arm of the candidate query and then survive (or not) the
+   * same fold everything else does.
+   *
+   * The winner's `dead_streak` is recovered by reference identity:
+   * `pickBestVariant` returns one of the objects handed to it, so the entry
+   * whose `result` *is* the winner names the row it came from. A streak on a
+   * black winner reads 0 -- `put()` resets it on any alive verdict -- which is
+   * fine; the streak is a property of being dead, not of being black.
+   *
+   * Unordered: presentation order belongs to whoever is displaying these.
+   */
+  deadStreams(): DeadStreamRow[] {
+    const rows = this.sql(
+      `SELECT stream_id, variant_id, probed_at, result, dead_streak
+       FROM probe_cache
+       WHERE stream_id IN (
+         SELECT stream_id FROM probe_cache
+         GROUP BY stream_id
+         HAVING MAX(alive) = 0
+            OR COALESCE(SUM(CASE WHEN json_valid(result)
+                                  AND COALESCE(json_extract(result, '$.black'), 0)
+                                THEN 1 ELSE 0 END), 0) > 0
+       )`,
+    ).all() as Array<{
+      stream_id: number;
+      variant_id: number;
+      probed_at: number;
+      result: string;
+      dead_streak: number;
+    }>;
+
+    const byStream = new Map<
+      number,
+      Array<{ variantId: number; probedAt: number; deadStreak: number; parsed: ProbeResult }>
+    >();
+    for (const row of rows) {
+      try {
+        const entry = {
+          variantId: row.variant_id,
+          probedAt: row.probed_at,
+          deadStreak: row.dead_streak,
+          parsed: JSON.parse(row.result) as ProbeResult,
+        };
+        const list = byStream.get(row.stream_id) ?? [];
+        list.push(entry);
+        byStream.set(row.stream_id, list);
+      } catch {
+        // An unreadable row is simply no verdict, as `verdicts` reads it.
+      }
+    }
+
+    const out: DeadStreamRow[] = [];
+    for (const [streamId, entries] of byStream) {
+      const best = pickBestVariant(entries.map((e) => ({ variantId: e.variantId, result: e.parsed })));
+      if (!best || verdictStatus(best) === 'live') continue;
+      const winner = entries.find((e) => e.parsed === best);
+      out.push({
+        streamId,
+        probedAt: Math.max(...entries.map((e) => e.probedAt)),
+        deadStreak: winner?.deadStreak ?? 0,
+        result: best,
+      });
     }
     return out;
   }

@@ -4,6 +4,7 @@ import { LoaderCircle } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BackupView } from './backup-view';
 import { CheckPanel } from './check-panel';
+import { DeadView } from './dead-view';
 import { NameNoiseView } from './name-noise-view';
 import { OrderingView } from './ordering-view';
 import { ProgressView } from './progress-view';
@@ -11,10 +12,11 @@ import { QualityView } from './quality-view';
 import { SettingsView } from './settings-view';
 import { StreamGroupsView } from './stream-groups-view';
 import { StreamSearch } from './stream-search';
+import type { DeadResponse } from '@/lib/dead';
 
 type Mode = 'always' | 'never' | 'after_epg_start' | 'assigned';
-type Tab = 'groups' | 'all' | 'rules' | 'progress' | 'quality' | 'settings';
-type ChanFilter = 'all' | 'regex' | 'noregex' | 'nomatch';
+type Tab = 'groups' | 'all' | 'dead' | 'rules' | 'progress' | 'quality' | 'settings';
+type ChanFilter = 'all' | 'regex' | 'noregex' | 'nomatch' | 'dead';
 
 interface ChannelRow {
   id: number;
@@ -172,6 +174,7 @@ const chip = (on: boolean) =>
 const TAB_LABELS: Record<Tab, string> = {
   groups: 'Groups',
   all: 'All channels',
+  dead: 'Dead',
   rules: 'Name rules',
   progress: 'Progress',
   quality: 'Quality',
@@ -206,6 +209,11 @@ export default function Page() {
   const [filter, setFilter] = useState('');
   const [chanFilter, setChanFilter] = useState<ChanFilter>('all');
   const [showDisabled, setShowDisabled] = useState(false);
+  // Dead streams with their channel attribution, for the Dead chip and the
+  // Dead tab. Fetched on demand -- see the effect below -- because it joins
+  // the probe cache against the catalogue and has no business sitting in the
+  // critical path of /api/state.
+  const [deadSummary, setDeadSummary] = useState<DeadResponse | null>(null);
   const [patternText, setPatternText] = useState('');
   const [groupFilter, setGroupFilter] = useState('');
 
@@ -275,7 +283,12 @@ export default function Page() {
   const applyUrl = useCallback((params: URLSearchParams) => {
     const t = params.get('tab');
     setTab(
-      t === 'all' || t === 'rules' || t === 'progress' || t === 'quality' || t === 'settings'
+      t === 'all' ||
+        t === 'dead' ||
+        t === 'rules' ||
+        t === 'progress' ||
+        t === 'quality' ||
+        t === 'settings'
         ? t
         : 'groups',
     );
@@ -355,6 +368,28 @@ export default function Page() {
     setProbeResultNote(null);
   }, [groupId]);
 
+  // The Dead chip reads this, and a chip that silently filters to nothing is
+  // worse than a chip that appears a second later, so it is fetched when the
+  // All-channels tab first shows -- best-effort, because a failure there must
+  // not take the channel list down with it. The Dead tab's own view fetches
+  // and refreshes independently.
+  useEffect(() => {
+    if (tab !== 'all' || deadSummary !== null) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const resp = await fetch('/api/dead');
+        const body = (await resp.json()) as DeadResponse & { error?: string };
+        if (!cancelled && resp.ok && !body.error) setDeadSummary(body);
+      } catch {
+        // Leave the chip absent; the Dead tab surfaces the error properly.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, deadSummary]);
+
   useEffect(() => {
     return () => {
       if (probeAbortRef.current) {
@@ -369,6 +404,21 @@ export default function Page() {
     }
     navigate({ group: gid ?? groupId, channel: c.id });
     seedRules(c);
+  };
+
+  /** A dead-list channel chip: opens the editor as if the row were clicked. */
+  const openDeadChannel = (id: number, gid: number | null) => {
+    for (const g of groups) {
+      const row = g.rows.find((c) => c.id === id);
+      if (row) {
+        openChannel(row, g.id);
+        return;
+      }
+    }
+    // Not in the loaded rows -- a disabled group's channel, or state has
+    // refreshed since the dead data was fetched. Go straight there; the
+    // editor seeds itself from the URL once the row arrives.
+    navigate({ group: gid, channel: id });
   };
 
   const runPreview = useCallback(async () => {
@@ -651,6 +701,15 @@ export default function Page() {
     }
   };
 
+  // Channels whose first-served stream is dead or black -- the viewer-impact
+  // subset of the dead summary, and what the Dead chip filters to. A dead
+  // stream ranked #3 is the ranking working, not an outage.
+  const deadFirstIds = useMemo(
+    () =>
+      new Set(deadSummary?.channels.filter((c) => c.servedFirstDead).map((c) => c.id) ?? []),
+    [deadSummary],
+  );
+
   const allChannels = useMemo(() => {
     const out: Array<ChannelRow & { groupName: string; groupId: number; groupMode: Mode }> = [];
     for (const g of groups) {
@@ -665,11 +724,27 @@ export default function Page() {
         if (chanFilter === 'noregex') return c.regexCount === 0;
         if (chanFilter === 'nomatch')
           return c.groupMode !== 'never' && c.hasRule && c.matched === 0;
+        if (chanFilter === 'dead') return deadFirstIds.has(c.id);
         return true;
       })
       .filter((c) => !filter || c.name.toLowerCase().includes(filter.toLowerCase()))
       .sort((a, b) => a.name.localeCompare(b.name));
-  }, [groups, chanFilter, filter, showDisabled]);
+  }, [groups, chanFilter, filter, showDisabled, deadFirstIds]);
+
+  // Built per render rather than inline in the JSX because the Dead entry is
+  // conditional on the summary having loaded, with a count that moves.
+  const chanChips = useMemo(() => {
+    const chips: Array<[ChanFilter, string]> = [
+      ['all', 'All'],
+      ['noregex', 'No regex'],
+      ['regex', 'On regex'],
+      ['nomatch', 'No match'],
+    ];
+    if (deadSummary) {
+      chips.push(['dead', deadFirstIds.size > 0 ? `Dead (${deadFirstIds.size})` : 'Dead']);
+    }
+    return chips;
+  }, [deadSummary, deadFirstIds]);
 
   const totals = useMemo(() => {
     const active = groups.filter((g) => g.mode !== 'never');
@@ -805,16 +880,18 @@ export default function Page() {
         {!group && (
           <>
             <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-line)] bg-[var(--color-panel)] px-5 py-3">
-              {(['groups', 'all', 'rules', 'progress', 'quality', 'settings'] as const).map((t) => (
-                <button
-                  type="button"
-                  key={t}
-                  onClick={() => navigate({ tab: t })}
-                  className={chip(tab === t)}
-                >
-                  {TAB_LABELS[t]}
-                </button>
-              ))}
+              {(['groups', 'all', 'dead', 'rules', 'progress', 'quality', 'settings'] as const).map(
+                (t) => (
+                  <button
+                    type="button"
+                    key={t}
+                    onClick={() => navigate({ tab: t })}
+                    className={chip(tab === t)}
+                  >
+                    {TAB_LABELS[t]}
+                  </button>
+                ),
+              )}
               {(tab === 'groups' || tab === 'all') && (
                 <>
                   <span className="flex-1" />
@@ -832,6 +909,8 @@ export default function Page() {
             </div>
 
             {tab === 'progress' && <ProgressView />}
+
+            {tab === 'dead' && <DeadView onOpenChannel={openDeadChannel} />}
 
             {tab === 'quality' && <QualityView />}
 
@@ -1009,14 +1088,7 @@ export default function Page() {
               <>
                 <div className="border-b border-[var(--color-line)] bg-[var(--color-panel)] p-4">
                   <div className="flex flex-wrap gap-2">
-                    {(
-                      [
-                        ['all', 'All'],
-                        ['noregex', 'No regex'],
-                        ['regex', 'On regex'],
-                        ['nomatch', 'No match'],
-                      ] as const
-                    ).map(([v, label]) => (
+                    {chanChips.map(([v, label]) => (
                       <button
                         type="button"
                         key={v}

@@ -328,3 +328,14 @@ function compareVariants(
   if (delta !== 0) return delta;
   return a.variantId - b.variantId;
 }
+
+/**
+ * The one-word verdict a stream reports: the channel editor's vocabulary
+ * stated once, so a list of streams and the editor per channel cannot drift
+ * apart. A black screen is *not* live -- it is a slate the ranking sinks like
+ * a dead stream -- so it keeps its own word rather than passing as alive.
+ */
+export function verdictStatus(result: Pick<ProbeResult, 'alive' | 'black'>): 'live' | 'black' | 'dead' {
+  if (!result.alive) return 'dead';
+  return result.black ? 'black' : 'live';
+}
