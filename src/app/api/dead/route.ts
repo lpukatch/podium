@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server';
-import { summarizeDead } from '@/lib/dead';
-import type { DeadStreamRow } from '@/lib/store';
 import { loadConfig } from '@/lib/config';
+import { summarizeDead } from '@/lib/dead';
 import { snapshot } from '@/lib/server/state';
+import type { DeadStreamRow } from '@/lib/store';
 import { Store } from '@/lib/store';
 
 export const dynamic = 'force-dynamic';

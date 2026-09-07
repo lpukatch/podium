@@ -2,6 +2,7 @@
 
 import { LoaderCircle } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { DeadResponse } from '@/lib/dead';
 import { BackupView } from './backup-view';
 import { CheckPanel } from './check-panel';
 import { DeadView } from './dead-view';
@@ -12,7 +13,6 @@ import { QualityView } from './quality-view';
 import { SettingsView } from './settings-view';
 import { StreamGroupsView } from './stream-groups-view';
 import { StreamSearch } from './stream-search';
-import type { DeadResponse } from '@/lib/dead';
 
 type Mode = 'always' | 'never' | 'after_epg_start' | 'assigned';
 type Tab = 'groups' | 'all' | 'dead' | 'rules' | 'progress' | 'quality' | 'settings';
@@ -705,8 +705,7 @@ export default function Page() {
   // subset of the dead summary, and what the Dead chip filters to. A dead
   // stream ranked #3 is the ranking working, not an outage.
   const deadFirstIds = useMemo(
-    () =>
-      new Set(deadSummary?.channels.filter((c) => c.servedFirstDead).map((c) => c.id) ?? []),
+    () => new Set(deadSummary?.channels.filter((c) => c.servedFirstDead).map((c) => c.id) ?? []),
     [deadSummary],
   );
 

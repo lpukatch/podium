@@ -36,7 +36,7 @@ import { createHash } from 'crypto';
 import { mkdirSync } from 'fs';
 import { dirname } from 'path';
 import type { ProbeResult } from './probe';
-import { pickBestVariant, verdictStatus, type VariantVerdict } from './variants';
+import { pickBestVariant, type VariantVerdict, verdictStatus } from './variants';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS probe_cache (
@@ -1375,7 +1375,9 @@ export class Store {
 
     const out: DeadStreamRow[] = [];
     for (const [streamId, entries] of byStream) {
-      const best = pickBestVariant(entries.map((e) => ({ variantId: e.variantId, result: e.parsed })));
+      const best = pickBestVariant(
+        entries.map((e) => ({ variantId: e.variantId, result: e.parsed })),
+      );
       if (!best || verdictStatus(best) === 'live') continue;
       const winner = entries.find((e) => e.parsed === best);
       out.push({

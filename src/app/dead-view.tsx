@@ -138,7 +138,9 @@ export function DeadView({
           </span>
           <span className="flex-1" />
           <button type="button" className={btn} disabled={loading} onClick={() => void load()}>
-            {loading && <LoaderCircle className="mr-1 inline h-4 w-4 animate-spin" aria-hidden="true" />}
+            {loading && (
+              <LoaderCircle className="mr-1 inline h-4 w-4 animate-spin" aria-hidden="true" />
+            )}
             {loading ? 'Refreshing' : 'Refresh'}
           </button>
         </div>
@@ -173,11 +175,17 @@ export function DeadView({
               tone={totals.channelsServedFirst > 0 ? 'bad' : undefined}
               sub={`of ${n(totals.channelsAffected)} channels with dead streams`}
             />
-            <Stat label="Orphaned verdicts" value={totals.orphans} sub="streams gone from the catalogue" />
+            <Stat
+              label="Orphaned verdicts"
+              value={totals.orphans}
+              sub="streams gone from the catalogue"
+            />
             <Stat
               label="Worst streak"
               value={totals.worstStreak}
-              sub={totals.oldestProbedAt ? `oldest checked ${ago(totals.oldestProbedAt)}` : undefined}
+              sub={
+                totals.oldestProbedAt ? `oldest checked ${ago(totals.oldestProbedAt)}` : undefined
+              }
             />
           </div>
 

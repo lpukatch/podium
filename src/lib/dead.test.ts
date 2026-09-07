@@ -6,10 +6,10 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { DEAD_ENTRIES_CAP, summarizeDead } from './dead';
 import type { DeadCatalog, DeadResponse } from './dead';
-import type { DeadStreamRow } from './store';
+import { DEAD_ENTRIES_CAP, summarizeDead } from './dead';
 import type { ProbeResult } from './probe';
+import type { DeadStreamRow } from './store';
 
 function result(alive: boolean, over: Partial<ProbeResult> = {}): ProbeResult {
   return {

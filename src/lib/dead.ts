@@ -90,7 +90,11 @@ export interface DeadResponse {
   truncated: boolean;
 }
 
-export function summarizeDead(rows: DeadStreamRow[], catalog: DeadCatalog, fetchedAt: number): DeadResponse {
+export function summarizeDead(
+  rows: DeadStreamRow[],
+  catalog: DeadCatalog,
+  fetchedAt: number,
+): DeadResponse {
   const streamById = new Map(catalog.streams.map((s) => [s.id, s]));
   const providerNames = new Map(catalog.providers.map((p) => [p.id, p.name]));
 

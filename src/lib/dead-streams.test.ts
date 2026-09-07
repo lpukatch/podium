@@ -76,7 +76,9 @@ describe('deadStreams', () => {
     store.put(1, 'h1', verdict(false), 2);
     // `put` stamps Date.now(); pin the two rows apart so "max" is checkable.
     const later = Date.now() + 5000;
-    new Database(path).prepare('UPDATE probe_cache SET probed_at = ? WHERE variant_id = 2').run(later);
+    new Database(path)
+      .prepare('UPDATE probe_cache SET probed_at = ? WHERE variant_id = 2')
+      .run(later);
 
     const rows = store.deadStreams();
     store.close();
@@ -123,9 +125,9 @@ describe('deadStreams', () => {
     const path = join(dir, 'corrupt.db');
     const store = new Store(path);
     store.put(1, 'h1', verdict(false));
-    new Database(path).prepare('UPDATE probe_cache SET result = ? WHERE stream_id = 1').run(
-      'not json {',
-    );
+    new Database(path)
+      .prepare('UPDATE probe_cache SET result = ? WHERE stream_id = 1')
+      .run('not json {');
 
     const rows = store.deadStreams();
     store.close();
