@@ -64,6 +64,31 @@ export interface PacerConfig {
    * politely for slots everywhere", and this only ever relaxes a pause.
    */
   probeIdleProviders: boolean;
+  /**
+   * Narrow the yield further: instead of staying off the watched account
+   * entirely, use whatever connections it has spare beyond `watchedFreeSlots`.
+   *
+   * The provider somebody is watching is usually the best one -- it is sorted
+   * to the top, which is why it is being watched -- so yielding it whole gives
+   * up ranking on exactly the account that matters most, for as long as one
+   * game lasts. An account with several connections can carry a probe and a
+   * viewer at once; an account with one cannot, and falls out of this by
+   * arithmetic rather than by being named, since it has nothing spare.
+   *
+   * Inert unless `probeIdleProviders` is on: without per-provider yielding
+   * there is no "watched provider" to single out.
+   */
+  probeWatchedProvider: boolean;
+  /**
+   * Connections held free on the watched account, over and above its viewers.
+   *
+   * Bigger than `minFreeSlots` on purpose. A viewer changing channel needs a
+   * slot for the new stream *before* the provider releases the old one, and
+   * providers commonly hold a dead connection open for another half minute,
+   * so the account somebody is actively driving needs more headroom than one
+   * nobody is touching.
+   */
+  watchedFreeSlots: number;
   /** Never take a provider's last slot. */
   minFreeSlots: number;
   /** Ceiling on one tick's work. */
@@ -87,6 +112,8 @@ export const DEFAULT_PACER: PacerConfig = {
   tickMs: 60_000,
   pauseWhenWatching: true,
   probeIdleProviders: false,
+  probeWatchedProvider: false,
+  watchedFreeSlots: 2,
   minFreeSlots: 1,
   maxSlice: 400,
 };
@@ -126,6 +153,9 @@ export class Pacer {
    * actually named -- see `LaneBudgets.attributed` for why the ordinary viewer
    * counts cannot answer that question. Without both, the mode falls back to
    * pausing.
+   *
+   * The watched providers are dropped outright unless `probeWatchedProvider`
+   * is on, in which case `sharedLanes` puts back whatever they can spare.
    */
   laneLimits(
     base: Map<string, number>,
@@ -162,6 +192,84 @@ export class Pacer {
       // two-connection provider outright.
       const free = limit - (yielding.attributedByLane.get(lane) ?? 0) - reserve;
       if (free > 0) out.set(lane, free);
+    }
+    for (const [lane, free] of this.sharedLanes(base, yielded, yielding)) {
+      out.set(lane, free);
+    }
+    return out;
+  }
+
+  /**
+   * What the watched account may spare, for `probeWatchedProvider`.
+   *
+   * The reserve is taken once per *account*, not once per lane, and this is
+   * the reason the method exists rather than being another branch in the loop
+   * above. Lanes are per login and Podium treats their caps as independent
+   * pools, which is fine while the arithmetic only ever hands out capacity the
+   * provider agreed to. It stops being fine here: two logins on one account
+   * with `max_streams` 5 each are one account with five connections far more
+   * often than they are ten, so a per-lane reserve of two would reserve four
+   * on paper and still let the pass open six probes against the five slots a
+   * viewer is sitting in. Capacity is therefore read as the largest single
+   * login's cap -- the conservative reading of "how big is this account" --
+   * every viewer named anywhere on it is subtracted, and the reserve comes off
+   * once.
+   *
+   * What is left is dealt out a slot at a time so several logins share the
+   * work, each bounded by its own headroom: a 5-connection login and a
+   * 2-connection one on the same account split three spare slots 2:1 rather
+   * than the smaller login being handed capacity it does not have.
+   */
+  private sharedLanes(
+    base: Map<string, number>,
+    watched: Set<number>,
+    yielding: LaneYielding,
+  ): Map<string, number> {
+    const out = new Map<string, number>();
+    if (!this.config.probeWatchedProvider) return out;
+
+    const lanesOf = new Map<number, string[]>();
+    for (const lane of base.keys()) {
+      const provider = yielding.providerOf.get(lane);
+      // An unplaceable lane stays yielded even here. `yieldedProviders` has
+      // already established that every *viewer* was placed; a lane that names
+      // no provider is still a lane this cannot reason about.
+      if (provider === undefined || !watched.has(provider)) continue;
+      const lanes = lanesOf.get(provider);
+      if (lanes) lanes.push(lane);
+      else lanesOf.set(provider, [lane]);
+    }
+
+    for (const lanes of lanesOf.values()) {
+      const cap = Math.max(...lanes.map((lane) => base.get(lane) ?? 0));
+      const viewers = lanes.reduce(
+        (sum, lane) => sum + (yielding.attributedByLane.get(lane) ?? 0),
+        0,
+      );
+      let spare = cap - viewers - this.config.watchedFreeSlots;
+      if (spare <= 0) continue;
+
+      const headroom = new Map(
+        lanes.map((lane) => [
+          lane,
+          Math.max(0, (base.get(lane) ?? 0) - (yielding.attributedByLane.get(lane) ?? 0)),
+        ]),
+      );
+      const grants = new Map(lanes.map((lane) => [lane, 0]));
+      for (let dealt = true; spare > 0 && dealt; ) {
+        dealt = false;
+        for (const lane of lanes) {
+          if (spare <= 0) break;
+          const grant = grants.get(lane) ?? 0;
+          if (grant >= (headroom.get(lane) ?? 0)) continue;
+          grants.set(lane, grant + 1);
+          spare -= 1;
+          dealt = true;
+        }
+      }
+      for (const [lane, grant] of grants) {
+        if (grant > 0) out.set(lane, grant);
+      }
     }
     return out;
   }

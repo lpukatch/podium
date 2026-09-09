@@ -20,6 +20,8 @@ describe('pacer slice sizing (finding 05, corrected)', () => {
     tickMs: 60_000,
     pauseWhenWatching: true,
     probeIdleProviders: false,
+    probeWatchedProvider: false,
+    watchedFreeSlots: 2,
     minFreeSlots: 1,
     maxSlice: 400,
   });
@@ -64,6 +66,8 @@ describe('pacer slice sizing (finding 05, corrected)', () => {
       tickMs: 60_000,
       pauseWhenWatching: true,
       probeIdleProviders: false,
+      probeWatchedProvider: false,
+      watchedFreeSlots: 2,
       minFreeSlots: 1,
       maxSlice: 400,
     });
@@ -72,6 +76,8 @@ describe('pacer slice sizing (finding 05, corrected)', () => {
       tickMs: 60_000,
       pauseWhenWatching: true,
       probeIdleProviders: false,
+      probeWatchedProvider: false,
+      watchedFreeSlots: 2,
       minFreeSlots: 1,
       maxSlice: 400,
     });

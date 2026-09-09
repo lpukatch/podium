@@ -106,6 +106,22 @@ export const FIELDS: FieldSpec[] = [
     section: 'behaviour',
   },
   {
+    key: 'PODIUM_PROBE_WATCHED_PROVIDER',
+    kind: 'boolean',
+    label: 'Also probe the provider being watched',
+    help: 'Instead of leaving the watched account alone entirely, use the connections it has spare beyond the reserve below. Meant for a provider with several connections — the one sorted top is usually both the best and the one being watched, so yielding it whole costs ranking exactly where it matters. An account with nothing spare, a single-connection one above all, still yields. Does nothing unless the setting above is on.',
+    section: 'behaviour',
+  },
+  {
+    key: 'PODIUM_WATCHED_FREE_SLOTS',
+    kind: 'number',
+    label: 'Connections to keep free on the watched provider',
+    help: 'Held back on that account over and above the viewers already on it. Two, not one: changing channel needs a slot for the new stream before the provider releases the old one, and a provider may hold a dead connection open for another half minute. Podium only knows the cap Dispatcharr was told about — another app on the same credentials is invisible to it, so raise this if anything else uses the account.',
+    section: 'behaviour',
+    min: 0,
+    max: 20,
+  },
+  {
     key: 'PODIUM_REMOVE_UNMATCHED',
     kind: 'boolean',
     label: 'Remove unmatched streams',

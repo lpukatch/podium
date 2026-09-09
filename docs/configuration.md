@@ -106,6 +106,8 @@ holds a Dispatcharr credential.
 | `PODIUM_UNKNOWN_BITRATE_TTL_MS` | `1800000` | how soon an alive-but-unmeasured stream is tried again; [see below](#streams-whose-bitrate-never-resolved) |
 | `PODIUM_PAUSE_WHEN_WATCHING` | `true` | stop while anyone is streaming |
 | `PODIUM_PROBE_IDLE_PROVIDERS` | `false` | narrow that pause to the provider being watched; [see below](#when-one-viewer-stops-everything) |
+| `PODIUM_PROBE_WATCHED_PROVIDER` | `false` | probe that provider too, on its spare connections; [see below](#sharing-the-provider-being-watched) |
+| `PODIUM_WATCHED_FREE_SLOTS` | `2` | connections held free on it while doing so |
 
 ### When one viewer stops everything
 
@@ -141,6 +143,47 @@ Two things to know before turning it on:
 It has no effect unless `PODIUM_PAUSE_WHEN_WATCHING` is on. Pausing switched off
 already means competing for slots on every provider, and this setting only ever
 relaxes a pause.
+
+### Sharing the provider being watched
+
+The mode above yields the watched account whole -- not trimmed to its spare
+slots, closed. That is the right default and the wrong answer for one common
+setup: the provider sorted to the top is usually the one being watched *because*
+it is the best, and if it sells five connections, spending a whole game refusing
+to touch four of them gives up ranking on the account that matters most.
+
+`PODIUM_PROBE_WATCHED_PROVIDER=true` trims it instead of closing it. The account
+keeps `PODIUM_WATCHED_FREE_SLOTS` connections free on top of the viewers already
+on it, and whatever is left over is probed. Five connections, one viewer, the
+default reserve of two: two slots to probe with. Nothing needs to be configured
+per provider -- an account with one or two connections has nothing spare once a
+viewer and the reserve are taken out, so it goes on yielding exactly as before.
+
+The reserve is taken once per account rather than once per login, and capacity
+is read as the largest single login's cap. Two logins on one provider are far
+more often one account with five connections than two accounts with five each,
+and the arithmetic is deliberately conservative about which it assumes.
+
+Two connections rather than one because this is the account somebody is driving:
+changing channel needs a slot for the new stream *before* the provider releases
+the old one, and a dead connection may be held open for another half minute.
+Raise it if anything other than Dispatcharr uses the same credentials -- Podium
+paces against `max_streams` as Dispatcharr was told it, which is a belief about
+the account rather than what the provider enforces, and another app on those
+credentials is invisible to it. The failure it protects against is a viewer's
+stream dying mid-game, so the cautious setting is the cheap one.
+
+While an account is being shared, the run's viewer watchdog stops treating any
+session on it as a reason to abort -- the viewer it is sharing with is on that
+provider for the whole game -- and aborts on a session *beyond* the ones running
+when the pass started. Changing channel is not an arrival: sessions are counted
+per provider, so the same viewer moving around holds the count steady. As
+everywhere else in this mode, a session Dispatcharr names no profile for still
+stops the pass outright.
+
+It needs `PODIUM_PROBE_IDLE_PROVIDERS` on, which in turn needs
+`PODIUM_PAUSE_WHEN_WATCHING`. Without per-provider yielding there is no
+"watched provider" to single out.
 
 ## Probing
 
