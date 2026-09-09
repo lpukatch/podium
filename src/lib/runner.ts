@@ -10,7 +10,7 @@
  */
 
 import type { Config } from './config';
-import { type Channel, DispatcharrClient, type Stream } from './dispatcharr';
+import { type ActiveSession, type Channel, DispatcharrClient, type Stream } from './dispatcharr';
 import {
   assignmentIsRule,
   currentProgrammes,
@@ -433,6 +433,57 @@ export function laneBudgets(
   return budgets;
 }
 
+/** What `watchForViewers` needs to tell an arrival from the sitting tenant. */
+export interface ViewerGuard {
+  /** M3U profile id -> provider id, for placing a live session on an account. */
+  providerOfProfile: Map<number, number>;
+  /** Providers this pass opened lanes on. Nothing else can be disturbed by it. */
+  open: Set<number>;
+  /** Sessions per provider when the pass started. See `blockingSession`. */
+  baseline: Map<number, number>;
+}
+
+/**
+ * The session, if any, that should stop this pass.
+ *
+ * Three answers, in the order they are cheap to be sure of. A session
+ * Dispatcharr named no profile for, or named one no login here claims, blocks
+ * unconditionally: the pacer fails closed on a viewer it cannot place and the
+ * run has to agree with it, or the pass carries on under a decision the pacer
+ * would not have made. A session on a provider this pass never opened is not
+ * this pass's business. What is left is a session on a provider being probed,
+ * and the count is what matters rather than the fact -- `probeWatchedProvider`
+ * opens accounts that *already* have a viewer on them, so "somebody is on a
+ * provider we are using" is the normal, deliberate state of that mode, and
+ * only somebody *extra* is news.
+ *
+ * Sessions carry no identity of their own -- `/proxy/ts/status` gives a channel
+ * and a profile, and the same viewer changing channel produces a different row
+ * -- so counting per provider is the only handle there is. It behaves well
+ * where identity would not: a viewer switching channels holds the count at
+ * one, and a viewer who stops and restarts dips it to zero and back rather
+ * than reading as an arrival.
+ */
+export function blockingSession(
+  sessions: ActiveSession[],
+  guard: ViewerGuard,
+): ActiveSession | null {
+  const onOpenProviders = new Map<number, ActiveSession[]>();
+  for (const session of sessions) {
+    if (session.profileId === null) return session;
+    const provider = guard.providerOfProfile.get(session.profileId);
+    if (provider === undefined) return session;
+    if (!guard.open.has(provider)) continue;
+    const seen = onOpenProviders.get(provider);
+    if (seen) seen.push(session);
+    else onOpenProviders.set(provider, [session]);
+  }
+  for (const [provider, live] of onOpenProviders) {
+    if (live.length > (guard.baseline.get(provider) ?? 0)) return live.at(-1) ?? null;
+  }
+  return null;
+}
+
 export interface StreamSettler {
   /** Record one queued probe landing -- a verdict, or null when it never ran. */
   landed(job: ProbeJob, result: ProbeResult | null): void;
@@ -637,6 +688,8 @@ export class Runner {
       tickMs: config.PODIUM_TICK_MS,
       pauseWhenWatching: config.PODIUM_PAUSE_WHEN_WATCHING,
       probeIdleProviders: config.PODIUM_PROBE_IDLE_PROVIDERS,
+      probeWatchedProvider: config.PODIUM_PROBE_WATCHED_PROVIDER,
+      watchedFreeSlots: config.PODIUM_WATCHED_FREE_SLOTS,
       minFreeSlots: config.PODIUM_MIN_FREE_SLOTS,
       maxSlice: config.PODIUM_MAX_SLICE,
     };
@@ -947,6 +1000,20 @@ export class Runner {
       // all of them, and telling those apart from the log was the whole
       // difficulty the first time this shipped.
       const yielded = pacer.yieldedProviders(activity, yielding);
+      // Which of the watched accounts `probeWatchedProvider` kept open, read
+      // back off the lanes rather than recomputed: the pacer's arithmetic
+      // decides whether an account had anything to spare, and a second opinion
+      // here is a second thing to keep in step with it.
+      const shared =
+        yielded === 'all' || yielded === 'none'
+          ? new Set<number>()
+          : new Set(
+              [...limits.keys()]
+                .map((lane) => laneProvider.get(lane))
+                .filter((id): id is number => id !== undefined && yielded.has(id)),
+            );
+      const named = (ids: Iterable<number>) =>
+        [...ids].map((id) => providerNames.get(id) ?? `provider ${id}`).join(', ');
       const yieldNote =
         yielded === 'all'
           ? ' (viewers active, provider unknown -- yielding everything)'
@@ -956,9 +1023,14 @@ export class Runner {
               : activity.idle
                 ? ''
                 : ' (viewers active)'
-            : ` (viewers on ${[...yielded]
-                .map((id) => providerNames.get(id) ?? `provider ${id}`)
-                .join(', ')} -- yielded, others probing)`;
+            : ` (viewers on ${named(yielded)} -- ${[
+                shared.size > 0 ? `sharing spare capacity on ${named(shared)}` : '',
+                [...yielded].some((id) => !shared.has(id))
+                  ? `yielded ${named([...yielded].filter((id) => !shared.has(id)))}`
+                  : '',
+              ]
+                .filter(Boolean)
+                .join(', ')}, others probing)`;
 
       log(
         `fetched ${channels.length} channels, ${streams.length} streams; ` +
@@ -1341,16 +1413,35 @@ export class Runner {
       // While yielding per provider, only a viewer arriving on a provider this
       // pass is actually using has to stop it -- the whole point of the mode is
       // that someone watching provider B does not interrupt work on A and C.
+      // With `probeWatchedProvider` an open provider may be one somebody is
+      // already on, so "arriving" has to be counted rather than spotted; the
+      // baseline below is what makes that difference.
+      const providerOfProfile = new Map(
+        [...loginsByProvider].flatMap(([providerId, logins]) =>
+          logins
+            .filter((login) => login.dispatcharrProfileId !== null)
+            .map((login) => [login.dispatcharrProfileId as number, providerId] as const),
+        ),
+      );
+      // Sessions already running when the pass started, per provider. Only
+      // `probeWatchedProvider` makes this anything but zeroes -- every other
+      // mode yields an account the moment it carries a viewer, so no provider
+      // with a session on it is ever open -- and for that mode it is the whole
+      // difference between working and not: the viewer this pass deliberately
+      // decided to share a provider with is on that provider for as long as
+      // the game lasts, and a watcher that cannot tell them from an arrival
+      // aborts every pass on its first poll.
+      const sessionBaseline = new Map<number, number>();
+      for (const [profileId, viewers] of activity.viewersByProfile) {
+        const provider = providerOfProfile.get(profileId);
+        if (provider === undefined) continue;
+        sessionBaseline.set(provider, (sessionBaseline.get(provider) ?? 0) + viewers);
+      }
       const guard =
         config.PODIUM_PAUSE_WHEN_WATCHING && config.PODIUM_PROBE_IDLE_PROVIDERS
           ? {
-              providerOfProfile: new Map(
-                [...loginsByProvider].flatMap(([providerId, logins]) =>
-                  logins
-                    .filter((login) => login.dispatcharrProfileId !== null)
-                    .map((login) => [login.dispatcharrProfileId as number, providerId] as const),
-                ),
-              ),
+              providerOfProfile,
+              baseline: sessionBaseline,
               open: new Set(
                 [...limits.keys()]
                   .map((lane) => laneProvider.get(lane))
@@ -1673,14 +1764,16 @@ export class Runner {
    * pass anyway, which is the same stall by a longer route. A session
    * Dispatcharr named no profile for still aborts: the pacer fails closed on
    * an unattributable viewer and the run must agree with it, or the pass keeps
-   * probing on a decision the pacer would not have made.
+   * probing on a decision the pacer would not have made. `blockingSession`
+   * holds the rest of the rule, including the baseline that lets a shared
+   * account keep the viewer it was opened alongside.
    */
   private watchForViewers(
     client: DispatcharrClient,
     abort: AbortFlag,
     log: (m: string) => void,
     uuidMap?: Map<string, number>,
-    guard?: { providerOfProfile: Map<number, number>; open: Set<number> },
+    guard?: ViewerGuard,
   ): NodeJS.Timeout {
     const config = this.deps.config();
     if (!config.PODIUM_PAUSE_WHEN_WATCHING) {
@@ -1690,14 +1783,7 @@ export class Runner {
       async () => {
         try {
           const sessions = await client.activeSessions(uuidMap);
-          const blocking = guard
-            ? sessions.filter((session) => {
-                if (session.profileId === null) return true;
-                const provider = guard.providerOfProfile.get(session.profileId);
-                return provider === undefined || guard.open.has(provider);
-              })
-            : sessions;
-          const first = blocking[0];
+          const first = guard ? blockingSession(sessions, guard) : sessions[0];
           if (first && !abort.aborted) {
             log(`viewer started on channel ${first.channelId} -- stopping this pass`);
             abort.abort();

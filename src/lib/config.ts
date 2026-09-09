@@ -290,6 +290,8 @@ export const configSchema = z.object({
   PODIUM_IDLE_MAX_MS: num(30 * 60_000),
   PODIUM_PAUSE_WHEN_WATCHING: bool(true),
   PODIUM_PROBE_IDLE_PROVIDERS: bool(false),
+  PODIUM_PROBE_WATCHED_PROVIDER: bool(false),
+  PODIUM_WATCHED_FREE_SLOTS: num(2),
   PODIUM_MIN_FREE_SLOTS: num(1),
   PODIUM_MAX_SLICE: num(400),
 

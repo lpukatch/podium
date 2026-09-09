@@ -32,6 +32,8 @@ const pacer = (over = {}) =>
     tickMs: 60_000,
     pauseWhenWatching: true,
     probeIdleProviders: true,
+    probeWatchedProvider: false,
+    watchedFreeSlots: 2,
     minFreeSlots: 1,
     maxSlice: 400,
     ...over,
