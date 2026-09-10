@@ -148,6 +148,26 @@ CREATE TABLE IF NOT EXISTS assign_blocks (
     PRIMARY KEY (channel_id, stream_id)
 );
 
+-- When each stream on each channel was first seen to be unclaimed by its rule.
+--
+-- The clock behind PODIUM_REMOVE_UNMATCHED_AFTER_MS. Removal is destructive and
+-- has no undo, so it is not allowed to fire on one pass's opinion: a rule edit
+-- mid-save, a provider group renamed upstream, or a catalogue fetch that came
+-- back short can all make a perfectly good stream look unclaimed exactly once.
+-- A row appears the first pass a stream goes unmatched, survives as long as it
+-- stays that way, and is deleted the moment the rule claims it again -- so the
+-- grace period measures continuous absence and a stream that flickers back into
+-- the match set starts its clock over.
+--
+-- Written only while PODIUM_REMOVE_UNMATCHED is on. An install that never
+-- removes anything has no use for the clock and should not pay to keep it.
+CREATE TABLE IF NOT EXISTS unmatched_since (
+    channel_id INTEGER NOT NULL,
+    stream_id  INTEGER NOT NULL,
+    since      INTEGER NOT NULL,
+    PRIMARY KEY (channel_id, stream_id)
+);
+
 -- The managed catalogue as of the last pass that fetched it: one row per
 -- (channel, slot), slot being the index in the channel's streams array, so
 -- slot 0 is what Dispatcharr plays first. Provider attribution lives here and
@@ -2205,6 +2225,63 @@ export class Store {
       streamId: r.stream_id,
       blockedAt: r.blocked_at,
     }));
+  }
+
+  /**
+   * Advance the unclaimed clock for one channel and report where it stands.
+   *
+   * One call does both halves so the read cannot disagree with the write:
+   * streams unclaimed right now get a row if they lack one, every other row for
+   * the channel is dropped (the rule claims that stream again, or it is no
+   * longer on the channel at all), and what comes back is the resulting
+   * `streamId -> since` for the ids passed in.
+   *
+   * `now` rather than `Date.now()` so a pass stamps one instant across every
+   * channel it touches, and so the tests can age a clock without sleeping.
+   */
+  markUnmatched(channelId: number, streamIds: number[], now: number): Map<number, number> {
+    const insert = this.sql(
+      `INSERT INTO unmatched_since (channel_id, stream_id, since) VALUES (?, ?, ?)
+       ON CONFLICT(channel_id, stream_id) DO NOTHING`,
+    );
+    const clear = this.sql('DELETE FROM unmatched_since WHERE channel_id = ?');
+    const read = this.sql('SELECT stream_id, since FROM unmatched_since WHERE channel_id = ?');
+    this.db.transaction(() => {
+      if (streamIds.length === 0) {
+        clear.run(channelId);
+        return;
+      }
+      // Rebuilt rather than diffed: the set is a handful of ids per channel,
+      // and deleting what is no longer unclaimed is the whole reason a stream
+      // that comes back into the match set starts its clock over.
+      const holes = streamIds.map(() => '?').join(',');
+      // Not cached: one bind hole per id, so the text varies with the channel.
+      this.db
+        .prepare(`DELETE FROM unmatched_since WHERE channel_id = ? AND stream_id NOT IN (${holes})`)
+        .run(channelId, ...streamIds);
+      for (const streamId of streamIds) insert.run(channelId, streamId, now);
+    })();
+    const rows = read.all(channelId) as Array<{ stream_id: number; since: number }>;
+    return new Map(rows.map((r) => [r.stream_id, r.since]));
+  }
+
+  /**
+   * The unclaimed clocks for one channel, read without advancing them.
+   *
+   * For the on-demand check, whose job is to *preview* what the worker would
+   * do. Starting a stream's grace period because somebody looked at the channel
+   * would make the preview the thing that decides the answer.
+   */
+  unmatchedSince(channelId: number): Map<number, number> {
+    const rows = this.sql('SELECT stream_id, since FROM unmatched_since WHERE channel_id = ?').all(
+      channelId,
+    ) as Array<{ stream_id: number; since: number }>;
+    return new Map(rows.map((r) => [r.stream_id, r.since]));
+  }
+
+  /** Forget a channel's unclaimed clocks entirely -- it is no longer managed. */
+  clearUnmatched(channelId: number): void {
+    this.sql('DELETE FROM unmatched_since WHERE channel_id = ?').run(channelId);
   }
 
   /** Undo a block, for a stream someone wants back in the running. */

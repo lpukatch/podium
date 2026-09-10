@@ -260,8 +260,36 @@ Why the gate exists at all, and how to read what it dropped, is in
 | --- | --- | --- |
 | `PODIUM_DRY_RUN` | `true` | never writes while set; set `false` to let it reorder |
 | `PODIUM_REMOVE_UNMATCHED` | `false` | `true` unassigns unclaimed streams |
+| `PODIUM_REMOVE_UNMATCHED_AFTER_MS` | `86400000` | how long a stream must stay unclaimed first; [see below](#removing-unmatched-streams) |
 | `PODIUM_AUTO_ASSIGN` | `true` | lets a pass put matched streams onto channels that do not carry them; `false` is reorder-only |
 | `PODIUM_AUTO_ASSIGN_MAX` | `0` | ceiling on how many matched streams a channel may gain this way; `0` removes the cap |
+
+### Removing unmatched streams
+
+`PODIUM_REMOVE_UNMATCHED` is the only setting that takes streams *off* a
+channel, and it has no undo. Two things hold it back.
+
+**Staleness is never grounds for removal.** Dispatcharr flags a stream
+`is_stale` when its provider stopped listing it. During an outage that is the
+provider's whole catalogue at once: the M3U comes back empty, every stream on it
+goes stale, and podium cannot rank any of them because there is nothing to probe.
+Removal used to read that as "no rule claims these" and unassign the lot — and
+nothing put them back when the provider recovered, because an assignment is
+something a channel remembers, not something a stream carries. A stale stream is
+now kept wherever it sits, however long it stays stale. Cleaning up streams a
+provider has genuinely dropped is Dispatcharr's job, not this setting's.
+
+**Everything else waits.** A stream that really is unclaimed is removed only
+once it has been unclaimed continuously for `PODIUM_REMOVE_UNMATCHED_AFTER_MS`
+(a day by default). The clock starts the first pass that sees it unclaimed and
+is thrown away the moment a rule claims it again, so a stream that looks
+unclaimed for a single pass — a rule saved mid-edit, a provider group renamed
+upstream, a catalogue fetch that came back short — never loses its assignment
+over it. Set it to `0` for the old instant removal.
+
+Checking one channel by hand and ticking the drop box ignores the waiting
+period: that is an instruction about a channel somebody is looking at, not a
+pass acting on its own. It still will not offer to drop a stale stream.
 
 ### Auto-assign
 

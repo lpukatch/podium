@@ -79,12 +79,21 @@ export function sameOrder(a: number[], b: number[]): boolean {
  * Streams on the channel the rule did not match are strays. Unless
  * `removeUnmatched` is set they are kept, after the ranked ones, so a reorder
  * never silently unassigns anything either.
+ *
+ * `protectedIds` is the exception to that exception: strays that removal is not
+ * allowed to take this pass, kept exactly where an unmatched stream would be if
+ * `removeUnmatched` were off. Two very different things end up in it -- a
+ * stream the catalogue cannot currently rank (stale, or gone), and one whose
+ * unclaimed grace period has not run out -- because from here they are the same
+ * thing: absent from `ranked` for a reason that is not "no rule wants this".
+ * Empty by default, so a caller that passes nothing gets the old behaviour.
  */
 export function composeOrder(
   ranked: number[],
   assigned: number[] = [],
   removeUnmatched = false,
   assign?: { eligible: Set<number>; max: number },
+  protectedIds?: Set<number>,
 ): number[] {
   const onChannel = new Set(assigned);
   let keep = (id: number): boolean => onChannel.has(id);
@@ -109,9 +118,82 @@ export function composeOrder(
   }
 
   const matched = ranked.filter(keep);
-  if (removeUnmatched) return matched;
   const matchedSet = new Set(matched);
+  if (removeUnmatched) {
+    if (!protectedIds || protectedIds.size === 0) return matched;
+    return [...matched, ...assigned.filter((id) => !matchedSet.has(id) && protectedIds.has(id))];
+  }
   return [...matched, ...assigned.filter((id) => !matchedSet.has(id))];
+}
+
+/**
+ * The streams on a channel that removal must not take on this pass.
+ *
+ * Two populations, and only the second one is a matter of timing.
+ *
+ * A stream the catalogue cannot rank -- absent from it, or flagged `is_stale`
+ * by Dispatcharr -- is protected outright, however long it stays that way.
+ * `plan` drops both kinds before matching (they have no verdict and nothing to
+ * rank on), which made them indistinguishable from a stream no rule claimed,
+ * and `removeUnmatched` therefore unassigned them. That is what turns a
+ * provider outage into permanent damage: the provider stops answering, its M3U
+ * comes back empty, Dispatcharr marks that provider's entire catalogue stale,
+ * and one pass strips every one of those streams off every channel it served.
+ * Nothing puts them back when the provider returns, because an assignment is
+ * not something a stream carries -- it is something a channel remembers.
+ * Staleness is the provider's problem and Dispatcharr's to clean up; it is not
+ * evidence about what the rule wants, so it is not grounds for removal.
+ *
+ * A stream that really is unclaimed is protected only until `graceMs` has
+ * passed since it first went unclaimed -- see `unmatched_since`. `graceMs` of 0
+ * removes that half entirely and restores instant removal.
+ */
+export function protectedFromRemoval(
+  assigned: number[],
+  ranked: number[],
+  byId: Map<number, Stream>,
+  unmatchedSince: Map<number, number>,
+  now: number,
+  graceMs: number,
+): Set<number> {
+  const rankedSet = new Set(ranked);
+  const held = new Set<number>();
+  for (const id of assigned) {
+    if (rankedSet.has(id)) continue;
+    const stream = byId.get(id);
+    if (!stream || stream.is_stale) {
+      held.add(id);
+      continue;
+    }
+    if (graceMs <= 0) continue;
+    // No row yet means this pass is the first to see it unclaimed, so its
+    // clock starts now and it has the whole window ahead of it.
+    const since = unmatchedSince.get(id) ?? now;
+    if (now - since < graceMs) held.add(id);
+  }
+  return held;
+}
+
+/**
+ * Which of a channel's streams are unclaimed in the sense the grace period
+ * measures: on the channel, absent from the ranking, and not merely unrankable.
+ *
+ * Split out from `protectedFromRemoval` because it is what gets written to
+ * `unmatched_since`, and a stale stream must never appear there -- it would
+ * start a clock that expires into a removal the moment the provider's outage
+ * outlasts the window, which is the exact failure this all exists to stop.
+ */
+export function unclaimedStreams(
+  assigned: number[],
+  ranked: number[],
+  byId: Map<number, Stream>,
+): number[] {
+  const rankedSet = new Set(ranked);
+  return assigned.filter((id) => {
+    if (rankedSet.has(id)) return false;
+    const stream = byId.get(id);
+    return Boolean(stream && !stream.is_stale);
+  });
 }
 
 /**
@@ -2328,11 +2410,35 @@ export class Runner {
         max: config.PODIUM_AUTO_ASSIGN_MAX,
       };
     }
+    // What removal is not allowed to take. Computed per candidate order,
+    // because the live re-read below may carry streams the pass-start snapshot
+    // did not -- but the unclaimed clock is advanced exactly once, off the
+    // pass-start order, so re-reading a channel cannot restart anyone's grace
+    // period or hand out a second one.
+    //
+    // The clock is only touched when removal is actually on: an install that
+    // never removes has no use for it and should not pay to keep it written.
+    const removeUnmatched = config.PODIUM_REMOVE_UNMATCHED;
+    const graceMs = Math.max(0, config.PODIUM_REMOVE_UNMATCHED_AFTER_MS);
+    const now = Date.now();
+    let unmatchedSince = new Map<number, number>();
+    if (removeUnmatched && graceMs > 0) {
+      unmatchedSince = this.deps.store.markUnmatched(
+        channelId,
+        unclaimedStreams(assigned, ranked, snapshot.byId),
+        now,
+      );
+    }
+    const holdBack = (order: number[]): Set<number> =>
+      removeUnmatched
+        ? protectedFromRemoval(order, ranked, snapshot.byId, unmatchedSince, now, graceMs)
+        : new Set<number>();
+
     // Only streams already on the channel may move, unless auto-assign is on:
     // a match the channel does not carry is otherwise a ranking candidate, not
     // an assignment. Strays are kept after the ranked ones unless asked to drop
     // them. See composeOrder.
-    const ordered = composeOrder(ranked, assigned, config.PODIUM_REMOVE_UNMATCHED, assign);
+    const ordered = composeOrder(ranked, assigned, removeUnmatched, assign, holdBack(assigned));
 
     // Dispatcharr already serves exactly this order, so the PATCH would write
     // the row it just read back. On a settled install every verdict is a cache
@@ -2385,7 +2491,13 @@ export class Runner {
       // managed to re-read it, the pass-start one when we did not.
       let baseline = assigned;
       if (live) {
-        const fresh = composeOrder(ranked, live.streams, config.PODIUM_REMOVE_UNMATCHED, assign);
+        const fresh = composeOrder(
+          ranked,
+          live.streams,
+          removeUnmatched,
+          assign,
+          holdBack(live.streams),
+        );
         if (sameOrder(fresh, live.streams)) {
           counters.unchanged += 1;
           return;

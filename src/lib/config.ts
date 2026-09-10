@@ -81,6 +81,25 @@ export const configSchema = z.object({
   PODIUM_REMOVE_UNMATCHED: bool(false),
 
   /**
+   * How long a stream must have gone unclaimed before removal may take it.
+   *
+   * Removal used to be instant, which made it a hair trigger on exactly the
+   * events that are temporary. A provider outage is the one that hurt: it
+   * empties the M3U, Dispatcharr marks that provider's whole catalogue stale,
+   * and the next pass unassigned every one of those streams from every channel
+   * -- permanently, because coming back does not put an assignment back. That
+   * particular case is now fixed outright (`is_stale` protects a stream from
+   * removal however long it lasts); this covers the rest, where a rule edit, a
+   * renamed provider group or a half-fetched catalogue makes a stream look
+   * unclaimed for one pass.
+   *
+   * A day by default: long enough to outlast an outage and a night's sleep,
+   * short enough that a deliberate rule change still takes effect without
+   * anyone waiting a week. 0 restores the old instant removal.
+   */
+  PODIUM_REMOVE_UNMATCHED_AFTER_MS: num(24 * 60 * 60 * 1000),
+
+  /**
    * Whether a pass may put a matched stream onto a channel that does not carry
    * it yet.
    *
