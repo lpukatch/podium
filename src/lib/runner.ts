@@ -33,7 +33,14 @@ import { AbortFlag, laneKey, type ProbeJob, runLanes } from './scheduler';
 // and the API route and tests that import it from here still can.
 export { statsPayload } from './stats';
 
-import { isUsable, type RankEntry, type RankStrategy, rank, type Weights } from './scoring';
+import {
+  frameRate,
+  isUsable,
+  type RankEntry,
+  type RankStrategy,
+  rank,
+  type Weights,
+} from './scoring';
 import { statsPayload } from './stats';
 import type { CatalogueRow } from './store';
 import { ALL_GROUPS, forcedAtFor, type Progress, type Store, ttlFor } from './store';
@@ -1471,7 +1478,11 @@ export class Runner {
                 bitrateKbps: best.bitrateKbps,
                 measured: Boolean(best.bitrateMeasured),
                 height: best.height,
-                fps: best.fps,
+                // The rate the ranking used, so a sample cannot disagree with
+                // the score computed from the same verdict. Rows written before
+                // interlacing was detected hold the raw reading, which for a
+                // field-coded feed is double -- they age out with the cache.
+                fps: frameRate(best),
                 // The measured codec, not the claimed one. Bitrate only
                 // compares within a codec, so this is what lets a later fit
                 // hold it constant instead of charging HEVC's efficiency to

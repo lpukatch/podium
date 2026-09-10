@@ -207,3 +207,37 @@ describe('what gets published to Dispatcharr', () => {
     expect(stats.field_order).toBe('');
   });
 });
+
+/**
+ * Every surface that shows a human a frame rate has to show the same one the
+ * ranking used. The check panel is the sharpest case: it is where somebody goes
+ * to find out why a stream sank, so a row reading 50fps beside a score computed
+ * from 25 answers the question wrongly. These pin the shape the route sends.
+ */
+describe('what a human is shown', () => {
+  it('describes an interlaced row by the rate that ranked it', () => {
+    const result = probe({ fps: 50, fieldOrder: 'tt', height: 1080 });
+    const shown = {
+      fps: frameRate(result),
+      reportedFps: result.fps,
+      interlaced: isInterlaced(result),
+    };
+    expect(shown).toEqual({ fps: 25, reportedFps: 50, interlaced: true });
+  });
+
+  it('leaves a progressive row reading exactly as it always did', () => {
+    const result = probe({ fps: 50, fieldOrder: 'progressive' });
+    expect(frameRate(result)).toBe(result.fps);
+    expect(isInterlaced(result)).toBe(false);
+  });
+
+  /**
+   * The quality sample records the same number, so history cannot disagree
+   * with the score computed from the very same verdict.
+   */
+  it('records the ranked rate in a quality sample', () => {
+    const result = probe({ fps: 50, fieldOrder: 'tt' });
+    expect(frameRate(result)).toBe(25);
+    expect(statsPayload(result).source_fps).toBe(frameRate(result));
+  });
+});

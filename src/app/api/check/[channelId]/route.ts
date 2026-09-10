@@ -9,7 +9,7 @@ import {
 } from '@/lib/eligibility';
 import { Mutex } from '@/lib/mutex';
 import { resolveOrdering } from '@/lib/ordering';
-import { type ProbeResult, probe } from '@/lib/probe';
+import { isInterlaced, type ProbeResult, probe } from '@/lib/probe';
 import {
   assignedCandidates,
   composeOrder,
@@ -18,7 +18,7 @@ import {
   statsPayload,
 } from '@/lib/runner';
 import { laneKey, type ProbeJob, runLanes } from '@/lib/scheduler';
-import { isUsable, type RankEntry, rank, score } from '@/lib/scoring';
+import { frameRate, isUsable, type RankEntry, rank, score } from '@/lib/scoring';
 import {
   groupPatterns,
   index,
@@ -398,7 +398,13 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         alive: result?.alive ?? null,
         width: result?.width ?? 0,
         height: result?.height ?? 0,
-        fps: result?.fps ?? 0,
+        // The rate the ranking actually used, not ffprobe's raw reading -- this
+        // panel is where somebody goes to find out why a stream sank, so
+        // showing it 50 while scoring it 25 answers that question wrongly.
+        // `reportedFps` keeps the raw number so a row can say why they differ.
+        fps: result ? frameRate(result) : 0,
+        reportedFps: result?.fps ?? 0,
+        interlaced: result ? isInterlaced(result) : false,
         bitrateKbps: result?.bitrateKbps ?? 0,
         videoCodec: result?.videoCodec ?? '',
         error: result?.error ?? '',

@@ -10,7 +10,11 @@ interface Row {
   usable: boolean;
   black: boolean;
   height: number;
+  /** The rate the ranking used: halved when ffprobe reported a field rate. */
   fps: number;
+  /** What ffprobe said, when that differs -- see `interlaced`. */
+  reportedFps: number;
+  interlaced: boolean;
   bitrateKbps: number;
   videoCodec: string;
   error: string;
@@ -264,7 +268,15 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
                         {row.alive ? (
                           <span className="text-[var(--color-muted)]">
                             {row.height
-                              ? `${row.height}p · ${row.fps || '?'}fps · ${
+                              ? `${row.height}${row.interlaced ? 'i' : 'p'} · ${row.fps || '?'}fps${
+                                  // Named rather than silently halved: a row
+                                  // reading 25fps where every other tool says
+                                  // 50 is the surprise this panel exists to
+                                  // explain, not one it should create.
+                                  row.interlaced && row.reportedFps > row.fps
+                                    ? ` (${row.reportedFps}i)`
+                                    : ''
+                                } · ${
                                   row.bitrateKbps > 0
                                     ? `${Math.round(row.bitrateKbps)}kbps`
                                     : 'bitrate unknown'
