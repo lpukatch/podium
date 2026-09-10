@@ -10,7 +10,13 @@ import {
 import { Mutex } from '@/lib/mutex';
 import { resolveOrdering } from '@/lib/ordering';
 import { type ProbeResult, probe } from '@/lib/probe';
-import { assignedCandidates, composeOrder, splitAssigned, statsPayload } from '@/lib/runner';
+import {
+  assignedCandidates,
+  composeOrder,
+  protectedFromRemoval,
+  splitAssigned,
+  statsPayload,
+} from '@/lib/runner';
 import { laneKey, type ProbeJob, runLanes } from '@/lib/scheduler';
 import { isUsable, type RankEntry, rank, score } from '@/lib/scoring';
 import {
@@ -346,7 +352,20 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         max: config.PODIUM_AUTO_ASSIGN_MAX,
       };
     }
-    const workerOrder = composeOrder(ranked, current, removeUnmatched, assign);
+    // Read, never advanced: previewing a channel must not start anybody's
+    // grace period. See `Store.unmatchedSince`.
+    const graceMs = Math.max(0, config.PODIUM_REMOVE_UNMATCHED_AFTER_MS);
+    const heldFromWorker = removeUnmatched
+      ? protectedFromRemoval(
+          current,
+          ranked,
+          streamById,
+          store.unmatchedSince(id),
+          Date.now(),
+          graceMs,
+        )
+      : new Set<number>();
+    const workerOrder = composeOrder(ranked, current, removeUnmatched, assign, heldFromWorker);
     const kept = composeOrder(ranked, current, false, assign);
     // What the panel's drop tick asks for, composed here rather than left to
     // the apply. `proposed` below is the raw ranking -- every stream the rule
@@ -354,7 +373,19 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     // why they sank. Sending that as an order would assign the lot, cap and
     // block list and all, so the drop gets its own composition: the same one
     // the worker makes when remove-unmatched is on.
-    const dropOrder = composeOrder(ranked, current, true, assign);
+    //
+    // The grace period deliberately does not apply here: ticking the box is a
+    // person's instruction about this channel, not a pass acting on its own,
+    // and making them wait a day for it would be answering a question nobody
+    // asked. Streams the catalogue cannot rank are still held back, because
+    // "this provider is down right now" is not a reason anyone ticked it.
+    const dropOrder = composeOrder(
+      ranked,
+      current,
+      true,
+      assign,
+      protectedFromRemoval(current, ranked, streamById, new Map(), Date.now(), 0),
+    );
     const proposed = ranked;
 
     const describe = (streamId: number) => {
