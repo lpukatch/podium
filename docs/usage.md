@@ -451,6 +451,29 @@ A channel whose 5.1 only appears during live coverage will change position
 between passes. That is the measurement being honest about a stream that
 genuinely changed.
 
+**50i is not 50p.** An interlaced 1080i25 feed carries 25 frames a second as 50
+half-pictures, and an encoder that codes those halves separately makes ffprobe
+report it as 50fps. That let a 25fps stream win the fps term outright and — with
+the better bitrate interlacing is cheap enough to afford — outrank genuine 50p
+feeds. Podium now reads ffprobe's `field_order` and scores an interlaced stream
+on the frames it actually carries, so 50i is ranked exactly as the 25p feed it
+is. Nothing else changes: the penalty is the fps term alone, so a 50i stream
+with a real bitrate advantage can still win on it.
+
+This is the number Podium publishes as `source_fps`, so Dispatcharr's channel
+table and Teamarr's `stats_metric` rules both read the honest rate. Note the
+consequence for an existing rule: `source_fps >= 50` stops matching interlaced
+streams, which is the point — they never carried 50 frames a second. What
+ffprobe actually said is still published beside it as `reported_fps`, with
+`scan_type` and `field_order` to explain the difference.
+
+There is no interlaced format with 50 whole frames a second, which is what makes
+the halving safe — an interlaced stream reporting 50 or 60 is quoting its field
+rate. A stream whose field order ffprobe could not determine is left alone
+rather than guessed at, as is one already reporting coded frames (1080i25 read
+as 25 stays 25). Verdicts cached before this existed carry no field order and
+rank exactly as they did until they are next probed.
+
 Bitrate is *measured*, not read from the container: live TS/HLS almost never
 declares one. Podium reads a few seconds of the stream, which also gives it the
 black-screen check from the same read, so it costs one provider connection

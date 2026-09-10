@@ -8,8 +8,8 @@
  * agree with the probe while disagreeing with what Teamarr actually reads.
  */
 
-import type { ProbeResult } from './probe';
-import { DEFAULT_WEIGHTS, score, type Weights } from './scoring';
+import { isInterlaced, type ProbeResult } from './probe';
+import { DEFAULT_WEIGHTS, frameRate, score, type Weights } from './scoring';
 
 /**
  * The shape published to Dispatcharr's `stream_stats`.
@@ -30,7 +30,30 @@ export function statsPayload(
     width: result.width,
     height: result.height,
     resolution: result.width && result.height ? `${result.width}x${result.height}` : '0x0',
-    source_fps: result.fps,
+    /**
+     * The frames a second a viewer actually gets, which for an interlaced feed
+     * coded as fields is half what ffprobe reported -- see `frameRate`.
+     *
+     * The honest number rather than the raw reading, because this is the key
+     * Dispatcharr's channel table renders and the one Teamarr's `stats_metric`
+     * rules threshold against, and both were being told a 1080i25 feed was
+     * 50fps. Note what that means for an existing `source_fps >= 50` rule: it
+     * stops matching interlaced streams, which is the point -- they never
+     * carried 50 frames. The raw reading is still published beside it.
+     */
+    source_fps: frameRate(result),
+    /**
+     * What ffprobe actually said, kept for the question this otherwise makes
+     * unanswerable: why podium reports 25 where another tool reports 50.
+     */
+    reported_fps: result.fps,
+    /** Why the two differ, when they do. `unknown` when ffprobe would not say. */
+    scan_type: result.fieldOrder
+      ? isInterlaced(result)
+        ? 'interlaced'
+        : 'progressive'
+      : 'unknown',
+    field_order: result.fieldOrder ?? '',
     video_codec: result.videoCodec,
     audio_codec: result.audioCodec,
     pixel_format: result.pixelFormat,

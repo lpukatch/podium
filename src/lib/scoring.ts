@@ -6,7 +6,7 @@
  * break ties.
  */
 
-import type { ProbeResult } from './probe';
+import { isInterlaced, type ProbeResult } from './probe';
 
 /** Normalisation ceilings. Anything at or above these scores 1.0 for that term. */
 const MAX_HEIGHT = 2160;
@@ -20,6 +20,14 @@ const MAX_FPS = 60;
  * practice.
  */
 const UHD_HEIGHT = 1800;
+/**
+ * Below this an interlaced stream is reporting coded frames, at or above it
+ * fields. 1080i25 and 1080i30 are the only interlaced formats broadcast, so an
+ * interlaced stream claiming ~50 or ~60 is quoting its field rate -- there is
+ * no interlaced format with 50 whole frames a second. 48 rather than 50 so
+ * 59.94 and the 50/1.001 variants land on the right side of it.
+ */
+const FIELD_RATE_FLOOR = 48;
 /** 5.1. Anything wider (7.1) is still a full score rather than a bonus. */
 const MAX_AUDIO_CHANNELS = 6;
 /** What a good E-AC-3 5.1 track on these providers runs at. */
@@ -159,6 +167,28 @@ export const NEW_INSTALL_HEVC_FACTOR = 1.6;
 export const NEW_INSTALL_UHD_BITRATE_KBPS = 24_000;
 
 /**
+ * The frames a second a viewer actually sees.
+ *
+ * ffprobe reports an interlaced stream's rate two different ways depending on
+ * how the encoder coded it: as whole frames (1080i25 -> 25) or as fields
+ * (1080i25 -> 50). The second reading is why a provider's 25fps interlaced feed
+ * can present as 50fps and, on a healthy bitrate, outrank a genuine 50p stream
+ * -- it wins the fps term on a number that describes half-pictures.
+ *
+ * Halving it is safe because no interlaced format carries 50 whole frames a
+ * second: at or above `FIELD_RATE_FLOOR`, an interlaced stream is quoting
+ * fields, so the true frame rate is half. Progressive streams, and interlaced
+ * ones already reporting coded frames, pass through untouched -- and so does
+ * anything whose `field_order` ffprobe could not determine, since `isInterlaced`
+ * only counts an explicit answer.
+ */
+export function frameRate(result: Pick<ProbeResult, 'fps' | 'fieldOrder'>): number {
+  if (!result.fps) return 0;
+  if (!isInterlaced(result) || result.fps < FIELD_RATE_FLOOR) return result.fps;
+  return result.fps / 2;
+}
+
+/**
  * A stream's bitrate in the units the bitrate term is normalised in.
  *
  * H.264 is the reference codec, so it and everything else pass through
@@ -251,7 +281,8 @@ export function score(
     result.bitrateKbps && ceiling > 0
       ? Math.min(effectiveBitrateKbps(result, weights) / ceiling, 1)
       : 0;
-  const fps = result.fps ? Math.min(result.fps / MAX_FPS, 1) : 0;
+  const rate = frameRate(result);
+  const fps = rate ? Math.min(rate / MAX_FPS, 1) : 0;
 
   let codec = 0;
   const name = (result.videoCodec || '').toLowerCase();

@@ -56,6 +56,26 @@ export interface ProbeResult {
    */
   black?: boolean;
   blackSeconds?: number;
+  /**
+   * ffprobe's `field_order`: `progressive`, `tt`/`bb`/`tb`/`bt` when
+   * interlaced, `unknown` when it could not tell. Optional because every
+   * verdict cached before this existed is missing it, and absent must read as
+   * "not known to be interlaced" rather than as progressive.
+   */
+  fieldOrder?: string;
+}
+
+/**
+ * Whether the picture is interlaced, from ffprobe's `field_order`.
+ *
+ * The three answers are not two: `unknown` is common on a short read of a live
+ * TS, and treating it as interlaced would halve the frame rate of streams
+ * nobody has established anything about. Only an explicit field order counts.
+ */
+export function isInterlaced(result: Pick<ProbeResult, 'fieldOrder'>): boolean {
+  const order = result.fieldOrder;
+  if (!order) return false;
+  return order === 'tt' || order === 'bb' || order === 'tb' || order === 'bt';
 }
 
 export const DEAD: Omit<ProbeResult, 'elapsedMs' | 'error'> = {
@@ -114,6 +134,11 @@ export interface FfprobeStream {
   height?: number;
   avg_frame_rate?: string;
   r_frame_rate?: string;
+  /**
+   * `progressive`, one of `tt`/`bb`/`tb`/`bt` for interlaced, or `unknown`.
+   * Already in `-show_streams` output; reading it costs nothing extra.
+   */
+  field_order?: string;
   bit_rate?: string;
   pix_fmt?: string;
   channels?: number;
@@ -239,11 +264,16 @@ export function parsePayload(
     alive: true,
     width: video?.width ?? 0,
     height: video?.height ?? 0,
-    fps: video ? parseFps(video.avg_frame_rate ?? video.r_frame_rate) : 0,
+    // `??` alone was wrong: ffprobe returns the *string* `0/0` for an
+    // undeterminable rate rather than omitting the key, so a nullish check
+    // never reached `r_frame_rate` and the stream scored 0 on fps. Falling
+    // back on the parsed value covers both the missing key and `0/0`.
+    fps: video ? parseFps(video.avg_frame_rate) || parseFps(video.r_frame_rate) : 0,
     bitrateKbps: Math.round(bitrate * 100) / 100,
     videoCodec: video?.codec_name ?? '',
     audioCodec: audio?.codec_name ?? '',
     pixelFormat: video?.pix_fmt ?? '',
+    ...(video?.field_order ? { fieldOrder: video.field_order } : {}),
     audioChannels: audio?.channels ?? 0,
     channelLayout: audio?.channel_layout ?? '',
     // Unlike video, audio tracks do declare a bitrate in these streams -- ac3
