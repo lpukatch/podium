@@ -33,6 +33,8 @@ const MAX_AUDIO_CHANNELS = 6;
 /** What a good E-AC-3 5.1 track on these providers runs at. */
 const MAX_AUDIO_KBPS = 256;
 
+export type HdrPreference = 'none' | 'hlg' | 'pq';
+
 export interface Weights {
   resolution: number;
   bitrate: number;
@@ -53,6 +55,26 @@ export interface Weights {
    * genuinely changed, and is accepted rather than damped.
    */
   audio: number;
+  /**
+   * How much the preferred HDR flavour is worth.
+   *
+   * Small on purpose, for the same reason `audio` is: it exists to separate
+   * two HDR variants of the same channel -- HLG and HDR10/PQ from one provider
+   * are hevc / yuv420p10le / 3840x2160 alike, and which took slot 0 came down
+   * to a few kbps -- and must not promote a thinner stream or a lower
+   * resolution. Inert while `hdrPreference` is `none`, whatever its value.
+   *
+   * Defaults to 0 so an existing rules file, which cannot mention a term that
+   * did not exist when it was written, keeps its exact ordering. New installs
+   * are seeded with `NEW_INSTALL_HDR`.
+   */
+  hdr: number;
+  /**
+   * Which HDR transfer function to prefer, read from `ProbeResult.colorTransfer`:
+   * `hlg` is `arib-std-b67`, `pq` is `smpte2084`. `none` makes the `hdr` term
+   * neutral for every stream. See `hdrScore`.
+   */
+  hdrPreference: HdrPreference;
   preferH265: boolean;
   /**
    * Below this, a stream is treated as dead however healthy its metadata looks.
@@ -123,6 +145,10 @@ export const DEFAULT_WEIGHTS: Weights = {
   // never asked to change. New installs are seeded with `NEW_INSTALL_AUDIO`
   // instead (see EMPTY_RULES_DOC), which is the value we would pick freely.
   audio: 0,
+  // Inert together: a zero weight, and a preference that scores every stream
+  // the same anyway. Both exist so an upgrade cannot reshuffle anything.
+  hdr: 0,
+  hdrPreference: 'none',
   preferH265: true,
   minBitrateKbps: 500,
   // Both inert: 1.0 applies no codec correction, and a UHD ceiling equal to
@@ -137,6 +163,14 @@ export const DEFAULT_WEIGHTS: Weights = {
  * Also what "Reset to defaults" restores, since it is what podium ships today.
  */
 export const NEW_INSTALL_AUDIO = 0.1;
+
+/**
+ * The HDR weight a fresh install starts with. Half of `audio`: it has one job,
+ * choosing between two HDR variants whose video otherwise ties, and it does
+ * that at any weight above zero. Seeded with `hdrPreference` left at `none`,
+ * so it does nothing until an operator picks a flavour.
+ */
+export const NEW_INSTALL_HDR = 0.05;
 
 /**
  * HEVC's bitrate equivalence for a fresh install.
@@ -248,6 +282,32 @@ export function audioScore(result: ProbeResult): number {
   return channels * 0.75 + bitrate * 0.25;
 }
 
+/** ffprobe's `color_transfer` names for the two HDR flavours an operator can prefer. */
+const HDR_TRANSFER: Record<Exclude<HdrPreference, 'none'>, string> = {
+  hlg: 'arib-std-b67',
+  pq: 'smpte2084',
+};
+
+/**
+ * How well the stream's HDR flavour matches the preference, in [0, 1].
+ *
+ * Three answers, not two. The preferred flavour scores 1 and the other HDR
+ * flavour 0, which is the whole job. Everything else -- SDR, a live TS that
+ * never declared a transfer, a verdict cached before `colorTransfer` existed
+ * -- sits at 0.5: not knowing is neither the thing asked for nor the thing
+ * asked against, and a preference between two HDR variants is no reason to
+ * move an SDR stream at all. With no preference every stream scores 0.5, so
+ * the term cancels out of the ranking whatever its weight.
+ */
+export function hdrScore(result: Pick<ProbeResult, 'colorTransfer'>, weights: Weights): number {
+  if (weights.hdrPreference === 'none') return 0.5;
+  const transfer = (result.colorTransfer ?? '').toLowerCase();
+  if (!transfer) return 0.5;
+  if (transfer === HDR_TRANSFER[weights.hdrPreference]) return 1;
+  const other = weights.hdrPreference === 'hlg' ? HDR_TRANSFER.pq : HDR_TRANSFER.hlg;
+  return transfer === other ? 0 : 0.5;
+}
+
 /** Score a probe result in [0, 1]. A dead or unusable stream always scores 0. */
 export function score(
   result: ProbeResult,
@@ -310,7 +370,13 @@ export function score(
   // 1.0, which is where a ranking loses the ability to tell them apart. An
   // install that had already tuned its weights to some other total keeps its
   // order too: dividing by a constant cannot reorder anything.
-  const sum = weights.resolution + weights.bitrate + weights.fps + weights.codec + weights.audio;
+  const sum =
+    weights.resolution +
+    weights.bitrate +
+    weights.fps +
+    weights.codec +
+    weights.audio +
+    weights.hdr;
   if (sum <= 0) return 0;
 
   const total =
@@ -318,7 +384,8 @@ export function score(
       bitrate * weights.bitrate +
       fps * weights.fps +
       codec * weights.codec +
-      audioScore(result) * weights.audio) /
+      audioScore(result) * weights.audio +
+      hdrScore(result, weights) * weights.hdr) /
     sum;
 
   return Math.round(Math.min(total, 1) * 10_000) / 10_000;

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
 type Mode = 'quality' | 'provider' | 'alias';
+type HdrPreference = 'none' | 'hlg' | 'pq';
 
 interface Provider {
   id: number;
@@ -16,7 +17,10 @@ interface Weights {
   fps: string;
   codec: string;
   audio: string;
+  hdr: string;
   preferH265: boolean;
+  /** Which HDR flavour the HDR weight rewards. Not a weight. */
+  hdrPreference: HdrPreference;
   /** A multiplier, not a weight: what one kbps of HEVC is worth in H.264 kbps. */
   hevcBitrateFactor: string;
   /** A bitrate, not a weight: what scores full marks above 1080p. */
@@ -38,7 +42,9 @@ interface Response {
     fps: number;
     codec: number;
     audio: number;
+    hdr: number;
     preferH265: boolean;
+    hdrPreference: HdrPreference;
     hevcBitrateFactor: number;
     uhdBitrateKbps: number;
   };
@@ -48,7 +54,9 @@ interface Response {
     fps: number;
     codec: number;
     audio: number;
+    hdr: number;
     preferH265: boolean;
+    hdrPreference: HdrPreference;
     hevcBitrateFactor: number;
     uhdBitrateKbps: number;
   };
@@ -77,12 +85,20 @@ const MODES: { value: Mode; label: string; help: string }[] = [
   },
 ];
 
-const WEIGHT_FIELDS: { key: keyof Omit<Weights, 'preferH265'>; label: string }[] = [
-  { key: 'resolution', label: 'Resolution' },
-  { key: 'bitrate', label: 'Bitrate' },
-  { key: 'fps', label: 'FPS' },
-  { key: 'codec', label: 'Codec' },
-  { key: 'audio', label: 'Audio' },
+const WEIGHT_FIELDS: { key: keyof Omit<Weights, 'preferH265' | 'hdrPreference'>; label: string }[] =
+  [
+    { key: 'resolution', label: 'Resolution' },
+    { key: 'bitrate', label: 'Bitrate' },
+    { key: 'fps', label: 'FPS' },
+    { key: 'codec', label: 'Codec' },
+    { key: 'audio', label: 'Audio' },
+    { key: 'hdr', label: 'HDR' },
+  ];
+
+const HDR_OPTIONS: { value: HdrPreference; label: string }[] = [
+  { value: 'none', label: 'No preference' },
+  { value: 'hlg', label: 'HLG' },
+  { value: 'pq', label: 'HDR10 (PQ)' },
 ];
 
 const toWeights = (w: Response['weights']): Weights => ({
@@ -91,7 +107,9 @@ const toWeights = (w: Response['weights']): Weights => ({
   fps: String(w.fps),
   codec: String(w.codec),
   audio: String(w.audio),
+  hdr: String(w.hdr),
   preferH265: w.preferH265,
+  hdrPreference: w.hdrPreference,
   hevcBitrateFactor: String(w.hevcBitrateFactor),
   uhdBitrateKbps: String(w.uhdBitrateKbps),
 });
@@ -118,7 +136,9 @@ export function OrderingView() {
     fps: '',
     codec: '',
     audio: '',
+    hdr: '',
     preferH265: true,
+    hdrPreference: 'none',
     hevcBitrateFactor: '',
     uhdBitrateKbps: '',
   });
@@ -185,7 +205,9 @@ export function OrderingView() {
             fps: num(weights.fps),
             codec: num(weights.codec),
             audio: num(weights.audio),
+            hdr: num(weights.hdr),
             preferH265: weights.preferH265,
+            hdrPreference: weights.hdrPreference,
             hevcBitrateFactor: num(weights.hevcBitrateFactor),
             uhdBitrateKbps: num(weights.uhdBitrateKbps),
           },
@@ -338,7 +360,7 @@ export function OrderingView() {
         </button>
         {advanced && (
           <div className="mt-2">
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">
               {WEIGHT_FIELDS.map((f) => (
                 <label key={f.key} className="block text-xs text-[var(--color-muted)]">
                   {f.label}
@@ -358,6 +380,26 @@ export function OrderingView() {
                 onChange={(e) => setWeights({ ...weights, preferH265: e.target.checked })}
               />
               Prefer H.265 / HEVC over H.264
+            </label>
+            <label className="mt-3 block text-xs text-[var(--color-muted)]">
+              Preferred HDR format
+              <select
+                value={weights.hdrPreference}
+                onChange={(e) =>
+                  setWeights({ ...weights, hdrPreference: e.target.value as HdrPreference })
+                }
+                className={`${input} mt-1`}
+              >
+                {HDR_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              <span className="mt-1 block">
+                Only separates two HDR variants of the same channel, using the HDR weight above. SDR
+                streams are not moved. New installs: no preference.
+              </span>
             </label>
             <div className="mt-3 grid grid-cols-2 gap-3">
               <label className="block text-xs text-[var(--color-muted)]">
@@ -389,8 +431,8 @@ export function OrderingView() {
             </div>
             <p className="mt-2 text-xs text-[var(--color-muted)]">
               Relative weights for the quality score (higher = more important). They are normalised
-              by their total, so only their size relative to each other matters. The two fields
-              above are not weights.
+              by their total, so only their size relative to each other matters. The HDR format and
+              the two fields above are not weights.
             </p>
             <p className="mt-1 text-xs text-[var(--color-muted)]">
               Audio prefers surround where a channel is carried both with and without it. New
@@ -401,8 +443,8 @@ export function OrderingView() {
                 copy of it, which is most of why this small print ran to a
                 hundred words. */}
             <p className="mt-1 text-xs text-[var(--color-muted)]">
-              Installs that predate any of these three settings keep the old behaviour until you
-              raise the value.
+              Installs that predate any of these settings keep the old behaviour until you raise the
+              value.
             </p>
             <button
               type="button"
