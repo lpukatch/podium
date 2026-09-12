@@ -26,15 +26,19 @@ export async function PUT(request: Request, context: { params: Promise<{ channel
     providers?: unknown;
     /**
      * `720p`, `1080p` or `2160p`; `none` to ignore the group's floor; `inherit`
-     * to take the group's. Absent leaves whatever is stored alone.
+     * to take the group's. Absent leaves whatever is stored alone, and `null`
+     * and `""` both read as `inherit` -- a client resetting a field sends one of
+     * those, and rejecting them would make "clear this" an error.
      */
-    minResolution?: string;
+    minResolution?: string | null;
   };
   const clean = (values: string[] | undefined) =>
     (values ?? []).map((v) => v.trim()).filter(Boolean);
 
-  const floor = parseMinResolution(body.minResolution);
-  if (body.minResolution !== undefined && body.minResolution !== 'inherit' && floor === undefined) {
+  const inherits =
+    body.minResolution === null || body.minResolution === '' || body.minResolution === 'inherit';
+  const floor = inherits ? undefined : parseMinResolution(body.minResolution);
+  if (body.minResolution !== undefined && !inherits && floor === undefined) {
     return NextResponse.json(
       { error: `unknown resolution ${body.minResolution}` },
       { status: 400 },

@@ -26,7 +26,7 @@ import { resolveOrdering, withResolutionFloor } from './ordering';
 import { Pacer, type PacerConfig, viewersByProvider } from './pacer';
 import { type ProbeResult, probe } from './probe';
 import { tierOf } from './quality';
-import { type MinResolution, resolveResolutionFloor } from './resolution';
+import { channelResolutionFloor, type MinResolution } from './resolution';
 import type { RulesSource } from './rules-source';
 import { AbortFlag, laneKey, type ProbeJob, runLanes } from './scheduler';
 
@@ -76,8 +76,17 @@ export function sameOrder(a: number[], b: number[]): boolean {
  * `assign` opts out of that intersection -- see PODIUM_AUTO_ASSIGN, which is the
  * feature the aliases exist for: one flat `ESPN` alias, a new provider, and its
  * streams join the channel on the next pass. Its `eligible` set is the caller's
- * judgement of what is fit to add (probed, and usable); `max` caps how many
- * matched streams the channel ends up carrying (0 removes the cap).
+ * judgement of what is fit to be on the channel -- probed, and usable -- which
+ * is every stream with a verdict worth keeping, not only the ones being added;
+ * `max` caps how many such streams the channel ends up carrying (0 removes the
+ * cap). Passing only the additions there would read as a channel holding
+ * nothing and hand out a full budget on every pass.
+ *
+ * The cap counts usable sources rather than stream links, so streams this pass
+ * would refuse to assign do not hold it shut. That distinction is the whole
+ * difference between a cap and a trap: count them, and a capped channel full of
+ * dead or sub-floor streams can never acquire one that works, which would make
+ * a resolution floor set on such a channel do nothing but reorder the junk.
  *
  * The cap only ever limits ADDITIONS. A channel already at or over `max` keeps
  * every stream it has and gains nothing -- truncating `ranked` would unassign
@@ -112,7 +121,16 @@ export function composeOrder(
     // to it. 0 or less removes the cap (unlimited). Never negative: `max`
     // lowered below a channel's current holding must read as "no room", not
     // as room to remove.
-    const held = ranked.filter((id) => onChannel.has(id)).length;
+    //
+    // Only streams this pass would still be willing to assign count against it.
+    // Counting the rest makes the cap a tally of stream links rather than of
+    // sources a viewer can use, and a channel already full of them can never
+    // acquire one that works: put a 1080p floor on a capped channel carrying
+    // nothing but 720p and the junk holds the whole budget, so the stream that
+    // would actually satisfy the floor is never added and the setting does
+    // nothing but reorder what was already there. The same arithmetic stranded
+    // a channel full of dead streams.
+    const held = ranked.filter((id) => onChannel.has(id) && assign.eligible.has(id)).length;
     let budget = assign.max <= 0 ? Number.POSITIVE_INFINITY : Math.max(0, assign.max - held);
     const adding = new Set<number>();
     // `ranked` is best-first, so the budget buys the best candidates.
@@ -1729,8 +1747,9 @@ export class Runner {
         this.checkTeamarrRules(runId, channels, streamById, groupNames, providerNames, strategy, {
           audioOnly: (groupId, groupName) => eligibility.policyFor(groupId, groupName).audioOnly,
           minResolution: (channelId, groupId, groupName) =>
-            resolveResolutionFloor(
-              this.deps.rules.get().channelFloors.get(channelId),
+            channelResolutionFloor(
+              this.deps.rules.get().channelFloors,
+              channelId,
               eligibility.policyFor(groupId, groupName).minResolution,
             ),
           // Teamarr orders the channels it creates, which are the ones an
@@ -2180,10 +2199,7 @@ export class Runner {
           cacheComplete: settledStreams.size === hits.length,
           audioOnly: policy.audioOnly,
           measureOnly: policy.measureOnly,
-          minResolution: resolveResolutionFloor(
-            channelFloors.get(channel.id),
-            policy.minResolution,
-          ),
+          minResolution: channelResolutionFloor(channelFloors, channel.id, policy.minResolution),
         });
       }
     }

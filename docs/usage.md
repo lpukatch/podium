@@ -400,13 +400,20 @@ or on one channel, in its rule:
 { "channel_id": 812, "aliases": ["BBC One"], "min_resolution": "none" }
 ```
 
-The choices are `720p`, `1080p` and `2160p`. A channel's own setting wins over
-its group's, and `none` is how one channel opts out — the SD simulcast in an
-otherwise HD group. There is no global floor, because what suits one group is
-wrong for the next.
+The choices are `720p`, `1080p` and `2160p`; a floor names a line count, not a
+scan type, so `1080i` is read as `1080p`. A setting that is none of these is
+ignored and logged on load — Podium never silently applies a floor you did not
+write, or drops one you did.
+
+Each level overrides the one above it, and `none` is how anything opts out of a
+wider floor: a channel opts out of its group's — the SD simulcast in an
+otherwise HD group — and a group opts out of a name rule's. There is no global
+floor, because what suits one group is wrong for the next.
 
 A stream clears the floor on its height *or* its width, so a letterboxed film at
 1920×800 counts as 1080p, and so does anamorphic 1440×1080. 1600×900 does not.
+A stream with no picture at all — a radio feed matched onto a video channel, or
+a probe that never resolved the dimensions — does not clear a picture floor.
 
 Falling below the floor is not the same as being broken:
 
@@ -415,7 +422,9 @@ Falling below the floor is not the same as being broken:
 - it still ranks ahead of dead, black-screened and sub-bitrate streams;
 - streams below the floor keep their quality order among themselves, so a
   channel where nothing clears it ranks exactly as it would without one;
-- it is never auto-assigned;
+- it is never auto-assigned, and it does not count against
+  `PODIUM_AUTO_ASSIGN_MAX`, so a capped channel carrying nothing but sub-floor
+  streams still has room to be given one that clears it;
 - it is never removed. The floor decides order and what gets added, not what a
   channel already carries.
 

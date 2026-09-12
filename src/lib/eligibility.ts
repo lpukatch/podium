@@ -356,8 +356,11 @@ export function parsePolicies(
         extra.measure_only ?? extra.measureOnly,
         Boolean(DEFAULT_POLICY.measureOnly),
       ),
-      // `none` on a group is the same as saying nothing: there is no wider
-      // floor for it to override.
+      // `none` lands as "no floor", and it is not the same as saying nothing:
+      // a name pattern is a wider floor, and having an entry here at all is
+      // what overrides it, since `policyFor` stops consulting the patterns the
+      // moment a group has one. So `none` is written down (by the group route)
+      // to keep the entry alive, and read back as the absence of a floor.
       minResolution: parseMinResolution(extra.min_resolution ?? extra.minResolution) ?? undefined,
     });
   }

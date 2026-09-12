@@ -247,9 +247,18 @@ export function isHealthy(
 /**
  * Whether a stream's picture clears `weights.minResolution`.
  *
- * Only a measured picture is judged. A stream with no dimensions -- dead, or
- * video-less -- has said nothing about its resolution, and whatever else is
- * wrong with it is `isHealthy`'s to report.
+ * A stream with no picture at all does not clear a picture floor. Reading that
+ * the other way -- "it never mentioned a resolution, so let it through" -- lets
+ * the stream that told us the least beat every stream that admitted to being
+ * merely 720p, and with auto-assign on it is how a video-less radio feed gets
+ * *added* to an HD channel. The floor is an explicit instruction about what a
+ * viewer is served, so an absent picture fails it.
+ *
+ * Failing is survivable, which is what makes this the safe direction: the
+ * stream keeps its score, stays ahead of everything actually broken, and the
+ * short unknown-bitrate TTL re-probes it into its true position.
+ *
+ * An audio-only channel has no picture to judge and is exempt outright.
  */
 export function meetsResolutionFloor(
   result: ProbeResult,
@@ -258,10 +267,7 @@ export function meetsResolutionFloor(
 ): boolean {
   const floor = weights.minResolution ? MIN_RESOLUTIONS[weights.minResolution] : undefined;
   if (!floor || audioOnly) return true;
-  const height = result.height || 0;
-  const width = result.width || 0;
-  if (height <= 0 && width <= 0) return true;
-  return height >= floor.height || width >= floor.width;
+  return (result.height || 0) >= floor.height || (result.width || 0) >= floor.width;
 }
 
 /**
@@ -418,11 +424,12 @@ export const DEFAULT_STRATEGY: RankStrategy = {
 /**
  * Order stream ids best-first.
  *
- * Unusable streams (dead / black / sub-floor) always sink regardless of mode,
- * and among them a stream that only misses the channel's resolution floor goes
- * ahead of one that does not play at all. The mode then picks the primary key, streams whose bitrate was never measured
- * sink within it, quality score breaks ties after that, and a stable stream-id
- * sort is the last resort:
+ * Unusable streams always sink regardless of mode -- dead, black, under the
+ * bitrate floor, or under the channel's resolution floor -- and among them a
+ * stream that only misses the resolution floor goes ahead of one that does not
+ * play at all. The mode then picks the primary key, streams whose bitrate was
+ * never measured sink within it, quality score breaks ties after that, and a
+ * stable stream-id sort is the last resort:
  *
  * - `quality` (default): score, then streamId. The best source wins outright.
  * - `provider`: preferred providers first (by `providerRank`), then score

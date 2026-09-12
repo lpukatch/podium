@@ -63,7 +63,16 @@ export async function GET(request: Request) {
       const channels = byGroup.get(group.id) ?? [];
       const resolved = resolver.policyFor(group.id, group.name);
       const mode: GroupPolicy['mode'] = resolved.mode ?? ALWAYS;
-      const fromPattern = !policy.has(group.id) && resolved.mode !== ALWAYS;
+      // Anything a name rule decided for this group, not just its mode. A
+      // pattern may now carry a floor while leaving the mode at `always`, and
+      // reading only the mode would leave that group's settings looking local
+      // and its menu snapping back to the pattern's answer with no explanation.
+      const fromPattern =
+        !policy.has(group.id) &&
+        (resolved.mode !== ALWAYS ||
+          Boolean(resolved.audioOnly) ||
+          Boolean(resolved.measureOnly) ||
+          resolved.minResolution != null);
       let ruled = 0;
       let matchedChannels = 0;
       let links = 0;

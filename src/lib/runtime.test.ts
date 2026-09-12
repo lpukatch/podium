@@ -828,16 +828,30 @@ describe('composeOrder', () => {
     it('caps how many it adds, best first', () => {
       // Three eligible candidates, room for two: the top two by rank win and the
       // third waits for a pass where something above it has fallen over.
-      expect(composeOrder([901, 902, 903, 10], [10], false, assign([901, 902, 903], 3))).toEqual([
-        901, 902, 10,
-      ]);
+      // `eligible` carries 10 as the caller builds it -- every usable stream
+      // with a verdict, the ones already on the channel included.
+      expect(
+        composeOrder([901, 902, 903, 10], [10], false, assign([901, 902, 903, 10], 3)),
+      ).toEqual([901, 902, 10]);
     });
 
     it('counts what the channel already carries against the cap', () => {
       // Two matched streams already on the channel and a cap of 3 leaves room
       // for exactly one more, not three.
-      expect(composeOrder([901, 902, 10, 20], [10, 20], false, assign([901, 902], 3))).toEqual([
-        901, 10, 20,
+      expect(
+        composeOrder([901, 902, 10, 20], [10, 20], false, assign([901, 902, 10, 20], 3)),
+      ).toEqual([901, 10, 20]);
+    });
+
+    it('does not let streams it would never assign hold the cap shut', () => {
+      // The cap counts sources a viewer can use, not stream links. 10 and 20 are
+      // on the channel but ineligible -- dead, or under this channel's
+      // resolution floor -- so a cap of 2 still has room for the two that work.
+      // Counting them would strand the channel on the junk it already carries:
+      // nothing could ever be added to fix it, and a floor set on such a channel
+      // would do nothing but reorder what was already there.
+      expect(composeOrder([901, 902, 10, 20], [10, 20], false, assign([901, 902], 2))).toEqual([
+        901, 902, 10, 20,
       ]);
     });
 

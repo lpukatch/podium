@@ -17,7 +17,7 @@ import {
   Matcher,
 } from './matcher';
 import { DEFAULT_ORDERING, type OrderingConfig } from './ordering';
-import { type MinResolution, parseMinResolution } from './resolution';
+import { invalidMinResolution, type MinResolution, parseMinResolution } from './resolution';
 import {
   NEW_INSTALL_AUDIO,
   NEW_INSTALL_HEVC_FACTOR,
@@ -113,6 +113,15 @@ export interface LoadReport {
    * are exactly the channels most likely to want it.
    */
   channelFloors: Map<number, MinResolution | null>;
+  /**
+   * Floors written in the file that could not be read, as `where: text`.
+   *
+   * An unreadable floor is ignored rather than fatal -- one typo must not cost
+   * every channel its matching -- but ignoring it in silence is how an operator
+   * ends up certain they set a floor, watching a channel ranked without one.
+   * Reported like `skippedPatterns`, and for the same reason.
+   */
+  invalidFloors: string[];
 }
 
 /**
@@ -289,6 +298,14 @@ export function loadRules(raw: unknown): LoadReport {
   const rules = new Map<number, ChannelRule>();
   const skippedPatterns: string[] = [];
   const channelFloors = new Map<number, MinResolution | null>();
+  const invalidFloors: string[] = [];
+
+  // Groups are read for their floors only; `parsePolicies` owns the rest. A
+  // typo here is as silent as one on a channel, and as worth saying out loud.
+  for (const [groupId, raw] of Object.entries(doc.groups ?? {})) {
+    const written = invalidMinResolution((raw as { min_resolution?: unknown })?.min_resolution);
+    if (written) invalidFloors.push(`group ${groupId}: min_resolution "${written}"`);
+  }
 
   for (const entry of doc.channels) {
     if (entry.enabled === false) continue;
@@ -296,6 +313,10 @@ export function loadRules(raw: unknown): LoadReport {
     // away the floor on every assignment-only channel.
     const floor = parseMinResolution(entry.min_resolution);
     if (floor !== undefined) channelFloors.set(entry.channel_id, floor);
+    const written = invalidMinResolution(entry.min_resolution);
+    if (written) {
+      invalidFloors.push(`channel ${entry.channel_id}: min_resolution "${written}"`);
+    }
 
     const patterns: CompiledPattern[] = [];
     for (const spec of entry.patterns ?? []) {
@@ -347,5 +368,6 @@ export function loadRules(raw: unknown): LoadReport {
     skippedPatterns,
     ordering,
     channelFloors,
+    invalidFloors,
   };
 }

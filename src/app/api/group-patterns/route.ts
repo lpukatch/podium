@@ -25,7 +25,10 @@ export async function PUT(request: Request) {
     audio_only?: boolean;
     measureOnly?: boolean;
     measure_only?: boolean;
-    /** `720p`, `1080p`, `2160p`, or `none` to clear it. Absent keeps what is stored. */
+    /**
+     * `720p`, `1080p`, `2160p`, or `none` to clear it. Absent keeps what is
+     * stored; `null` and `""` read as `none`.
+     */
     minResolution?: string | null;
   };
   const pattern = (body.pattern ?? '').trim();
@@ -35,8 +38,11 @@ export async function PUT(request: Request) {
   if (!VALID_MODES.includes(mode as never)) {
     return NextResponse.json({ error: `unknown mode ${mode}` }, { status: 400 });
   }
-  const requestedFloor = parseMinResolution(body.minResolution);
-  if (body.minResolution != null && requestedFloor === undefined) {
+  // As in the group route: clearing a floor is not an error, so only a value
+  // that was written and could not be read is.
+  const cleared = body.minResolution === null || body.minResolution === '';
+  const requestedFloor = cleared ? null : parseMinResolution(body.minResolution);
+  if (body.minResolution !== undefined && !cleared && requestedFloor === undefined) {
     return NextResponse.json(
       { error: `unknown resolution ${body.minResolution}` },
       { status: 400 },

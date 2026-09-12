@@ -11,7 +11,7 @@
 import { loadConfig } from './config';
 import { assignmentIsRule, Eligibility } from './eligibility';
 import { resolveOrdering } from './ordering';
-import { resolveResolutionFloor } from './resolution';
+import { channelResolutionFloor } from './resolution';
 import type { RankStrategy } from './scoring';
 import { channelFloors, groupPatterns, ordering, policies, type Snapshot } from './server/state';
 import type { Store } from './store';
@@ -84,7 +84,7 @@ export function checkInputs(snap: Snapshot, store: Store): CheckInputs {
       // Teamarr orders what it creates: the groups marked measure-only, or
       // ranked off their own assignment. Its rules reach nothing else.
       managed: Boolean(policy.measureOnly) || assignmentIsRule(policy.mode),
-      minResolution: resolveResolutionFloor(floors.get(channel.id), policy.minResolution),
+      minResolution: channelResolutionFloor(floors, channel.id, policy.minResolution),
       streams,
     });
   }

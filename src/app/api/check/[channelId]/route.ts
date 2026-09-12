@@ -10,7 +10,7 @@ import {
 import { Mutex } from '@/lib/mutex';
 import { resolveOrdering, withResolutionFloor } from '@/lib/ordering';
 import { isInterlaced, type ProbeResult, probe } from '@/lib/probe';
-import { resolveResolutionFloor } from '@/lib/resolution';
+import { channelResolutionFloor } from '@/lib/resolution';
 import {
   assignedCandidates,
   composeOrder,
@@ -167,7 +167,13 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         proposed: [],
         kept: current,
         workerOrder,
-        minBitrateKbps: config.PODIUM_MIN_BITRATE_KBPS,
+        // No rows were ranked, so there is nothing for these to explain -- but
+        // they are the floors the ranking would have used, not a second opinion
+        // read out of the environment beside it.
+        minBitrateKbps: resolveOrdering(ordering(), new Map(), config.PODIUM_MIN_BITRATE_KBPS)
+          .weights.minBitrateKbps,
+        minResolution:
+          channelResolutionFloor(channelFloors(), id, groupPolicy.minResolution) ?? null,
         rows: [],
         unclaimed: [],
         unprobed: [],
@@ -186,7 +192,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     // down to this channel's own resolution floor.
     const strategy = withResolutionFloor(
       resolveOrdering(ordering(), providerNames, config.PODIUM_MIN_BITRATE_KBPS),
-      resolveResolutionFloor(channelFloors().get(id), groupPolicy.minResolution),
+      channelResolutionFloor(channelFloors(), id, groupPolicy.minResolution),
     );
 
     // The courtesy reserve, on the same rule the worker uses (Pacer.laneLimits):

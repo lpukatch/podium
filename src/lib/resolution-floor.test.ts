@@ -18,7 +18,7 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadConfig } from './config';
 import type { Channel, DispatcharrClient, Stream } from './dispatcharr';
-import { ALWAYS, parseGroupPatterns, parsePolicies } from './eligibility';
+import { ALWAYS, Eligibility, parseGroupPatterns, parsePolicies } from './eligibility';
 import { withResolutionFloor } from './ordering';
 import type { ProbeResult } from './probe';
 import { parseMinResolution, resolveResolutionFloor } from './resolution';
@@ -91,6 +91,32 @@ describe('reading a floor', () => {
     expect(parseMinResolution('yes')).toBeUndefined();
   });
 
+  it('reads an interlaced label as the line count it names', () => {
+    // Broadcast IPTV labels half its HD feeds 1080i. An operator typing what
+    // their provider calls the stream must not quietly get no floor at all.
+    expect(parseMinResolution('1080i')).toBe('1080p');
+    expect(parseMinResolution('720i')).toBe('720p');
+    expect(parseMinResolution('1080I')).toBe('1080p');
+  });
+
+  it('says so when a floor could not be read, rather than dropping it in silence', () => {
+    const report = loadRules({
+      schema: 2,
+      groups: { '7': { mode: ALWAYS, min_resolution: '1o80p' } },
+      channels: [
+        { channel_id: 1, aliases: ['A'], min_resolution: '1440p' },
+        { channel_id: 2, aliases: ['B'], min_resolution: '1080i' },
+        { channel_id: 3, aliases: ['C'] },
+      ],
+    });
+    expect(report.channelFloors.has(1)).toBe(false);
+    expect(report.channelFloors.get(2)).toBe('1080p');
+    expect(report.invalidFloors).toEqual([
+      'group 7: min_resolution "1o80p"',
+      'channel 1: min_resolution "1440p"',
+    ]);
+  });
+
   it('lets a channel raise, lower or clear its group floor', () => {
     expect(resolveResolutionFloor(undefined, '1080p')).toBe('1080p');
     expect(resolveResolutionFloor('2160p', '1080p')).toBe('2160p');
@@ -106,8 +132,10 @@ describe('reading a floor', () => {
       '9': { mode: ALWAYS },
     });
     expect(groups.get(7)?.minResolution).toBe('1080p');
-    // A group has no wider floor to opt out of, so `none` is just no floor.
+    // `none` reads as no floor -- but the entry still exists, and that is what
+    // overrides a name pattern's floor. See the group opt-out test below.
     expect(groups.get(8)?.minResolution).toBeUndefined();
+    expect(groups.has(8)).toBe(true);
     expect(groups.get(9)?.minResolution).toBeUndefined();
 
     const patterns = parseGroupPatterns([
@@ -147,12 +175,37 @@ describe('clearing the floor', () => {
     expect(meetsResolutionFloor(probe({ width: 1600, height: 900 }), FHD.weights)).toBe(false);
   });
 
-  it('judges nothing it did not measure', () => {
-    // No floor at all, a video-less feed, and a verdict with no dimensions:
-    // none of those is a resolution this can have an opinion about.
+  it('has no opinion without a floor, or on a channel with no picture to judge', () => {
     expect(meetsResolutionFloor(hd720, DEFAULT_WEIGHTS)).toBe(true);
-    expect(meetsResolutionFloor(probe({ width: 0, height: 0 }), FHD.weights)).toBe(true);
     expect(meetsResolutionFloor(probe({ width: 0, height: 0 }), FHD.weights, true)).toBe(true);
+  });
+
+  it('does not let a stream with no picture clear a picture floor', () => {
+    // Fail-open here is the expensive direction. A verdict with no dimensions
+    // has told us the least of any stream on the channel, and passing it would
+    // rank it above every stream that admitted to being merely 720p.
+    expect(meetsResolutionFloor(probe({ width: 0, height: 0 }), FHD.weights)).toBe(false);
+  });
+
+  it('keeps a video-less feed off an HD channel that auto-assign would have taken it onto', () => {
+    // The case that makes it concrete: a radio stream matched onto a video
+    // channel is alive and healthy, so before this it cleared the floor by
+    // never mentioning a resolution -- and outranked the 720p feed beside it.
+    const radio = probe({ width: 0, height: 0, videoCodec: '', fps: 0, bitrateKbps: 320 });
+    expect(isHealthy(radio, FHD.weights)).toBe(true);
+    expect(isUsable(radio, FHD.weights)).toBe(false);
+    expect(
+      rank(
+        [
+          { streamId: 1, stepOrder: 0, providerId: 0, result: hd720 },
+          { streamId: 2, stepOrder: 0, providerId: 0, result: radio },
+        ],
+        withResolutionFloor(DEFAULT_STRATEGY, '1080p'),
+      ),
+    ).toEqual([1, 2]);
+    // ...and it still outranks what is actually broken, rather than being
+    // lumped in with it.
+    expect(score(radio, FHD.weights)).toBeGreaterThan(0);
   });
 
   it('separates being below the floor from being broken', () => {
@@ -161,6 +214,41 @@ describe('clearing the floor', () => {
     // And the score survives, which is what keeps the sunk streams ordered.
     expect(score(hd720, FHD.weights)).toBeGreaterThan(0);
     expect(score(probe({ alive: false }), FHD.weights)).toBe(0);
+  });
+});
+
+describe("a group opting out of a name rule's floor", () => {
+  it('takes the pattern floor when the group has no entry of its own', () => {
+    const elig = new Eligibility(
+      parsePolicies({}),
+      undefined,
+      parseGroupPatterns([{ pattern: 'Sports *', mode: ALWAYS, min_resolution: '1080p' }]),
+    );
+    expect(elig.policyFor(42, 'Sports SD').minResolution).toBe('1080p');
+  });
+
+  it('drops it the moment the group has one, floor or no floor', () => {
+    // How a group says "not me" to a floor written for the shelf it sits on.
+    // `policyFor` stops reading the patterns once a group has its own entry, so
+    // the entry existing is the override -- which is why the group route has to
+    // write `none` down instead of deleting an entry that holds nothing else.
+    const patterns = parseGroupPatterns([
+      { pattern: 'Sports *', mode: ALWAYS, min_resolution: '1080p' },
+    ]);
+    const optedOut = new Eligibility(
+      parsePolicies({ '42': { mode: ALWAYS, min_resolution: 'none' } }),
+      undefined,
+      patterns,
+    );
+    expect(optedOut.policyFor(42, 'Sports SD').minResolution).toBeUndefined();
+
+    // And a group that overrides it with a different floor still gets its own.
+    const raised = new Eligibility(
+      parsePolicies({ '42': { mode: ALWAYS, min_resolution: '2160p' } }),
+      undefined,
+      patterns,
+    );
+    expect(raised.policyFor(42, 'Sports SD').minResolution).toBe('2160p');
   });
 });
 
