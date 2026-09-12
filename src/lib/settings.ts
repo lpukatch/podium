@@ -566,3 +566,69 @@ export function mergeForTest(
   }
   return { merged, withheld };
 }
+
+/** How a credential key reads in a sentence somebody has to act on. */
+const CREDENTIAL_NAMES: Record<(typeof CREDENTIAL_KEYS)[number], string> = {
+  DISPATCHARR_API_KEY: 'API key',
+  DISPATCHARR_USERNAME: 'username',
+  DISPATCHARR_PASSWORD: 'password',
+};
+
+/**
+ * Credentials this change would hand to a host they were not saved for.
+ *
+ * `mergeForTest` stops the *test* endpoint sending a stored credential to a
+ * newly typed host. Saving had no such guard, and it is the worse half of the
+ * pair: a test sends the credential once, a save points every later request at
+ * the new host -- the worker's next pass, every page in the UI -- and writes the
+ * decision to the database, where nothing shows it happened.
+ *
+ * The whole attack is one request. `PUT /api/settings` with nothing but a URL
+ * in it passed the credential check, because `requireCredentials` looks at the
+ * *merged* config and the credentials were still there in the environment,
+ * exactly where a compose file puts them. On the next tick the worker built a
+ * client for `https://wherever` and sent the Dispatcharr API key to it in
+ * cleartext. Restoring a backup is the same request wearing a different hat: it
+ * replaces the settings table wholesale, so a bundle carrying a URL and no
+ * credentials leaves the environment's in place and pointed somewhere new.
+ *
+ * What counts as moved is a credential the request does not itself carry. One
+ * supplied in the same breath is one the caller already holds -- the person at
+ * the form re-entering the key for the host they are moving to, or a backup
+ * bundle that carries its own -- and one that ends up empty is sent nowhere.
+ * Everything else is inherited: left in the settings table by an earlier save,
+ * or sitting in the environment where a compose file put it, which is exactly
+ * what the caller would not otherwise have.
+ *
+ * Compared by hostname only, for the reason `mergeForTest` gives: a port change
+ * keeps the secret on the machine that already has it, and fixing a port is the
+ * commonest edit there is.
+ */
+export function movedCredentials(
+  before: Record<string, string>,
+  after: Record<string, string>,
+  supplied: Record<string, string | null | undefined>,
+  env: Record<string, string | undefined>,
+): string[] {
+  const urlOf = (source: Record<string, string | undefined>): string =>
+    source.DISPATCHARR_URL || env.DISPATCHARR_URL || CONFIG_DEFAULTS.DISPATCHARR_URL;
+  if (hostOfUrl(urlOf(before)) === hostOfUrl(urlOf(after))) return [];
+
+  return CREDENTIAL_KEYS.filter((key) => {
+    const effective = after[key] || env[key] || '';
+    return effective !== '' && !supplied[key];
+  });
+}
+
+/** That refusal, as the sentence the caller is shown. */
+export function credentialMoveMessage(moved: string[], url: string): string {
+  const names = moved.map(
+    (key) => CREDENTIAL_NAMES[key as (typeof CREDENTIAL_KEYS)[number]] ?? key,
+  );
+  const list =
+    names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : (names[0] ?? '');
+  return (
+    `This points Dispatcharr at ${hostOfUrl(url)}, and the saved ${list} would be sent there. ` +
+    `Enter the ${list} again in the same save to confirm the move, or clear it first.`
+  );
+}

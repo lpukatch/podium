@@ -10,6 +10,7 @@ import {
 import { loadConfig } from '@/lib/config';
 import { loadRules } from '@/lib/rules';
 import { readRulesDoc, writeRulesDoc } from '@/lib/server/state';
+import { credentialMoveMessage, movedCredentials } from '@/lib/settings';
 import { Store } from '@/lib/store';
 
 export const dynamic = 'force-dynamic';
@@ -105,6 +106,21 @@ export async function POST(request: Request) {
     }
 
     store = new Store(loadConfig().dbPath);
+    // A restore replaces the settings table wholesale, so a bundle carrying a
+    // Dispatcharr URL and no credentials leaves the environment's in place and
+    // aimed at whatever host the bundle names. Same refusal the settings PUT
+    // makes, for the same reason -- and, like every check above, before
+    // anything is written.
+    // The bundle is both the new state and what the request supplies: one
+    // that carries its own credential is a caller who already holds it.
+    const moved = movedCredentials(store.settings(), settings, settings, process.env);
+    if (moved.length > 0) {
+      return NextResponse.json(
+        { error: credentialMoveMessage(moved, settings.DISPATCHARR_URL ?? '') },
+        { status: 400 },
+      );
+    }
+
     writeRulesDoc(bundle.rules);
     try {
       store.restoreConfig({
