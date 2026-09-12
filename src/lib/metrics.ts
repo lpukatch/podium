@@ -192,6 +192,12 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
     'counter',
     totals.assigned,
   );
+  out.add(
+    'podium_streams_removed_total',
+    'Streams taken off a channel for being dead too long, all runs. Zero unless PODIUM_REMOVE_DEAD_AFTER_CHECKS is set.',
+    'counter',
+    totals.removed,
+  );
   out.add('podium_probes_skipped_total', 'Probes skipped by an abort.', 'counter', totals.skipped);
 
   const lastRun = store.recentRuns(1)[0];

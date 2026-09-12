@@ -37,6 +37,13 @@ export interface FieldSpec {
   /** Bounds in *displayed* units. Keeps a typo from stalling every pass. */
   min?: number;
   max?: number;
+  /**
+   * Whole numbers only. For a field counting *events* rather than measuring a
+   * quantity -- "after 3 checks" is a real instruction and "after 0.5 checks"
+   * is not, and a fraction that floors to zero on the way in is how a
+   * threshold turns into "remove on the first one".
+   */
+  int?: boolean;
 }
 
 /** Displayed units from stored units. */
@@ -137,6 +144,16 @@ export const FIELDS: FieldSpec[] = [
     scale: 3_600_000,
     min: 0,
     max: 720,
+  },
+  {
+    key: 'PODIUM_REMOVE_DEAD_AFTER_CHECKS',
+    kind: 'number',
+    label: 'Remove a dead stream after this many checks',
+    help: 'Unassigns a stream that came back dead this many consecutive times. Checks, not hours: a dead stream is re-probed after 3h, then 6, 12 and 24, so 5 checks is about two days. Any live verdict resets the count, and a stream that is merely black-screened or under the bitrate floor is alive — it sinks, but is never removed. A provider whose catalogue has mostly gone dead is left alone entirely, so an outage cannot strip its streams off every channel. 0 is off, and removal has no undo.',
+    section: 'behaviour',
+    min: 0,
+    max: 100,
+    int: true,
   },
   {
     key: 'PODIUM_AUTO_ASSIGN',
@@ -451,6 +468,10 @@ export function validateSettings(patch: Record<string, unknown>): {
       }
       if (field.max !== undefined && n > field.max) {
         errors.push({ key, message: `must be at most ${field.max}` });
+        continue;
+      }
+      if (field.int && !Number.isInteger(n)) {
+        errors.push({ key, message: 'must be a whole number' });
         continue;
       }
       values[key] = String(field.scale ? Math.round(n * field.scale) : n);

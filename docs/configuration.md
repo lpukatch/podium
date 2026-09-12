@@ -261,6 +261,7 @@ Why the gate exists at all, and how to read what it dropped, is in
 | `PODIUM_DRY_RUN` | `true` | never writes while set; set `false` to let it reorder |
 | `PODIUM_REMOVE_UNMATCHED` | `false` | `true` unassigns unclaimed streams |
 | `PODIUM_REMOVE_UNMATCHED_AFTER_MS` | `86400000` | how long a stream must stay unclaimed first; [see below](#removing-unmatched-streams) |
+| `PODIUM_REMOVE_DEAD_AFTER_CHECKS` | `0` | unassign a stream after this many consecutive dead checks; `0` is off, [see below](#removing-dead-streams) |
 | `PODIUM_AUTO_ASSIGN` | `true` | lets a pass put matched streams onto channels that do not carry them; `false` is reorder-only |
 | `PODIUM_AUTO_ASSIGN_MAX` | `0` | ceiling on how many matched streams a channel may gain this way; `0` removes the cap |
 
@@ -290,6 +291,77 @@ over it. Set it to `0` for the old instant removal.
 Checking one channel by hand and ticking the drop box ignores the waiting
 period: that is an instruction about a channel somebody is looking at, not a
 pass acting on its own. It still will not offer to drop a stale stream.
+
+### Removing dead streams
+
+The setting above is about a stream the rule stopped claiming. This is the other
+case: the rule still wants it, the provider still lists it, and it simply does
+not play any more. Ranking sinks a dead stream, which is enough while the
+channel has something better — but a channel whose lineup died months ago is
+carrying streams nobody can watch, and nothing else will ever clear them.
+
+`PODIUM_REMOVE_DEAD_AFTER_CHECKS` is how many consecutive dead checks a stream
+must fail before a pass unassigns it. Off by default.
+
+**Checks, not hours**, because the checks are already spaced out for you: a dead
+verdict is re-probed after 3 hours, then 6, 12 and 24, so waiting for the count
+costs a provider nothing extra.
+
+| checks | roughly how long it has been dead |
+| --- | --- |
+| 2 | 3 hours |
+| 3 | 9 hours |
+| 4 | 21 hours |
+| 5 | 2 days |
+| 6 | 3 days |
+
+Whole numbers only, and any live verdict resets the count to zero. Queueing a
+re-check by hand probes sooner than the schedule would, so it also reaches the
+count sooner. The count is read at the moment a pass decides a write, not when
+the pass began: a stream that answers mid-pass is safe that same pass, and one
+that reaches the threshold mid-pass is acted on without waiting for the next.
+
+**Only dead counts.** A black screen, and a stream under the bitrate floor, are
+both *alive*: they sink in the ranking, they reset the streak like any other
+live verdict, and this never removes them.
+
+Three things it will not do:
+
+- **Strip a provider that is having an outage.** When more than half of the
+  streams Podium *manages* on a provider read dead, nothing of that provider's
+  is removed on that pass. An outage looks exactly like every stream on the
+  account dying at once, and it is the failure that made unmatched removal
+  dangerous.
+
+  The share is measured against the streams Podium manages on that provider --
+  the ones it probes and holds verdicts for — not against the provider's full
+  catalogue. A provider may list 20,000 streams while Podium manages 400 of
+  them; judged against the catalogue, a total blackout would read as 2% dead
+  and this guard would never once fire.
+
+  Providers with fewer than four managed streams are not judged for an outage
+  at all. One managed stream reads 1/1 dead the moment it dies, which would
+  otherwise mean a permanent "outage" and a stream that could never be cleaned
+  up — the opposite of what the setting is for.
+- **Remove a stream it just saw working.** A stream the pass probed alive is
+  exempt however long its streak was beforehand, and its count is already back
+  to zero.
+- **Touch a stale stream**, on the same rule as above: Dispatcharr marking a
+  stream stale is the provider's business, not evidence about this channel.
+- **Empty a channel.** The last stream is never removed, however dead it is. A
+  channel carrying nothing serves nothing and says nothing about why.
+
+Every removal is logged with the stream ids and their providers, counted in the
+pass summary line, and recorded against the run in the database — `removed` on
+the run row, and `podium_streams_removed_total` in the metrics, so the count
+outlives the logs. Nothing happens under `PODIUM_DRY_RUN`, and a measure-only
+group is never written to at all.
+
+Removal still has no undo: an assignment is something a channel remembers, not
+something a stream carries. Nothing is recorded against the stream, so if the
+feed recovers, auto-assign can put it back on a channel whose rule still matches
+it — but a channel ranked off its own assignment has nothing left to match on,
+and there it is gone for good.
 
 ### Auto-assign
 

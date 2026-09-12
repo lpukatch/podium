@@ -100,6 +100,35 @@ export const configSchema = z.object({
   PODIUM_REMOVE_UNMATCHED_AFTER_MS: num(24 * 60 * 60 * 1000),
 
   /**
+   * Unassign a stream after this many consecutive checks found it dead.
+   *
+   * The other half of removal, and a different question from
+   * `PODIUM_REMOVE_UNMATCHED`: this one is about a stream the rule still wants
+   * and the provider still lists, which simply does not play any more. Ranking
+   * sinks it, which is enough while a channel has something better, but a
+   * channel whose whole lineup went dead months ago is carrying streams nobody
+   * can watch and nothing else will ever clear them.
+   *
+   * Counted in checks rather than in time because the checks are already
+   * spaced by `deadTtlFor`: a dead stream is re-probed after 3h, then 6, 12 and
+   * 24, so the fifth consecutive dead verdict lands about two days after the
+   * first. Counting probes therefore costs a provider nothing extra, and a
+   * stream dead for a fortnight has still only been asked about a dozen times.
+   *
+   * Off by default (0). Removal has no undo -- an assignment is something the
+   * channel remembers, not something the stream carries, so a stream removed
+   * here does not come back on its own when the feed recovers. It can be
+   * re-assigned by `PODIUM_AUTO_ASSIGN` once it probes alive again, because
+   * this deliberately records no block against it, but only where the rule
+   * still matches it: on a channel ranked off its own assignment there is
+   * nothing to put it back.
+   *
+   * Only counts *dead*. A black screen or a stream under the bitrate floor is
+   * alive, resets the streak in `Store.put`, and is never removed by this.
+   */
+  PODIUM_REMOVE_DEAD_AFTER_CHECKS: num(0),
+
+  /**
    * Whether a pass may put a matched stream onto a channel that does not carry
    * it yet.
    *
