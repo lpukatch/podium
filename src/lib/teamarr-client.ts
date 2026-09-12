@@ -14,6 +14,8 @@
  * disagree with them.
  */
 
+import { normaliseBaseUrl } from './base-url';
+
 /** Teamarr's settings API, as of its v1 routes. */
 const RULES_PATH = '/api/v1/settings/stream-ordering';
 
@@ -168,8 +170,11 @@ export class TeamarrClient {
   private readonly base: string;
 
   constructor(url: string) {
-    this.base = url.trim().replace(/\/+$/, '');
-    if (!this.base) throw new Error('no Teamarr URL configured');
+    // Not merely trimmed: see `base-url.ts`. The URL reaches here from the
+    // settings table, which is writable through the API, so a base that
+    // truncates the API path off the end of the request is input this has to
+    // refuse rather than a typo it can assume away.
+    this.base = normaliseBaseUrl(url, 'Teamarr');
   }
 
   private async call(method: 'GET' | 'PUT', path: string, body?: unknown): Promise<unknown> {
@@ -202,14 +207,22 @@ export class TeamarrClient {
     const text = await response.text();
     if (!response.ok) {
       // Teamarr answers a rejected rule with a `detail` string; surfacing it
-      // verbatim is the difference between "the push failed" and knowing
-      // which rule it choked on.
-      let detail = text.slice(0, 300);
+      // verbatim is the difference between "the push failed" and knowing which
+      // rule it choked on.
+      //
+      // Only that field, though. This message is returned to whoever called the
+      // test endpoint, and the URL it was fetched from is theirs to choose --
+      // so echoing an arbitrary error body would turn "test my Teamarr address"
+      // into a way to read 300 bytes off any http service the container can
+      // reach and any host that answers it. A JSON `detail` is Teamarr
+      // answering in its own terms; anything else gets its status and nothing
+      // more, which is all the reader needs to tell a 404 from a 502.
+      let detail = 'no JSON detail in the response';
       try {
         const parsed = JSON.parse(text) as { detail?: unknown };
-        if (typeof parsed.detail === 'string') detail = parsed.detail;
+        if (typeof parsed.detail === 'string') detail = parsed.detail.slice(0, 300);
       } catch {
-        // Not JSON; the raw body is the best message available.
+        detail = 'the response was not JSON';
       }
       throw new Error(`Teamarr ${method} ${response.status}: ${detail}`);
     }
