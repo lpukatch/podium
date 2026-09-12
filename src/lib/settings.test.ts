@@ -116,6 +116,17 @@ describe('validateSettings', () => {
     expect(validateSettings({ PODIUM_MAX_SLICE: '200' }).values.PODIUM_MAX_SLICE).toBe('200');
   });
 
+  it('rejects a fraction where the field counts events', () => {
+    // "after 0.5 checks" is not an instruction. Left to float it reaches
+    // `deadRemovalPlan`, floors to zero, and turns the threshold into "remove
+    // on the first dead verdict" -- so it is refused at the form.
+    expect(validateSettings({ PODIUM_REMOVE_DEAD_AFTER_CHECKS: '0.5' }).errors).toHaveLength(1);
+    expect(
+      validateSettings({ PODIUM_REMOVE_DEAD_AFTER_CHECKS: '5' }).values
+        .PODIUM_REMOVE_DEAD_AFTER_CHECKS,
+    ).toBe('5');
+  });
+
   it('requires a real http(s) URL and trims a trailing slash', () => {
     expect(validateSettings({ DISPATCHARR_URL: 'not a url' }).errors).toHaveLength(1);
     expect(validateSettings({ DISPATCHARR_URL: 'ftp://x' }).errors).toHaveLength(1);

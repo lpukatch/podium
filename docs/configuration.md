@@ -315,8 +315,11 @@ costs a provider nothing extra.
 | 5 | 2 days |
 | 6 | 3 days |
 
-Any live verdict resets the count to zero. Queueing a re-check by hand probes
-sooner than the schedule would, so it also reaches the count sooner.
+Whole numbers only, and any live verdict resets the count to zero. Queueing a
+re-check by hand probes sooner than the schedule would, so it also reaches the
+count sooner. The count is read at the moment a pass decides a write, not when
+the pass began: a stream that answers mid-pass is safe that same pass, and one
+that reaches the threshold mid-pass is acted on without waiting for the next.
 
 **Only dead counts.** A black screen, and a stream under the bitrate floor, are
 both *alive*: they sink in the ranking, they reset the streak like any other
@@ -324,17 +327,34 @@ live verdict, and this never removes them.
 
 Three things it will not do:
 
-- **Strip a provider that is having an outage.** When more than half of a
-  provider's catalogue reads dead, nothing of that provider's is removed on that
-  pass. An outage looks exactly like every stream on the account dying at once,
-  and it is the failure that made unmatched removal dangerous.
+- **Strip a provider that is having an outage.** When more than half of the
+  streams Podium *manages* on a provider read dead, nothing of that provider's
+  is removed on that pass. An outage looks exactly like every stream on the
+  account dying at once, and it is the failure that made unmatched removal
+  dangerous.
+
+  The share is measured against the streams Podium manages on that provider --
+  the ones it probes and holds verdicts for — not against the provider's full
+  catalogue. A provider may list 20,000 streams while Podium manages 400 of
+  them; judged against the catalogue, a total blackout would read as 2% dead
+  and this guard would never once fire.
+
+  Providers with fewer than four managed streams are not judged for an outage
+  at all. One managed stream reads 1/1 dead the moment it dies, which would
+  otherwise mean a permanent "outage" and a stream that could never be cleaned
+  up — the opposite of what the setting is for.
+- **Remove a stream it just saw working.** A stream the pass probed alive is
+  exempt however long its streak was beforehand, and its count is already back
+  to zero.
 - **Touch a stale stream**, on the same rule as above: Dispatcharr marking a
   stream stale is the provider's business, not evidence about this channel.
 - **Empty a channel.** The last stream is never removed, however dead it is. A
   channel carrying nothing serves nothing and says nothing about why.
 
-Every removal is logged with the stream ids and their providers, and counted in
-the pass summary. Nothing happens under `PODIUM_DRY_RUN`, and a measure-only
+Every removal is logged with the stream ids and their providers, counted in the
+pass summary line, and recorded against the run in the database — `removed` on
+the run row, and `podium_streams_removed_total` in the metrics, so the count
+outlives the logs. Nothing happens under `PODIUM_DRY_RUN`, and a measure-only
 group is never written to at all.
 
 Removal still has no undo: an assignment is something a channel remembers, not

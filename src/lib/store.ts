@@ -70,6 +70,11 @@ CREATE TABLE IF NOT EXISTS runs (
     reordered        INTEGER NOT NULL DEFAULT 0,
     unchanged        INTEGER NOT NULL DEFAULT 0,
     assigned         INTEGER NOT NULL DEFAULT 0,
+    -- Streams taken off a channel for being dead too long. Its own column
+    -- rather than folded into the reorder count, because removal is the one
+    -- write a pass makes that nothing puts back: the log line naming the
+    -- stream ids rotates with the container, and this is what outlives it.
+    removed          INTEGER NOT NULL DEFAULT 0,
     -- Channels probed under a measure-only policy and deliberately not written.
     measured         INTEGER NOT NULL DEFAULT 0,
     skipped          INTEGER NOT NULL DEFAULT 0,
@@ -589,6 +594,8 @@ export interface RunRow {
   dead: number;
   reordered: number;
   unchanged?: number;
+  /** Streams taken off a channel for being dead too long. */
+  removed?: number;
   skipped: number;
   deferred?: number;
   backlog?: number;
@@ -654,6 +661,8 @@ export interface RunUpdate {
   reordered?: number;
   unchanged?: number;
   assigned?: number;
+  /** Streams taken off a channel for being dead too long. */
+  removed?: number;
   /** Channels probed under a measure-only policy and deliberately not written. */
   measured?: number;
   skipped?: number;
@@ -956,6 +965,51 @@ export interface CacheEntry {
  * won the fold, so it is the streak of *this* verdict -- how many consecutive
  * checks have said the same thing.
  */
+/** One probe_cache row, parsed, as the folds below pass it around. */
+interface CacheRowFold {
+  streamHash: string;
+  variantId: number;
+  probedAt: number;
+  rowId: number;
+  deadStreak: number;
+  parsed: ProbeResult;
+}
+
+/**
+ * The rows belonging to the stream's *current* URL, discarding those left by
+ * one it no longer has.
+ *
+ * `put()` keys on `stream_hash` so that a changed URL invalidates the verdict
+ * rather than inheriting it, but the old rows are not deleted -- `prune()`
+ * clears them on age, a month later. Reads that filter by hash never see them.
+ * These folds cannot: they are asked about a stream, not about a URL. Without
+ * this a stream whose provider re-issued its address carries the dead streak
+ * of the address it lost, and the tie-break between two equally dead verdicts
+ * is primary-key order, which is lexicographic on the hash and so has nothing
+ * to do with which one is current.
+ *
+ * Newest probe wins, because that is the URL being probed now. `rowid` breaks
+ * a tie on the timestamp: two rows written in the same millisecond are ordered
+ * by insertion, and `ON CONFLICT` updates in place without moving a row, so
+ * the higher rowid is the hash that arrived later. Without it the tie falls
+ * back to primary-key order -- lexicographic on the hash, which is to say
+ * arbitrary.
+ */
+function currentHashOnly(entries: CacheRowFold[]): CacheRowFold[] {
+  const newest = entries.reduce<CacheRowFold | null>(
+    (best, entry) =>
+      best === null ||
+      entry.probedAt > best.probedAt ||
+      (entry.probedAt === best.probedAt && entry.rowId > best.rowId)
+        ? entry
+        : best,
+    null,
+  );
+  if (!newest) return entries;
+  const hash = newest.streamHash;
+  return entries.filter((e) => e.streamHash === hash);
+}
+
 export interface DeadStreamRow {
   streamId: number;
   probedAt: number;
@@ -988,6 +1042,10 @@ export class Store {
         // 0 is the truth for every run recorded before measure-only groups
         // existed: none of them ever withheld a write.
         ['runs', 'measured INTEGER NOT NULL DEFAULT 0'],
+        // 0 is the truth for every run recorded before dead-stream removal
+        // existed, and for every install that has never turned it on: none of
+        // them ever took a stream off a channel for being dead.
+        ['runs', 'removed INTEGER NOT NULL DEFAULT 0'],
         // Existing rows land on 0, which `deadTtlFor` treats as the base TTL:
         // an install upgrading in place re-probes its dead streams once at the
         // old cadence and starts backing them off from there, rather than
@@ -1245,6 +1303,7 @@ export class Store {
       ['reordered', 'reordered'],
       ['unchanged', 'unchanged'],
       ['assigned', 'assigned'],
+      ['removed', 'removed'],
       ['measured', 'measured'],
       ['skipped', 'skipped'],
       ['deferred', 'deferred'],
@@ -1355,7 +1414,7 @@ export class Store {
    */
   deadStreams(): DeadStreamRow[] {
     const rows = this.sql(
-      `SELECT stream_id, variant_id, probed_at, result, dead_streak
+      `SELECT rowid AS row_id, stream_id, stream_hash, variant_id, probed_at, result, dead_streak
        FROM probe_cache
        WHERE stream_id IN (
          SELECT stream_id FROM probe_cache
@@ -1366,22 +1425,23 @@ export class Store {
                                 THEN 1 ELSE 0 END), 0) > 0
        )`,
     ).all() as Array<{
+      row_id: number;
       stream_id: number;
+      stream_hash: string;
       variant_id: number;
       probed_at: number;
       result: string;
       dead_streak: number;
     }>;
 
-    const byStream = new Map<
-      number,
-      Array<{ variantId: number; probedAt: number; deadStreak: number; parsed: ProbeResult }>
-    >();
+    const byStream = new Map<number, CacheRowFold[]>();
     for (const row of rows) {
       try {
         const entry = {
+          streamHash: row.stream_hash,
           variantId: row.variant_id,
           probedAt: row.probed_at,
+          rowId: row.row_id,
           deadStreak: row.dead_streak,
           parsed: JSON.parse(row.result) as ProbeResult,
         };
@@ -1394,7 +1454,8 @@ export class Store {
     }
 
     const out: DeadStreamRow[] = [];
-    for (const [streamId, entries] of byStream) {
+    for (const [streamId, all] of byStream) {
+      const entries = currentHashOnly(all);
       const best = pickBestVariant(
         entries.map((e) => ({ variantId: e.variantId, result: e.parsed })),
       );
@@ -1406,6 +1467,97 @@ export class Store {
         deadStreak: winner?.deadStreak ?? 0,
         result: best,
       });
+    }
+    return out;
+  }
+
+  /**
+   * Every stream the cache holds a verdict for: the population a provider's
+   * dead share is measured against.
+   *
+   * This is the set of streams Podium actually manages, kept that way by
+   * `pruneOutside`, which deletes every row outside the candidate set. The
+   * provider's own catalogue is the wrong denominator by one to two orders of
+   * magnitude -- see `providersInOutage`.
+   */
+  probedStreamIds(): Set<number> {
+    const rows = this.sql('SELECT DISTINCT stream_id FROM probe_cache').all() as Array<{
+      stream_id: number;
+    }>;
+    return new Set(rows.map((row) => row.stream_id));
+  }
+
+  /**
+   * The consecutive-dead count for each of `streamIds` whose verdict *right
+   * now* is dead. A stream that is alive, black, or unprobed is simply absent.
+   *
+   * Read at the moment a write is decided rather than taken from a pass-start
+   * snapshot, because both directions of the difference matter and removal has
+   * no undo. A stream the pass has just probed alive has had its streak reset
+   * by `put()` in the same breath, and a snapshot taken before the probes
+   * would still be holding the streak that condemns it. A stream that reached
+   * the threshold *during* the pass is in the opposite position, and a
+   * snapshot would spare it until the next one.
+   *
+   * Scoped to the ids a channel is about to be written with, so it stays an
+   * indexed lookup on a handful of rows rather than the full-cache scan
+   * `deadStreams` does for the pass-level outage judgement.
+   */
+  deadStreaks(streamIds: number[]): Map<number, number> {
+    const out = new Map<number, number>();
+    if (streamIds.length === 0) return out;
+
+    // Chunked to stay under SQLite's bound-variable limit, as `verdicts` is.
+    for (let i = 0; i < streamIds.length; i += 400) {
+      const chunk = streamIds.slice(i, i + 400);
+      const holes = chunk.map(() => '?').join(',');
+      // Not cached: one bind hole per id, so the text varies with the chunk.
+      const rows = this.db
+        .prepare(
+          `SELECT rowid AS row_id, stream_id, stream_hash, variant_id, probed_at, result, dead_streak
+           FROM probe_cache WHERE stream_id IN (${holes})`,
+        )
+        .all(...chunk) as Array<{
+        row_id: number;
+        stream_id: number;
+        stream_hash: string;
+        variant_id: number;
+        probed_at: number;
+        result: string;
+        dead_streak: number;
+      }>;
+
+      const byStream = new Map<number, CacheRowFold[]>();
+      for (const row of rows) {
+        try {
+          const entry = {
+            streamHash: row.stream_hash,
+            variantId: row.variant_id,
+            probedAt: row.probed_at,
+            rowId: row.row_id,
+            deadStreak: row.dead_streak,
+            parsed: JSON.parse(row.result) as ProbeResult,
+          };
+          const list = byStream.get(row.stream_id) ?? [];
+          list.push(entry);
+          byStream.set(row.stream_id, list);
+        } catch {
+          // An unreadable row is simply no verdict, as `verdicts` reads it.
+        }
+      }
+
+      for (const [streamId, all] of byStream) {
+        const entries = currentHashOnly(all);
+        const best = pickBestVariant(
+          entries.map((e) => ({ variantId: e.variantId, result: e.parsed })),
+        );
+        // Only *dead* counts. A black screen and a stream under the bitrate
+        // floor are both alive: they sink in the ranking, and `put()` has
+        // already put their streak back to zero.
+        if (!best || verdictStatus(best) !== 'dead') continue;
+        const winner = entries.find((e) => e.parsed === best);
+        out.set(streamId, winner?.deadStreak ?? 0);
+      }
     }
     return out;
   }
@@ -1740,6 +1892,7 @@ export class Store {
     dead: number;
     reordered: number;
     assigned: number;
+    removed: number;
     skipped: number;
   } {
     const row = this.sql(
@@ -1750,6 +1903,7 @@ export class Store {
               COALESCE(SUM(dead), 0)      AS dead,
               COALESCE(SUM(reordered), 0) AS reordered,
               COALESCE(SUM(assigned), 0)  AS assigned,
+              COALESCE(SUM(removed), 0)   AS removed,
               COALESCE(SUM(skipped), 0)   AS skipped
        FROM runs`,
     ).get() as Record<string, number>;
@@ -1761,6 +1915,7 @@ export class Store {
       dead: row.dead ?? 0,
       reordered: row.reordered ?? 0,
       assigned: row.assigned ?? 0,
+      removed: row.removed ?? 0,
       skipped: row.skipped ?? 0,
     };
   }

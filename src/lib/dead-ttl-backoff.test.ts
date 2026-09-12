@@ -342,3 +342,53 @@ describe('migration from a database without dead_streak', () => {
     store.close();
   });
 });
+
+describe('migration from a database without a removed count', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'podium-migrate-removed-'));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('adds the column, and every run already recorded removed nothing', () => {
+    const path = join(dir, 'old.db');
+    // The runs table exactly as an install upgrading from it will have: no
+    // `removed`, because nothing could remove a stream for being dead yet.
+    const raw = new Database(path);
+    raw.exec(`CREATE TABLE runs (
+        run_id     TEXT PRIMARY KEY,
+        started_at INTEGER NOT NULL,
+        finished_at INTEGER,
+        channels   INTEGER NOT NULL DEFAULT 0,
+        probed     INTEGER NOT NULL DEFAULT 0,
+        cached     INTEGER NOT NULL DEFAULT 0,
+        dead       INTEGER NOT NULL DEFAULT 0,
+        reordered  INTEGER NOT NULL DEFAULT 0,
+        unchanged  INTEGER NOT NULL DEFAULT 0,
+        assigned   INTEGER NOT NULL DEFAULT 0,
+        measured   INTEGER NOT NULL DEFAULT 0,
+        skipped    INTEGER NOT NULL DEFAULT 0,
+        deferred   INTEGER NOT NULL DEFAULT 0,
+        backlog    INTEGER NOT NULL DEFAULT 0,
+        next_due_at INTEGER,
+        oldest_probed_at INTEGER,
+        error      TEXT
+      )`);
+    raw
+      .prepare('INSERT INTO runs (run_id, started_at, reordered) VALUES (?, ?, ?)')
+      .run('ancient', Date.now(), 7);
+    raw.close();
+
+    const store = new Store(path);
+    expect(store.recentRuns(1)[0]?.removed).toBe(0);
+    expect(store.runTotals().removed).toBe(0);
+
+    // And a pass recorded after the upgrade writes through the new column.
+    store.startRun('fresh');
+    store.finishRun('fresh', { removed: 2 });
+    expect(store.runTotals().removed).toBe(2);
+    store.close();
+  });
+});

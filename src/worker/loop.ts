@@ -221,6 +221,11 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
           `pass at ${clock(startedAt)} took ${(summary.elapsedMs / 1000).toFixed(1)}s: ` +
             `${summary.probed} probed, ${summary.cached} cached, ${summary.dead} dead, ` +
             `${summary.reordered} reordered, ${summary.unchanged} already in order, ` +
+            // Only when it happened. Removal is off by default, and a "0
+            // removed" on every line of a log nobody has enabled it in is
+            // noise -- but the one pass that does remove something must say so
+            // where the operator is already looking.
+            (summary.removed > 0 ? `${summary.removed} removed, ` : '') +
             `${summary.skipped} skipped`,
         );
         // Biggest bucket first, ties by name: the same order the progress page

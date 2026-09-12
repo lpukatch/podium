@@ -37,6 +37,13 @@ export interface FieldSpec {
   /** Bounds in *displayed* units. Keeps a typo from stalling every pass. */
   min?: number;
   max?: number;
+  /**
+   * Whole numbers only. For a field counting *events* rather than measuring a
+   * quantity -- "after 3 checks" is a real instruction and "after 0.5 checks"
+   * is not, and a fraction that floors to zero on the way in is how a
+   * threshold turns into "remove on the first one".
+   */
+  int?: boolean;
 }
 
 /** Displayed units from stored units. */
@@ -146,6 +153,7 @@ export const FIELDS: FieldSpec[] = [
     section: 'behaviour',
     min: 0,
     max: 100,
+    int: true,
   },
   {
     key: 'PODIUM_AUTO_ASSIGN',
@@ -460,6 +468,10 @@ export function validateSettings(patch: Record<string, unknown>): {
       }
       if (field.max !== undefined && n > field.max) {
         errors.push({ key, message: `must be at most ${field.max}` });
+        continue;
+      }
+      if (field.int && !Number.isInteger(n)) {
+        errors.push({ key, message: 'must be a whole number' });
         continue;
       }
       values[key] = String(field.scale ? Math.round(n * field.scale) : n);

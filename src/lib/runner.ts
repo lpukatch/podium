@@ -225,24 +225,38 @@ export function unclaimedStreams(
 
 /**
  * What a pass needs in order to unassign streams that have been dead for a
- * while: the threshold, each stream's consecutive-dead count, and the providers
- * whose catalogue has gone dark and must be left alone entirely.
+ * while: the threshold, and the providers whose managed streams have gone dark
+ * together and must be left alone entirely.
+ *
+ * Deliberately no streak map. The counts are read per channel at the moment a
+ * write is decided -- see `Store.deadStreaks` -- because a pass-start snapshot
+ * is wrong in both directions by the time it is used: it still condemns a
+ * stream the pass has since probed alive, and it still spares one that reached
+ * the threshold while the pass ran. The outage judgement below is the opposite
+ * case and *must* be a snapshot, because it has to be the same answer for
+ * every channel a provider's streams appear on.
  */
 export interface DeadRemoval {
   /** Consecutive dead checks before a stream may be taken off a channel. */
   after: number;
-  /** Stream id -> consecutive dead verdicts. Absent means not dead at all. */
-  streaks: Map<number, number>;
   /** Providers whose streams this pass must not remove -- see `providersInOutage`. */
   outages: Set<number>;
 }
 
-/** Above this share of a provider's catalogue reading dead, assume an outage. */
+/** Above this share of a provider's *managed* streams reading dead, assume an outage. */
 export const PROVIDER_OUTAGE_SHARE = 0.5;
 
 /**
- * Providers whose catalogue has mostly gone dead, and whose streams removal
- * must therefore not touch.
+ * Below this many managed streams, a provider is not judged for an outage at
+ * all: the share is too small a sample to mean anything, and a provider with
+ * one managed stream would otherwise read 1/1 = a permanent outage and never
+ * have that stream cleaned up however long it stayed dead.
+ */
+export const PROVIDER_OUTAGE_MIN_SAMPLE = 4;
+
+/**
+ * Providers whose streams have mostly gone dead together, and whose streams
+ * removal must therefore not touch.
  *
  * This is the failure that made unmatched removal dangerous, arriving by
  * another road: a provider goes down, every stream on the account stops
@@ -253,26 +267,41 @@ export const PROVIDER_OUTAGE_SHARE = 0.5;
  * listing the streams it can no longer serve.
  *
  * A streak alone cannot tell an outage from a channel's own feeds dying. The
- * shape can: a real outage takes the whole account with it. Deliberately blunt
- * and deliberately conservative -- it costs a slower cleanup on a provider that
- * is genuinely half dead, and saves every assignment on one that is merely down.
+ * shape can: a real outage takes the whole account with it.
+ *
+ * `probed` is what makes that shape measurable, and getting it wrong makes
+ * this guard useless rather than merely blunt. The population is the streams
+ * Podium *manages* on that provider -- the ones that can appear in the cache at
+ * all, since `pruneOutside` deletes every row outside the candidate set. It is
+ * emphatically not the provider's catalogue: `client.streams()` returns every
+ * stream on the account, managed or not, and against that denominator a
+ * provider with 400 managed streams out of 20,000 listed reads 2% dead in a
+ * total blackout, which is nowhere near any threshold worth setting.
+ *
+ * Deliberately blunt and deliberately conservative -- it costs a slower cleanup
+ * on a provider that is genuinely half dead, and saves every assignment on one
+ * that is merely down.
  */
 export function providersInOutage(
   byId: Map<number, Stream>,
   streaks: Map<number, number>,
+  probed: Set<number>,
   share = PROVIDER_OUTAGE_SHARE,
+  minSample = PROVIDER_OUTAGE_MIN_SAMPLE,
 ): Set<number> {
-  const total = new Map<number, number>();
+  const managed = new Map<number, number>();
   const dead = new Map<number, number>();
   for (const [streamId, stream] of byId) {
-    total.set(stream.providerId, (total.get(stream.providerId) ?? 0) + 1);
+    if (!probed.has(streamId)) continue;
+    managed.set(stream.providerId, (managed.get(stream.providerId) ?? 0) + 1);
     if (streaks.has(streamId)) {
       dead.set(stream.providerId, (dead.get(stream.providerId) ?? 0) + 1);
     }
   }
   const out = new Set<number>();
-  for (const [providerId, count] of total) {
-    if (count > 0 && (dead.get(providerId) ?? 0) / count > share) out.add(providerId);
+  for (const [providerId, count] of managed) {
+    if (count < minSample) continue;
+    if ((dead.get(providerId) ?? 0) / count > share) out.add(providerId);
   }
   return out;
 }
@@ -280,23 +309,32 @@ export function providersInOutage(
 /**
  * The pass's removal plan, or undefined when the setting is off.
  *
- * Only genuinely dead streams count. `deadStreams` reports black screens too,
- * and those are *alive*: they sink in the ranking, and any live verdict resets
- * the streak in `Store.put`, so a slate can never accumulate its way to being
- * removed. The same goes for a stream under the bitrate floor.
+ * Floored *before* the guard, not after. `num()` accepts any finite number and
+ * the settings form will persist one, so a threshold of 0.5 would otherwise
+ * pass an `after <= 0` check and then floor to zero -- and a threshold of zero
+ * condemns every dead stream on its first dead verdict, which is the accident
+ * this setting being off by default exists to prevent.
+ *
+ * Only genuinely dead streams count toward the outage shape. `deadStreams`
+ * reports black screens too, and those are *alive*: they sink in the ranking,
+ * and any live verdict resets the streak in `Store.put`, so a slate can never
+ * accumulate its way to being removed. The same goes for a stream under the
+ * bitrate floor.
  */
 export function deadRemovalPlan(
   after: number,
   rows: DeadStreamRow[],
   byId: Map<number, Stream>,
+  probed: Set<number>,
 ): DeadRemoval | undefined {
-  if (!Number.isFinite(after) || after <= 0) return undefined;
+  const threshold = Math.floor(after);
+  if (!Number.isFinite(threshold) || threshold <= 0) return undefined;
   const streaks = new Map<number, number>();
   for (const row of rows) {
     if (verdictStatus(row.result) !== 'dead') continue;
     streaks.set(row.streamId, row.deadStreak);
   }
-  return { after: Math.floor(after), streaks, outages: providersInOutage(byId, streaks) };
+  return { after: threshold, outages: providersInOutage(byId, streaks, probed) };
 }
 
 /**
@@ -307,26 +345,38 @@ export function deadRemovalPlan(
  * is what makes the rescue below pick the least-bad stream rather than an
  * arbitrary one.
  *
- * Three streams are spared whatever their streak. One the catalogue no longer
- * carries, and one the provider has marked stale, for exactly the reasons
- * `protectedFromRemoval` spares them: neither is evidence about this channel.
- * And the last stream on a channel is never removed -- a channel serving
- * nothing is worse than one serving a dead stream, which at least says what
- * happened, and a channel ranked off its own assignment could never get a
- * stream back once its lineup was empty.
+ * `streaks` must be read at the moment the write is decided rather than taken
+ * from the pass-start plan; `Store.deadStreaks` says why, and only lists a
+ * stream whose verdict is dead right now. `alive` is the same guarantee from
+ * the other side: the verdicts this pass actually ranked on. A stream the pass
+ * has just probed alive is exempt, full stop -- where those two could ever
+ * disagree the one saying "do not remove it" wins, because that is the
+ * direction that cannot be undone.
+ *
+ * Four streams are spared whatever their streak. One the pass found alive. One
+ * the catalogue no longer carries, and one the provider has marked stale, for
+ * exactly the reasons `protectedFromRemoval` spares them: neither is evidence
+ * about this channel. And the last stream on a channel is never removed -- a
+ * channel serving nothing is worse than one serving a dead stream, which at
+ * least says what happened, and a channel ranked off its own assignment could
+ * never get a stream back once its lineup was empty.
  */
 export function dropDeadStreams(
   order: number[],
   byId: Map<number, Stream>,
-  removal?: DeadRemoval,
+  removal: DeadRemoval | undefined,
+  streaks: Map<number, number> = new Map(),
+  alive: Set<number> = new Set(),
 ): { order: number[]; dropped: number[] } {
   if (!removal) return { order, dropped: [] };
   const condemned = new Set<number>();
   for (const id of order) {
     const stream = byId.get(id);
     if (!stream || stream.is_stale) continue;
+    if (alive.has(id)) continue;
     if (removal.outages.has(stream.providerId)) continue;
-    if ((removal.streaks.get(id) ?? 0) < removal.after) continue;
+    const streak = streaks.get(id);
+    if (streak === undefined || streak < removal.after) continue;
     condemned.add(id);
   }
   if (condemned.size === 0) return { order, dropped: [] };
@@ -1392,7 +1442,12 @@ export class Runner {
       // channel a provider's streams appear on or removal would be arbitrary.
       const removal =
         config.PODIUM_REMOVE_DEAD_AFTER_CHECKS > 0
-          ? deadRemovalPlan(config.PODIUM_REMOVE_DEAD_AFTER_CHECKS, store.deadStreams(), streamById)
+          ? deadRemovalPlan(
+              config.PODIUM_REMOVE_DEAD_AFTER_CHECKS,
+              store.deadStreams(),
+              streamById,
+              store.probedStreamIds(),
+            )
           : undefined;
       if (removal && removal.outages.size > 0) {
         log(
@@ -2664,7 +2719,25 @@ export class Runner {
     // afterwards, on the composed order rather than on `assigned`: the same
     // list the write is about, already in rank order.
     const composed = composeOrder(ranked, assigned, removeUnmatched, assign, holdBack(assigned));
-    const dropped = dropDeadStreams(composed, snapshot.byId, snapshot.removal);
+    // Read here, not at pass start, and only when removal is on: a snapshot
+    // taken before this pass's probes ran still condemns a stream that has
+    // since come back, and still spares one that reached the threshold while
+    // the pass was working. `Store.deadStreaks` has the full reasoning.
+    const streaksFor = (ids: number[]): Map<number, number> =>
+      snapshot.removal ? this.deps.store.deadStreaks(ids) : new Map();
+    // The verdicts this pass actually ranked on, as a second and independent
+    // reason to keep a stream: whatever the cache says, a stream that answered
+    // this pass is not one to take off a channel.
+    const aliveNow = new Set(
+      entries.filter((e) => verdictStatus(e.result) !== 'dead').map((e) => e.streamId),
+    );
+    const dropped = dropDeadStreams(
+      composed,
+      snapshot.byId,
+      snapshot.removal,
+      streaksFor(composed),
+      aliveNow,
+    );
     const ordered = dropped.order;
     let deadDropped = dropped.dropped;
 
@@ -2723,10 +2796,19 @@ export class Runner {
       // managed to re-read it, the pass-start one when we did not.
       let baseline = assigned;
       if (live) {
+        const freshComposed = composeOrder(
+          ranked,
+          live.streams,
+          removeUnmatched,
+          assign,
+          holdBack(live.streams),
+        );
         const freshDropped = dropDeadStreams(
-          composeOrder(ranked, live.streams, removeUnmatched, assign, holdBack(live.streams)),
+          freshComposed,
           snapshot.byId,
           snapshot.removal,
+          streaksFor(freshComposed),
+          aliveNow,
         );
         const fresh = freshDropped.order;
         deadDropped = freshDropped.dropped;
