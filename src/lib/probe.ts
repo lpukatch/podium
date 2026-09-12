@@ -63,6 +63,16 @@ export interface ProbeResult {
    * "not known to be interlaced" rather than as progressive.
    */
   fieldOrder?: string;
+  /**
+   * ffprobe's `color_transfer`: `arib-std-b67` for HLG, `smpte2084` for PQ
+   * (HDR10), `bt709` for SDR. The one field that separates a provider's HLG
+   * variant of a channel from its HDR10 one -- both are hevc / yuv420p10le /
+   * 3840x2160 in every other respect. Optional because live TS streams often
+   * omit it, and absent must read as "not known" rather than as SDR.
+   */
+  colorTransfer?: string;
+  /** ffprobe's `color_primaries`, e.g. `bt2020` or `bt709`. Optional as above. */
+  colorPrimaries?: string;
 }
 
 /**
@@ -139,6 +149,13 @@ export interface FfprobeStream {
    * Already in `-show_streams` output; reading it costs nothing extra.
    */
   field_order?: string;
+  /**
+   * `arib-std-b67` (HLG), `smpte2084` (PQ) or `bt709` (SDR). Also already in
+   * `-show_streams` output; ffprobe omits the key when the stream does not say.
+   */
+  color_transfer?: string;
+  /** `bt2020`, `bt709`. Omitted by ffprobe when unknown, as above. */
+  color_primaries?: string;
   bit_rate?: string;
   pix_fmt?: string;
   channels?: number;
@@ -274,6 +291,8 @@ export function parsePayload(
     audioCodec: audio?.codec_name ?? '',
     pixelFormat: video?.pix_fmt ?? '',
     ...(video?.field_order ? { fieldOrder: video.field_order } : {}),
+    ...(video?.color_transfer ? { colorTransfer: video.color_transfer } : {}),
+    ...(video?.color_primaries ? { colorPrimaries: video.color_primaries } : {}),
     audioChannels: audio?.channels ?? 0,
     channelLayout: audio?.channel_layout ?? '',
     // Unlike video, audio tracks do declare a bitrate in these streams -- ac3

@@ -474,6 +474,15 @@ rather than guessed at, as is one already reporting coded frames (1080i25 read
 as 25 stays 25). Verdicts cached before this existed carry no field order and
 rank exactly as they did until they are next probed.
 
+**HLG is not HDR10.** A provider carrying both HDR flavours of the same channel
+presents them identically in every stat Podium used to publish — both are
+`hevc`, `yuv420p10le`, 3840x2160 — so a Teamarr ordering rule had no way to
+prefer one. Podium now publishes ffprobe's `color_transfer` (`arib-std-b67` for
+HLG, `smpte2084` for HDR10/PQ, `bt709` for SDR) and `color_primaries` (`bt2020`
+or `bt709`) beside `pixel_format`. Live TS streams often omit both, and then the
+keys are `null` rather than an empty string, so "unknown" stays distinguishable
+from a value. Nothing is scored on them; they exist so a rule can be.
+
 Bitrate is *measured*, not read from the container: live TS/HLS almost never
 declares one. Podium reads a few seconds of the stream, which also gives it the
 black-screen check from the same read, so it costs one provider connection
