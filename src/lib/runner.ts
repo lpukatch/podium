@@ -43,7 +43,7 @@ import {
   type Weights,
 } from './scoring';
 import { statsPayload } from './stats';
-import type { CatalogueRow } from './store';
+import type { CatalogueRow, DeadStreamRow } from './store';
 import { ALL_GROUPS, forcedAtFor, type Progress, type Store, ttlFor } from './store';
 import { type ChannelInput, checkRules, factsFor, type RuleInput } from './teamarr';
 import {
@@ -56,6 +56,7 @@ import {
   type StreamVariant,
   type VariantIssue,
   type VariantVerdict,
+  verdictStatus,
 } from './variants';
 
 /** Whether a computed ordering is the one Dispatcharr already holds. */
@@ -220,6 +221,123 @@ export function unclaimedStreams(
     const stream = byId.get(id);
     return Boolean(stream && !stream.is_stale);
   });
+}
+
+/**
+ * What a pass needs in order to unassign streams that have been dead for a
+ * while: the threshold, each stream's consecutive-dead count, and the providers
+ * whose catalogue has gone dark and must be left alone entirely.
+ */
+export interface DeadRemoval {
+  /** Consecutive dead checks before a stream may be taken off a channel. */
+  after: number;
+  /** Stream id -> consecutive dead verdicts. Absent means not dead at all. */
+  streaks: Map<number, number>;
+  /** Providers whose streams this pass must not remove -- see `providersInOutage`. */
+  outages: Set<number>;
+}
+
+/** Above this share of a provider's catalogue reading dead, assume an outage. */
+export const PROVIDER_OUTAGE_SHARE = 0.5;
+
+/**
+ * Providers whose catalogue has mostly gone dead, and whose streams removal
+ * must therefore not touch.
+ *
+ * This is the failure that made unmatched removal dangerous, arriving by
+ * another road: a provider goes down, every stream on the account stops
+ * answering, and their dead streaks climb together until one pass strips the
+ * lot off every channel they served. Permanently, because an assignment is
+ * something a channel remembers, not something a stream carries -- and unlike
+ * the `is_stale` case there is no flag to read, since the provider is still
+ * listing the streams it can no longer serve.
+ *
+ * A streak alone cannot tell an outage from a channel's own feeds dying. The
+ * shape can: a real outage takes the whole account with it. Deliberately blunt
+ * and deliberately conservative -- it costs a slower cleanup on a provider that
+ * is genuinely half dead, and saves every assignment on one that is merely down.
+ */
+export function providersInOutage(
+  byId: Map<number, Stream>,
+  streaks: Map<number, number>,
+  share = PROVIDER_OUTAGE_SHARE,
+): Set<number> {
+  const total = new Map<number, number>();
+  const dead = new Map<number, number>();
+  for (const [streamId, stream] of byId) {
+    total.set(stream.providerId, (total.get(stream.providerId) ?? 0) + 1);
+    if (streaks.has(streamId)) {
+      dead.set(stream.providerId, (dead.get(stream.providerId) ?? 0) + 1);
+    }
+  }
+  const out = new Set<number>();
+  for (const [providerId, count] of total) {
+    if (count > 0 && (dead.get(providerId) ?? 0) / count > share) out.add(providerId);
+  }
+  return out;
+}
+
+/**
+ * The pass's removal plan, or undefined when the setting is off.
+ *
+ * Only genuinely dead streams count. `deadStreams` reports black screens too,
+ * and those are *alive*: they sink in the ranking, and any live verdict resets
+ * the streak in `Store.put`, so a slate can never accumulate its way to being
+ * removed. The same goes for a stream under the bitrate floor.
+ */
+export function deadRemovalPlan(
+  after: number,
+  rows: DeadStreamRow[],
+  byId: Map<number, Stream>,
+): DeadRemoval | undefined {
+  if (!Number.isFinite(after) || after <= 0) return undefined;
+  const streaks = new Map<number, number>();
+  for (const row of rows) {
+    if (verdictStatus(row.result) !== 'dead') continue;
+    streaks.set(row.streamId, row.deadStreak);
+  }
+  return { after: Math.floor(after), streaks, outages: providersInOutage(byId, streaks) };
+}
+
+/**
+ * Take the long-dead streams out of a composed order.
+ *
+ * Applied to the order rather than to the channel's current streams so that it
+ * reads the same list the write does -- and because the order is ranked, which
+ * is what makes the rescue below pick the least-bad stream rather than an
+ * arbitrary one.
+ *
+ * Three streams are spared whatever their streak. One the catalogue no longer
+ * carries, and one the provider has marked stale, for exactly the reasons
+ * `protectedFromRemoval` spares them: neither is evidence about this channel.
+ * And the last stream on a channel is never removed -- a channel serving
+ * nothing is worse than one serving a dead stream, which at least says what
+ * happened, and a channel ranked off its own assignment could never get a
+ * stream back once its lineup was empty.
+ */
+export function dropDeadStreams(
+  order: number[],
+  byId: Map<number, Stream>,
+  removal?: DeadRemoval,
+): { order: number[]; dropped: number[] } {
+  if (!removal) return { order, dropped: [] };
+  const condemned = new Set<number>();
+  for (const id of order) {
+    const stream = byId.get(id);
+    if (!stream || stream.is_stale) continue;
+    if (removal.outages.has(stream.providerId)) continue;
+    if ((removal.streaks.get(id) ?? 0) < removal.after) continue;
+    condemned.add(id);
+  }
+  if (condemned.size === 0) return { order, dropped: [] };
+
+  const kept = order.filter((id) => !condemned.has(id));
+  if (kept.length > 0) return { order: kept, dropped: [...condemned] };
+
+  const rescued = order[0];
+  if (rescued === undefined) return { order: kept, dropped: [...condemned] };
+  condemned.delete(rescued);
+  return { order: [rescued], dropped: [...condemned] };
 }
 
 /**
@@ -687,6 +805,12 @@ export interface RunSummary {
   unchanged: number;
   /** Streams put onto a channel that did not carry them -- see PODIUM_AUTO_ASSIGN. */
   assigned: number;
+  /**
+   * Streams taken off a channel for being dead too long -- see
+   * PODIUM_REMOVE_DEAD_AFTER_CHECKS. Counted apart from the reorder that
+   * carried them, because removal is the one write here with no undo.
+   */
+  removed: number;
   skipped: number;
   /** Streams a saturated provider left for a later pass -- still real work. */
   deferred: number;
@@ -873,6 +997,7 @@ export class Runner {
         reordered: 0,
         unchanged: 0,
         assigned: 0,
+        removed: 0,
         skipped: 0,
         deferred: 0,
         backlog: 0,
@@ -931,6 +1056,8 @@ export class Runner {
       measured: 0,
       /** Streams this pass put onto a channel that did not carry them. */
       assigned: 0,
+      /** Streams this pass took off a channel for being dead too long. */
+      removed: 0,
       skipped: 0,
       deferred: 0,
       backlog: 0,
@@ -1260,9 +1387,31 @@ export class Runner {
           log(`pruned ${staleLogins} cache rows for logins that no longer exist`);
       }
 
+      // Read once for the pass rather than per channel: `deadStreams` scans the
+      // cache, and the provider-outage judgement has to be the same for every
+      // channel a provider's streams appear on or removal would be arbitrary.
+      const removal =
+        config.PODIUM_REMOVE_DEAD_AFTER_CHECKS > 0
+          ? deadRemovalPlan(config.PODIUM_REMOVE_DEAD_AFTER_CHECKS, store.deadStreams(), streamById)
+          : undefined;
+      if (removal && removal.outages.size > 0) {
+        log(
+          `not removing dead streams on provider(s) ${[...removal.outages].join(', ')}: ` +
+            'most of their catalogue is dead, which is what an outage looks like',
+        );
+      }
+
       // Cache-only channels never enter the scheduler, so they are reordered
       // here or they would be skipped entirely.
-      await this.reorderCachedOnly(client, planned, counters, strategy, streamById, providerNames);
+      await this.reorderCachedOnly(
+        client,
+        planned,
+        counters,
+        strategy,
+        streamById,
+        providerNames,
+        removal,
+      );
 
       // A lane the pacer left out has no spare capacity this pass. Its jobs
       // must be dropped, not merely unbounded -- the scheduler falls back to
@@ -1709,6 +1858,7 @@ export class Runner {
                   byId: streamById,
                   providerNames,
                   audioOnly: entry.audioOnly,
+                  removal,
                 },
               );
             }
@@ -2381,10 +2531,17 @@ export class Runner {
   private async reorderCachedOnly(
     client: DispatcharrClient,
     planned: PlannedChannel[],
-    counters: { reordered: number; unchanged: number; assigned: number; measured: number },
+    counters: {
+      reordered: number;
+      unchanged: number;
+      assigned: number;
+      removed: number;
+      measured: number;
+    },
     strategy: RankStrategy,
     byId: Map<number, Stream>,
     providerNames: Map<number, string>,
+    removal?: DeadRemoval,
   ): Promise<void> {
     const log = this.deps.log ?? (() => {});
     for (const entry of planned) {
@@ -2426,6 +2583,7 @@ export class Runner {
           byId,
           providerNames,
           audioOnly,
+          removal,
         },
       );
     }
@@ -2435,7 +2593,7 @@ export class Runner {
     client: DispatcharrClient,
     channelId: number,
     entries: RankEntry[],
-    counters: { reordered: number; unchanged: number; assigned: number },
+    counters: { reordered: number; unchanged: number; assigned: number; removed: number },
     log: (m: string) => void,
     assigned: number[] = [],
     strategy: RankStrategy,
@@ -2444,6 +2602,8 @@ export class Runner {
       byId: Map<number, Stream>;
       providerNames: Map<number, string>;
       audioOnly?: boolean;
+      /** Absent when PODIUM_REMOVE_DEAD_AFTER_CHECKS is off, which is the default. */
+      removal?: DeadRemoval;
     },
   ): Promise<void> {
     if (entries.length === 0) return;
@@ -2499,7 +2659,14 @@ export class Runner {
     // a match the channel does not carry is otherwise a ranking candidate, not
     // an assignment. Strays are kept after the ranked ones unless asked to drop
     // them. See composeOrder.
-    const ordered = composeOrder(ranked, assigned, removeUnmatched, assign, holdBack(assigned));
+    //
+    // Streams dead for PODIUM_REMOVE_DEAD_AFTER_CHECKS checks running come off
+    // afterwards, on the composed order rather than on `assigned`: the same
+    // list the write is about, already in rank order.
+    const composed = composeOrder(ranked, assigned, removeUnmatched, assign, holdBack(assigned));
+    const dropped = dropDeadStreams(composed, snapshot.byId, snapshot.removal);
+    const ordered = dropped.order;
+    let deadDropped = dropped.dropped;
 
     // Dispatcharr already serves exactly this order, so the PATCH would write
     // the row it just read back. On a settled install every verdict is a cache
@@ -2530,9 +2697,13 @@ export class Runner {
       // only way to see what it would put on a channel before it does, so the
       // preview has to name the additions and not just print the new order.
       const would = additions(assigned, ordered);
+      const wouldDrop = deadDropped.filter((id) => assigned.includes(id));
       log(
         `[dry-run] channel ${channelId} -> ${ordered.join(',')}` +
-          (would.length > 0 ? ` (would assign ${would.length}: ${describe(would)})` : ''),
+          (would.length > 0 ? ` (would assign ${would.length}: ${describe(would)})` : '') +
+          (wouldDrop.length > 0
+            ? ` (would remove ${wouldDrop.length} long-dead: ${describe(wouldDrop)})`
+            : ''),
       );
       return;
     }
@@ -2552,13 +2723,13 @@ export class Runner {
       // managed to re-read it, the pass-start one when we did not.
       let baseline = assigned;
       if (live) {
-        const fresh = composeOrder(
-          ranked,
-          live.streams,
-          removeUnmatched,
-          assign,
-          holdBack(live.streams),
+        const freshDropped = dropDeadStreams(
+          composeOrder(ranked, live.streams, removeUnmatched, assign, holdBack(live.streams)),
+          snapshot.byId,
+          snapshot.removal,
         );
+        const fresh = freshDropped.order;
+        deadDropped = freshDropped.dropped;
         if (sameOrder(fresh, live.streams)) {
           counters.unchanged += 1;
           return;
@@ -2576,9 +2747,19 @@ export class Runner {
           `channel ${channelId} (${snapshot.channelName}): assigning ${added.length} stream(s) ${describe(added)}`,
         );
       }
+      // Named for the same reason, and more so: this is the only write here
+      // that takes something away, and nothing puts it back by itself.
+      const removedDead = deadDropped.filter((id) => baseline.includes(id));
+      if (removedDead.length > 0) {
+        log(
+          `channel ${channelId} (${snapshot.channelName}): removing ${removedDead.length} stream(s) ` +
+            `dead for ${snapshot.removal?.after ?? 0}+ checks ${describe(removedDead)}`,
+        );
+      }
       await client.setStreamOrder(channelId, writeOrder);
       counters.reordered += 1;
       counters.assigned += added.length;
+      counters.removed += removedDead.length;
       // The snapshot taken at pass start still shows the fetched order; patch
       // this channel now so slot 0 is what was just decided, not what the pass
       // began with hours ago. Built from `writeOrder` -- the live-reconciled
@@ -2607,6 +2788,7 @@ export class Runner {
       reordered: number;
       unchanged: number;
       assigned: number;
+      removed: number;
       skipped: number;
       deferred: number;
       backlog: number;

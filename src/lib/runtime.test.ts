@@ -675,6 +675,7 @@ describe('idle back-off', () => {
     reordered: 0,
     unchanged: 100,
     assigned: 0,
+    removed: 0,
     skipped: 0,
     deferred: 0,
     backlog: 0,

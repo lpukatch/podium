@@ -14,6 +14,8 @@ import { channelResolutionFloor } from '@/lib/resolution';
 import {
   assignedCandidates,
   composeOrder,
+  deadRemovalPlan,
+  dropDeadStreams,
   protectedFromRemoval,
   splitAssigned,
   statsPayload,
@@ -377,7 +379,20 @@ export async function POST(request: Request, context: { params: Promise<{ channe
           graceMs,
         )
       : new Set<number>();
-    const workerOrder = composeOrder(ranked, current, removeUnmatched, assign, heldFromWorker);
+    // The worker's other removal rule, mirrored so this preview says what a
+    // pass would actually write. Read-only, like the grace period above:
+    // looking at a channel neither advances a streak nor excuses one. The
+    // verdicts this check just wrote are already in the cache, so a stream this
+    // probe found dead for the Nth time counts here exactly as it will there.
+    const deadRemoval =
+      config.PODIUM_REMOVE_DEAD_AFTER_CHECKS > 0
+        ? deadRemovalPlan(config.PODIUM_REMOVE_DEAD_AFTER_CHECKS, store.deadStreams(), streamById)
+        : undefined;
+    const workerOrder = dropDeadStreams(
+      composeOrder(ranked, current, removeUnmatched, assign, heldFromWorker),
+      streamById,
+      deadRemoval,
+    ).order;
     const kept = composeOrder(ranked, current, false, assign);
     // What the panel's drop tick asks for, composed here rather than left to
     // the apply. `proposed` below is the raw ranking -- every stream the rule

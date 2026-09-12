@@ -139,6 +139,15 @@ export const FIELDS: FieldSpec[] = [
     max: 720,
   },
   {
+    key: 'PODIUM_REMOVE_DEAD_AFTER_CHECKS',
+    kind: 'number',
+    label: 'Remove a dead stream after this many checks',
+    help: 'Unassigns a stream that came back dead this many consecutive times. Checks, not hours: a dead stream is re-probed after 3h, then 6, 12 and 24, so 5 checks is about two days. Any live verdict resets the count, and a stream that is merely black-screened or under the bitrate floor is alive — it sinks, but is never removed. A provider whose catalogue has mostly gone dead is left alone entirely, so an outage cannot strip its streams off every channel. 0 is off, and removal has no undo.',
+    section: 'behaviour',
+    min: 0,
+    max: 100,
+  },
+  {
     key: 'PODIUM_AUTO_ASSIGN',
     kind: 'boolean',
     label: 'Assign matched streams',
