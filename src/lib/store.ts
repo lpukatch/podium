@@ -551,6 +551,23 @@ export interface Progress {
 export const STALE_LOCK_MS = 120_000;
 
 /**
+ * How long a writer waits for another writer's transaction before giving up.
+ *
+ * Podium runs two processes against one database file: the web server and the
+ * worker. WAL lets them read while one writes, but it does not queue writers --
+ * SQLite's default `busy_timeout` is 0, so the *instant* the worker is inside a
+ * write transaction, a settings save or an on-demand check from the web half
+ * throws `SQLITE_BUSY: database is locked` rather than waiting the millisecond
+ * or two the worker needs to finish. Nothing in the app retries that, so it
+ * surfaces as a 500 on a button press with no explanation.
+ *
+ * Five seconds is far longer than any write here takes (the longest is the
+ * restore transaction, which is a few hundred rows) and far shorter than a
+ * request timeout, so a genuine deadlock still fails rather than hanging.
+ */
+export const BUSY_TIMEOUT_MS = 5_000;
+
+/**
  * How much run history to keep.
  *
  * One row per pass, and nothing reads further back than a day: the progress
@@ -1027,6 +1044,7 @@ export class Store {
     this.db = new Database(path);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
+    this.db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
 
     if (path === ':memory:' || !Store.initializedPaths.has(path)) {
       this.db.exec(SCHEMA);
@@ -1576,28 +1594,48 @@ export class Store {
    * A lock whose heartbeat has gone stale is taken over: a worker that was
    * SIGKILLed never releases, and the alternative is a deployment that stays
    * dead until someone clears a row by hand.
+   *
+   * The claim is one statement, and the condition lives in its `WHERE` rather
+   * than in a read before it. A read-then-write across two statements is not a
+   * lock at all between two *processes*: both workers of a rolling deployment
+   * start within milliseconds of each other, both find the row absent or
+   * stale, and both then write themselves in and believe they won. The upsert
+   * below can only update a row that is already ours or already stale, and
+   * SQLite decides that while holding the write lock, so exactly one of two
+   * simultaneous claims changes a row. The loser reads the holder afterwards --
+   * for the log line only, which is why that read may safely be racy.
    */
   acquireLock(owner: string, staleAfterMs = STALE_LOCK_MS): { ok: boolean; heldBy?: string } {
     const now = Date.now();
-    const row = this.sql('SELECT owner, heartbeat FROM worker_lock WHERE id = 1').get() as
-      | { owner: string; heartbeat: number }
-      | undefined;
-
-    if (row && row.owner !== owner && now - row.heartbeat < staleAfterMs) {
-      return { ok: false, heldBy: row.owner };
-    }
-    this.sql(
+    const result = this.sql(
       `INSERT INTO worker_lock (id, owner, heartbeat) VALUES (1, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET owner = excluded.owner, heartbeat = excluded.heartbeat`,
-    ).run(owner, now);
-    return { ok: true };
+       ON CONFLICT(id) DO UPDATE SET owner = excluded.owner, heartbeat = excluded.heartbeat
+         WHERE worker_lock.owner = excluded.owner OR worker_lock.heartbeat <= ?`,
+    ).run(owner, now, now - staleAfterMs);
+    if (result.changes === 1) return { ok: true };
+
+    const row = this.sql('SELECT owner FROM worker_lock WHERE id = 1').get() as
+      | { owner: string }
+      | undefined;
+    return { ok: false, heldBy: row?.owner };
   }
 
-  heartbeat(owner: string): void {
-    this.sql('UPDATE worker_lock SET heartbeat = ? WHERE id = 1 AND owner = ?').run(
+  /**
+   * Say we are still here, and report whether the lock is still ours.
+   *
+   * False means another worker took it over -- which can only happen after our
+   * heartbeats stopped landing for the staleness window, but "can only happen"
+   * is exactly the assumption a stalled event loop, a suspended container or a
+   * clock step breaks. A worker that keeps passing after losing the lock is the
+   * thing the lock exists to prevent: two processes probing the same streams
+   * and racing each other's reorders into Dispatcharr. The caller stops.
+   */
+  heartbeat(owner: string): boolean {
+    const result = this.sql('UPDATE worker_lock SET heartbeat = ? WHERE id = 1 AND owner = ?').run(
       Date.now(),
       owner,
     );
+    return result.changes === 1;
   }
 
   releaseLock(owner: string): void {

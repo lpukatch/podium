@@ -205,7 +205,9 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
   };
 
   const tick = async (): Promise<void> => {
-    if (stopping || running) return;
+    // `holding` as well as `stopping`: a pass that was in flight when the lock
+    // was lost still runs to the end, and must not book a successor.
+    if (stopping || running || !holding) return;
     running = true;
     // Cleared on the way in, so a request that lands *during* this pass is
     // still honoured below even though this pass may already have planned
@@ -246,7 +248,7 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
     // `checkWake` cannot see a pass that has finished but not yet booked its
     // successor and start a second one on top of it.
     running = false;
-    if (!stopping) {
+    if (!stopping && holding) {
       const live = currentConfig();
       // The pass reports this, not the cache: it is the only place that knows
       // which expiring verdicts belong to a channel a pass would actually probe.
@@ -373,6 +375,45 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
     void tick();
   };
 
+  /**
+   * Beat, and hand the lock back if it is no longer ours.
+   *
+   * Losing a lock we believe we hold should be impossible -- it takes two
+   * minutes of missed beats -- but the ways it happens are all ways this
+   * process cannot see: an event loop stalled behind a slow probe, a container
+   * suspended and resumed, a clock stepped forward by NTP, or a database file
+   * swapped underneath us. In every one of them the other worker is now the
+   * real holder, and this one carrying on means two processes probing the same
+   * streams and racing reorders into Dispatcharr.
+   *
+   * So it stops passing and goes back to the queue rather than exiting: the
+   * takeover may itself be the transient one, and a worker that waits is back
+   * within a tick of the lock going stale. A store that cannot be read at all
+   * is *not* treated as a lost lock -- that is the database being briefly
+   * unavailable to both of us, and standing down for it would hand the install
+   * to nobody.
+   */
+  const keepLock = (): boolean => {
+    let ours: boolean;
+    try {
+      ours = store.heartbeat(owner);
+    } catch (error) {
+      log(`heartbeat failed, keeping the lock and retrying: ${String(error)}`);
+      return true;
+    }
+    if (ours) return true;
+
+    log('another worker has taken the lock; standing down and waiting for it');
+    holding = false;
+    waited = false;
+    if (beat) clearInterval(beat);
+    beat = null;
+    if (timer) clearTimeout(timer);
+    timer = null;
+    retry = setTimeout(acquire, LOCK_RETRY_MS);
+    return false;
+  };
+
   /** Take the lock and start passing, or come back in `LOCK_RETRY_MS`. */
   const acquire = (): void => {
     if (stopping) return;
@@ -402,7 +443,7 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
       lastMark = 0;
     }
     beat = setInterval(() => {
-      store.heartbeat(owner);
+      if (!keepLock()) return;
       checkWake();
       checkSync();
     }, 30_000);
