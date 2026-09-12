@@ -20,6 +20,8 @@
  * organises by.
  */
 
+import { type MinResolution, parseMinResolution } from './resolution';
+
 export const ALWAYS = 'always';
 export const NEVER = 'never';
 export const AFTER_EPG_START = 'after_epg_start';
@@ -105,6 +107,12 @@ export interface GroupPolicy {
    * A mode could not express that combination.
    */
   measureOnly?: boolean;
+  /**
+   * The smallest picture this group's channels should lead with -- see
+   * `Weights.minResolution`. A channel's own rule can set a different one, or
+   * `none`, which wins over this.
+   */
+  minResolution?: MinResolution;
 }
 
 export const DEFAULT_POLICY: GroupPolicy = {
@@ -348,6 +356,12 @@ export function parsePolicies(
         extra.measure_only ?? extra.measureOnly,
         Boolean(DEFAULT_POLICY.measureOnly),
       ),
+      // `none` lands as "no floor", and it is not the same as saying nothing:
+      // a name pattern is a wider floor, and having an entry here at all is
+      // what overrides it, since `policyFor` stops consulting the patterns the
+      // moment a group has one. So `none` is written down (by the group route)
+      // to keep the entry alive, and read back as the absence of a floor.
+      minResolution: parseMinResolution(extra.min_resolution ?? extra.minResolution) ?? undefined,
     });
   }
   return out;
@@ -378,6 +392,7 @@ export function parseGroupPatterns(
       requireLive: bool(row.require_live, DEFAULT_POLICY.requireLive),
       audioOnly: bool(row.audio_only ?? row.audioOnly, Boolean(DEFAULT_POLICY.audioOnly)),
       measureOnly: bool(row.measure_only ?? row.measureOnly, Boolean(DEFAULT_POLICY.measureOnly)),
+      minResolution: parseMinResolution(row.min_resolution ?? row.minResolution) ?? undefined,
     });
   }
   return out;

@@ -26,7 +26,14 @@ import {
 } from './dispatcharr';
 import type { ProbeResult } from './probe';
 import { laneKey } from './scheduler';
-import { bitrateUnknown, DEFAULT_WEIGHTS, isUsable, score, type Weights } from './scoring';
+import {
+  bitrateUnknown,
+  DEFAULT_WEIGHTS,
+  isHealthy,
+  isUsable,
+  score,
+  type Weights,
+} from './scoring';
 
 /**
  * One login on a provider: a lane of its own, and a rewrite that turns the
@@ -322,6 +329,10 @@ function compareVariants(
     (isUsable(a.result, weights, audioOnly) ? 0 : 1) -
     (isUsable(b.result, weights, audioOnly) ? 0 : 1);
   if (usable !== 0) return usable;
+  const healthy =
+    (isHealthy(a.result, weights, audioOnly) ? 0 : 1) -
+    (isHealthy(b.result, weights, audioOnly) ? 0 : 1);
+  if (healthy !== 0) return healthy;
   const measured = (bitrateUnknown(a.result) ? 1 : 0) - (bitrateUnknown(b.result) ? 1 : 0);
   if (measured !== 0) return measured;
   const delta = score(b.result, weights, audioOnly) - score(a.result, weights, audioOnly);

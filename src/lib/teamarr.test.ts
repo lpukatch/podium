@@ -234,6 +234,29 @@ describe('checkRules', () => {
     expect(check.channels[0]!.teamarr.matched.map((rule) => rule.value)).toContain('Provider A');
   });
 
+  it("ranks Podium's side under the channel's resolution floor", () => {
+    // The comparison is only meaningful if Podium's column is what a pass would
+    // actually write. A floored channel that ignored the floor here would
+    // report a disagreement with itself on every channel that has one.
+    const streams = [
+      { facts: facts(1, {}, { width: 1280, height: 720, bitrateKbps: 12_000 }), stepOrder: 0 },
+      { facts: facts(2, {}, { width: 1920, height: 1080, bitrateKbps: 3000 }), stepOrder: 1 },
+    ];
+
+    // Without a floor the generous 720p feed is genuinely the better stream --
+    // the control, so the assertion below is about the floor and nothing else.
+    expect(checkRules([channel(streams)], [], DEFAULT_STRATEGY).channels[0]?.podium.streamId).toBe(
+      1,
+    );
+
+    const floored = checkRules(
+      [{ ...channel(streams), minResolution: '1080p' as const }],
+      [],
+      DEFAULT_STRATEGY,
+    );
+    expect(floored.channels[0]?.podium.streamId).toBe(2);
+  });
+
   it('agrees when the rules and the measurements point the same way', () => {
     const check = checkRules(
       [

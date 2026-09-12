@@ -8,8 +8,12 @@ interface Row {
   provider: string;
   alive: boolean | null;
   usable: boolean;
+  /** Plays at all. True while `usable` is false means below the resolution floor. */
+  healthy?: boolean;
   black: boolean;
   height: number;
+  /** Beside `height` so a row can tell "no picture" from "a small one". */
+  width: number;
   /** The rate the ranking used: halved when ffprobe reported a field rate. */
   fps: number;
   /** What ffprobe said, when that differs -- see `interlaced`. */
@@ -40,6 +44,8 @@ interface CheckResult {
   totalHits?: number;
   probeLimit?: number;
   minBitrateKbps: number;
+  /** The channel's resolution floor, from its rule or its group; null for none. */
+  minResolution?: string | null;
   rows: Row[];
   unclaimed: Row[];
   unprobed?: Row[];
@@ -293,9 +299,16 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
                         {row.alive && row.black && (
                           <span className="ml-1 text-[var(--color-bad)]">(black screen)</span>
                         )}
-                        {row.alive && !row.usable && !row.black && (
+                        {row.alive && !row.usable && !row.black && !row.healthy && (
                           <span className="ml-1 text-[var(--color-bad)]">
                             (under {result.minBitrateKbps}kbps — treated as dead)
+                          </span>
+                        )}
+                        {row.alive && !row.usable && row.healthy && (
+                          <span className="ml-1 text-[var(--color-warn)]">
+                            {row.height <= 0 && row.width <= 0
+                              ? `(no picture measured — cannot clear the ${result.minResolution} floor, so it ranks after every stream that does and is never auto-assigned)`
+                              : `(below the ${result.minResolution} floor — ranked after every stream that meets it, and never auto-assigned)`}
                           </span>
                         )}
                         {row.alive && row.usable && !row.black && row.bitrateKbps <= 0 && (

@@ -3,6 +3,7 @@ import { loadConfig } from '@/lib/config';
 import { ALWAYS, assignmentIsRule, Eligibility, type GroupPolicy } from '@/lib/eligibility';
 import { assignedCandidates } from '@/lib/runner';
 import {
+  channelFloors,
   config,
   groupPatterns,
   index,
@@ -27,6 +28,7 @@ export async function GET(request: Request) {
     const idx = await index();
     const policy = policies();
     const patterns = groupPatterns();
+    const floors = channelFloors();
     // Resolve through Eligibility so the UI shows exactly what the worker will
     // do, including policies that come from a name pattern rather than an id.
     const resolver = new Eligibility(policy, undefined, patterns);
@@ -61,7 +63,16 @@ export async function GET(request: Request) {
       const channels = byGroup.get(group.id) ?? [];
       const resolved = resolver.policyFor(group.id, group.name);
       const mode: GroupPolicy['mode'] = resolved.mode ?? ALWAYS;
-      const fromPattern = !policy.has(group.id) && resolved.mode !== ALWAYS;
+      // Anything a name rule decided for this group, not just its mode. A
+      // pattern may now carry a floor while leaving the mode at `always`, and
+      // reading only the mode would leave that group's settings looking local
+      // and its menu snapping back to the pattern's answer with no explanation.
+      const fromPattern =
+        !policy.has(group.id) &&
+        (resolved.mode !== ALWAYS ||
+          Boolean(resolved.audioOnly) ||
+          Boolean(resolved.measureOnly) ||
+          resolved.minResolution != null);
       let ruled = 0;
       let matchedChannels = 0;
       let links = 0;
@@ -97,6 +108,9 @@ export async function GET(request: Request) {
           regexCount: rule?.patterns.length ?? 0,
           hasRule: Boolean(rule),
           assignmentOnly,
+          // The channel's own floor as written: `null` takes the group's, and
+          // `none` is an explicit opt-out of it.
+          minResolution: floors.has(channel.id) ? (floors.get(channel.id) ?? 'none') : null,
         };
       });
       rows.sort((a, b) => a.name.localeCompare(b.name));
@@ -110,6 +124,7 @@ export async function GET(request: Request) {
         window: resolved.windowMinutes,
         audioOnly: resolved.audioOnly,
         measureOnly: resolved.measureOnly,
+        minResolution: resolved.minResolution ?? null,
         channels: channels.length,
         ruled,
         matchedChannels,

@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { parseMinResolution } from '@/lib/resolution';
 import { readRulesDoc, writeRulesDoc } from '@/lib/server/state';
 
 export const dynamic = 'force-dynamic';
@@ -23,9 +24,26 @@ export async function PUT(request: Request, context: { params: Promise<{ channel
     contains?: string[];
     exclude?: string[];
     providers?: unknown;
+    /**
+     * `720p`, `1080p` or `2160p`; `none` to ignore the group's floor; `inherit`
+     * to take the group's. Absent leaves whatever is stored alone, and `null`
+     * and `""` both read as `inherit` -- a client resetting a field sends one of
+     * those, and rejecting them would make "clear this" an error.
+     */
+    minResolution?: string | null;
   };
   const clean = (values: string[] | undefined) =>
     (values ?? []).map((v) => v.trim()).filter(Boolean);
+
+  const inherits =
+    body.minResolution === null || body.minResolution === '' || body.minResolution === 'inherit';
+  const floor = inherits ? undefined : parseMinResolution(body.minResolution);
+  if (body.minResolution !== undefined && !inherits && floor === undefined) {
+    return NextResponse.json(
+      { error: `unknown resolution ${body.minResolution}` },
+      { status: 400 },
+    );
+  }
 
   const doc = readRulesDoc();
   const channels = (doc.channels ?? []) as ChannelEntry[];
@@ -48,6 +66,12 @@ export async function PUT(request: Request, context: { params: Promise<{ channel
     } else {
       delete entry.providers;
     }
+  }
+  if (body.minResolution !== undefined) {
+    // Stored as `none` rather than omitted: omitting it is how a channel says
+    // "use my group's floor", which is the opposite.
+    if (floor === undefined) delete entry.min_resolution;
+    else entry.min_resolution = floor ?? 'none';
   }
 
   writeRulesDoc(doc);

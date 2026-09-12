@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { ALWAYS, globToRegExp, VALID_MODES } from '@/lib/eligibility';
+import { parseMinResolution } from '@/lib/resolution';
 import { readRulesDoc, snapshot, userGroups, writeRulesDoc } from '@/lib/server/state';
 
 export const dynamic = 'force-dynamic';
@@ -12,6 +13,7 @@ interface PatternRow {
   require_live?: boolean;
   audio_only?: boolean;
   measure_only?: boolean;
+  min_resolution?: string;
 }
 
 /** Add or replace a name-pattern rule, and report which groups it would hit. */
@@ -23,6 +25,11 @@ export async function PUT(request: Request) {
     audio_only?: boolean;
     measureOnly?: boolean;
     measure_only?: boolean;
+    /**
+     * `720p`, `1080p`, `2160p`, or `none` to clear it. Absent keeps what is
+     * stored; `null` and `""` read as `none`.
+     */
+    minResolution?: string | null;
   };
   const pattern = (body.pattern ?? '').trim();
   const mode = body.mode ?? ALWAYS;
@@ -30,6 +37,16 @@ export async function PUT(request: Request) {
   if (!pattern) return NextResponse.json({ error: 'pattern is required' }, { status: 400 });
   if (!VALID_MODES.includes(mode as never)) {
     return NextResponse.json({ error: `unknown mode ${mode}` }, { status: 400 });
+  }
+  // As in the group route: clearing a floor is not an error, so only a value
+  // that was written and could not be read is.
+  const cleared = body.minResolution === null || body.minResolution === '';
+  const requestedFloor = cleared ? null : parseMinResolution(body.minResolution);
+  if (body.minResolution !== undefined && !cleared && requestedFloor === undefined) {
+    return NextResponse.json(
+      { error: `unknown resolution ${body.minResolution}` },
+      { status: 400 },
+    );
   }
 
   const doc = readRulesDoc();
@@ -43,8 +60,14 @@ export async function PUT(request: Request) {
     body.measureOnly ??
     body.measure_only ??
     (existing >= 0 ? patterns[existing]?.measure_only : undefined);
+  const minResolution =
+    body.minResolution !== undefined
+      ? (requestedFloor ?? undefined)
+      : existing >= 0
+        ? (parseMinResolution(patterns[existing]?.min_resolution) ?? undefined)
+        : undefined;
 
-  if (mode === ALWAYS && !audioOnly && !measureOnly) {
+  if (mode === ALWAYS && !audioOnly && !measureOnly && !minResolution) {
     // `always` with no custom flags is the default; storing it would just be noise.
     if (existing >= 0) patterns.splice(existing, 1);
   } else {
@@ -55,6 +78,7 @@ export async function PUT(request: Request) {
       window_minutes: 180,
       ...(audioOnly ? { audio_only: true } : {}),
       ...(measureOnly ? { measure_only: true } : {}),
+      ...(minResolution ? { min_resolution: minResolution } : {}),
     };
     // Carried over rather than reset: `require_live` has no control in this UI,
     // so an operator who turned it off did it by hand in the rules file, and
