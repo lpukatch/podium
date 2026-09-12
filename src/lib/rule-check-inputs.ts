@@ -11,8 +11,9 @@
 import { loadConfig } from './config';
 import { assignmentIsRule, Eligibility } from './eligibility';
 import { resolveOrdering } from './ordering';
+import { resolveResolutionFloor } from './resolution';
 import type { RankStrategy } from './scoring';
-import { groupPatterns, ordering, policies, type Snapshot } from './server/state';
+import { channelFloors, groupPatterns, ordering, policies, type Snapshot } from './server/state';
 import type { Store } from './store';
 import { type ChannelInput, factsFor, type StreamFacts } from './teamarr';
 import { type MatchIndex, matchKey } from './teamarr-match';
@@ -42,6 +43,7 @@ export function checkInputs(snap: Snapshot, store: Store): CheckInputs {
   // Audio-only channels rank on audio, so ranking them as video would report
   // every radio channel as a disagreement with itself.
   const eligibility = new Eligibility(policies(), undefined, groupPatterns());
+  const floors = channelFloors();
   const streamById = new Map(snap.streams.map((s) => [s.id, s]));
 
   // Every verdict in one read rather than per channel: a stream on several
@@ -82,6 +84,7 @@ export function checkInputs(snap: Snapshot, store: Store): CheckInputs {
       // Teamarr orders what it creates: the groups marked measure-only, or
       // ranked off their own assignment. Its rules reach nothing else.
       managed: Boolean(policy.measureOnly) || assignmentIsRule(policy.mode),
+      minResolution: resolveResolutionFloor(floors.get(channel.id), policy.minResolution),
       streams,
     });
   }

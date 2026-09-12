@@ -17,6 +17,7 @@ import {
   Matcher,
 } from './matcher';
 import { DEFAULT_ORDERING, type OrderingConfig } from './ordering';
+import { type MinResolution, parseMinResolution } from './resolution';
 import {
   NEW_INSTALL_AUDIO,
   NEW_INSTALL_HEVC_FACTOR,
@@ -42,6 +43,8 @@ const channelSchema = z.object({
   exclude_regions: z.array(z.string()).nullish(),
   step_order: z.coerce.number().optional(),
   patterns: z.array(patternSchema).nullish(),
+  /** `720p`, `1080p`, `2160p`, or `none` to ignore the group's. See `parseMinResolution`. */
+  min_resolution: z.unknown().optional(),
 });
 
 const defaultsSchema = z
@@ -103,6 +106,13 @@ export interface LoadReport {
   regexBased: number;
   skippedPatterns: string[];
   ordering: OrderingConfig;
+  /**
+   * Resolution floors set on individual channels, `null` for an explicit
+   * `none`. Kept beside the matcher rather than on `ChannelRule`, because a
+   * channel ranked off its own assignment has no rule to carry one -- and those
+   * are exactly the channels most likely to want it.
+   */
+  channelFloors: Map<number, MinResolution | null>;
 }
 
 /**
@@ -278,9 +288,14 @@ export function loadRules(raw: unknown): LoadReport {
   const flags = caseSensitive ? '' : 'i';
   const rules = new Map<number, ChannelRule>();
   const skippedPatterns: string[] = [];
+  const channelFloors = new Map<number, MinResolution | null>();
 
   for (const entry of doc.channels) {
     if (entry.enabled === false) continue;
+    // Read before the no-matchers bail-out below, which would otherwise throw
+    // away the floor on every assignment-only channel.
+    const floor = parseMinResolution(entry.min_resolution);
+    if (floor !== undefined) channelFloors.set(entry.channel_id, floor);
 
     const patterns: CompiledPattern[] = [];
     for (const spec of entry.patterns ?? []) {
@@ -331,5 +346,6 @@ export function loadRules(raw: unknown): LoadReport {
     regexBased,
     skippedPatterns,
     ordering,
+    channelFloors,
   };
 }

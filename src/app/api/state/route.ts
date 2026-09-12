@@ -3,6 +3,7 @@ import { loadConfig } from '@/lib/config';
 import { ALWAYS, assignmentIsRule, Eligibility, type GroupPolicy } from '@/lib/eligibility';
 import { assignedCandidates } from '@/lib/runner';
 import {
+  channelFloors,
   config,
   groupPatterns,
   index,
@@ -27,6 +28,7 @@ export async function GET(request: Request) {
     const idx = await index();
     const policy = policies();
     const patterns = groupPatterns();
+    const floors = channelFloors();
     // Resolve through Eligibility so the UI shows exactly what the worker will
     // do, including policies that come from a name pattern rather than an id.
     const resolver = new Eligibility(policy, undefined, patterns);
@@ -97,6 +99,9 @@ export async function GET(request: Request) {
           regexCount: rule?.patterns.length ?? 0,
           hasRule: Boolean(rule),
           assignmentOnly,
+          // The channel's own floor as written: `null` takes the group's, and
+          // `none` is an explicit opt-out of it.
+          minResolution: floors.has(channel.id) ? (floors.get(channel.id) ?? 'none') : null,
         };
       });
       rows.sort((a, b) => a.name.localeCompare(b.name));
@@ -110,6 +115,7 @@ export async function GET(request: Request) {
         window: resolved.windowMinutes,
         audioOnly: resolved.audioOnly,
         measureOnly: resolved.measureOnly,
+        minResolution: resolved.minResolution ?? null,
         channels: channels.length,
         ruled,
         matchedChannels,

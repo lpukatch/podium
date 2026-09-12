@@ -3,6 +3,7 @@
 import { LoaderCircle } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DeadResponse } from '@/lib/dead';
+import { RESOLUTION_CHOICES } from '@/lib/resolution';
 import { BackupView } from './backup-view';
 import { CheckPanel } from './check-panel';
 import { DeadView } from './dead-view';
@@ -33,6 +34,8 @@ interface ChannelRow {
   hasRule: boolean;
   /** No rule, but an `assigned`/after-kickoff group: ranked off what it carries. */
   assignmentOnly?: boolean;
+  /** This channel's own floor: `null` takes the group's, `none` opts out of it. */
+  minResolution?: string | null;
 }
 
 interface PatternRule {
@@ -45,6 +48,7 @@ interface PatternRule {
    */
   audioOnly?: boolean;
   measureOnly?: boolean;
+  minResolution?: string;
 }
 
 interface GroupRow {
@@ -54,6 +58,8 @@ interface GroupRow {
   fromPattern: boolean;
   audioOnly?: boolean;
   measureOnly?: boolean;
+  /** Resolved, so a floor that comes from a name rule shows here too. */
+  minResolution?: string | null;
   channels: number;
   ruled: number;
   matchedChannels: number;
@@ -222,6 +228,8 @@ export default function Page() {
   const [aliases, setAliases] = useState('');
   const [contains, setContains] = useState('');
   const [exclude, setExclude] = useState('');
+  /** `inherit`, `none`, or a resolution -- what the rule route accepts. */
+  const [minResolution, setMinResolution] = useState('inherit');
   const [preview, setPreview] = useState<Preview | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [saved, setSaved] = useState('');
@@ -347,6 +355,7 @@ export default function Page() {
     setContains(c.contains.join('\n'));
     setExclude(c.exclude.join('\n'));
     setSelectedProviders(c.providers ? [...c.providers] : null);
+    setMinResolution(c.minResolution ?? 'inherit');
     setPreview(null);
     setRemoveNote(null);
   }, []);
@@ -503,6 +512,7 @@ export default function Page() {
         contains: lines(contains),
         exclude: lines(exclude),
         providers: selectedProviders,
+        minResolution,
       }),
     });
     setSaved(resp.ok ? 'Saved' : 'Save failed');
@@ -665,6 +675,25 @@ export default function Page() {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pattern, mode, measureOnly: !current }),
+    });
+    await load();
+  };
+
+  /** Set a group's resolution floor; an empty choice clears it. */
+  const setGroupFloor = async (id: number, mode: Mode, floor: string) => {
+    await fetch(`/api/groups/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode, minResolution: floor || 'none' }),
+    });
+    await load();
+  };
+
+  const setPatternFloor = async (pattern: string, mode: Mode, floor: string) => {
+    await fetch('/api/group-patterns', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pattern, mode, minResolution: floor || 'none' }),
     });
     await load();
   };
@@ -1045,6 +1074,21 @@ export default function Page() {
                       >
                         {p.measureOnly ? '✓ Measure only' : 'Measure only'}
                       </button>
+                      <select
+                        aria-label={`Minimum resolution for ${p.pattern}`}
+                        value={p.minResolution ?? ''}
+                        onChange={(e) =>
+                          void setPatternFloor(p.pattern, p.mode as Mode, e.target.value)
+                        }
+                        className="rounded-lg border border-[var(--color-line)] bg-[var(--color-panel)] px-2 py-1.5 text-sm"
+                      >
+                        <option value="">Any resolution</option>
+                        {RESOLUTION_CHOICES.map((r) => (
+                          <option key={r} value={r}>
+                            {r} and up
+                          </option>
+                        ))}
+                      </select>
                       <button
                         type="button"
                         className={`${btn} px-3 py-1.5 text-sm`}
@@ -1195,6 +1239,24 @@ export default function Page() {
                 >
                   {group.measureOnly ? '✓ Measure only' : 'Measure only'}
                 </button>
+                <label
+                  className="flex items-center gap-2 text-sm text-[var(--color-muted)]"
+                  title="Streams below this sink under every stream that meets it and are never auto-assigned, but keep their order among themselves. A channel's own setting wins over this."
+                >
+                  Min resolution
+                  <select
+                    value={group.minResolution ?? ''}
+                    onChange={(e) => void setGroupFloor(group.id, group.mode, e.target.value)}
+                    className="rounded-lg border border-[var(--color-line)] bg-[var(--color-panel)] px-2 py-1.5 text-sm"
+                  >
+                    <option value="">Any</option>
+                    {RESOLUTION_CHOICES.map((r) => (
+                      <option key={r} value={r}>
+                        {r}
+                      </option>
+                    ))}
+                  </select>
+                </label>
               </div>
               <p className="mt-2 text-sm text-[var(--color-muted)]">
                 {MODES.find((m) => m.value === group.mode)?.hint}
@@ -1508,6 +1570,56 @@ export default function Page() {
                 </p>
               </div>
             )}
+
+            <div className={`${card} mt-4 p-5`}>
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h3 className="text-sm font-semibold uppercase tracking-wide text-[var(--color-muted)]">
+                  Minimum resolution
+                </h3>
+                <span className="text-sm text-[var(--color-muted)]">
+                  {(() => {
+                    const effective =
+                      minResolution === 'inherit'
+                        ? (group?.minResolution ?? null)
+                        : minResolution === 'none'
+                          ? null
+                          : minResolution;
+                    return effective ? `Leads with ${effective} or better` : 'No floor';
+                  })()}
+                </span>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => setMinResolution('inherit')}
+                  className={chip(minResolution === 'inherit')}
+                >
+                  Group default ({group?.minResolution ?? 'any'})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMinResolution('none')}
+                  className={chip(minResolution === 'none')}
+                >
+                  Any
+                </button>
+                {RESOLUTION_CHOICES.map((r) => (
+                  <button
+                    type="button"
+                    key={r}
+                    onClick={() => setMinResolution(r)}
+                    className={chip(minResolution === r)}
+                  >
+                    {r}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-2 text-sm text-[var(--color-muted)]">
+                Streams below it sink under every stream that meets it and are never auto-assigned,
+                but keep their order among themselves and ahead of anything dead. Saved with the
+                rule.
+              </p>
+            </div>
 
             <div className="mt-4 grid gap-4 sm:grid-cols-2">
               <Editor

@@ -16,6 +16,7 @@ import { statSync } from 'fs';
 import { Eligibility, type GroupPolicy, parseGroupPatterns, parsePolicies } from './eligibility';
 import type { Matcher } from './matcher';
 import type { OrderingConfig } from './ordering';
+import type { MinResolution } from './resolution';
 import { loadRules, readRulesFile } from './rules';
 
 export type Log = (message: string) => void;
@@ -26,6 +27,8 @@ export interface Rules {
   policies: Map<number, GroupPolicy>;
   /** Parsed ranking strategy from the top-level `ordering` block. */
   ordering: OrderingConfig;
+  /** Per-channel resolution floors -- see `LoadReport.channelFloors`. */
+  channelFloors: Map<number, MinResolution | null>;
   loadedAt: number;
   /** Whether the file existed when this was loaded. */
   present: boolean;
@@ -100,6 +103,7 @@ export class RulesSource {
       eligibility: new Eligibility(policies, undefined, patterns),
       policies,
       ordering: report.ordering,
+      channelFloors: report.channelFloors,
       loadedAt: Date.now(),
       present: !missing,
     };

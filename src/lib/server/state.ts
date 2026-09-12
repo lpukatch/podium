@@ -15,6 +15,7 @@ import type { GroupPattern, GroupPolicy } from '../eligibility';
 import { parseGroupPatterns } from '../eligibility';
 import type { Matcher, StreamIndex } from '../matcher';
 import type { OrderingConfig } from '../ordering';
+import type { MinResolution } from '../resolution';
 import { readRulesFile } from '../rules';
 import { RulesSource } from '../rules-source';
 import { resolveEnv } from '../settings';
@@ -157,6 +158,11 @@ export function groupPatterns(): GroupPattern[] {
 /** The ranking strategy from the rules `ordering` block (reloaded on mtime). */
 export function ordering(): OrderingConfig {
   return source().get().ordering;
+}
+
+/** Resolution floors set on individual channels (reloaded on mtime). */
+export function channelFloors(): Map<number, MinResolution | null> {
+  return source().get().channelFloors;
 }
 
 export async function snapshot(force = false): Promise<Snapshot> {

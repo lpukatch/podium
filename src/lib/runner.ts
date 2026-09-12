@@ -22,10 +22,11 @@ import {
 } from './eligibility';
 import { EpgCache } from './epg-cache';
 import type { Matcher, StreamIndex } from './matcher';
-import { resolveOrdering } from './ordering';
+import { resolveOrdering, withResolutionFloor } from './ordering';
 import { Pacer, type PacerConfig, viewersByProvider } from './pacer';
 import { type ProbeResult, probe } from './probe';
 import { tierOf } from './quality';
+import { type MinResolution, resolveResolutionFloor } from './resolution';
 import type { RulesSource } from './rules-source';
 import { AbortFlag, laneKey, type ProbeJob, runLanes } from './scheduler';
 
@@ -367,6 +368,11 @@ export interface PlannedChannel {
    * two write paths cannot disagree about it.
    */
   measureOnly?: boolean;
+  /**
+   * The resolution floor this channel ranks under: its rule's, else its
+   * group's. Resolved in `plan` for the same reason as `measureOnly`.
+   */
+  minResolution?: MinResolution;
 }
 
 export interface OpenJobItem {
@@ -1635,6 +1641,7 @@ export class Runner {
               probedVariants.set(job.streamId, variants);
             }
 
+            const channelStrategy = withResolutionFloor(strategy, entry.minResolution);
             const entries: RankEntry[] = [];
             let complete = true;
             for (const [streamId, stepOrder] of entry.hits) {
@@ -1643,7 +1650,7 @@ export class Runner {
               for (const [variantId, result] of entry.fresh.get(streamId) ?? []) {
                 if (!seen?.has(variantId)) verdicts.push({ variantId, result });
               }
-              const best = pickBestVariant(verdicts, strategy.weights, entry.audioOnly);
+              const best = pickBestVariant(verdicts, channelStrategy.weights, entry.audioOnly);
               if (best) {
                 entries.push({
                   streamId,
@@ -1678,7 +1685,7 @@ export class Runner {
                 counters,
                 log,
                 entry.channel.streams,
-                strategy,
+                channelStrategy,
                 {
                   channelName: entry.channel.name,
                   byId: streamById,
@@ -1721,6 +1728,11 @@ export class Runner {
       try {
         this.checkTeamarrRules(runId, channels, streamById, groupNames, providerNames, strategy, {
           audioOnly: (groupId, groupName) => eligibility.policyFor(groupId, groupName).audioOnly,
+          minResolution: (channelId, groupId, groupName) =>
+            resolveResolutionFloor(
+              this.deps.rules.get().channelFloors.get(channelId),
+              eligibility.policyFor(groupId, groupName).minResolution,
+            ),
           // Teamarr orders the channels it creates, which are the ones an
           // operator has marked measure-only or ranked off their own
           // assignment. Its rules are never evaluated anywhere else, so a
@@ -1976,7 +1988,7 @@ export class Runner {
         groupId === null || groupId === undefined ? undefined : outstandingMarks.get(groupId);
       if (group && probedAt <= group.forcedAt) group.remaining += 1;
     };
-    const { matcher } = this.deps.rules.get();
+    const { matcher, channelFloors } = this.deps.rules.get();
     const index = passedIndex ?? matcher.buildIndex(streams, groupNames);
     const byId = passedById ?? new Map(streams.map((s) => [s.id, s]));
     // A stream's probe targets: the stored URL, plus a rewritten one per extra
@@ -2168,6 +2180,10 @@ export class Runner {
           cacheComplete: settledStreams.size === hits.length,
           audioOnly: policy.audioOnly,
           measureOnly: policy.measureOnly,
+          minResolution: resolveResolutionFloor(
+            channelFloors.get(channel.id),
+            policy.minResolution,
+          ),
         });
       }
     }
@@ -2255,6 +2271,12 @@ export class Runner {
       audioOnly: (groupId: number | null, groupName?: string) => boolean | undefined;
       /** Whether another app owns this channel's ordering. */
       managed: (groupId: number | null, groupName?: string) => boolean;
+      /** The floor the channel ranks under, as `plan` resolves it. */
+      minResolution: (
+        channelId: number,
+        groupId: number | null,
+        groupName?: string,
+      ) => MinResolution | undefined;
     },
   ): void {
     const { store } = this.deps;
@@ -2294,6 +2316,7 @@ export class Runner {
         channelName: channel.name,
         audioOnly: policy.audioOnly(channel.groupId, groupName),
         managed: policy.managed(channel.groupId, groupName),
+        minResolution: policy.minResolution(channel.id, channel.groupId, groupName),
         streams,
       });
     }
@@ -2348,19 +2371,21 @@ export class Runner {
     providerNames: Map<number, string>,
   ): Promise<void> {
     const log = this.deps.log ?? (() => {});
-    for (const { channel, hits, fresh, cacheComplete, audioOnly, measureOnly } of planned) {
+    for (const entry of planned) {
+      const { channel, hits, fresh, cacheComplete, audioOnly, measureOnly } = entry;
       if (!cacheComplete) continue;
       if (measureOnly) {
         counters.measured += 1;
         continue;
       }
+      const channelStrategy = withResolutionFloor(strategy, entry.minResolution);
       const entries: RankEntry[] = [];
       for (const [streamId, stepOrder] of hits) {
         const verdicts = fresh.get(streamId);
         if (!verdicts) continue;
         const best = pickBestVariant(
           [...verdicts].map(([variantId, result]) => ({ variantId, result })),
-          strategy.weights,
+          channelStrategy.weights,
           audioOnly,
         );
         if (!best) continue;
@@ -2372,12 +2397,21 @@ export class Runner {
         });
       }
       if (entries.length === 0) continue;
-      await this.reorder(client, channel.id, entries, counters, log, channel.streams, strategy, {
-        channelName: channel.name,
-        byId,
-        providerNames,
-        audioOnly,
-      });
+      await this.reorder(
+        client,
+        channel.id,
+        entries,
+        counters,
+        log,
+        channel.streams,
+        channelStrategy,
+        {
+          channelName: channel.name,
+          byId,
+          providerNames,
+          audioOnly,
+        },
+      );
     }
   }
 

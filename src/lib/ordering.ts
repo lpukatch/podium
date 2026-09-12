@@ -9,6 +9,7 @@
  * the one object the comparator needs, once per pass.
  */
 
+import type { MinResolution } from './resolution';
 import { DEFAULT_WEIGHTS, type RankStrategy, type Weights } from './scoring';
 
 export type { OrderingMode } from './scoring';
@@ -65,4 +66,21 @@ export function resolveOrdering(
   }
 
   return { mode: cfg.mode, weights, providerRank };
+}
+
+/**
+ * One channel's strategy: the pass's, with the channel's resolution floor on.
+ *
+ * Every place that ranks a channel goes through this rather than threading a
+ * floor argument beside `audioOnly`, because the floor has to reach `rank`,
+ * `pickBestVariant` and auto-assign's eligibility alike, and all three already
+ * take the weights. Hands back the same object when there is nothing to change,
+ * so a channel with no floor costs nothing.
+ */
+export function withResolutionFloor(
+  strategy: RankStrategy,
+  floor: MinResolution | undefined,
+): RankStrategy {
+  if (strategy.weights.minResolution === floor) return strategy;
+  return { ...strategy, weights: { ...strategy.weights, minResolution: floor } };
 }

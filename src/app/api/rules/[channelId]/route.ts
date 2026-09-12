@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { parseMinResolution } from '@/lib/resolution';
 import { readRulesDoc, writeRulesDoc } from '@/lib/server/state';
 
 export const dynamic = 'force-dynamic';
@@ -23,9 +24,22 @@ export async function PUT(request: Request, context: { params: Promise<{ channel
     contains?: string[];
     exclude?: string[];
     providers?: unknown;
+    /**
+     * `720p`, `1080p` or `2160p`; `none` to ignore the group's floor; `inherit`
+     * to take the group's. Absent leaves whatever is stored alone.
+     */
+    minResolution?: string;
   };
   const clean = (values: string[] | undefined) =>
     (values ?? []).map((v) => v.trim()).filter(Boolean);
+
+  const floor = parseMinResolution(body.minResolution);
+  if (body.minResolution !== undefined && body.minResolution !== 'inherit' && floor === undefined) {
+    return NextResponse.json(
+      { error: `unknown resolution ${body.minResolution}` },
+      { status: 400 },
+    );
+  }
 
   const doc = readRulesDoc();
   const channels = (doc.channels ?? []) as ChannelEntry[];
@@ -48,6 +62,12 @@ export async function PUT(request: Request, context: { params: Promise<{ channel
     } else {
       delete entry.providers;
     }
+  }
+  if (body.minResolution !== undefined) {
+    // Stored as `none` rather than omitted: omitting it is how a channel says
+    // "use my group's floor", which is the opposite.
+    if (floor === undefined) delete entry.min_resolution;
+    else entry.min_resolution = floor ?? 'none';
   }
 
   writeRulesDoc(doc);

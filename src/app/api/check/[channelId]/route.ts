@@ -8,8 +8,9 @@ import {
   Eligibility,
 } from '@/lib/eligibility';
 import { Mutex } from '@/lib/mutex';
-import { resolveOrdering } from '@/lib/ordering';
+import { resolveOrdering, withResolutionFloor } from '@/lib/ordering';
 import { isInterlaced, type ProbeResult, probe } from '@/lib/probe';
+import { resolveResolutionFloor } from '@/lib/resolution';
 import {
   assignedCandidates,
   composeOrder,
@@ -18,8 +19,9 @@ import {
   statsPayload,
 } from '@/lib/runner';
 import { laneKey, type ProbeJob, runLanes } from '@/lib/scheduler';
-import { frameRate, isUsable, type RankEntry, rank, score } from '@/lib/scoring';
+import { frameRate, isHealthy, isUsable, type RankEntry, rank, score } from '@/lib/scoring';
 import {
+  channelFloors,
   groupPatterns,
   index,
   matcher,
@@ -180,8 +182,12 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     const workerBusy = !isStale && progress.phase === 'probing';
 
     const providerNames = new Map(snap.providers.map((p) => [p.id, p.name]));
-    // Same strategy the worker resolves, so the preview matches what it writes.
-    const strategy = resolveOrdering(ordering(), providerNames, config.PODIUM_MIN_BITRATE_KBPS);
+    // Same strategy the worker resolves, so the preview matches what it writes --
+    // down to this channel's own resolution floor.
+    const strategy = withResolutionFloor(
+      resolveOrdering(ordering(), providerNames, config.PODIUM_MIN_BITRATE_KBPS),
+      resolveResolutionFloor(channelFloors().get(id), groupPolicy.minResolution),
+    );
 
     // The courtesy reserve, on the same rule the worker uses (Pacer.laneLimits):
     // hold a slot back for a human only when a human is actually watching, since
@@ -411,6 +417,9 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         elapsedMs: result?.elapsedMs ?? 0,
         score: result ? score(result, strategy.weights, audioOnly) : 0,
         usable: result ? isUsable(result, strategy.weights, audioOnly) : false,
+        // Separates "below the resolution floor" from "does not play", which
+        // the panel explains differently and the ranking treats differently.
+        healthy: result ? isHealthy(result, strategy.weights, audioOnly) : false,
         black: result?.black ?? false,
         currentRank: current.indexOf(streamId) >= 0 ? current.indexOf(streamId) + 1 : null,
         proposedRank: proposed.indexOf(streamId) >= 0 ? proposed.indexOf(streamId) + 1 : null,
@@ -448,7 +457,12 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       truncated,
       totalHits: hits.length,
       probeLimit: maxCheckStreams,
-      minBitrateKbps: config.PODIUM_MIN_BITRATE_KBPS,
+      // The floors this channel was actually ranked under, so the panel's reason
+      // for a stream sinking quotes the number that sank it. The bitrate floor
+      // used to be read from the environment here, which disagreed with the
+      // ranking whenever the rules file overrode it.
+      minBitrateKbps: strategy.weights.minBitrateKbps,
+      minResolution: strategy.weights.minResolution ?? null,
       rows,
       unclaimed,
       unprobed,
