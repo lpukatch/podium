@@ -80,6 +80,26 @@ PODIUM_ALLOWED_HOSTS="podium.example.com"
 Several are comma-separated, a leading dot is a subdomain wildcard
 (`.example.com`), and `*` disables the check entirely.
 
+What that check does *not* cover, stated plainly, because both are deliberate:
+
+- **Single-label names are accepted on their word.** A name with no dot cannot be
+  registered, but it can be claimed on your own network — mDNS, LLMNR and NetBIOS
+  all let a machine answer to `printer` or `nas`. Somebody already on your
+  network could publish such a name, point it at Podium, and rebind it. They
+  could also just talk to Podium directly, which is why this costs nothing on a
+  default install; it matters only where `PODIUM_AUTH_TOKEN` is set and the
+  attacker is on the network but does not have the token. The alternative is
+  refusing `http://podium:3456` between containers and every short Kubernetes
+  service name, which breaks the ordinary deployment to harden the unusual one.
+  If that trade is wrong for you, name the host you actually use and nothing
+  else: `PODIUM_ALLOWED_HOSTS` is checked first, but the built-in rules are
+  additive, so the tighter setup is a token plus a proxy that only forwards the
+  name you chose.
+- **A request with no `Host` header at all is allowed through.** Rebinding is an
+  attack a *browser* carries out, and a browser always sends `Host` — an HTTP/1.1
+  request without one is rejected by the server before Podium sees it. Refusing
+  it here would add nothing except a way to break odd clients.
+
 **A token, if you have put it on the internet.** Setting `PODIUM_AUTH_TOKEN`
 makes every request carry it: `Authorization: Bearer <token>`, an
 `X-Podium-Token` header, or the `podium_token` cookie. Visiting
