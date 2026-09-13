@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
 import { renderMetrics } from '@/lib/metrics';
+import { resolveEnv } from '@/lib/settings';
 import { Store } from '@/lib/store';
 
 export const dynamic = 'force-dynamic';
@@ -14,8 +15,15 @@ export const dynamic = 'force-dynamic';
 export function GET() {
   let store: Store | null = null;
   try {
-    const config = loadConfig();
-    store = new Store(config.dbPath);
+    // Resolved against stored settings, not just the environment. Paths come
+    // from the environment only -- which is what makes opening the store to
+    // read the rest non-circular -- but the freshness target and the
+    // per-channel switch below are both settable in the UI, and a scrape that
+    // reports staleness against a max-age nobody is using any more is a
+    // dashboard disagreeing with the settings page.
+    const boot = loadConfig();
+    store = new Store(boot.dbPath);
+    const config = loadConfig(resolveEnv(process.env, store.settings()));
     const body = renderMetrics(store, {
       maxAgeMs: config.PODIUM_MAX_AGE_MS,
       channelMetrics: config.PODIUM_METRICS_CHANNELS,
