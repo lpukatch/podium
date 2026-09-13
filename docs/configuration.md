@@ -43,6 +43,7 @@ through **Settings → Backup**; see
 | --- | --- | --- |
 | `PODIUM_ALLOWED_HOSTS` | — | extra hostnames Podium will answer to |
 | `PODIUM_AUTH_TOKEN` | — | require a shared token on every request |
+| `PODIUM_TRUST_PROXY` | `false` | believe `X-Forwarded-Host` and `X-Forwarded-Proto` |
 
 Podium has no login, because a tool that manages one Dispatcharr on your own
 network does not need accounts. It does need to be sure a request came from
@@ -88,10 +89,41 @@ back out of the URL, which is how you log a browser in without a login page.
 `/api/health` is exempt so the container's own health check still works;
 `/api/metrics` is not, so give Prometheus a `bearer_token`.
 
-Both of these are environment-only, and deliberately not on the Settings page: a
+**Behind a reverse proxy, say so.** Some proxies forward the browser's `Host`
+header and some replace it with the address they are proxying to — nginx's
+default is the latter, `proxy_set_header Host $proxy_host`. When it is replaced,
+Podium sees `Host: 127.0.0.1:3456` while the browser sent
+`Origin: https://podium.example.com`, decides they disagree, and refuses every
+`POST`, `PUT` and `DELETE` as cross-site: the UI loads and nothing in it works.
+The same hop is plain `http` even when the browser is on TLS, so the token
+cookie loses its `Secure` flag and the `?token=` redirect points back at
+`http://`.
+
+```sh
+PODIUM_TRUST_PROXY=true
+PODIUM_ALLOWED_HOSTS="podium.example.com"
+```
+
+That makes Podium read `X-Forwarded-Host` and `X-Forwarded-Proto` instead. It is
+off by default and should stay off unless a proxy really is in front, because
+`Host` is what makes the rebinding check work — a page cannot change it, and
+those two headers are ones any client can write. Behind a proxy that sets them,
+the proxy is the only thing that can reach Podium and they are exactly as
+trustworthy as it is. The host rules still apply to the forwarded name, so it
+still has to be in `PODIUM_ALLOWED_HOSTS`.
+
+If your proxy preserves the original `Host` — Caddy and Traefik do by default, and
+so does nginx with `proxy_set_header Host $host` — you do not need this.
+
+All of these are environment-only, and deliberately not on the Settings page: a
 boundary you can move through the API it protects is not a boundary. None of it
 is a substitute for not exposing Podium — it can reorder your channels and it
-holds a Dispatcharr credential.
+holds a Dispatcharr credential. One more thing worth knowing if you put it
+behind a proxy you do not control: `?token=` is a query string, and query
+strings end up in access logs. It is meant to be used once, from a browser, and
+the redirect takes it back out of the URL — but the log entry on the way in has
+already been written, so treat a token that has been through somebody else's
+proxy as one worth rotating.
 
 ## Pacing
 

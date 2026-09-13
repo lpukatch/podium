@@ -73,6 +73,23 @@ export function hostOf(header: string | null | undefined): string | null {
   return raw.slice(0, colon) || null;
 }
 
+/**
+ * The host a proxy says the browser asked for, from `X-Forwarded-Host`.
+ *
+ * Only consulted when `PODIUM_TRUST_PROXY` says so, and that opt-in is the
+ * whole design. The `Host` check works because a browser sets `Host` itself and
+ * a page cannot change it; `X-Forwarded-Host` is a header any client can write,
+ * so trusting it by default would hand the rebinding defence to whoever asked.
+ * Behind a proxy that sets it, the proxy is the only thing that can reach
+ * Podium and the header is exactly as trustworthy as the proxy -- which is the
+ * trade the operator is making when they set the variable.
+ *
+ * A chain of proxies appends, so the first entry is the one the browser sent.
+ */
+export function forwardedHostOf(header: string | null | undefined): string | null {
+  return hostOf((header ?? '').split(',')[0]);
+}
+
 /** The host an Origin header names, or null when there is no usable one. */
 export function originHost(origin: string | null | undefined): string | null {
   const raw = (origin ?? '').trim();
