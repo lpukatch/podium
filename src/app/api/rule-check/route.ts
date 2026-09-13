@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
 import { applyMatches, checkInputs, scoredChannelIds } from '@/lib/rule-check-inputs';
 import { snapshot } from '@/lib/server/state';
+import { resolveEnv } from '@/lib/settings';
 import { Store } from '@/lib/store';
 import { checkRules, type RuleInput } from '@/lib/teamarr';
 import { TeamarrClient } from '@/lib/teamarr-client';
@@ -65,8 +66,13 @@ export async function POST(request: Request) {
     );
 
     const snap = await snapshot();
-    const config = loadConfig();
-    store = new Store(config.dbPath);
+    const boot = loadConfig();
+    store = new Store(boot.dbPath);
+    // Stored settings on top of the environment: the Teamarr URL read below is
+    // settable in the UI, and reading it from the environment alone meant a
+    // check run against a URL entered there silently skipped the `epg_match`
+    // and `stream_type` reads and reported itself approximate instead.
+    const config = loadConfig(resolveEnv(process.env, store.settings()));
     // Shared with the Teamarr push, which scores two rule sets over this same
     // assembly -- see `checkInputs`. Two copies would compare two populations.
     const { channels, strategy } = checkInputs(snap, store);
