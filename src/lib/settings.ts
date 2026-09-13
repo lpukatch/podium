@@ -12,6 +12,7 @@
  * not a settings change.
  */
 
+import { baseUrlProblem, normaliseBaseUrl } from './base-url';
 import { CONFIG_DEFAULTS } from './config';
 import type { Store } from './store';
 
@@ -271,7 +272,7 @@ export const FIELDS: FieldSpec[] = [
     key: 'PODIUM_TEAMARR_URL',
     kind: 'string',
     label: 'Teamarr URL',
-    help: 'Where Teamarr answers, e.g. http://teamarr:9195. Leave empty and nothing is pushed; the export stays a file you download. Use in-cluster service DNS where possible.',
+    help: 'Where Teamarr answers, e.g. http://teamarr:9195 — a plain http(s) base, with no path fragment, query or credentials in it. Leave empty and nothing is pushed; the export stays a file you download. Use in-cluster service DNS where possible.',
     section: 'teamarr',
   },
   {
@@ -477,14 +478,15 @@ export function validateSettings(patch: Record<string, unknown>): {
       values[key] = String(field.scale ? Math.round(n * field.scale) : n);
     } else if (field.kind === 'boolean') {
       values[key] = ['1', 'true', 'yes', 'on'].includes(text.toLowerCase()) ? 'true' : 'false';
-    } else if (key === 'DISPATCHARR_URL') {
-      try {
-        const url = new URL(text);
-        if (!/^https?:$/.test(url.protocol)) throw new Error('protocol');
-        values[key] = text.replace(/\/+$/, '');
-      } catch {
-        errors.push({ key, message: 'must be an http(s) URL' });
-      }
+    } else if (key === 'DISPATCHARR_URL' || key === 'PODIUM_TEAMARR_URL') {
+      // Both are bases with an API path appended to them, and both are checked
+      // by the same rules -- see `base-url.ts`. The Teamarr URL used to fall
+      // through to the untyped branch below, which accepted anything at all:
+      // the client then appended its path to it, and a base ending in `#` threw
+      // that path away and sent the request somewhere else entirely.
+      const problem = baseUrlProblem(text);
+      if (problem) errors.push({ key, message: problem });
+      else values[key] = normaliseBaseUrl(text, field.label);
     } else {
       values[key] = text;
     }

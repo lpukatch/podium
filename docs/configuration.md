@@ -30,7 +30,7 @@ through **Settings → Backup**; see
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `DISPATCHARR_URL` | `http://dispatcharr:9191` | |
+| `DISPATCHARR_URL` | `http://dispatcharr:9191` | a plain `http(s)` base, same rules as `PODIUM_TEAMARR_URL` below |
 | `DISPATCHARR_API_KEY` | — | required, unless username/password |
 | `DISPATCHARR_USERNAME` / `_PASSWORD` | — | JWT auth instead of an API key |
 | `PODIUM_DATA_DIR` | `/app/data` | rules file, probe cache, run history |
@@ -211,7 +211,7 @@ word.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `PODIUM_TEAMARR_URL` | *(empty)* | where Teamarr answers, e.g. `http://teamarr:9195`. Empty disables the push entirely — the export stays a file you download |
+| `PODIUM_TEAMARR_URL` | *(empty)* | where Teamarr answers, e.g. `http://teamarr:9195`. Empty disables the push entirely — the export stays a file you download. A plain `http(s)` base only: a `#`, a `?` or a `user:pass@` in it is refused, because Podium appends its API path to this and a fragment would throw that path away |
 | `PODIUM_TEAMARR_SYNC` | `false` | also push on the interval below. Off, the Quality page's button is the only thing that writes |
 | `PODIUM_TEAMARR_SYNC_MS` | `86400000` | how often the scheduled push runs. A day |
 | `PODIUM_TEAMARR_MIN_SAMPLES` | `200` | in-scope samples the profile must be fitted on before anything is pushed |

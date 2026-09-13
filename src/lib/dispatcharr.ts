@@ -15,6 +15,8 @@
  *     PATCH /api/channels/channels/{id}/  reorder by writing `streams`
  */
 
+import { normaliseBaseUrl } from './base-url';
+
 export const PAGE_SIZE = 500;
 /**
  * Bounded, not unbounded. Dispatcharr is Django behind a small worker pool:
@@ -340,7 +342,10 @@ export class DispatcharrClient {
     private readonly auth: DispatcharrAuth,
     private readonly timeoutMs = 60_000,
   ) {
-    this.base = baseUrl.replace(/\/+$/, '');
+    // Refuses a base that cannot carry a path -- a fragment or query truncates
+    // every API path appended below it, and the URL is settable through the
+    // API. See `base-url.ts`.
+    this.base = normaliseBaseUrl(baseUrl, 'Dispatcharr');
   }
 
   private headers(): Record<string, string> {
