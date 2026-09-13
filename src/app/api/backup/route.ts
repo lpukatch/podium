@@ -67,7 +67,10 @@ export function GET() {
  * everything that can reject runs before anything is written (a 400 never
  * mutates anything), the pre-validated atomic rules rename goes first, and
  * the database transaction -- the only step that can lose a race with the
- * worker -- goes last.
+ * worker -- goes last. If that last step still fails, the rules file is put
+ * back: two writes where the second can fail is a half-applied restore
+ * otherwise, and a restore is what people reach for when something has
+ * already gone wrong.
  */
 export async function POST(request: Request) {
   let store: Store | null = null;
@@ -111,14 +114,32 @@ export async function POST(request: Request) {
     // aimed at whatever host the bundle names. Same refusal the settings PUT
     // makes, for the same reason -- and, like every check above, before
     // anything is written.
-    // The bundle is both the new state and what the request supplies: one
-    // that carries its own credential is a caller who already holds it.
+    //
+    // The bundle is both the new state and what the request supplies: one that
+    // carries its own credential is a caller who already holds it.
     const moved = movedCredentials(store.settings(), settings, settings, process.env);
     if (moved.length > 0) {
       return NextResponse.json(
         { error: credentialMoveMessage(moved, settings.DISPATCHARR_URL ?? '') },
         { status: 400 },
       );
+    }
+
+    // Held so the file write can be undone. No atomic commit spans a file and
+    // SQLite, so a restore is two writes and the second one can fail -- on a
+    // busy database, a disk that filled between them, a bundle the transaction
+    // rejects. That used to leave rules.json replaced and the settings, rule set
+    // and assign blocks as they were: an install running half of somebody's
+    // backup, in the one operation people reach for *because* something has
+    // already gone wrong.
+    //
+    // Unreadable is not the same as absent. A doc that will not parse cannot be
+    // put back, and the failure below says so rather than pretending it can.
+    let previous: Record<string, unknown> | null = null;
+    try {
+      previous = readRulesDoc();
+    } catch {
+      previous = null;
     }
 
     writeRulesDoc(bundle.rules);
@@ -129,11 +150,23 @@ export async function POST(request: Request) {
         assignBlocks: bundle.assignBlocks,
       });
     } catch (error) {
+      let undone = false;
+      if (previous !== null) {
+        try {
+          writeRulesDoc(previous);
+          undone = true;
+        } catch {
+          // Nothing left to try: say what state it is in and stop.
+        }
+      }
       return NextResponse.json(
         {
-          error:
-            `rules.json was replaced, but the database was not restored: ${String(error).slice(0, 200)}. ` +
-            'Import the same backup again once the cause is fixed.',
+          error: undone
+            ? `the database was not restored: ${String(error).slice(0, 200)}. ` +
+              'Nothing was changed -- rules.json was put back as it was. ' +
+              'Import the same backup again once the cause is fixed.'
+            : `rules.json was replaced, but the database was not restored: ${String(error).slice(0, 200)}. ` +
+              'Import the same backup again once the cause is fixed.',
         },
         { status: 500 },
       );
