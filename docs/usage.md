@@ -542,11 +542,12 @@ Podium can rank on it too, if asked. **Settings → Stream ordering → Advanced
 has a *Preferred HDR format* of no preference, HLG or HDR10 (PQ), and an *HDR*
 weight beside the others. With a flavour chosen, a stream carrying it scores
 full marks on that term, the other flavour scores nothing, and SDR or unknown
-sits halfway — so the preference moves HDR variants of a channel relative to
-each other and leaves SDR streams where they were. The weight is small on
-purpose, like audio: at the 0.05 a new install starts with it settles two HDR
-variants a few kbps apart and cannot lift a thinner stream or a lower
-resolution. With no preference the term is the same for every stream and drops
+sits halfway. That is a tilt, not a tiebreak. At the 0.05 a new install starts
+with, the preferred flavour still leads the other while carrying about 1.9 Mbps
+less HEVC — around an eighth of a 15 Mbps UHD feed — and an SDR or untagged
+stream overtakes the flavour you did not pick with about half that deficit. It
+cannot lift a 1080p stream over a 2160p one, or a thin stream over a healthy
+one. With no preference the term is the same for every stream and drops
 out of the ranking, so an install that predates it, or never picks a flavour,
 ranks exactly as before. Streams probed before Podium read these fields sit at
 the halfway mark until their next probe.

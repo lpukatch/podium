@@ -16,7 +16,10 @@ import { EMPTY_RULES_DOC, loadRules } from './rules';
 import {
   DEFAULT_WEIGHTS,
   hdrScore,
+  NEW_INSTALL_AUDIO,
   NEW_INSTALL_HDR,
+  NEW_INSTALL_HEVC_FACTOR,
+  NEW_INSTALL_UHD_BITRATE_KBPS,
   type RankEntry,
   rank,
   score,
@@ -56,6 +59,15 @@ function weights(over: Partial<Weights>): Weights {
 const preferHlg = weights({ hdr: 0.05, hdrPreference: 'hlg' });
 const preferPq = weights({ hdr: 0.05, hdrPreference: 'pq' });
 
+/** What a new install actually runs, where the UHD bitrate term is not saturated. */
+const seededHlg = weights({
+  audio: NEW_INSTALL_AUDIO,
+  hdr: NEW_INSTALL_HDR,
+  hdrPreference: 'hlg',
+  hevcBitrateFactor: NEW_INSTALL_HEVC_FACTOR,
+  uhdBitrateKbps: NEW_INSTALL_UHD_BITRATE_KBPS,
+});
+
 function entries(...results: ProbeResult[]): RankEntry[] {
   return results.map((result, i) => ({ streamId: i + 1, stepOrder: 0, providerId: 1, result }));
 }
@@ -76,7 +88,7 @@ describe('the HDR term', () => {
     expect(hdrScore(HLG, preferPq)).toBe(0);
   });
 
-  it('reads h265 and HEVC the same way it reads the transfer: case-insensitively', () => {
+  it('reads the transfer name case-insensitively', () => {
     expect(hdrScore(probe({ colorTransfer: 'SMPTE2084' }), preferPq)).toBe(1);
   });
 });
@@ -105,21 +117,37 @@ describe('what the preference can and cannot do', () => {
     ).toEqual([2, 1]);
   });
 
-  /** The case this exists for: two provider variants a few kbps apart. */
-  it('beats a small bitrate gap between the two HDR flavours', () => {
-    const thinnerHlg = probe({ ...HLG, bitrateKbps: 14_000 });
+  /**
+   * The case this exists for: two provider variants whose video is close. Run
+   * at a new install's weights, not DEFAULT_WEIGHTS -- there the UHD ceiling is
+   * 12000 kbps, both streams saturate the bitrate term, and any gap passes.
+   * These pin how close "close" is: a tilt of roughly 1.9 Mbps, not a tiebreak.
+   */
+  it('beats a bitrate gap of up to ~1.9 Mbps between the two HDR flavours, and no more', () => {
     const fatterPq = probe({ ...PQ, bitrateKbps: 15_000 });
-    expect(score(thinnerHlg, preferHlg)).toBeGreaterThan(score(fatterPq, preferHlg));
+    const within = probe({ ...HLG, bitrateKbps: 13_500 });
+    const beyond = probe({ ...HLG, bitrateKbps: 12_500 });
+    expect(score(within, seededHlg)).toBeGreaterThan(score(fatterPq, seededHlg));
+    expect(score(beyond, seededHlg)).toBeLessThan(score(fatterPq, seededHlg));
   });
 
   it('cannot lift a 1080p stream over a 2160p one', () => {
     const hlg1080 = probe({ ...HLG, width: 1920, height: 1080, bitrateKbps: 8000 });
-    expect(score(PQ, preferHlg)).toBeGreaterThan(score(hlg1080, preferHlg));
+    expect(score(PQ, seededHlg)).toBeGreaterThan(score(hlg1080, seededHlg));
   });
 
   it('cannot lift a thin stream over a healthy one', () => {
     const thinHlg = probe({ ...HLG, bitrateKbps: 6000 });
-    expect(score(PQ, preferHlg)).toBeGreaterThan(score(thinHlg, preferHlg));
+    expect(score(PQ, seededHlg)).toBeGreaterThan(score(thinHlg, seededHlg));
+  });
+
+  /** Halfway is not "unmoved": SDR overtakes the unpicked flavour when the two are close. */
+  it('lets an SDR stream overtake the flavour that was not picked, by about half as much', () => {
+    const pq = probe({ ...PQ, bitrateKbps: 15_000 });
+    const within = probe({ ...SDR, bitrateKbps: 14_300 });
+    const beyond = probe({ ...SDR, bitrateKbps: 13_800 });
+    expect(score(within, seededHlg)).toBeGreaterThan(score(pq, seededHlg));
+    expect(score(beyond, seededHlg)).toBeLessThan(score(pq, seededHlg));
   });
 
   /** Verdicts cached before `colorTransfer` existed sit between the two flavours. */

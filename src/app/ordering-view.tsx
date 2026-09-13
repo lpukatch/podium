@@ -397,8 +397,9 @@ export function OrderingView() {
                 ))}
               </select>
               <span className="mt-1 block">
-                Only separates two HDR variants of the same channel, using the HDR weight above. SDR
-                streams are not moved. New installs: no preference.
+                Tilts the ranking toward one HDR flavour, using the HDR weight above. SDR and
+                untagged streams sit halfway, so they can overtake the flavour you did not pick. New
+                installs: no preference.
               </span>
             </label>
             <div className="mt-3 grid grid-cols-2 gap-3">

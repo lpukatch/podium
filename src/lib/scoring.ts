@@ -62,8 +62,10 @@ export interface Weights {
    * Small on purpose, for the same reason `audio` is: it exists to separate
    * two HDR variants of the same channel -- HLG and HDR10/PQ from one provider
    * are hevc / yuv420p10le / 3840x2160 alike, and which took slot 0 came down
-   * to a few kbps -- and must not promote a thinner stream or a lower
-   * resolution. Inert while `hdrPreference` is `none`, whatever its value.
+   * to a few kbps -- and must not promote a lower resolution or a genuinely
+   * thin stream. It is a tilt rather than a tiebreak, though: at
+   * `NEW_INSTALL_HDR` the preferred flavour still leads with ~1.9 Mbps less UHD
+   * HEVC. Inert while `hdrPreference` is `none`, whatever its value.
    *
    * Defaults to 0 so an existing rules file, which cannot mention a term that
    * did not exist when it was written, keeps its exact ordering. New installs
@@ -182,9 +184,10 @@ export const DEFAULT_WEIGHTS: Weights = {
 export const NEW_INSTALL_AUDIO = 0.1;
 
 /**
- * The HDR weight a fresh install starts with. Half of `audio`: it has one job,
- * choosing between two HDR variants whose video otherwise ties, and it does
- * that at any weight above zero. Seeded with `hdrPreference` left at `none`,
+ * The HDR weight a fresh install starts with. Half of `audio`, for choosing
+ * between two HDR variants whose video is close -- and at this weight "close"
+ * is ~1.9 Mbps on a 15 Mbps UHD HEVC pair (pinned in hdr-preference.test.ts).
+ * Seeded with `hdrPreference` left at `none`,
  * so it does nothing until an operator picks a flavour.
  */
 export const NEW_INSTALL_HDR = 0.05;
@@ -357,8 +360,9 @@ const HDR_TRANSFER: Record<Exclude<HdrPreference, 'none'>, string> = {
  * flavour 0, which is the whole job. Everything else -- SDR, a live TS that
  * never declared a transfer, a verdict cached before `colorTransfer` existed
  * -- sits at 0.5: not knowing is neither the thing asked for nor the thing
- * asked against, and a preference between two HDR variants is no reason to
- * move an SDR stream at all. With no preference every stream scores 0.5, so
+ * asked against. SDR is not left untouched by that, though: sitting halfway,
+ * it overtakes the flavour that was not picked when the two are close. With
+ * no preference every stream scores 0.5, so
  * the term cancels out of the ranking whatever its weight.
  */
 export function hdrScore(result: Pick<ProbeResult, 'colorTransfer'>, weights: Weights): number {
