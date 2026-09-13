@@ -533,11 +533,24 @@ apart. Podium now publishes ffprobe's `color_transfer` (`arib-std-b67` for
 HLG, `smpte2084` for HDR10/PQ, `bt709` for SDR) and `color_primaries` (`bt2020`
 or `bt709`) beside `pixel_format`. Live TS streams often omit both, and then the
 keys are `null` rather than an empty string, so "unknown" stays distinguishable
-from a value. Nothing in Podium scores on them, and **a Teamarr rule cannot
-use them either**: Stream Stats rules compare numbers only, so `smpte2084`
-never matches a threshold, and `is_unknown` fires for a string as readily as
-for `null`. They are there for whatever reads `stream_stats` as JSON, not for a
-`stats_metric` rule.
+from a value. **A Teamarr rule cannot use them**: Stream Stats rules compare
+numbers only, so `smpte2084` never matches a threshold, and `is_unknown` fires
+for a string as readily as for `null`. They are there for whatever reads
+`stream_stats` as JSON, not for a `stats_metric` rule.
+
+Podium can rank on it too, if asked. **Settings → Stream ordering → Advanced**
+has a *Preferred HDR format* of no preference, HLG or HDR10 (PQ), and an *HDR*
+weight beside the others. With a flavour chosen, a stream carrying it scores
+full marks on that term, the other flavour scores nothing, and SDR or unknown
+sits halfway. That is a tilt, not a tiebreak. At the 0.05 a new install starts
+with, the preferred flavour still leads the other while carrying about 1.9 Mbps
+less HEVC — around an eighth of a 15 Mbps UHD feed — and an SDR or untagged
+stream overtakes the flavour you did not pick with about half that deficit. It
+cannot lift a 1080p stream over a 2160p one, or a thin stream over a healthy
+one. With no preference the term is the same for every stream and drops
+out of the ranking, so an install that predates it, or never picks a flavour,
+ranks exactly as before. Streams probed before Podium read these fields sit at
+the halfway mark until their next probe.
 
 Bitrate is *measured*, not read from the container: live TS/HLS almost never
 declares one. Podium reads a few seconds of the stream, which also gives it the

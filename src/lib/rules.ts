@@ -20,6 +20,7 @@ import { DEFAULT_ORDERING, type OrderingConfig } from './ordering';
 import { invalidMinResolution, type MinResolution, parseMinResolution } from './resolution';
 import {
   NEW_INSTALL_AUDIO,
+  NEW_INSTALL_HDR,
   NEW_INSTALL_HEVC_FACTOR,
   NEW_INSTALL_UHD_BITRATE_KBPS,
 } from './scoring';
@@ -72,6 +73,8 @@ const orderingWeightsSchema = z
     fps: z.coerce.number().optional(),
     codec: z.coerce.number().optional(),
     audio: z.coerce.number().optional(),
+    hdr: z.coerce.number().optional(),
+    hdr_preference: z.string().optional(),
     prefer_h265: z.boolean().optional(),
     min_bitrate_kbps: z.coerce.number().optional(),
     hevc_bitrate_factor: z.coerce.number().optional(),
@@ -208,6 +211,15 @@ function parseOrdering(doc: RulesDoc): OrderingConfig {
       ...(w.fps !== undefined ? { fps: w.fps } : {}),
       ...(w.codec !== undefined ? { codec: w.codec } : {}),
       ...(w.audio !== undefined ? { audio: w.audio } : {}),
+      ...(w.hdr !== undefined ? { hdr: w.hdr } : {}),
+      // Same tolerance as `mode`: a value this code does not know degrades to
+      // no preference rather than failing every channel's matching.
+      ...(w.hdr_preference !== undefined
+        ? {
+            hdrPreference:
+              w.hdr_preference === 'hlg' || w.hdr_preference === 'pq' ? w.hdr_preference : 'none',
+          }
+        : {}),
       ...(w.prefer_h265 !== undefined ? { preferH265: w.prefer_h265 } : {}),
       ...(w.min_bitrate_kbps !== undefined ? { minBitrateKbps: w.min_bitrate_kbps } : {}),
       ...(w.hevc_bitrate_factor !== undefined ? { hevcBitrateFactor: w.hevc_bitrate_factor } : {}),
@@ -233,6 +245,7 @@ export const EMPTY_RULES_DOC = {
   ordering: {
     weights: {
       audio: NEW_INSTALL_AUDIO,
+      hdr: NEW_INSTALL_HDR,
       hevc_bitrate_factor: NEW_INSTALL_HEVC_FACTOR,
       uhd_bitrate_kbps: NEW_INSTALL_UHD_BITRATE_KBPS,
     },

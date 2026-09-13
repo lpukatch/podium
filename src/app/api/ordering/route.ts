@@ -1,7 +1,9 @@
 import { NextResponse } from 'next/server';
 import {
   DEFAULT_WEIGHTS,
+  type HdrPreference,
   NEW_INSTALL_AUDIO,
+  NEW_INSTALL_HDR,
   NEW_INSTALL_HEVC_FACTOR,
   NEW_INSTALL_UHD_BITRATE_KBPS,
 } from '@/lib/scoring';
@@ -10,7 +12,7 @@ import { ordering, readRulesDoc, snapshot, writeRulesDoc } from '@/lib/server/st
 export const dynamic = 'force-dynamic';
 
 /** The editable weight keys exposed in the UI (the bitrate floor has its own field). */
-const WEIGHT_KEYS = ['resolution', 'bitrate', 'fps', 'codec', 'audio'] as const;
+const WEIGHT_KEYS = ['resolution', 'bitrate', 'fps', 'codec', 'audio', 'hdr'] as const;
 type WeightKey = (typeof WEIGHT_KEYS)[number];
 
 /**
@@ -24,6 +26,8 @@ type WeightKey = (typeof WEIGHT_KEYS)[number];
  */
 interface ScaleKnobs {
   preferH265: boolean;
+  /** Which HDR flavour the `hdr` weight rewards; `none` leaves the term neutral. */
+  hdrPreference: HdrPreference;
   hevcBitrateFactor: number;
   uhdBitrateKbps: number;
 }
@@ -58,7 +62,9 @@ export async function GET() {
       fps: pick('fps'),
       codec: pick('codec'),
       audio: pick('audio'),
+      hdr: pick('hdr'),
       preferH265: merged.preferH265,
+      hdrPreference: merged.hdrPreference,
       hevcBitrateFactor: merged.hevcBitrateFactor,
       uhdBitrateKbps: merged.uhdBitrateKbps,
     };
@@ -70,7 +76,9 @@ export async function GET() {
       // What a new install is seeded with, not the inert values that keep
       // upgrades still: "reset" should hand back what podium ships today.
       audio: NEW_INSTALL_AUDIO,
+      hdr: NEW_INSTALL_HDR,
       preferH265: DEFAULT_WEIGHTS.preferH265,
+      hdrPreference: DEFAULT_WEIGHTS.hdrPreference,
       hevcBitrateFactor: NEW_INSTALL_HEVC_FACTOR,
       uhdBitrateKbps: NEW_INSTALL_UHD_BITRATE_KBPS,
     };
@@ -124,7 +132,10 @@ export async function PUT(request: Request) {
       fps: num(w.fps),
       codec: num(w.codec),
       audio: num(w.audio),
+      hdr: num(w.hdr),
       prefer_h265: Boolean(w.preferH265),
+      hdr_preference:
+        w.hdrPreference === 'hlg' || w.hdrPreference === 'pq' ? w.hdrPreference : 'none',
       hevc_bitrate_factor: positive(w.hevcBitrateFactor, DEFAULT_WEIGHTS.hevcBitrateFactor),
       uhd_bitrate_kbps: positive(w.uhdBitrateKbps, DEFAULT_WEIGHTS.uhdBitrateKbps),
     };
