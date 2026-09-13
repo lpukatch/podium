@@ -57,6 +57,20 @@ export function statsPayload(
     video_codec: result.videoCodec,
     audio_codec: result.audioCodec,
     pixel_format: result.pixelFormat,
+    /**
+     * The transfer function, which is what tells HLG (`arib-std-b67`) from
+     * HDR10/PQ (`smpte2084`). A provider carrying both flavours of the same
+     * channel presents them identically in every other key here -- hevc,
+     * yuv420p10le, 3840x2160 -- so this is the only handle a reader of these
+     * stats has on which is which. Not one a Teamarr `stats_metric` rule can
+     * use: those compare numbers only, and `is_unknown` fires on a string as
+     * readily as on `null`. `null`, not `''`, when ffprobe did not say: live TS
+     * streams often omit it, and a consumer has to be able to tell "unknown"
+     * from a value. Older consumers ignore the unknown key.
+     */
+    color_transfer: result.colorTransfer ?? null,
+    /** `bt2020` for either HDR flavour, `bt709` for SDR; `null` when unknown. */
+    color_primaries: result.colorPrimaries ?? null,
     audio_channels: result.audioChannels,
     channel_layout: result.channelLayout,
     audio_bitrate: Math.round(result.audioBitrateKbps),
