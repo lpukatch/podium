@@ -1,6 +1,12 @@
 import { NextResponse } from 'next/server';
 import { loadConfig, requireCredentials } from '@/lib/config';
-import { describeSettings, resolveEnv, validateSettings } from '@/lib/settings';
+import {
+  credentialMoveMessage,
+  describeSettings,
+  movedCredentials,
+  resolveEnv,
+  validateSettings,
+} from '@/lib/settings';
 import { Store } from '@/lib/store';
 
 export const dynamic = 'force-dynamic';
@@ -48,7 +54,8 @@ export async function PUT(request: Request) {
     store = openStore();
     // Refuse a change that would leave the app unable to authenticate, rather
     // than accepting it and failing every run afterwards.
-    const merged = { ...store.settings() };
+    const stored = store.settings();
+    const merged = { ...stored };
     for (const [k, v] of Object.entries(values)) {
       if (v === null) delete merged[k];
       else merged[k] = v;
@@ -56,6 +63,22 @@ export async function PUT(request: Request) {
     const next = loadConfigSafely(merged);
     if (!next.ok) {
       return NextResponse.json({ error: next.message }, { status: 400 });
+    }
+
+    // A saved credential is never sent to a host it was not saved for -- the
+    // same rule the connection test follows, which saving used to be missing.
+    // See `movedCredentials`: a request carrying nothing but a URL pointed the
+    // worker and every page at whatever it named, with the Dispatcharr
+    // credential still in the environment behind it.
+    const moved = movedCredentials(stored, merged, values, process.env);
+    if (moved.length > 0) {
+      return NextResponse.json(
+        {
+          error: credentialMoveMessage(moved, merged.DISPATCHARR_URL ?? ''),
+          needsCredentials: true,
+        },
+        { status: 400 },
+      );
     }
 
     store.setSettings(values);

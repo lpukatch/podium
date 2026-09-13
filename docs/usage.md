@@ -383,6 +383,56 @@ Toggling **Audio only** on a group (or adding `"audio_only": true` in `rules.jso
 - Score and rank streams by audio quality (channel count, codec, sample rate, and audio bitrate).
 - Auto-assign matched radio streams to radio channels normally.
 
+#### Minimum resolution
+
+Ranking alone will put a provider's 720p copy of a channel first whenever it
+scores best, and a generous bitrate at a lower resolution is enough to do it: a
+720p50 feed at 12Mbps outscores a 1080p25 one at 3Mbps. A floor says what a
+channel should lead with instead. Set it on a group or a name pattern:
+
+```json
+"groups": { "3618": { "mode": "always", "min_resolution": "1080p" } }
+```
+
+or on one channel, in its rule:
+
+```json
+{ "channel_id": 812, "aliases": ["BBC One"], "min_resolution": "none" }
+```
+
+The choices are `720p`, `1080p` and `2160p`; a floor names a line count, not a
+scan type, so `1080i` is read as `1080p`. A setting that is none of these is
+ignored and logged on load — Podium never silently applies a floor you did not
+write, or drops one you did.
+
+Each level overrides the one above it, and `none` is how anything opts out of a
+wider floor: a channel opts out of its group's — the SD simulcast in an
+otherwise HD group — and a group opts out of a name rule's. There is no global
+floor, because what suits one group is wrong for the next.
+
+A stream clears the floor on its height *or* its width, so a letterboxed film at
+1920×800 counts as 1080p, and so does anamorphic 1440×1080. 1600×900 does not.
+A stream with no picture at all — a radio feed matched onto a video channel, or
+a probe that never resolved the dimensions — does not clear a picture floor.
+
+Falling below the floor is not the same as being broken:
+
+- the stream sinks below every stream that meets the floor, whatever the
+  ordering mode;
+- it still ranks ahead of dead, black-screened and sub-bitrate streams;
+- streams below the floor keep their quality order among themselves, so a
+  channel where nothing clears it ranks exactly as it would without one;
+- it is never auto-assigned, and it does not count against
+  `PODIUM_AUTO_ASSIGN_MAX`, so a capped channel carrying nothing but sub-floor
+  streams still has room to be given one that clears it;
+- it is never removed. The floor decides order and what gets added, not what a
+  channel already carries.
+
+In the UI a group's floor is the **Min resolution** menu beside its policy
+chips, a name rule's is the menu on its row, and a channel's is **Minimum
+resolution** in its editor, saved with the rule. **Check now** says when a
+stream sank because of it.
+
 ## Re-checking on demand
 
 The freshness target is a floor, not a schedule. "Nothing older than 24 hours"
@@ -435,8 +485,10 @@ the **Probe all** button on the group view.
 Step order first (an alias you put first wins), then a weighted score:
 resolution, bitrate, fps, codec, audio. Dead streams sink to the bottom, and so
 do streams below `PODIUM_MIN_BITRATE_KBPS` or showing a black screen — a slate
-is not a fallback. The weights are normalised by their total, so only their size
-relative to each other matters.
+is not a fallback. A group or channel can also set a
+[minimum resolution](#minimum-resolution): streams below it sink too, but ahead
+of the broken ones. The weights are normalised by their total, so only their
+size relative to each other matters.
 
 Audio earns its weight where a provider carries the same channel twice, once
 with 5.1 and once without. Podium reads the richest audio track a stream has —
@@ -476,12 +528,15 @@ rank exactly as they did until they are next probed.
 
 **HLG is not HDR10.** A provider carrying both HDR flavours of the same channel
 presents them identically in every stat Podium used to publish — both are
-`hevc`, `yuv420p10le`, 3840x2160 — so a Teamarr ordering rule had no way to
-prefer one. Podium now publishes ffprobe's `color_transfer` (`arib-std-b67` for
+`hevc`, `yuv420p10le`, 3840x2160 — so nothing reading them could tell the two
+apart. Podium now publishes ffprobe's `color_transfer` (`arib-std-b67` for
 HLG, `smpte2084` for HDR10/PQ, `bt709` for SDR) and `color_primaries` (`bt2020`
 or `bt709`) beside `pixel_format`. Live TS streams often omit both, and then the
 keys are `null` rather than an empty string, so "unknown" stays distinguishable
-from a value.
+from a value. **A Teamarr rule cannot use them**: Stream Stats rules compare
+numbers only, so `smpte2084` never matches a threshold, and `is_unknown` fires
+for a string as readily as for `null`. They are there for whatever reads
+`stream_stats` as JSON, not for a `stats_metric` rule.
 
 Podium can rank on it too, if asked. **Settings → Stream ordering → Advanced**
 has a *Preferred HDR format* of no preference, HLG or HDR10 (PQ), and an *HDR*

@@ -79,7 +79,8 @@ describe('reading colour metadata from ffprobe', () => {
 describe('what gets published to Dispatcharr', () => {
   /**
    * Same channel, two provider variants -- indistinguishable in every field
-   * published before this. A Teamarr ordering rule can now prefer one.
+   * published before this. The payload now tells them apart (though not in a
+   * form a Teamarr `stats_metric` rule can read -- those compare numbers only).
    */
   it('separates an HLG stream from a PQ one', () => {
     const a = statsPayload(probe({ colorTransfer: 'arib-std-b67', colorPrimaries: 'bt2020' }));

@@ -32,6 +32,25 @@
 const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 /**
+ * Reads that are checked like writes.
+ *
+ * The cross-site rules exist for requests that *do* something, because a
+ * browser cannot read a cross-origin response and a GET therefore leaks
+ * nothing. `/api/backup` is the exception on both counts: its body carries the
+ * Dispatcharr credential in the clear, and a hostile page can still start a
+ * top-level navigation to it, which on a token-protected install carries the
+ * cookie and writes the credential to the victim's disk. The attacker never
+ * sees that file -- but "a page you visited made your browser download your
+ * Dispatcharr password" is not a thing to leave working when the fix is to
+ * treat this one path the way a write is treated.
+ *
+ * It costs automation nothing: curl and a scheduled backup job send neither
+ * `Origin` nor `Sec-Fetch-Site`, and both checks pass on their absence. Only a
+ * browser being driven from somewhere else is refused.
+ */
+const CREDENTIAL_PATHS = new Set(['/api/backup']);
+
+/**
  * Suffixes that cannot be registered by an attacker, so cannot be rebound.
  *
  * `.ts.net` is Tailscale's MagicDNS: publicly resolvable, but only ever to a
@@ -71,6 +90,23 @@ export function hostOf(header: string | null | undefined): string | null {
   // a hostname of "fe80" with a port of the rest.
   if (raw.indexOf(':', colon + 1) !== -1) return raw;
   return raw.slice(0, colon) || null;
+}
+
+/**
+ * The host a proxy says the browser asked for, from `X-Forwarded-Host`.
+ *
+ * Only consulted when `PODIUM_TRUST_PROXY` says so, and that opt-in is the
+ * whole design. The `Host` check works because a browser sets `Host` itself and
+ * a page cannot change it; `X-Forwarded-Host` is a header any client can write,
+ * so trusting it by default would hand the rebinding defence to whoever asked.
+ * Behind a proxy that sets it, the proxy is the only thing that can reach
+ * Podium and the header is exactly as trustworthy as the proxy -- which is the
+ * trade the operator is making when they set the variable.
+ *
+ * A chain of proxies appends, so the first entry is the one the browser sent.
+ */
+export function forwardedHostOf(header: string | null | undefined): string | null {
+  return hostOf((header ?? '').split(',')[0]);
 }
 
 /** The host an Origin header names, or null when there is no usable one. */
@@ -221,7 +257,11 @@ export function checkAccess(request: AccessRequest, policy: AccessPolicy): Acces
     };
   }
 
-  if (UNSAFE_METHODS.has(request.method.toUpperCase())) {
+  const isWrite = UNSAFE_METHODS.has(request.method.toUpperCase());
+  if (isWrite || CREDENTIAL_PATHS.has(request.path)) {
+    // The same rule, refused in the caller's own terms: "only accepts writes"
+    // is a puzzling thing to read after asking for a backup.
+    const what = isWrite ? 'writes' : 'backup downloads';
     const site = request.secFetchSite;
     // Sent by every current browser and by nothing else, so its absence is not
     // evidence either way -- the Origin check below is what covers that case.
@@ -233,7 +273,7 @@ export function checkAccess(request: AccessRequest, policy: AccessPolicy): Acces
         ok: false,
         status: 403,
         reason: 'cross-site',
-        message: `Refusing a ${site} ${request.method} request. Podium only accepts writes from its own pages.`,
+        message: `Refusing a ${site} ${request.method} request. Podium only accepts ${what} from its own pages.`,
       };
     }
 
@@ -248,7 +288,7 @@ export function checkAccess(request: AccessRequest, policy: AccessPolicy): Acces
         ok: false,
         status: 403,
         reason: 'cross-site',
-        message: `Refusing a ${request.method} request from origin "${request.origin}". Podium only accepts writes from its own pages.`,
+        message: `Refusing a ${request.method} request from origin "${request.origin}". Podium only accepts ${what} from its own pages.`,
       };
     }
   }

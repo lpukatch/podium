@@ -181,7 +181,7 @@ function userAgentArgs(url: string, userAgent: string): string[] {
 }
 
 /**
- * What the input is allowed to reach, beyond itself.
+ * The transports a stream URL may name, and what each one may reach.
  *
  * A stream URL is not ours: it arrives in the provider's M3U, through
  * Dispatcharr, from whoever sells the subscription. The playlist at the end of
@@ -191,13 +191,42 @@ function userAgentArgs(url: string, userAgent: string): string[] {
  * output back (it goes to /dev/null), but bitrate and blackness both come out
  * of it, which is enough to answer questions about a file a byte at a time.
  *
- * A remote input therefore gets no `file`, and a local one -- which only exists
- * so this can be exercised against a sample on disk -- gets no network.
+ * Hence a whitelist per scheme rather than one for "anything remote": an HTTP
+ * input can follow a playlist to another HTTP segment, which is how HLS works,
+ * and cannot open a UDP socket or a local file on the way. The transports each
+ * entry carries are the ones its own protocol needs -- RTSP negotiates RTP over
+ * UDP or TCP, RTMPS is RTMP inside TLS -- and no more.
  */
+const PROTOCOL_WHITELISTS: Record<string, string> = {
+  http: 'http,https,tcp,tls,crypto,data',
+  https: 'http,https,tcp,tls,crypto,data',
+  rtmp: 'rtmp,rtmpt,tcp,crypto,data',
+  rtmps: 'rtmps,rtmpts,tcp,tls,crypto,data',
+  rtsp: 'rtsp,rtp,udp,tcp,crypto,data',
+  rtsps: 'rtsp,rtsps,rtp,udp,tcp,tls,crypto,data',
+  srt: 'srt,udp,crypto,data',
+  udp: 'udp,crypto,data',
+  rtp: 'rtp,udp,crypto,data',
+};
+
+/**
+ * A local input -- which exists only so this can be exercised against a sample
+ * on disk -- gets no network, the mirror of the rule above.
+ */
+const LOCAL_WHITELIST = 'file,crypto,data';
+
+/** The scheme a URL names, lowercased, or empty for a bare path. */
+export function schemeOf(url: string): string {
+  return /^([a-z][a-z0-9+.-]*):/i.exec(url.trim())?.[1]?.toLowerCase() ?? '';
+}
+
 function protocolArgs(url: string): string[] {
-  return /^https?:\/\//i.test(url)
-    ? ['-protocol_whitelist', 'http,https,tcp,tls,crypto,data']
-    : ['-protocol_whitelist', 'file,crypto,data'];
+  const scheme = schemeOf(url);
+  const allowed = scheme ? PROTOCOL_WHITELISTS[scheme] : LOCAL_WHITELIST;
+  // `rejectUrl` has already refused anything not in the table, so the fallback
+  // is unreachable rather than a policy -- and if it ever becomes reachable, it
+  // should be the strictest thing here rather than the loosest.
+  return ['-protocol_whitelist', allowed ?? LOCAL_WHITELIST];
 }
 
 /**
@@ -210,10 +239,30 @@ function protocolArgs(url: string): string[] {
  * `--` would also end option parsing, but relying on it means relying on a
  * cmdutils behaviour across every ffmpeg build a self-hoster might have; a
  * stream URL that starts with a dash is not a stream URL, so say so instead.
+ *
+ * The scheme is checked against the table above rather than against a list of
+ * schemes to refuse. Everything that used to fall outside `^https?://` was
+ * handed the *local* whitelist, which is two bugs sharing a line: a provider
+ * URL of `file:///app/data/podium.db` was probed with `file` allowed, and every
+ * real streaming protocol -- rtmp, rtsp, srt, udp -- was refused by ffmpeg with
+ * a protocol error that read like the stream was dead. One of those is a
+ * disclosure and the other is a whole class of stream Podium could not measure;
+ * naming the transports it does support fixes both at once.
+ *
+ * A bare path with no scheme keeps working: it is how the probe is exercised
+ * against a sample on disk, and it is not something a URL from an M3U reaches
+ * -- ffmpeg resolves it as a path, not as a protocol.
  */
 export function rejectUrl(url: string): string {
   if (url.trim() === '') return 'empty url';
   if (url.startsWith('-')) return 'refusing a url that begins with "-"';
+  const scheme = schemeOf(url);
+  if (scheme && !PROTOCOL_WHITELISTS[scheme]) {
+    // Worded to start the way the refusal above does: `deadReason` classifies
+    // "refusing a url..." as `rejected`, and a message that reads the same to a
+    // person but not to that test would land in the `other` bucket.
+    return `refusing a url with a "${scheme}:" scheme -- Podium probes network streams only`;
+  }
   return '';
 }
 

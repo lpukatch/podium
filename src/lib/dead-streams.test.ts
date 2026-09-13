@@ -134,4 +134,55 @@ describe('deadStreams', () => {
 
     expect(rows).toHaveLength(0);
   });
+
+  it('reads the streak of the URL the stream has now, not one it lost', () => {
+    // `put()` keys on stream_hash so a re-issued URL does not inherit the old
+    // verdict, but the old rows stay until `prune()` sweeps them a month
+    // later. This fold is asked about a stream, not a URL, so it has to pick.
+    // Getting it wrong is not cosmetic: between two equally dead verdicts the
+    // tie-break is primary-key order, which is lexicographic on the hash, so
+    // roughly half the time a stream that has failed once under its new
+    // address reports the streak of the address it no longer has -- and with
+    // removal on, that unassigns it immediately and for good.
+    const store = new Store(join(dir, 'rotated.db'));
+    for (let i = 0; i < 10; i += 1) store.put(1, 'a1b2old', verdict(false));
+    store.put(1, 'f9e8new', verdict(false));
+
+    const row = store.deadStreams().find((r) => r.streamId === 1);
+    const streak = store.deadStreaks([1]).get(1);
+    store.close();
+
+    expect(row?.deadStreak).toBe(1);
+    expect(streak).toBe(1);
+  });
+
+  it('reports no streak for a stream that is alive, black, or unprobed', () => {
+    // `deadStreaks` is what decides a removal, so only *dead* may appear in
+    // it. A black screen and a thin stream are alive: they sink, they reset
+    // the count in `put()`, and they are never removed.
+    const store = new Store(join(dir, 'streaks.db'));
+    for (let i = 0; i < 4; i += 1) store.put(1, 'h1', verdict(false));
+    store.put(2, 'h1', verdict(true, { black: true }));
+    store.put(3, 'h1', verdict(true));
+
+    const streaks = store.deadStreaks([1, 2, 3, 99]);
+    store.close();
+
+    expect(streaks.get(1)).toBe(4);
+    expect(streaks.has(2)).toBe(false);
+    expect(streaks.has(3)).toBe(false);
+    expect(streaks.has(99)).toBe(false);
+  });
+
+  it('counts only the streams it actually holds a verdict for', () => {
+    // The population a provider's dead share is measured against.
+    const store = new Store(join(dir, 'probed.db'));
+    store.put(1, 'h1', verdict(false));
+    store.put(2, 'h1', verdict(true));
+
+    const probed = store.probedStreamIds();
+    store.close();
+
+    expect(probed).toEqual(new Set([1, 2]));
+  });
 });

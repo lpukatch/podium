@@ -30,7 +30,7 @@ through **Settings → Backup**; see
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `DISPATCHARR_URL` | `http://dispatcharr:9191` | |
+| `DISPATCHARR_URL` | `http://dispatcharr:9191` | a plain `http(s)` base, same rules as `PODIUM_TEAMARR_URL` below |
 | `DISPATCHARR_API_KEY` | — | required, unless username/password |
 | `DISPATCHARR_USERNAME` / `_PASSWORD` | — | JWT auth instead of an API key |
 | `PODIUM_DATA_DIR` | `/app/data` | rules file, probe cache, run history |
@@ -43,6 +43,7 @@ through **Settings → Backup**; see
 | --- | --- | --- |
 | `PODIUM_ALLOWED_HOSTS` | — | extra hostnames Podium will answer to |
 | `PODIUM_AUTH_TOKEN` | — | require a shared token on every request |
+| `PODIUM_TRUST_PROXY` | `false` | believe `X-Forwarded-Host` and `X-Forwarded-Proto` |
 
 Podium has no login, because a tool that manages one Dispatcharr on your own
 network does not need accounts. It does need to be sure a request came from
@@ -80,6 +81,26 @@ PODIUM_ALLOWED_HOSTS="podium.example.com"
 Several are comma-separated, a leading dot is a subdomain wildcard
 (`.example.com`), and `*` disables the check entirely.
 
+What that check does *not* cover, stated plainly, because both are deliberate:
+
+- **Single-label names are accepted on their word.** A name with no dot cannot be
+  registered, but it can be claimed on your own network — mDNS, LLMNR and NetBIOS
+  all let a machine answer to `printer` or `nas`. Somebody already on your
+  network could publish such a name, point it at Podium, and rebind it. They
+  could also just talk to Podium directly, which is why this costs nothing on a
+  default install; it matters only where `PODIUM_AUTH_TOKEN` is set and the
+  attacker is on the network but does not have the token. The alternative is
+  refusing `http://podium:3456` between containers and every short Kubernetes
+  service name, which breaks the ordinary deployment to harden the unusual one.
+  If that trade is wrong for you, name the host you actually use and nothing
+  else: `PODIUM_ALLOWED_HOSTS` is checked first, but the built-in rules are
+  additive, so the tighter setup is a token plus a proxy that only forwards the
+  name you chose.
+- **A request with no `Host` header at all is allowed through.** Rebinding is an
+  attack a *browser* carries out, and a browser always sends `Host` — an HTTP/1.1
+  request without one is rejected by the server before Podium sees it. Refusing
+  it here would add nothing except a way to break odd clients.
+
 **A token, if you have put it on the internet.** Setting `PODIUM_AUTH_TOKEN`
 makes every request carry it: `Authorization: Bearer <token>`, an
 `X-Podium-Token` header, or the `podium_token` cookie. Visiting
@@ -88,10 +109,41 @@ back out of the URL, which is how you log a browser in without a login page.
 `/api/health` is exempt so the container's own health check still works;
 `/api/metrics` is not, so give Prometheus a `bearer_token`.
 
-Both of these are environment-only, and deliberately not on the Settings page: a
+**Behind a reverse proxy, say so.** Some proxies forward the browser's `Host`
+header and some replace it with the address they are proxying to — nginx's
+default is the latter, `proxy_set_header Host $proxy_host`. When it is replaced,
+Podium sees `Host: 127.0.0.1:3456` while the browser sent
+`Origin: https://podium.example.com`, decides they disagree, and refuses every
+`POST`, `PUT` and `DELETE` as cross-site: the UI loads and nothing in it works.
+The same hop is plain `http` even when the browser is on TLS, so the token
+cookie loses its `Secure` flag and the `?token=` redirect points back at
+`http://`.
+
+```sh
+PODIUM_TRUST_PROXY=true
+PODIUM_ALLOWED_HOSTS="podium.example.com"
+```
+
+That makes Podium read `X-Forwarded-Host` and `X-Forwarded-Proto` instead. It is
+off by default and should stay off unless a proxy really is in front, because
+`Host` is what makes the rebinding check work — a page cannot change it, and
+those two headers are ones any client can write. Behind a proxy that sets them,
+the proxy is the only thing that can reach Podium and they are exactly as
+trustworthy as it is. The host rules still apply to the forwarded name, so it
+still has to be in `PODIUM_ALLOWED_HOSTS`.
+
+If your proxy preserves the original `Host` — Caddy and Traefik do by default, and
+so does nginx with `proxy_set_header Host $host` — you do not need this.
+
+All of these are environment-only, and deliberately not on the Settings page: a
 boundary you can move through the API it protects is not a boundary. None of it
 is a substitute for not exposing Podium — it can reorder your channels and it
-holds a Dispatcharr credential.
+holds a Dispatcharr credential. One more thing worth knowing if you put it
+behind a proxy you do not control: `?token=` is a query string, and query
+strings end up in access logs. It is meant to be used once, from a browser, and
+the redirect takes it back out of the URL — but the log entry on the way in has
+already been written, so treat a token that has been through somebody else's
+proxy as one worth rotating.
 
 ## Pacing
 
@@ -211,7 +263,7 @@ word.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `PODIUM_TEAMARR_URL` | *(empty)* | where Teamarr answers, e.g. `http://teamarr:9195`. Empty disables the push entirely — the export stays a file you download |
+| `PODIUM_TEAMARR_URL` | *(empty)* | where Teamarr answers, e.g. `http://teamarr:9195`. Empty disables the push entirely — the export stays a file you download. A plain `http(s)` base only: a `#`, a `?` or a `user:pass@` in it is refused, because Podium appends its API path to this and a fragment would throw that path away |
 | `PODIUM_TEAMARR_SYNC` | `false` | also push on the interval below. Off, the Quality page's button is the only thing that writes |
 | `PODIUM_TEAMARR_SYNC_MS` | `86400000` | how often the scheduled push runs. A day |
 | `PODIUM_TEAMARR_MIN_SAMPLES` | `200` | in-scope samples the profile must be fitted on before anything is pushed |
@@ -261,6 +313,7 @@ Why the gate exists at all, and how to read what it dropped, is in
 | `PODIUM_DRY_RUN` | `true` | never writes while set; set `false` to let it reorder |
 | `PODIUM_REMOVE_UNMATCHED` | `false` | `true` unassigns unclaimed streams |
 | `PODIUM_REMOVE_UNMATCHED_AFTER_MS` | `86400000` | how long a stream must stay unclaimed first; [see below](#removing-unmatched-streams) |
+| `PODIUM_REMOVE_DEAD_AFTER_CHECKS` | `0` | unassign a stream after this many consecutive dead checks; `0` is off, [see below](#removing-dead-streams) |
 | `PODIUM_AUTO_ASSIGN` | `true` | lets a pass put matched streams onto channels that do not carry them; `false` is reorder-only |
 | `PODIUM_AUTO_ASSIGN_MAX` | `0` | ceiling on how many matched streams a channel may gain this way; `0` removes the cap |
 
@@ -290,6 +343,77 @@ over it. Set it to `0` for the old instant removal.
 Checking one channel by hand and ticking the drop box ignores the waiting
 period: that is an instruction about a channel somebody is looking at, not a
 pass acting on its own. It still will not offer to drop a stale stream.
+
+### Removing dead streams
+
+The setting above is about a stream the rule stopped claiming. This is the other
+case: the rule still wants it, the provider still lists it, and it simply does
+not play any more. Ranking sinks a dead stream, which is enough while the
+channel has something better — but a channel whose lineup died months ago is
+carrying streams nobody can watch, and nothing else will ever clear them.
+
+`PODIUM_REMOVE_DEAD_AFTER_CHECKS` is how many consecutive dead checks a stream
+must fail before a pass unassigns it. Off by default.
+
+**Checks, not hours**, because the checks are already spaced out for you: a dead
+verdict is re-probed after 3 hours, then 6, 12 and 24, so waiting for the count
+costs a provider nothing extra.
+
+| checks | roughly how long it has been dead |
+| --- | --- |
+| 2 | 3 hours |
+| 3 | 9 hours |
+| 4 | 21 hours |
+| 5 | 2 days |
+| 6 | 3 days |
+
+Whole numbers only, and any live verdict resets the count to zero. Queueing a
+re-check by hand probes sooner than the schedule would, so it also reaches the
+count sooner. The count is read at the moment a pass decides a write, not when
+the pass began: a stream that answers mid-pass is safe that same pass, and one
+that reaches the threshold mid-pass is acted on without waiting for the next.
+
+**Only dead counts.** A black screen, and a stream under the bitrate floor, are
+both *alive*: they sink in the ranking, they reset the streak like any other
+live verdict, and this never removes them.
+
+Three things it will not do:
+
+- **Strip a provider that is having an outage.** When more than half of the
+  streams Podium *manages* on a provider read dead, nothing of that provider's
+  is removed on that pass. An outage looks exactly like every stream on the
+  account dying at once, and it is the failure that made unmatched removal
+  dangerous.
+
+  The share is measured against the streams Podium manages on that provider --
+  the ones it probes and holds verdicts for — not against the provider's full
+  catalogue. A provider may list 20,000 streams while Podium manages 400 of
+  them; judged against the catalogue, a total blackout would read as 2% dead
+  and this guard would never once fire.
+
+  Providers with fewer than four managed streams are not judged for an outage
+  at all. One managed stream reads 1/1 dead the moment it dies, which would
+  otherwise mean a permanent "outage" and a stream that could never be cleaned
+  up — the opposite of what the setting is for.
+- **Remove a stream it just saw working.** A stream the pass probed alive is
+  exempt however long its streak was beforehand, and its count is already back
+  to zero.
+- **Touch a stale stream**, on the same rule as above: Dispatcharr marking a
+  stream stale is the provider's business, not evidence about this channel.
+- **Empty a channel.** The last stream is never removed, however dead it is. A
+  channel carrying nothing serves nothing and says nothing about why.
+
+Every removal is logged with the stream ids and their providers, counted in the
+pass summary line, and recorded against the run in the database — `removed` on
+the run row, and `podium_streams_removed_total` in the metrics, so the count
+outlives the logs. Nothing happens under `PODIUM_DRY_RUN`, and a measure-only
+group is never written to at all.
+
+Removal still has no undo: an assignment is something a channel remembers, not
+something a stream carries. Nothing is recorded against the stream, so if the
+feed recovers, auto-assign can put it back on a channel whose rule still matches
+it — but a channel ranked off its own assignment has nothing left to match on,
+and there it is gone for good.
 
 ### Auto-assign
 

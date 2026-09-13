@@ -7,6 +7,7 @@
  */
 
 import { isInterlaced, type ProbeResult } from './probe';
+import { MIN_RESOLUTIONS, type MinResolution } from './resolution';
 
 /** Normalisation ceilings. Anything at or above these scores 1.0 for that term. */
 const MAX_HEIGHT = 2160;
@@ -132,6 +133,22 @@ export interface Weights {
    * new installs are seeded with `NEW_INSTALL_UHD_BITRATE_KBPS`.
    */
   uhdBitrateKbps: number;
+  /**
+   * The smallest picture a stream may carry and still be offered.
+   *
+   * Never read from the rules file's `ordering` block: it is resolved per
+   * channel, from the channel's rule or else its group's policy, and laid onto
+   * the pass's weights by `withResolutionFloor`. Absent means no floor, which
+   * is every channel nobody has set one on.
+   *
+   * Unlike `minBitrateKbps` this is a preference, not a health check. A 720p
+   * feed plays; it is just not what this channel should lead with. So a stream
+   * below it sinks with the unusable ones and is never auto-assigned, but keeps
+   * its score and ranks ahead of every stream that is actually broken -- see
+   * `isHealthy`. A channel where nothing clears the floor therefore keeps its
+   * quality order rather than collapsing to stream id.
+   */
+  minResolution?: MinResolution;
 }
 
 export const DEFAULT_WEIGHTS: Weights = {
@@ -235,8 +252,15 @@ export function effectiveBitrateKbps(result: ProbeResult, weights: Weights): num
   return result.bitrateKbps * (hevc ? weights.hevcBitrateFactor : 1);
 }
 
-/** True when a stream is alive but too degraded to be worth offering. */
-export function isUsable(
+/**
+ * True when a stream actually plays: alive, not a black screen, and not under
+ * the bitrate floor.
+ *
+ * Split from `isUsable` because the resolution floor is a different kind of
+ * question. A stream failing this is broken and scores 0; one that passes it
+ * but falls short of a channel's resolution floor is merely not wanted first.
+ */
+export function isHealthy(
   result: ProbeResult,
   weights: Weights = DEFAULT_WEIGHTS,
   audioOnly = false,
@@ -252,6 +276,44 @@ export function isUsable(
   // A measured 0 means "unknown", not "no data" -- only judge what we measured.
   if (weights.minBitrateKbps <= 0 || result.bitrateKbps <= 0) return true;
   return result.bitrateKbps >= weights.minBitrateKbps;
+}
+
+/**
+ * Whether a stream's picture clears `weights.minResolution`.
+ *
+ * A stream with no picture at all does not clear a picture floor. Reading that
+ * the other way -- "it never mentioned a resolution, so let it through" -- lets
+ * the stream that told us the least beat every stream that admitted to being
+ * merely 720p, and with auto-assign on it is how a video-less radio feed gets
+ * *added* to an HD channel. The floor is an explicit instruction about what a
+ * viewer is served, so an absent picture fails it.
+ *
+ * Failing is survivable, which is what makes this the safe direction: the
+ * stream keeps its score, stays ahead of everything actually broken, and the
+ * short unknown-bitrate TTL re-probes it into its true position.
+ *
+ * An audio-only channel has no picture to judge and is exempt outright.
+ */
+export function meetsResolutionFloor(
+  result: ProbeResult,
+  weights: Weights = DEFAULT_WEIGHTS,
+  audioOnly = false,
+): boolean {
+  const floor = weights.minResolution ? MIN_RESOLUTIONS[weights.minResolution] : undefined;
+  if (!floor || audioOnly) return true;
+  return (result.height || 0) >= floor.height || (result.width || 0) >= floor.width;
+}
+
+/**
+ * True when a stream is worth offering: healthy, and clearing the channel's
+ * resolution floor if it has one. What ranking sinks on and auto-assign admits.
+ */
+export function isUsable(
+  result: ProbeResult,
+  weights: Weights = DEFAULT_WEIGHTS,
+  audioOnly = false,
+): boolean {
+  return isHealthy(result, weights, audioOnly) && meetsResolutionFloor(result, weights, audioOnly);
 }
 
 /**
@@ -308,13 +370,17 @@ export function hdrScore(result: Pick<ProbeResult, 'colorTransfer'>, weights: We
   return transfer === other ? 0 : 0.5;
 }
 
-/** Score a probe result in [0, 1]. A dead or unusable stream always scores 0. */
+/**
+ * Score a probe result in [0, 1]. A dead, black or sub-bitrate stream always
+ * scores 0. One below a resolution floor keeps its score, so the streams that
+ * sank for that reason alone are still ordered among themselves.
+ */
 export function score(
   result: ProbeResult,
   weights: Weights = DEFAULT_WEIGHTS,
   audioOnly = false,
 ): number {
-  if (!isUsable(result, weights, audioOnly)) return 0;
+  if (!isHealthy(result, weights, audioOnly)) return 0;
 
   if (audioOnly || (!result.videoCodec && !result.height)) {
     const channels = Math.min((result.audioChannels || 2) / MAX_AUDIO_CHANNELS, 1);
@@ -425,10 +491,12 @@ export const DEFAULT_STRATEGY: RankStrategy = {
 /**
  * Order stream ids best-first.
  *
- * Unusable streams (dead / black / sub-floor) always sink regardless of mode.
- * The mode then picks the primary key, streams whose bitrate was never measured
- * sink within it, quality score breaks ties after that, and a stable stream-id
- * sort is the last resort:
+ * Unusable streams always sink regardless of mode -- dead, black, under the
+ * bitrate floor, or under the channel's resolution floor -- and among them a
+ * stream that only misses the resolution floor goes ahead of one that does not
+ * play at all. The mode then picks the primary key, streams whose bitrate was
+ * never measured sink within it, quality score breaks ties after that, and a
+ * stable stream-id sort is the last resort:
  *
  * - `quality` (default): score, then streamId. The best source wins outright.
  * - `provider`: preferred providers first (by `providerRank`), then score
@@ -448,6 +516,12 @@ export function rank(
         (isUsable(a.result, weights, audioOnly) ? 0 : 1) -
         (isUsable(b.result, weights, audioOnly) ? 0 : 1);
       if (usable !== 0) return usable;
+      // Without a resolution floor the two tests agree, so this never decides
+      // anything and an install that has not set one ranks exactly as before.
+      const healthy =
+        (isHealthy(a.result, weights, audioOnly) ? 0 : 1) -
+        (isHealthy(b.result, weights, audioOnly) ? 0 : 1);
+      if (healthy !== 0) return healthy;
 
       if (mode === 'alias' && a.stepOrder !== b.stepOrder) return a.stepOrder - b.stepOrder;
       if (mode === 'provider') {

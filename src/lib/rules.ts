@@ -17,6 +17,7 @@ import {
   Matcher,
 } from './matcher';
 import { DEFAULT_ORDERING, type OrderingConfig } from './ordering';
+import { invalidMinResolution, type MinResolution, parseMinResolution } from './resolution';
 import {
   NEW_INSTALL_AUDIO,
   NEW_INSTALL_HDR,
@@ -43,6 +44,8 @@ const channelSchema = z.object({
   exclude_regions: z.array(z.string()).nullish(),
   step_order: z.coerce.number().optional(),
   patterns: z.array(patternSchema).nullish(),
+  /** `720p`, `1080p`, `2160p`, or `none` to ignore the group's. See `parseMinResolution`. */
+  min_resolution: z.unknown().optional(),
 });
 
 const defaultsSchema = z
@@ -106,6 +109,22 @@ export interface LoadReport {
   regexBased: number;
   skippedPatterns: string[];
   ordering: OrderingConfig;
+  /**
+   * Resolution floors set on individual channels, `null` for an explicit
+   * `none`. Kept beside the matcher rather than on `ChannelRule`, because a
+   * channel ranked off its own assignment has no rule to carry one -- and those
+   * are exactly the channels most likely to want it.
+   */
+  channelFloors: Map<number, MinResolution | null>;
+  /**
+   * Floors written in the file that could not be read, as `where: text`.
+   *
+   * An unreadable floor is ignored rather than fatal -- one typo must not cost
+   * every channel its matching -- but ignoring it in silence is how an operator
+   * ends up certain they set a floor, watching a channel ranked without one.
+   * Reported like `skippedPatterns`, and for the same reason.
+   */
+  invalidFloors: string[];
 }
 
 /**
@@ -291,9 +310,26 @@ export function loadRules(raw: unknown): LoadReport {
   const flags = caseSensitive ? '' : 'i';
   const rules = new Map<number, ChannelRule>();
   const skippedPatterns: string[] = [];
+  const channelFloors = new Map<number, MinResolution | null>();
+  const invalidFloors: string[] = [];
+
+  // Groups are read for their floors only; `parsePolicies` owns the rest. A
+  // typo here is as silent as one on a channel, and as worth saying out loud.
+  for (const [groupId, raw] of Object.entries(doc.groups ?? {})) {
+    const written = invalidMinResolution((raw as { min_resolution?: unknown })?.min_resolution);
+    if (written) invalidFloors.push(`group ${groupId}: min_resolution "${written}"`);
+  }
 
   for (const entry of doc.channels) {
     if (entry.enabled === false) continue;
+    // Read before the no-matchers bail-out below, which would otherwise throw
+    // away the floor on every assignment-only channel.
+    const floor = parseMinResolution(entry.min_resolution);
+    if (floor !== undefined) channelFloors.set(entry.channel_id, floor);
+    const written = invalidMinResolution(entry.min_resolution);
+    if (written) {
+      invalidFloors.push(`channel ${entry.channel_id}: min_resolution "${written}"`);
+    }
 
     const patterns: CompiledPattern[] = [];
     for (const spec of entry.patterns ?? []) {
@@ -344,5 +380,7 @@ export function loadRules(raw: unknown): LoadReport {
     regexBased,
     skippedPatterns,
     ordering,
+    channelFloors,
+    invalidFloors,
   };
 }

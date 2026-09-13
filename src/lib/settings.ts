@@ -12,6 +12,7 @@
  * not a settings change.
  */
 
+import { baseUrlProblem, normaliseBaseUrl } from './base-url';
 import { CONFIG_DEFAULTS } from './config';
 import type { Store } from './store';
 
@@ -37,6 +38,13 @@ export interface FieldSpec {
   /** Bounds in *displayed* units. Keeps a typo from stalling every pass. */
   min?: number;
   max?: number;
+  /**
+   * Whole numbers only. For a field counting *events* rather than measuring a
+   * quantity -- "after 3 checks" is a real instruction and "after 0.5 checks"
+   * is not, and a fraction that floors to zero on the way in is how a
+   * threshold turns into "remove on the first one".
+   */
+  int?: boolean;
 }
 
 /** Displayed units from stored units. */
@@ -137,6 +145,16 @@ export const FIELDS: FieldSpec[] = [
     scale: 3_600_000,
     min: 0,
     max: 720,
+  },
+  {
+    key: 'PODIUM_REMOVE_DEAD_AFTER_CHECKS',
+    kind: 'number',
+    label: 'Remove a dead stream after this many checks',
+    help: 'Unassigns a stream that came back dead this many consecutive times. Checks, not hours: a dead stream is re-probed after 3h, then 6, 12 and 24, so 5 checks is about two days. Any live verdict resets the count, and a stream that is merely black-screened or under the bitrate floor is alive — it sinks, but is never removed. A provider whose catalogue has mostly gone dead is left alone entirely, so an outage cannot strip its streams off every channel. 0 is off, and removal has no undo.',
+    section: 'behaviour',
+    min: 0,
+    max: 100,
+    int: true,
   },
   {
     key: 'PODIUM_AUTO_ASSIGN',
@@ -254,7 +272,7 @@ export const FIELDS: FieldSpec[] = [
     key: 'PODIUM_TEAMARR_URL',
     kind: 'string',
     label: 'Teamarr URL',
-    help: 'Where Teamarr answers, e.g. http://teamarr:9195. Leave empty and nothing is pushed; the export stays a file you download. Use in-cluster service DNS where possible.',
+    help: 'Where Teamarr answers, e.g. http://teamarr:9195 — a plain http(s) base, with no path fragment, query or credentials in it. Leave empty and nothing is pushed; the export stays a file you download. Use in-cluster service DNS where possible.',
     section: 'teamarr',
   },
   {
@@ -453,17 +471,22 @@ export function validateSettings(patch: Record<string, unknown>): {
         errors.push({ key, message: `must be at most ${field.max}` });
         continue;
       }
+      if (field.int && !Number.isInteger(n)) {
+        errors.push({ key, message: 'must be a whole number' });
+        continue;
+      }
       values[key] = String(field.scale ? Math.round(n * field.scale) : n);
     } else if (field.kind === 'boolean') {
       values[key] = ['1', 'true', 'yes', 'on'].includes(text.toLowerCase()) ? 'true' : 'false';
-    } else if (key === 'DISPATCHARR_URL') {
-      try {
-        const url = new URL(text);
-        if (!/^https?:$/.test(url.protocol)) throw new Error('protocol');
-        values[key] = text.replace(/\/+$/, '');
-      } catch {
-        errors.push({ key, message: 'must be an http(s) URL' });
-      }
+    } else if (key === 'DISPATCHARR_URL' || key === 'PODIUM_TEAMARR_URL') {
+      // Both are bases with an API path appended to them, and both are checked
+      // by the same rules -- see `base-url.ts`. The Teamarr URL used to fall
+      // through to the untyped branch below, which accepted anything at all:
+      // the client then appended its path to it, and a base ending in `#` threw
+      // that path away and sent the request somewhere else entirely.
+      const problem = baseUrlProblem(text);
+      if (problem) errors.push({ key, message: problem });
+      else values[key] = normaliseBaseUrl(text, field.label);
     } else {
       values[key] = text;
     }
@@ -544,4 +567,70 @@ export function mergeForTest(
     merged[key] = '';
   }
   return { merged, withheld };
+}
+
+/** How a credential key reads in a sentence somebody has to act on. */
+const CREDENTIAL_NAMES: Record<(typeof CREDENTIAL_KEYS)[number], string> = {
+  DISPATCHARR_API_KEY: 'API key',
+  DISPATCHARR_USERNAME: 'username',
+  DISPATCHARR_PASSWORD: 'password',
+};
+
+/**
+ * Credentials this change would hand to a host they were not saved for.
+ *
+ * `mergeForTest` stops the *test* endpoint sending a stored credential to a
+ * newly typed host. Saving had no such guard, and it is the worse half of the
+ * pair: a test sends the credential once, a save points every later request at
+ * the new host -- the worker's next pass, every page in the UI -- and writes the
+ * decision to the database, where nothing shows it happened.
+ *
+ * The whole attack is one request. `PUT /api/settings` with nothing but a URL
+ * in it passed the credential check, because `requireCredentials` looks at the
+ * *merged* config and the credentials were still there in the environment,
+ * exactly where a compose file puts them. On the next tick the worker built a
+ * client for `https://wherever` and sent the Dispatcharr API key to it in
+ * cleartext. Restoring a backup is the same request wearing a different hat: it
+ * replaces the settings table wholesale, so a bundle carrying a URL and no
+ * credentials leaves the environment's in place and pointed somewhere new.
+ *
+ * What counts as moved is a credential the request does not itself carry. One
+ * supplied in the same breath is one the caller already holds -- the person at
+ * the form re-entering the key for the host they are moving to, or a backup
+ * bundle that carries its own -- and one that ends up empty is sent nowhere.
+ * Everything else is inherited: left in the settings table by an earlier save,
+ * or sitting in the environment where a compose file put it, which is exactly
+ * what the caller would not otherwise have.
+ *
+ * Compared by hostname only, for the reason `mergeForTest` gives: a port change
+ * keeps the secret on the machine that already has it, and fixing a port is the
+ * commonest edit there is.
+ */
+export function movedCredentials(
+  before: Record<string, string>,
+  after: Record<string, string>,
+  supplied: Record<string, string | null | undefined>,
+  env: Record<string, string | undefined>,
+): string[] {
+  const urlOf = (source: Record<string, string | undefined>): string =>
+    source.DISPATCHARR_URL || env.DISPATCHARR_URL || CONFIG_DEFAULTS.DISPATCHARR_URL;
+  if (hostOfUrl(urlOf(before)) === hostOfUrl(urlOf(after))) return [];
+
+  return CREDENTIAL_KEYS.filter((key) => {
+    const effective = after[key] || env[key] || '';
+    return effective !== '' && !supplied[key];
+  });
+}
+
+/** That refusal, as the sentence the caller is shown. */
+export function credentialMoveMessage(moved: string[], url: string): string {
+  const names = moved.map(
+    (key) => CREDENTIAL_NAMES[key as (typeof CREDENTIAL_KEYS)[number]] ?? key,
+  );
+  const list =
+    names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : (names[0] ?? '');
+  return (
+    `This points Dispatcharr at ${hostOfUrl(url)}, and the saved ${list} would be sent there. ` +
+    `Enter the ${list} again in the same save to confirm the move, or clear it first.`
+  );
 }

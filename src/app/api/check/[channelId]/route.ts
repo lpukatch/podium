@@ -8,18 +8,22 @@ import {
   Eligibility,
 } from '@/lib/eligibility';
 import { Mutex } from '@/lib/mutex';
-import { resolveOrdering } from '@/lib/ordering';
+import { resolveOrdering, withResolutionFloor } from '@/lib/ordering';
 import { isInterlaced, type ProbeResult, probe } from '@/lib/probe';
+import { channelResolutionFloor } from '@/lib/resolution';
 import {
   assignedCandidates,
   composeOrder,
+  deadRemovalPlan,
+  dropDeadStreams,
   protectedFromRemoval,
   splitAssigned,
   statsPayload,
 } from '@/lib/runner';
 import { laneKey, type ProbeJob, runLanes } from '@/lib/scheduler';
-import { frameRate, isUsable, type RankEntry, rank, score } from '@/lib/scoring';
+import { frameRate, isHealthy, isUsable, type RankEntry, rank, score } from '@/lib/scoring';
 import {
+  channelFloors,
   groupPatterns,
   index,
   matcher,
@@ -165,7 +169,13 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         proposed: [],
         kept: current,
         workerOrder,
-        minBitrateKbps: config.PODIUM_MIN_BITRATE_KBPS,
+        // No rows were ranked, so there is nothing for these to explain -- but
+        // they are the floors the ranking would have used, not a second opinion
+        // read out of the environment beside it.
+        minBitrateKbps: resolveOrdering(ordering(), new Map(), config.PODIUM_MIN_BITRATE_KBPS)
+          .weights.minBitrateKbps,
+        minResolution:
+          channelResolutionFloor(channelFloors(), id, groupPolicy.minResolution) ?? null,
         rows: [],
         unclaimed: [],
         unprobed: [],
@@ -180,8 +190,12 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     const workerBusy = !isStale && progress.phase === 'probing';
 
     const providerNames = new Map(snap.providers.map((p) => [p.id, p.name]));
-    // Same strategy the worker resolves, so the preview matches what it writes.
-    const strategy = resolveOrdering(ordering(), providerNames, config.PODIUM_MIN_BITRATE_KBPS);
+    // Same strategy the worker resolves, so the preview matches what it writes --
+    // down to this channel's own resolution floor.
+    const strategy = withResolutionFloor(
+      resolveOrdering(ordering(), providerNames, config.PODIUM_MIN_BITRATE_KBPS),
+      channelResolutionFloor(channelFloors(), id, groupPolicy.minResolution),
+    );
 
     // The courtesy reserve, on the same rule the worker uses (Pacer.laneLimits):
     // hold a slot back for a human only when a human is actually watching, since
@@ -365,7 +379,33 @@ export async function POST(request: Request, context: { params: Promise<{ channe
           graceMs,
         )
       : new Set<number>();
-    const workerOrder = composeOrder(ranked, current, removeUnmatched, assign, heldFromWorker);
+    // The worker's other removal rule, mirrored so this preview says what a
+    // pass would actually write. Read-only, like the grace period above:
+    // looking at a channel neither advances a streak nor excuses one. The
+    // verdicts this check just wrote are already in the cache, so a stream this
+    // probe found dead for the Nth time counts here exactly as it will there.
+    //
+    // The one thing this cannot mirror is *when*: the worker judges an outage
+    // from the whole cache as it stood when its pass began, and a check run
+    // between passes sees a cache the worker has not read yet. The streaks are
+    // exact either way -- they are read here, now, for this channel's streams,
+    // which is what the worker does too.
+    const deadRemoval =
+      config.PODIUM_REMOVE_DEAD_AFTER_CHECKS > 0
+        ? deadRemovalPlan(
+            config.PODIUM_REMOVE_DEAD_AFTER_CHECKS,
+            store.deadStreams(),
+            streamById,
+            store.probedStreamIds(),
+          )
+        : undefined;
+    const workerComposed = composeOrder(ranked, current, removeUnmatched, assign, heldFromWorker);
+    const workerOrder = dropDeadStreams(
+      workerComposed,
+      streamById,
+      deadRemoval,
+      deadRemoval ? store.deadStreaks(workerComposed) : new Map(),
+    ).order;
     const kept = composeOrder(ranked, current, false, assign);
     // What the panel's drop tick asks for, composed here rather than left to
     // the apply. `proposed` below is the raw ranking -- every stream the rule
@@ -411,6 +451,9 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         elapsedMs: result?.elapsedMs ?? 0,
         score: result ? score(result, strategy.weights, audioOnly) : 0,
         usable: result ? isUsable(result, strategy.weights, audioOnly) : false,
+        // Separates "below the resolution floor" from "does not play", which
+        // the panel explains differently and the ranking treats differently.
+        healthy: result ? isHealthy(result, strategy.weights, audioOnly) : false,
         black: result?.black ?? false,
         currentRank: current.indexOf(streamId) >= 0 ? current.indexOf(streamId) + 1 : null,
         proposedRank: proposed.indexOf(streamId) >= 0 ? proposed.indexOf(streamId) + 1 : null,
@@ -448,7 +491,12 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       truncated,
       totalHits: hits.length,
       probeLimit: maxCheckStreams,
-      minBitrateKbps: config.PODIUM_MIN_BITRATE_KBPS,
+      // The floors this channel was actually ranked under, so the panel's reason
+      // for a stream sinking quotes the number that sank it. The bitrate floor
+      // used to be read from the environment here, which disagreed with the
+      // ranking whenever the rules file overrode it.
+      minBitrateKbps: strategy.weights.minBitrateKbps,
+      minResolution: strategy.weights.minResolution ?? null,
       rows,
       unclaimed,
       unprobed,

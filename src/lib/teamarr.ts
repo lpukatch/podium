@@ -20,7 +20,9 @@
  * scored as though those rules were absent.
  */
 
+import { withResolutionFloor } from './ordering';
 import type { ProbeResult } from './probe';
+import type { MinResolution } from './resolution';
 import { type RankEntry, type RankStrategy, rank } from './scoring';
 import { statsPayload } from './stats';
 import type { StreamMatch } from './teamarr-match';
@@ -359,6 +361,8 @@ export interface ChannelInput {
   audioOnly?: boolean;
   /** Another app owns this channel's ordering -- see `ChannelCheck.managed`. */
   managed?: boolean;
+  /** The channel's resolution floor, so Podium's side ranks it as a pass would. */
+  minResolution?: MinResolution;
   streams: Array<{ facts: StreamFacts; stepOrder: number }>;
 }
 
@@ -410,7 +414,11 @@ export function checkRules(
       providerId: 0,
       result: facts.result,
     }));
-    const measured = rank(entries, strategy, channel.audioOnly);
+    const measured = rank(
+      entries,
+      withResolutionFloor(strategy, channel.minResolution),
+      channel.audioOnly,
+    );
 
     const factsById = new Map(channel.streams.map(({ facts }) => [facts.streamId, facts]));
     const view = (streamId: number): PickView => {
