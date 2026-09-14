@@ -126,6 +126,47 @@ export interface ActiveSession {
   profileId: number | null;
 }
 
+/**
+ * How to read `/proxy/ts/status` when Podium is itself a client of it.
+ *
+ * Probing through the Dispatcharr proxy puts Podium in the same client table
+ * as the people it is trying to stay out of the way of, and the pacer reads
+ * that table to decide how much of a provider it may use. Left alone, the
+ * arithmetic eats itself: every probe in flight reads back as a viewer, the
+ * lane shrinks by the work already running in it, and with "pause when
+ * watching" on the first probe of a pass aborts the pass that started it.
+ *
+ * `ignoreUserAgent` is the way out. Dispatcharr records each client's
+ * User-Agent and reports it per client, and in proxy mode Podium sends one
+ * nobody else sends, so its own sessions can be told from a viewer's exactly
+ * rather than guessed at by timing. Unset -- which is every install probing
+ * providers directly -- reads the payload exactly as before.
+ */
+export interface ActiveSessionOptions {
+  /** Drop sessions whose every client reports this User-Agent. */
+  ignoreUserAgent?: string;
+}
+
+/**
+ * Whether a status entry is Podium's own probing and nobody else's.
+ *
+ * Conservative on purpose, in both directions a mistake could go. An entry
+ * with no per-client detail is *kept*: an older Dispatcharr that reports only
+ * channel-level counts gives nothing to match on, and treating that as
+ * Podium's own would hide real viewers. An entry carrying one viewer beside
+ * two probes is also kept -- the viewer is what the lane must yield to, and
+ * the probes are already accounted for by the lane they were drawn from.
+ */
+function isOwnProbeSession(row: Record<string, unknown>, userAgent: string): boolean {
+  const clients = row.clients;
+  if (!Array.isArray(clients) || clients.length === 0) return false;
+  return clients.every(
+    (client) =>
+      typeof (client as { user_agent?: unknown })?.user_agent === 'string' &&
+      (client as { user_agent: string }).user_agent.trim() === userAgent,
+  );
+}
+
 export class DispatcharrError extends Error {}
 
 /**
@@ -195,6 +236,34 @@ function toJsReplacement(replacePattern: string): string | null {
     i += 1 + whole.length;
   }
   return out;
+}
+
+/**
+ * The Dispatcharr proxy address that plays a stream, for probing through the
+ * server rather than at the provider.
+ *
+ * `/proxy/ts/stream/<id>/` resolves its id as a channel UUID first and falls
+ * back to a `stream_hash`, so an individual stream plays through it without
+ * being attached to a channel -- the same endpoint the Dispatcharr UI's
+ * "Preview Stream" action uses on a row in the streams table. What that buys a
+ * probe is the stream *profile*: Dispatcharr picks the M3U profile, applies the
+ * account's user agent, and runs whatever the stream's profile says (a direct
+ * pipe, ffmpeg, streamlink), so what ffprobe measures is what a viewer would
+ * actually receive rather than what the origin hands an anonymous GET.
+ *
+ * Null for a stream Dispatcharr has no hash for, which is the caller's signal
+ * to probe the provider URL directly: a hash is written by the M3U refresh, so
+ * a stream without one is mid-import rather than unplayable.
+ */
+export function proxyStreamUrl(
+  baseUrl: string,
+  streamHash: string | null | undefined,
+): string | null {
+  if (!streamHash || streamHash.trim() === '') return null;
+  // Same refusal as the API base: a base URL carrying a query or fragment
+  // truncates the path appended below it, and this one is settable in the UI.
+  const base = normaliseBaseUrl(baseUrl, 'Dispatcharr');
+  return `${base}/proxy/ts/stream/${encodeURIComponent(streamHash.trim())}/`;
 }
 
 /**
@@ -665,6 +734,7 @@ export class DispatcharrClient {
    */
   async activeSessions(
     uuidMap?: Map<string, number> | Record<string, number>,
+    options?: ActiveSessionOptions,
   ): Promise<ActiveSession[]> {
     const resp = await this.request('GET', '/proxy/ts/status');
     if (!resp.ok) throw new DispatcharrError(`activity probe -> ${resp.status}`);
@@ -674,6 +744,9 @@ export class DispatcharrClient {
       Array.isArray(body.channels) ? body.channels.length : 0,
     );
     const entries = Array.isArray(body.channels) ? body.channels : [];
+    const ignoreAgent = options?.ignoreUserAgent?.trim() ?? '';
+    /** Entries that were entirely Podium's own probes. See `rawCount` below. */
+    let ignored = 0;
     const resolve = (val: unknown): number | null => {
       if (typeof val === 'number') return val;
       if (typeof val !== 'string' || val.trim() === '') return null;
@@ -700,6 +773,10 @@ export class DispatcharrClient {
       }
       if (!entry || typeof entry !== 'object') continue;
       const row = entry as Record<string, unknown>;
+      if (ignoreAgent && isOwnProbeSession(row, ignoreAgent)) {
+        ignored += 1;
+        continue;
+      }
       let channelId: number | null = null;
       for (const key of ['channel_id', 'id', 'channel']) {
         channelId = resolve(row[key]);
@@ -718,7 +795,7 @@ export class DispatcharrClient {
       sessions.push({ channelId, profileId });
     }
 
-    if (rawCount > 0 && sessions.length === 0) {
+    if (rawCount - ignored > 0 && sessions.length === 0) {
       throw new DispatcharrError(
         `active channel probe status payload had ${rawCount} active entry/entries but 0 channel IDs resolved`,
       );
@@ -729,8 +806,9 @@ export class DispatcharrClient {
   /** Channel ids currently being streamed. Resolves UUIDs if uuidMap is provided. */
   async activeChannelIds(
     uuidMap?: Map<string, number> | Record<string, number>,
+    options?: ActiveSessionOptions,
   ): Promise<number[]> {
-    return (await this.activeSessions(uuidMap)).map((session) => session.channelId);
+    return (await this.activeSessions(uuidMap, options)).map((session) => session.channelId);
   }
 
   /**

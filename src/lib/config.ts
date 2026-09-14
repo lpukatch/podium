@@ -53,6 +53,43 @@ export const configSchema = z.object({
    */
   PODIUM_PROBE_TIMEOUT_MS: num(20_000),
   PODIUM_USER_AGENT: z.string().default('VLC/3.0.14'),
+  /**
+   * Probe through Dispatcharr's proxy instead of straight at the provider.
+   *
+   * Off by default, because direct probing is the cheaper and more direct
+   * measurement: it costs Dispatcharr nothing and measures the origin without
+   * anything in between. Turn it on when what you want ranked is what a viewer
+   * would actually get. `/proxy/ts/stream/<stream_hash>/` resolves an
+   * individual stream, so each probe goes through the stream's own *stream
+   * profile* -- the proxy mode, the transcode, the account's user agent and
+   * connection accounting that Dispatcharr applies at playback. A provider
+   * whose origin answers an anonymous GET but fails the real playback path (or
+   * the reverse) is then measured as it plays, not as it probes.
+   *
+   * It is not free. Every probe becomes a real Dispatcharr client and reserves
+   * an M3U profile slot, an ffmpeg-mode stream profile transcodes for the
+   * length of the probe, and a stream with no `stream_hash` yet still falls
+   * back to its provider URL. See `PODIUM_PROBE_CLIENT_USER_AGENT` for how
+   * Podium keeps its own sessions out of its viewer accounting, and set
+   * Dispatcharr's "channel shutdown delay" to 0 so a finished probe releases
+   * the slot instead of holding it for the grace period.
+   */
+  PODIUM_PROBE_VIA_DISPATCHARR: bool(false),
+  /**
+   * The User-Agent proxy-mode probes identify themselves to Dispatcharr with.
+   *
+   * Not cosmetic, and not the same knob as `PODIUM_USER_AGENT`: in proxy mode
+   * the agent the *provider* sees is the one the M3U account is configured
+   * with, and this one reaches only Dispatcharr -- where it is what tells a
+   * Podium probe from a person watching TV in `/proxy/ts/status`. Without that
+   * split, probing through the proxy makes Podium read its own work as viewers
+   * and yield the provider to itself.
+   *
+   * Change it only if something else on the network already sends this exact
+   * string; anything a viewer's player would send is the one bad choice, since
+   * a match there hides a real viewer from the pacer.
+   */
+  PODIUM_PROBE_CLIENT_USER_AGENT: z.string().default('Podium-Probe/1'),
   /** Live TS/HLS rarely declares a bitrate; measuring it keeps ranking honest. */
   PODIUM_MEASURE_BITRATE: bool(true),
   PODIUM_MEASURE_SECONDS: num(5),
