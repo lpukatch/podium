@@ -42,18 +42,26 @@ describe('proxyStreamUrl', () => {
     // stream_hash, which is what lets a stream be probed without being
     // attached to a channel at all.
     expect(proxyStreamUrl('http://dispatcharr:9191', 'abc123')).toBe(
-      'http://dispatcharr:9191/proxy/ts/stream/abc123/',
+      'http://dispatcharr:9191/proxy/ts/stream/abc123',
     );
   });
 
   it('tolerates a base URL with a trailing slash', () => {
     expect(proxyStreamUrl('http://dispatcharr:9191/', 'abc123')).toBe(
-      'http://dispatcharr:9191/proxy/ts/stream/abc123/',
+      'http://dispatcharr:9191/proxy/ts/stream/abc123',
     );
   });
 
+  it('ends at the hash, with no trailing slash', () => {
+    // Not cosmetic. Dispatcharr serves the stream at the bare path and does
+    // not redirect a slashed one onto it, so a trailing slash 404s -- and a
+    // 404 reads back as a dead stream, which would rank every stream on the
+    // install as dead without saying why.
+    expect(proxyStreamUrl('http://d', 'abc123')).not.toMatch(/\/$/);
+  });
+
   it('escapes the hash rather than pasting it into the path', () => {
-    expect(proxyStreamUrl('http://d', 'a/../b')).toBe('http://d/proxy/ts/stream/a%2F..%2Fb/');
+    expect(proxyStreamUrl('http://d', 'a/../b')).toBe('http://d/proxy/ts/stream/a%2F..%2Fb');
   });
 
   it('has no address for a stream with no hash', () => {
@@ -77,7 +85,7 @@ describe('probeTargetUrl', () => {
   });
 
   it('probes through Dispatcharr when a base is given', () => {
-    expect(probeTargetUrl(variant, 'abc123', 'http://d')).toBe('http://d/proxy/ts/stream/abc123/');
+    expect(probeTargetUrl(variant, 'abc123', 'http://d')).toBe('http://d/proxy/ts/stream/abc123');
   });
 
   it('falls back to the provider URL for a stream with no hash', () => {
@@ -110,8 +118,8 @@ describe('probeTargetUrl', () => {
     // Dispatcharr picks, the probe occupies exactly one connection on the
     // account -- which is what the lane charged it.
     expect(drawn.map((v) => probeTargetUrl(v, 'abc123', 'http://d'))).toEqual([
-      'http://d/proxy/ts/stream/abc123/',
-      'http://d/proxy/ts/stream/abc123/',
+      'http://d/proxy/ts/stream/abc123',
+      'http://d/proxy/ts/stream/abc123',
     ]);
   });
 });

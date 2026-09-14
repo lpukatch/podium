@@ -59,7 +59,7 @@ export const configSchema = z.object({
    * Off by default, because direct probing is the cheaper and more direct
    * measurement: it costs Dispatcharr nothing and measures the origin without
    * anything in between. Turn it on when what you want ranked is what a viewer
-   * would actually get. `/proxy/ts/stream/<stream_hash>/` resolves an
+   * would actually get. `/proxy/ts/stream/<stream_hash>` resolves an
    * individual stream, so each probe goes through the stream's own *stream
    * profile* -- the proxy mode, the transcode, the account's user agent and
    * connection accounting that Dispatcharr applies at playback. A provider

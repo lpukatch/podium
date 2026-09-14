@@ -265,7 +265,7 @@ is — it costs Dispatcharr nothing and puts nothing between the probe and the
 origin.
 
 `PODIUM_PROBE_VIA_DISPATCHARR=true` sends the probe through Dispatcharr
-instead, at `/proxy/ts/stream/<stream_hash>/`. That endpoint resolves a channel
+instead, at `/proxy/ts/stream/<stream_hash>`. That endpoint resolves a channel
 UUID first and falls back to a stream hash, so an individual stream plays
 through it without being attached to a channel — it is the same address the
 Dispatcharr UI's **Preview Stream** button uses on a row in the streams table.

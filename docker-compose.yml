@@ -11,7 +11,7 @@
 
 services:
   podium:
-    image: ghcr.io/lpukatch/podium:latest
+    image: podiumfork
     container_name: podium
     restart: unless-stopped
     ports:
@@ -20,12 +20,12 @@ services:
       # network". To reach it from elsewhere, change this to "3456:3456" and
       # read docs/configuration.md#who-can-reach-it first -- if it is going
       # anywhere but your own network, it wants PODIUM_AUTH_TOKEN.
-      - "127.0.0.1:3456:3456"
+      - "3456:3456"
     environment:
       # Where Dispatcharr lives, and how to authenticate. An API key is
       # simplest; DISPATCHARR_USERNAME/PASSWORD works too and mints a JWT.
       DISPATCHARR_URL: "http://dispatcharr:9191"
-      DISPATCHARR_API_KEY: "${DISPATCHARR_API_KEY:?set DISPATCHARR_API_KEY}"
+      DISPATCHARR_API_KEY: "mnxrSux4ceISy7lJt4VoalFbJ-AVYHAA8E2rcbo8Qry8cj3Mgw8yLw"
 
       TZ: "${TZ:-UTC}"
 

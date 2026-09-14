@@ -242,7 +242,7 @@ function toJsReplacement(replacePattern: string): string | null {
  * The Dispatcharr proxy address that plays a stream, for probing through the
  * server rather than at the provider.
  *
- * `/proxy/ts/stream/<id>/` resolves its id as a channel UUID first and falls
+ * `/proxy/ts/stream/<id>` resolves its id as a channel UUID first and falls
  * back to a `stream_hash`, so an individual stream plays through it without
  * being attached to a channel -- the same endpoint the Dispatcharr UI's
  * "Preview Stream" action uses on a row in the streams table. What that buys a
@@ -263,7 +263,12 @@ export function proxyStreamUrl(
   // Same refusal as the API base: a base URL carrying a query or fragment
   // truncates the path appended below it, and this one is settable in the UI.
   const base = normaliseBaseUrl(baseUrl, 'Dispatcharr');
-  return `${base}/proxy/ts/stream/${encodeURIComponent(streamHash.trim())}/`;
+  // No trailing slash. Dispatcharr serves the stream at the bare path and does
+  // not redirect a slashed one onto it, so the slash is a 404 rather than a
+  // cosmetic difference -- and a 404 here reads as a dead stream, which is the
+  // worst way for this to fail: every stream on the install ranks as dead and
+  // nothing says why.
+  return `${base}/proxy/ts/stream/${encodeURIComponent(streamHash.trim())}`;
 }
 
 /**

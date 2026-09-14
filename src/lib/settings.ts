@@ -391,7 +391,7 @@ export const FIELDS: FieldSpec[] = [
     label: 'Probe through Dispatcharr',
     help: 'Measure each stream through Dispatcharr\u2019s proxy instead of straight at the provider, so the probe gets the stream profile, transcode and user agent a viewer would.',
     more:
-      'Off measures the origin: Podium opens the provider URL the drawn login plays, which costs Dispatcharr nothing. On, it opens /proxy/ts/stream/<hash>/ instead \u2014 the same address the Dispatcharr UI\u2019s \u201cPreview Stream\u201d button uses \u2014 so what ffprobe sees is what the stream profile actually delivers. Worth turning on when a provider answers a bare GET differently from real playback, or when the stream profile transcodes and it is the transcode you want ranked. ' +
+      'Off measures the origin: Podium opens the provider URL the drawn login plays, which costs Dispatcharr nothing. On, it opens /proxy/ts/stream/<hash> instead \u2014 the same address the Dispatcharr UI\u2019s \u201cPreview Stream\u201d button uses \u2014 so what ffprobe sees is what the stream profile actually delivers. Worth turning on when a provider answers a bare GET differently from real playback, or when the stream profile transcodes and it is the transcode you want ranked. ' +
       'The cost is that every probe becomes a real Dispatcharr client: it reserves an M3U profile connection for its duration, an ffmpeg-mode profile transcodes while it runs, and probes get slower. Set Dispatcharr\u2019s channel shutdown delay to 0 so a finished probe frees the slot immediately rather than holding it through the grace period. Streams Dispatcharr has no stream hash for yet are probed at their provider URL either way.',
     section: 'probing',
   },
