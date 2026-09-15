@@ -27,6 +27,7 @@ import type { Matcher, StreamIndex } from './matcher';
 import { resolveOrdering, withResolutionFloor } from './ordering';
 import { Pacer, type PacerConfig, viewersByProvider } from './pacer';
 import { type ProbeResult, probe } from './probe';
+import { activityOptions, probeProxyBase, probeUserAgent } from './probe-routing';
 import { tierOf } from './quality';
 import { channelResolutionFloor, type MinResolution } from './resolution';
 import { pruneDeletedChannelRules } from './rule-sync';
@@ -55,6 +56,7 @@ import {
   POOLED_VARIANT,
   type ProviderLogin,
   pickBestVariant,
+  probeTargetUrl,
   providerLogins,
   type StreamVariant,
   type VariantIssue,
@@ -1848,7 +1850,7 @@ export class Runner {
               result = await probe(job.url, {
                 timeoutMs: config.PODIUM_PROBE_TIMEOUT_MS,
                 analyzeSeconds: config.PODIUM_ANALYZE_SECONDS,
-                userAgent: config.PODIUM_USER_AGENT,
+                userAgent: probeUserAgent(config),
                 measureBitrate: config.PODIUM_MEASURE_BITRATE,
                 measureSeconds: config.PODIUM_MEASURE_SECONDS,
                 detectBlack: config.PODIUM_DETECT_BLACK,
@@ -2105,7 +2107,7 @@ export class Runner {
     unplacedSessions: number;
   }> {
     try {
-      const sessions = await client.activeSessions(uuidMap);
+      const sessions = await client.activeSessions(uuidMap, activityOptions(this.deps.config()));
       const viewersByProfile = new Map<number, number>();
       let unplacedSessions = 0;
       for (const session of sessions) {
@@ -2165,7 +2167,7 @@ export class Runner {
     return setInterval(
       async () => {
         try {
-          const sessions = await client.activeSessions(uuidMap);
+          const sessions = await client.activeSessions(uuidMap, activityOptions(config));
           const first = guard ? blockingSession(sessions, guard) : sessions[0];
           if (first && !abort.aborted) {
             log(`viewer started on channel ${first.channelId} -- stopping this pass`);
@@ -2242,6 +2244,11 @@ export class Runner {
     const config = this.deps.config();
     const { store } = this.deps;
     const log = this.deps.log ?? (() => {});
+    // Where the probes go, settled once for the pass. Null is the default --
+    // straight at the provider, at the URL the drawn login plays. See
+    // `probeTargetUrl` for why this is applied here, after the draw, rather
+    // than folded into the variant menu.
+    const proxyBase = probeProxyBase(config);
     // Read once for the pass, not per channel: a mark is a handful of rows and
     // the answer cannot change under us mid-plan without making the pass
     // inconsistent with itself.
@@ -2433,7 +2440,7 @@ export class Runner {
             job: {
               streamId: stream.id,
               channelId: channel.id,
-              url: variant.url,
+              url: probeTargetUrl(variant, stream.streamHash, proxyBase),
               providerId: stream.providerId,
               profileId: variant.profileId,
               stepOrder,
