@@ -2356,9 +2356,13 @@ export class Runner {
     managedChannels: Channel[];
   } {
     const config = this.deps.config();
-    const proxyBase = probeProxyBase(config);
     const { store } = this.deps;
     const log = this.deps.log ?? (() => {});
+    // Where the probes go, settled once for the pass. Null is the default --
+    // straight at the provider, at the URL the drawn login plays. See
+    // `probeTargetUrl` for why this is applied here, after the draw, rather
+    // than folded into the variant menu.
+    const proxyBase = probeProxyBase(config);
     // Read once for the pass, not per channel: a mark is a handful of rows and
     // the answer cannot change under us mid-plan without making the pass
     // inconsistent with itself.
