@@ -255,6 +255,81 @@ It needs `PODIUM_PROBE_IDLE_PROVIDERS` on, which in turn needs
 | `PODIUM_ANALYZE_SECONDS` | `6` | biggest lever on run time |
 | `PODIUM_MIN_BITRATE_KBPS` | `500` | below this counts as dead |
 | `PODIUM_DETECT_BLACK` | `true` | black-screen detection |
+| `PODIUM_PROBE_VIA_DISPATCHARR` | `false` | probe through Dispatcharr instead of the provider |
+| `PODIUM_PROBE_CLIENT_USER_AGENT` | `Podium-Probe/1` | how those probes name themselves to Dispatcharr |
+
+### Probing through Dispatcharr
+
+By default Podium probes the provider directly: it takes the URL the drawn
+login plays and opens it with ffprobe. That is the cheapest measurement there
+is — it costs Dispatcharr nothing and puts nothing between the probe and the
+origin.
+
+`PODIUM_PROBE_VIA_DISPATCHARR=true` sends the probe through Dispatcharr
+instead, at `/proxy/ts/stream/<stream_hash>`. That endpoint resolves a channel
+UUID first and falls back to a stream hash, so an individual stream plays
+through it without being attached to a channel — it is the same address the
+Dispatcharr UI's **Preview Stream** button uses on a row in the streams table.
+
+What that changes is *what gets measured*. The probe now arrives through the
+stream's own **stream profile**, so it carries the account's user agent, the
+proxy mode the profile names, and any transcode it applies. Two cases where
+that is the number you actually want:
+
+- A provider that answers an anonymous GET differently from real playback —
+  either better (an origin that serves a probe and throttles a viewer) or worse
+  (one that refuses anything that does not look like the account).
+- A stream profile that transcodes. Direct probing measures the source; through
+  the proxy you measure what the transcode delivers, which is what anybody
+  watching the channel receives.
+
+It is not free, and the costs are worth knowing before you turn it on:
+
+- **Every probe is a real Dispatcharr client.** It reserves an M3U profile
+  connection for its duration, exactly as a viewer does, and an ffmpeg-mode
+  stream profile transcodes for as long as it runs.
+- **Probes get slower.** There is a server in the path, and with a transcoding
+  profile the probe runs no faster than the transcode does.
+- **Set Dispatcharr's channel shutdown delay to 0.** Above zero, the upstream
+  connection is held for the grace period after the probe disconnects, so each
+  probe keeps its slot long after it has finished with it.
+- **Streams with no stream hash are still probed directly.** A hash arrives
+  with the M3U refresh, so a stream without one is mid-import rather than
+  unplayable, and it is better ranked on an origin measurement than not ranked.
+
+Lane arithmetic is unchanged. Which login draws a stream is still decided from
+the provider URLs each login reaches, and only the address probed is swapped
+afterwards — so a two-login account still gets through its catalogue at the
+combined width of both logins. Whichever login Dispatcharr then picks, the
+probe occupies exactly one connection on the account, which is what the lane
+charged it.
+
+#### Why the probe needs its own user agent
+
+Probing through the proxy puts Podium in the same client table as the people it
+is trying to stay out of the way of — and Podium reads that table to pace
+itself. Left alone the arithmetic eats itself: every probe in flight reads back
+as a viewer, each lane shrinks by the work already running in it, and with
+`PODIUM_PAUSE_WHEN_WATCHING` on the first probe of a pass aborts the pass that
+started it.
+
+`PODIUM_PROBE_CLIENT_USER_AGENT` is how that is avoided. Dispatcharr records
+each client's user agent and reports it per client in `/proxy/ts/status`, so a
+session whose clients are *all* Podium is subtracted from the viewer counts and
+everything else is left alone. A channel carrying one viewer beside two probes
+still counts as watched.
+
+Note that this is not `PODIUM_USER_AGENT`. That one reaches the provider and
+its job is to look like a player; this one reaches only Dispatcharr (the
+provider sees whatever the M3U account is configured with) and its job is the
+opposite — to look like nothing else on your network. Change it only if
+something already sends that exact string, and never to something a real player
+would send: a session that matches is hidden from the pacer, which is the one
+failure the setting exists to prevent.
+
+An older Dispatcharr that reports only channel-level counts, with no per-client
+detail, gives nothing to match on. Those sessions are kept rather than
+discounted — the read fails towards "somebody is watching", never away from it.
 
 ## Quality priors
 

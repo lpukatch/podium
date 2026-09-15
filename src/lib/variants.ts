@@ -21,6 +21,7 @@
 import {
   type Provider,
   type ProviderProfile,
+  proxyStreamUrl,
   transformUrl,
   xtreamPlaybackUrl,
 } from './dispatcharr';
@@ -232,6 +233,38 @@ export function buildVariants(
   // account Dispatcharr reports no profiles for.
   if (out.length === 0) out.push({ variantId: POOLED_VARIANT, profileId: 0, url });
   return out;
+}
+
+/**
+ * The address a drawn variant is actually probed at.
+ *
+ * Deliberately the *last* step, after `buildVariants` and `drawVariant` have
+ * both run on provider URLs. Proxy mode does not change which login a stream
+ * is drawn on, and it must not: the menu exists to tell logins that are
+ * separate lines into the provider from logins that are the same credentials
+ * twice, and that question is answered by the URLs they reach. Build the menu
+ * from proxy addresses instead and every login on an account collapses onto
+ * one entry -- Dispatcharr's address for a stream is the same whoever plays it
+ * -- so the dedupe would throw away every lane but the default's and a
+ * two-login account would probe at half the width it had.
+ *
+ * So the draw keeps its arithmetic and only the address changes. Which login
+ * Dispatcharr then picks is its own business, and the counts still add up:
+ * whichever it picks, the probe occupies exactly one connection on the
+ * account, which is exactly what the lane charged it.
+ *
+ * `proxyBaseUrl` null is direct probing -- the default, and unchanged. A
+ * stream with no hash falls back to its provider URL rather than being
+ * skipped, since a hash arrives with the M3U refresh and its absence means
+ * "not imported yet", not "cannot be played".
+ */
+export function probeTargetUrl(
+  variant: StreamVariant,
+  streamHash: string | null | undefined,
+  proxyBaseUrl: string | null,
+): string {
+  if (!proxyBaseUrl) return variant.url;
+  return proxyStreamUrl(proxyBaseUrl, streamHash) ?? variant.url;
 }
 
 /**

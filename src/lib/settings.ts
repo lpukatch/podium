@@ -385,6 +385,26 @@ export const FIELDS: FieldSpec[] = [
     min: 1,
     max: 60,
   },
+  {
+    key: 'PODIUM_PROBE_VIA_DISPATCHARR',
+    kind: 'boolean',
+    label: 'Probe through Dispatcharr',
+    help: 'Measure each stream through Dispatcharr\u2019s proxy instead of straight at the provider, so the probe gets the stream profile, transcode and user agent a viewer would.',
+    more:
+      'Off measures the origin: Podium opens the provider URL the drawn login plays, which costs Dispatcharr nothing. On, it opens /proxy/ts/stream/<hash> instead \u2014 the same address the Dispatcharr UI\u2019s \u201cPreview Stream\u201d button uses \u2014 so what ffprobe sees is what the stream profile actually delivers. Worth turning on when a provider answers a bare GET differently from real playback, or when the stream profile transcodes and it is the transcode you want ranked. ' +
+      'The cost is that every probe becomes a real Dispatcharr client: it reserves an M3U profile connection for its duration, an ffmpeg-mode profile transcodes while it runs, and probes get slower. Set Dispatcharr\u2019s channel shutdown delay to 0 so a finished probe frees the slot immediately rather than holding it through the grace period. Streams Dispatcharr has no stream hash for yet are probed at their provider URL either way.',
+    section: 'probing',
+  },
+  {
+    key: 'PODIUM_PROBE_CLIENT_USER_AGENT',
+    kind: 'string',
+    label: 'Probe user agent (through Dispatcharr)',
+    help: 'How proxy-mode probes name themselves to Dispatcharr. Podium discounts sessions carrying this agent from its viewer counts, so it does not mistake its own probing for someone watching.',
+    more:
+      'Only used when \u201cProbe through Dispatcharr\u201d is on, and only ever seen by Dispatcharr \u2014 the agent the provider sees is the one the M3U account is configured with. It exists so /proxy/ts/status can be read honestly: without it, every probe in flight reads back as a viewer, each lane shrinks by the work already running in it, and with \u201cPause when watching\u201d on the first probe of a pass aborts the pass that started it. ' +
+      'Change it only if something else on your network already sends this exact string. Do not set it to something a real player would send: a session that matches is hidden from the pacer, which is the one failure this setting exists to prevent.',
+    section: 'probing',
+  },
 ];
 
 export const FIELD_KEYS = new Set(FIELDS.map((f) => f.key));

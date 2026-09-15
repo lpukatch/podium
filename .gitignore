@@ -20,3 +20,10 @@ dist/
 # Local editor/agent state, per-machine. The glob catches the atomic-write temp
 # files that land next to it.
 .claude/settings.local.json*
+
+# Editor swap files. Not tidiness: a swap file sitting beside an edited
+# docker-compose.yml carries whatever was in the buffer, credentials included,
+# and `git add -A` will happily commit it.
+*.swp
+*.swo
+*~
