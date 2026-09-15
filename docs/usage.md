@@ -538,9 +538,14 @@ presents them identically in every stat Podium used to publish — both are
 `hevc`, `yuv420p10le`, 3840x2160 — so nothing reading them could tell the two
 apart. Podium now publishes ffprobe's `color_transfer` (`arib-std-b67` for
 HLG, `smpte2084` for HDR10/PQ, `bt709` for SDR) and `color_primaries` (`bt2020`
-or `bt709`) beside `pixel_format`. Live TS streams often omit both, and then the
-keys are `null` rather than an empty string, so "unknown" stays distinguishable
-from a value. **A Teamarr rule cannot use them directly**: Stream Stats rules
+or `bt709`) beside `pixel_format`. In practice, UK UHD sport reaches a
+Dispatcharr install as PQ: every HDR stream observed so far reads `smpte2084` +
+`bt2020`. HLG is handled the same way but has not yet been seen on a real
+stream, so that half of the mapping rests on ffmpeg's documented name rather
+than a sample. Live TS streams often omit both fields -- about a third of one
+night's probes, all of them otherwise clean -- and then the keys are `null`
+rather than an empty string, so "unknown" stays distinguishable from a value
+and from a failed probe. **A Teamarr rule cannot use them directly**: Stream Stats rules
 compare numbers only, so `smpte2084` never matches a threshold, and `is_unknown`
 fires for a string as readily as for `null`. For that, Podium also publishes
 `hdr_format`: the same reading as a small number a `stats_metric` rule can

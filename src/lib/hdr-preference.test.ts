@@ -228,6 +228,51 @@ describe('hdr_format', () => {
     expect(hdrFormat(probe({ colorTransfer: 'ARIB-STD-B67' }))).toBe(1);
   });
 
+  /**
+   * The first HDR stream this code met in the wild, not a synthetic case:
+   * Sky Sports Main Event UHD as published by the merged build on
+   * 2026-09-15. All four of the channel's streams read the same. UK UHD sport
+   * reaches this deployment as PQ / HDR10; no arib-std-b67 stream has been
+   * observed yet, so the HLG case above rests on libavutil's name alone.
+   */
+  it('reads a real PQ probe as 2', () => {
+    const skySportsUhd = probe({
+      width: 3840,
+      height: 2160,
+      videoCodec: 'hevc',
+      pixelFormat: 'yuv420p10le',
+      fps: 50,
+      audioCodec: 'eac3',
+      channelLayout: '5.1(side)',
+      colorTransfer: 'smpte2084',
+      colorPrimaries: 'bt2020',
+      bitrateKbps: 13_917,
+    });
+    expect(hdrFormat(skySportsUhd)).toBe(2);
+    expect(statsPayload(skySportsUhd).hdr_format).toBe(2);
+  });
+
+  /** The same night's SDR and undescribed probes: 720p h264, quality_reason "ok" for both. */
+  it('reads the real SDR and absent cases as 0 and null', () => {
+    const sdr720 = probe({
+      width: 1280,
+      height: 720,
+      videoCodec: 'h264',
+      pixelFormat: 'yuv420p',
+      colorTransfer: 'bt709',
+      colorPrimaries: 'bt709',
+    });
+    const undescribed720 = probe({
+      width: 1280,
+      height: 720,
+      videoCodec: 'h264',
+      pixelFormat: 'yuv420p',
+    });
+    expect(statsPayload(sdr720).hdr_format).toBe(0);
+    expect(statsPayload(undescribed720).hdr_format).toBeNull();
+    expect(statsPayload(undescribed720).quality_reason).toBe('ok');
+  });
+
   it('is published to stream_stats beside color_transfer', () => {
     expect(statsPayload(HLG).hdr_format).toBe(1);
     expect(statsPayload(PQ).hdr_format).toBe(2);
