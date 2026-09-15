@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DispatcharrClient,
   DispatcharrError,
+  PAGE_ATTEMPTS,
   PAGE_CONCURRENCY,
   PAGE_SIZE,
   transformUrl,
@@ -136,6 +137,46 @@ describe('paging', () => {
     const client = new DispatcharrClient('http://d', { apiKey: 'k' });
     expect(await client.paged('/api/x')).toHaveLength(3);
     expect(calls).toHaveLength(3);
+  });
+
+  describe('a torn read', () => {
+    // Dispatcharr sorts streams by name alone, so two that share a name can
+    // trade places between page queries: one lands on both pages, its twin on
+    // neither. Here page 2 repeats page 1's last row in place of its own first.
+    const total = PAGE_SIZE * 2;
+    const torn = (page: number) => {
+      const body = pageOf(total, page);
+      if (page === 2) body.results[0] = { id: PAGE_SIZE - 1 };
+      return body;
+    };
+    const pageParam = (c: Call) => Number(new URL(c.url).searchParams.get('page'));
+
+    it('returns every row once, appending the one a later read found', async () => {
+      let reads = 0;
+      stubFetch((c) => {
+        if (pageParam(c) === 1) reads += 1;
+        return { body: reads === 1 ? torn(pageParam(c)) : pageOf(total, pageParam(c)) };
+      });
+      const client = new DispatcharrClient('http://d', { apiKey: 'k' });
+      const rows = (await client.paged<{ id: number }>('/api/x')).map((r) => r.id);
+
+      expect(reads).toBe(2);
+      expect(rows).toEqual([
+        ...Array.from({ length: PAGE_SIZE }, (_, i) => i),
+        ...Array.from({ length: PAGE_SIZE - 1 }, (_, i) => PAGE_SIZE + 1 + i),
+        PAGE_SIZE,
+      ]);
+    });
+
+    it('settles for what it saw after PAGE_ATTEMPTS reads', async () => {
+      const { calls } = stubFetch((c) => ({ body: torn(pageParam(c)) }));
+      const client = new DispatcharrClient('http://d', { apiKey: 'k' });
+      const rows = (await client.paged<{ id: number }>('/api/x')).map((r) => r.id);
+
+      expect(calls).toHaveLength(PAGE_ATTEMPTS * 2);
+      expect(rows).toHaveLength(total - 1);
+      expect(new Set(rows).size).toBe(total - 1);
+    });
   });
 
   it('raises with the status and body on an error', async () => {

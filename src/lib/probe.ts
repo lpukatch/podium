@@ -692,6 +692,7 @@ export async function probe(url: string, options: ProbeOptions = {}): Promise<Pr
 export const DEAD_REASONS = [
   'auth',
   'not_found',
+  'client_error',
   'server_error',
   'timeout',
   'unreachable',
@@ -712,6 +713,12 @@ export type DeadReason = (typeof DEAD_REASONS)[number];
  * credentials are wrong" (`auth`) are three completely different answers to
  * "how good is this provider", and a single `dead` count cannot tell them apart.
  *
+ * `client_error` is the provider refusing the request for a reason that is
+ * neither a login nor a missing stream. ffmpeg names 400, 401, 403 and 404 and
+ * folds every other 4xx -- a rate limit, a connection cap -- into "4XX Client
+ * Error, but not one of 40{0,1,3,4}". Before it had a bucket, that message was
+ * 129 of one live provider's 130 dead streams, all filed under `other`.
+ *
  * `probe_error` is deliberately separate: a missing ffprobe or an unparseable
  * payload is our failure, not the provider's, and smearing it across providers
  * would make whichever one happened to be probed look broken.
@@ -728,6 +735,9 @@ export function deadReason(error: string): DeadReason {
   // Status codes first -- a 403 body can mention any word below.
   if (/\b(401|403)\b|unauthorized|forbidden/.test(text)) return 'auth';
   if (/\b(404|410)\b|not found/.test(text)) return 'not_found';
+  // On ffmpeg's own wording rather than a bare 4\d\d: the stored error carries
+  // the stream URL, and a stream id like 429 in its path is not a status code.
+  if (/server returned 4(\d\d|xx)\b|bad request/.test(text)) return 'client_error';
   if (/\b5\d\d\b|bad gateway|service unavailable|server error/.test(text)) return 'server_error';
   if (/timed? ?out|etimedout/.test(text)) return 'timeout';
   if (

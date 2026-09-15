@@ -14,6 +14,7 @@
 import { randomUUID } from 'crypto';
 import { hostname } from 'os';
 import { type Config, loadConfig } from '../lib/config';
+import { errorText } from '../lib/error-text';
 import { RulesSource } from '../lib/rules-source';
 import { Runner, type RunSummary } from '../lib/runner';
 import { resolveEnv } from '../lib/settings';
@@ -242,7 +243,7 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
       }
     } catch (error) {
       // A failed pass must not kill the loop -- the next tick retries.
-      log(`pass at ${clock(startedAt)} failed: ${String(error)}`);
+      log(`pass at ${clock(startedAt)} failed: ${errorText(error)}`);
     }
     // Before the reschedule and with nothing awaited in between, so
     // `checkWake` cannot see a pass that has finished but not yet booked its

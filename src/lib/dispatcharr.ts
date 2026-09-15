@@ -25,6 +25,12 @@ export const PAGE_SIZE = 500;
  * is the sweet spot -- this took a cold load from 117s to under 4s.
  */
 export const PAGE_CONCURRENCY = 4;
+/**
+ * How many full reads `paged` makes of a listing that keeps coming back short
+ * before it settles for what it has seen. See `paged` for why a read can be
+ * short at all.
+ */
+export const PAGE_ATTEMPTS = 3;
 
 export interface Channel {
   id: number;
@@ -523,26 +529,82 @@ export class DispatcharrClient {
   }
 
   /**
-   * Fetch every page, the remaining ones at bounded concurrency.
+   * Every row of a paged listing, each exactly once.
+   *
+   * Dispatcharr pages with an offset over an ordering that is not unique:
+   * streams sort by `-name` alone, and a catalogue has several streams called
+   * "NBA TV". The database is free to break those ties differently on each
+   * query, so two pages fetched separately can both carry one stream and
+   * neither carry its twin -- the listing comes back the right length with a
+   * stream missing. Measured on a live install, two of three full stream
+   * listings dropped two streams each. A dropped stream drops out of the pass:
+   * its channel loses its lead for a minute and its verdict is pruned as an
+   * orphan, to be probed again on the next pass.
+   *
+   * The endpoint offers no unique ordering to ask for, so the repair is here:
+   * repeats collapse by id, and the listing is read again until every row
+   * `count` promised has turned up. A torn read misses different rows each
+   * time, so the second read nearly always closes the gap. Rows a later read
+   * finds are appended, leaving the first read's order otherwise intact.
+   */
+  async paged<T>(path: string): Promise<T[]> {
+    const first = await this.readPages<T>(path);
+    // No count means nothing to measure the read against.
+    if (first.count === null) return first.rows;
+
+    const seen = new Set<number>();
+    const out: T[] = [];
+    const merge = (rows: T[], keepUnkeyed: boolean): void => {
+      for (const row of rows) {
+        const id = (row as { id?: unknown }).id;
+        if (typeof id !== 'number') {
+          // Nothing to collapse on, and nothing a re-read could match up.
+          if (keepUnkeyed) out.push(row);
+          continue;
+        }
+        if (seen.has(id)) continue;
+        seen.add(id);
+        out.push(row);
+      }
+    };
+
+    merge(first.rows, true);
+    let count = first.count;
+    for (let attempt = 1; attempt < PAGE_ATTEMPTS && out.length < count; attempt++) {
+      const again = await this.readPages<T>(path);
+      // The latest count, so a stream deleted between reads is not waited for.
+      count = again.count ?? count;
+      merge(again.rows, false);
+    }
+    // Still short after every attempt: return what was seen, which is no worse
+    // than a single read.
+    return out;
+  }
+
+  /**
+   * One read of every page, the remaining ones at bounded concurrency, with the
+   * `count` page 1 reported (null when there was none).
    *
    * `count` from page 1 tells us exactly how many remain, so the rest can be
    * planned rather than walked one `next` link at a time.
    */
-  async paged<T>(path: string): Promise<T[]> {
+  private async readPages<T>(path: string): Promise<{ rows: T[]; count: number | null }> {
     const first = await this.page<T>(path, 1);
-    if (Array.isArray(first)) return first;
+    if (Array.isArray(first)) return { rows: first, count: null };
 
     const out: T[] = [...(first.results ?? [])];
-    if (!first.next) return out;
+    if (!first.next) {
+      return { rows: out, count: typeof first.count === 'number' ? first.count : null };
+    }
 
     if (typeof first.count !== 'number') {
       // No count to plan with -- fall back to walking `next` serially.
       let n = 2;
       for (;;) {
         const body = await this.page<T>(path, n);
-        if (Array.isArray(body)) return [...out, ...body];
+        if (Array.isArray(body)) return { rows: [...out, ...body], count: null };
         out.push(...(body.results ?? []));
-        if (!body.next) return out;
+        if (!body.next) return { rows: out, count: null };
         n += 1;
       }
     }
@@ -564,7 +626,7 @@ export class DispatcharrClient {
 
     // Reassemble in page order; provider stream order is meaningful upstream.
     for (let n = 2; n <= lastPage; n++) out.push(...(collected.get(n) ?? []));
-    return out;
+    return { rows: out, count: first.count };
   }
 
   /** Fold Dispatcharr's effective_* aliases onto a plain Channel. */

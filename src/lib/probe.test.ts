@@ -335,6 +335,8 @@ describe('deadReason', () => {
     ['Server returned 403 Forbidden', 'auth'],
     ['Server returned 404 Not Found', 'not_found'],
     ['Server returned 410 Gone', 'not_found'],
+    ['Server returned 4XX Client Error, but not one of 40{0,1,3,4}', 'client_error'],
+    ['Server returned 400 Bad Request', 'client_error'],
     ['Server returned 502 Bad Gateway', 'server_error'],
     ['Server returned 503 Service Unavailable', 'server_error'],
     ['timeout', 'timeout'],
@@ -374,6 +376,13 @@ describe('deadReason', () => {
 
   it('does not mistake a year or a port for a status code', () => {
     expect(deadReason('failed at 2024 something')).toBe('other');
+  });
+
+  it('does not read a 4xx out of the stream URL', () => {
+    // The stored error is prefixed with the URL, and stream ids are numbers.
+    expect(
+      deadReason('http://h:8080/live/u/p/429.ts: Invalid data found when processing input'),
+    ).toBe('unsupported');
   });
 
   it('is what `rejectUrl` refusals classify as', () => {

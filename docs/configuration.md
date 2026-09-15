@@ -109,7 +109,8 @@ makes every request carry it: `Authorization: Bearer <token>`, an
 `http://podium.lan:3456/?token=<token>` once puts it in that cookie and takes it
 back out of the URL, which is how you log a browser in without a login page.
 `/api/health` is exempt so the container's own health check still works;
-`/api/metrics` is not, so give Prometheus a `bearer_token`.
+`/api/metrics` is not, so give Prometheus the token too — see
+[Metrics](#metrics) for a scrape job.
 
 **Behind a reverse proxy, say so.** Some proxies forward the browser's `Host`
 header and some replace it with the address they are proxying to — nginx's
@@ -402,6 +403,30 @@ Why the gate exists at all, and how to read what it dropped, is in
 | `PODIUM_AUTO_ASSIGN` | `true` | lets a pass put matched streams onto channels that do not carry them; `false` is reorder-only |
 | `PODIUM_AUTO_ASSIGN_MAX` | `0` | ceiling on how many matched streams a channel may gain this way; `0` removes the cap |
 
+### Rules for deleted channels
+
+A rule belongs to a Dispatcharr channel id, so deleting the channel in
+Dispatcharr leaves its rule behind. It never runs, but it still counts: the
+provider stream groups and the stream search show what it matches as claimed,
+by a channel you can no longer find in the UI to fix.
+
+Each pass removes those rules from the rules file on its own, with no setting.
+Dry run does not stop it, because it writes Podium's file, not Dispatcharr. The
+removed ids and names go to the log. Three things hold it back, because a rule
+is aliases somebody wrote:
+
+- **Only a 404 counts.** Missing from the channel list is a suspicion; each
+  missing channel is then looked up on its own, and the rule goes only if
+  Dispatcharr answers that the channel does not exist. A lookup that fails any
+  other way keeps the rule until a later pass can ask again.
+- **Most of the file at once is refused.** When more than half the ruled
+  channels (and more than ten) are missing, nothing is removed and the log says
+  why, once. That is what pointing Podium at a different or rebuilt Dispatcharr
+  looks like, not a tidy-up.
+- **The previous file is kept.** Before each removal the rules file is copied to
+  `rules.json.pruned-<time>` beside it; the newest five copies are kept. Copy one
+  back over `rules.json` to undo.
+
 ### Removing unmatched streams
 
 `PODIUM_REMOVE_UNMATCHED` is the only setting that takes streams *off* a
@@ -558,12 +583,43 @@ catalogue snapshot.
 | --- | --- | --- |
 | `PODIUM_METRICS_CHANNELS` | `true` | also expose the per-channel source series — every managed channel's slots with provider and verdict; the only families that scale with the catalogue, so the switch exists for a Prometheus watching its cardinality |
 
+A scrape job needs the path, and the token if you set one:
+
+```yaml
+scrape_configs:
+  - job_name: podium
+    metrics_path: /api/metrics
+    scrape_interval: 60s
+    authorization: # only with PODIUM_AUTH_TOKEN set
+      credentials: <PODIUM_AUTH_TOKEN>
+    static_configs:
+      - targets: ["podium:3456"]
+```
+
+Verdicts change at pass cadence, and every scrape re-reads the whole probe
+cache, so a minute is plenty.
+
+### Example dashboard
+
+[`docs/grafana/podium-provider-quality.json`](grafana/podium-provider-quality.json)
+is a Grafana dashboard built on these families. Import it through
+**Dashboards → New → Import** and pick your Prometheus data source from the
+selector at the top. It has a provider scorecard, who holds each channel's
+primary slot, verdict and resolution mix, why streams die, every managed
+channel's sources in order (needs `PODIUM_METRICS_CHANNELS`), and the worker's
+own health: freshness, deferral, lanes and lineup changes.
+
+Every panel's description says how to read it, including the caveats below.
+Time-series panels aggregate `by (provider)`. Without that, each restart of a
+pod or container under a new `pod` or `instance` label draws a second line for
+the same provider.
+
 ### Comparing providers
 
 | Family | Labels | What it says |
 | --- | --- | --- |
 | `podium_provider_streams` | `provider`, `state` | distinct managed streams by verdict: `alive` (would rank as usable), `dead`, `black`, `low_bitrate`, `unmeasured` |
-| `podium_provider_dead_streams` | `provider`, `reason` | why the dead ones died — `auth`, `not_found`, `server_error`, `timeout`, `unreachable`, `unsupported`, `rejected`, `probe_error`, `other` |
+| `podium_provider_dead_streams` | `provider`, `reason` | why the dead ones died — `auth`, `not_found`, `client_error`, `server_error`, `timeout`, `unreachable`, `unsupported`, `rejected`, `probe_error`, `other` |
 | `podium_provider_resolution_streams` | `provider`, `resolution` | distinct streams by measured height, whether or not usable |
 | `podium_provider_bitrate_kbps` | `provider`, `resolution`, `stat` | median measured bitrate, overall (`resolution="all"`) and per bucket |
 | `podium_provider_bitrate_measured` | `provider` | how many of those medians rest on a real measurement |
