@@ -15,6 +15,7 @@ import type { ProbeResult } from './probe';
 import { EMPTY_RULES_DOC, loadRules } from './rules';
 import {
   DEFAULT_WEIGHTS,
+  hdrFormat,
   hdrScore,
   NEW_INSTALL_AUDIO,
   NEW_INSTALL_HDR,
@@ -25,6 +26,7 @@ import {
   score,
   type Weights,
 } from './scoring';
+import { statsPayload } from './stats';
 
 function probe(over: Partial<ProbeResult> = {}): ProbeResult {
   return {
@@ -193,5 +195,88 @@ describe('the rules file', () => {
     const loaded = loadRules(EMPTY_RULES_DOC);
     expect(loaded.ordering.weights.hdr).toBe(NEW_INSTALL_HDR);
     expect(loaded.ordering.weights.hdrPreference ?? 'none').toBe('none');
+  });
+});
+
+/**
+ * The same three-way answer as a number, for a consumer that cannot read the
+ * string. Teamarr's `stats_metric` rules cast the value to a float, so
+ * `color_transfer` fails every comparator for them and `is_unknown` fires on
+ * "bt709" as readily as on `null`. A small ordinal they can threshold on:
+ * `>= 1` is any HDR, `== 1` is HLG, `== 2` is PQ, and unknown stays `null`
+ * so `is_unknown` keeps meaning what it says.
+ */
+describe('hdr_format', () => {
+  it('maps HLG to 1 and PQ to 2', () => {
+    expect(hdrFormat(HLG)).toBe(1);
+    expect(hdrFormat(PQ)).toBe(2);
+  });
+
+  it('maps a declared non-HDR transfer to 0', () => {
+    expect(hdrFormat(SDR)).toBe(0);
+    expect(hdrFormat(probe({ colorTransfer: 'smpte170m' }))).toBe(0);
+  });
+
+  /** Not knowing is not SDR: a stream ffprobe would not describe stays unknown. */
+  it('is null when ffprobe did not say', () => {
+    expect(hdrFormat(UNKNOWN)).toBeNull();
+    expect(hdrFormat(probe({ colorTransfer: '' }))).toBeNull();
+  });
+
+  it('reads the transfer case-insensitively, like hdrScore', () => {
+    expect(hdrFormat(probe({ colorTransfer: 'SMPTE2084' }))).toBe(2);
+    expect(hdrFormat(probe({ colorTransfer: 'ARIB-STD-B67' }))).toBe(1);
+  });
+
+  /**
+   * The first HDR stream this code met in the wild, not a synthetic case:
+   * Sky Sports Main Event UHD as published by the merged build on
+   * 2026-09-15. All four of the channel's streams read the same. UK UHD sport
+   * reaches this deployment as PQ / HDR10; no arib-std-b67 stream has been
+   * observed yet, so the HLG case above rests on libavutil's name alone.
+   */
+  it('reads a real PQ probe as 2', () => {
+    const skySportsUhd = probe({
+      width: 3840,
+      height: 2160,
+      videoCodec: 'hevc',
+      pixelFormat: 'yuv420p10le',
+      fps: 50,
+      audioCodec: 'eac3',
+      channelLayout: '5.1(side)',
+      colorTransfer: 'smpte2084',
+      colorPrimaries: 'bt2020',
+      bitrateKbps: 13_917,
+    });
+    expect(hdrFormat(skySportsUhd)).toBe(2);
+    expect(statsPayload(skySportsUhd).hdr_format).toBe(2);
+  });
+
+  /** The same night's SDR and undescribed probes: 720p h264, quality_reason "ok" for both. */
+  it('reads the real SDR and absent cases as 0 and null', () => {
+    const sdr720 = probe({
+      width: 1280,
+      height: 720,
+      videoCodec: 'h264',
+      pixelFormat: 'yuv420p',
+      colorTransfer: 'bt709',
+      colorPrimaries: 'bt709',
+    });
+    const undescribed720 = probe({
+      width: 1280,
+      height: 720,
+      videoCodec: 'h264',
+      pixelFormat: 'yuv420p',
+    });
+    expect(statsPayload(sdr720).hdr_format).toBe(0);
+    expect(statsPayload(undescribed720).hdr_format).toBeNull();
+    expect(statsPayload(undescribed720).quality_reason).toBe('ok');
+  });
+
+  it('is published to stream_stats beside color_transfer', () => {
+    expect(statsPayload(HLG).hdr_format).toBe(1);
+    expect(statsPayload(PQ).hdr_format).toBe(2);
+    expect(statsPayload(SDR).hdr_format).toBe(0);
+    expect(statsPayload(UNKNOWN).hdr_format).toBeNull();
   });
 });

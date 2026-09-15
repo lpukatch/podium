@@ -9,7 +9,7 @@
  */
 
 import { isInterlaced, type ProbeResult } from './probe';
-import { DEFAULT_WEIGHTS, frameRate, score, type Weights } from './scoring';
+import { DEFAULT_WEIGHTS, frameRate, hdrFormat, score, type Weights } from './scoring';
 
 /**
  * The shape published to Dispatcharr's `stream_stats`.
@@ -71,6 +71,11 @@ export function statsPayload(
     color_transfer: result.colorTransfer ?? null,
     /** `bt2020` for either HDR flavour, `bt709` for SDR; `null` when unknown. */
     color_primaries: result.colorPrimaries ?? null,
+    /**
+     * The transfer as a number a `stats_metric` rule can threshold: `0` SDR,
+     * `1` HLG, `2` HDR10/PQ, `null` when ffprobe did not say. See `hdrFormat`.
+     */
+    hdr_format: hdrFormat(result),
     audio_channels: result.audioChannels,
     channel_layout: result.channelLayout,
     audio_bitrate: Math.round(result.audioBitrateKbps),
