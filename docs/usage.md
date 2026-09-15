@@ -540,10 +540,13 @@ apart. Podium now publishes ffprobe's `color_transfer` (`arib-std-b67` for
 HLG, `smpte2084` for HDR10/PQ, `bt709` for SDR) and `color_primaries` (`bt2020`
 or `bt709`) beside `pixel_format`. Live TS streams often omit both, and then the
 keys are `null` rather than an empty string, so "unknown" stays distinguishable
-from a value. **A Teamarr rule cannot use them**: Stream Stats rules compare
-numbers only, so `smpte2084` never matches a threshold, and `is_unknown` fires
-for a string as readily as for `null`. They are there for whatever reads
-`stream_stats` as JSON, not for a `stats_metric` rule.
+from a value. **A Teamarr rule cannot use them directly**: Stream Stats rules
+compare numbers only, so `smpte2084` never matches a threshold, and `is_unknown`
+fires for a string as readily as for `null`. For that, Podium also publishes
+`hdr_format`: the same reading as a small number a `stats_metric` rule can
+threshold — `0` for a declared SDR transfer, `1` for HLG, `2` for HDR10/PQ, and
+`null` when ffprobe did not say, so `is_unknown` still means unknown rather than
+SDR. `hdr_format >= 1` is any HDR stream; `== 1` or `== 2` picks a flavour.
 
 Podium can rank on it too, if asked. **Settings → Stream ordering → Advanced**
 has a *Preferred HDR format* of no preference, HLG or HDR10 (PQ), and an *HDR*

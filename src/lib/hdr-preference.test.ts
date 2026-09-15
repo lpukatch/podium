@@ -15,6 +15,7 @@ import type { ProbeResult } from './probe';
 import { EMPTY_RULES_DOC, loadRules } from './rules';
 import {
   DEFAULT_WEIGHTS,
+  hdrFormat,
   hdrScore,
   NEW_INSTALL_AUDIO,
   NEW_INSTALL_HDR,
@@ -25,6 +26,7 @@ import {
   score,
   type Weights,
 } from './scoring';
+import { statsPayload } from './stats';
 
 function probe(over: Partial<ProbeResult> = {}): ProbeResult {
   return {
@@ -193,5 +195,43 @@ describe('the rules file', () => {
     const loaded = loadRules(EMPTY_RULES_DOC);
     expect(loaded.ordering.weights.hdr).toBe(NEW_INSTALL_HDR);
     expect(loaded.ordering.weights.hdrPreference ?? 'none').toBe('none');
+  });
+});
+
+/**
+ * The same three-way answer as a number, for a consumer that cannot read the
+ * string. Teamarr's `stats_metric` rules cast the value to a float, so
+ * `color_transfer` fails every comparator for them and `is_unknown` fires on
+ * "bt709" as readily as on `null`. A small ordinal they can threshold on:
+ * `>= 1` is any HDR, `== 1` is HLG, `== 2` is PQ, and unknown stays `null`
+ * so `is_unknown` keeps meaning what it says.
+ */
+describe('hdr_format', () => {
+  it('maps HLG to 1 and PQ to 2', () => {
+    expect(hdrFormat(HLG)).toBe(1);
+    expect(hdrFormat(PQ)).toBe(2);
+  });
+
+  it('maps a declared non-HDR transfer to 0', () => {
+    expect(hdrFormat(SDR)).toBe(0);
+    expect(hdrFormat(probe({ colorTransfer: 'smpte170m' }))).toBe(0);
+  });
+
+  /** Not knowing is not SDR: a stream ffprobe would not describe stays unknown. */
+  it('is null when ffprobe did not say', () => {
+    expect(hdrFormat(UNKNOWN)).toBeNull();
+    expect(hdrFormat(probe({ colorTransfer: '' }))).toBeNull();
+  });
+
+  it('reads the transfer case-insensitively, like hdrScore', () => {
+    expect(hdrFormat(probe({ colorTransfer: 'SMPTE2084' }))).toBe(2);
+    expect(hdrFormat(probe({ colorTransfer: 'ARIB-STD-B67' }))).toBe(1);
+  });
+
+  it('is published to stream_stats beside color_transfer', () => {
+    expect(statsPayload(HLG).hdr_format).toBe(1);
+    expect(statsPayload(PQ).hdr_format).toBe(2);
+    expect(statsPayload(SDR).hdr_format).toBe(0);
+    expect(statsPayload(UNKNOWN).hdr_format).toBeNull();
   });
 });

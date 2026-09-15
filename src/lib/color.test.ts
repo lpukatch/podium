@@ -108,8 +108,20 @@ describe('what gets published to Dispatcharr', () => {
   it('leaves every existing key as it was', () => {
     const before = statsPayload(probe());
     const after = statsPayload(probe({ colorTransfer: 'smpte2084', colorPrimaries: 'bt2020' }));
-    const { color_transfer: _t, color_primaries: _p, probed_at: _a, ...restBefore } = before;
-    const { color_transfer: _t2, color_primaries: _p2, probed_at: _a2, ...restAfter } = after;
+    const {
+      color_transfer: _t,
+      color_primaries: _p,
+      hdr_format: _h,
+      probed_at: _a,
+      ...restBefore
+    } = before;
+    const {
+      color_transfer: _t2,
+      color_primaries: _p2,
+      hdr_format: _h2,
+      probed_at: _a2,
+      ...restAfter
+    } = after;
     expect(restAfter).toEqual(restBefore);
   });
 });
