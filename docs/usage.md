@@ -547,6 +547,13 @@ fires for a string as readily as for `null`. For that, Podium also publishes
 threshold — `0` for a declared SDR transfer, `1` for HLG, `2` for HDR10/PQ, and
 `null` when ffprobe did not say, so `is_unknown` still means unknown rather than
 SDR. `hdr_format >= 1` is any HDR stream; `== 1` or `== 2` picks a flavour.
+Two things share a value on purpose. `0` covers every declared transfer that is
+not one of the two -- `bt709`, but also `smpte428` or a `bt2020-10` -- since for
+ordering the question is only whether the stream is HDR. And `null` covers a
+Dolby Vision profile 5 stream as well as an undescribed one: DV carries its
+colour in its own metadata rather than the fields ffprobe reads, so `is_unknown`
+catches both, and a DV feed ranks like an unprobed one until someone teaches
+the probe to read it.
 
 Podium can rank on it too, if asked. **Settings → Stream ordering → Advanced**
 has a *Preferred HDR format* of no preference, HLG or HDR10 (PQ), and an *HDR*

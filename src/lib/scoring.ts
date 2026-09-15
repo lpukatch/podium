@@ -367,6 +367,12 @@ const HDR_TRANSFER: Record<Exclude<HdrPreference, 'none'>, string> = {
  * Unknown stays `null` rather than a sentinel. A live TS that never declared
  * a transfer is not SDR, and a `-1` would let a `>= 0` rule match streams
  * nobody knows anything about; `null` is what `is_unknown` exists for.
+ *
+ * Two collisions are deliberate. `0` is every declared transfer that is not
+ * one of the two, so `bt709` and an unrecognised `smpte428` read the same:
+ * for ordering the only question is whether the stream is HDR. And Dolby
+ * Vision profile 5 lands on `null` beside an undescribed stream, because it
+ * carries its colour in its own RPU rather than the VUI fields ffprobe reads.
  */
 export function hdrFormat(result: Pick<ProbeResult, 'colorTransfer'>): 0 | 1 | 2 | null {
   const transfer = (result.colorTransfer ?? '').toLowerCase();
