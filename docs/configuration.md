@@ -261,6 +261,8 @@ It needs `PODIUM_PROBE_IDLE_PROVIDERS` on, which in turn needs
 | `PODIUM_SOAK_SECONDS` | `180` | how long each soak holds its stream |
 | `PODIUM_SOAK_MAX_PER_CHANNEL` | `3` | how deep into each channel's order the sweep measures; `0` for all |
 | `PODIUM_SOAK_MAX_AGE_MS` | `1209600000` | a stream observed more recently than this is left alone (14 days) |
+| `PODIUM_SOAK_COOLDOWN_MS` | `10000` | rest after a soak connection closes before that slot opens another |
+| `PODIUM_SOAK_SPARE_SLOTS` | `1` | connections per account soaks leave unused; never below one soak |
 
 ### Recording how long streams hold
 

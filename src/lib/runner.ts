@@ -34,9 +34,11 @@ import type { RulesSource } from './rules-source';
 import { AbortFlag, laneKey, type ProbeJob, runLanes } from './scheduler';
 import {
   laneQuotas,
+  makeKickDetector,
   minutesLeftInWindow,
   oneRoundBudgetMs,
   planSoaks,
+  soakLimits,
   soakWindowOpen,
   takePerLane,
 } from './soak-plan';
@@ -2854,8 +2856,18 @@ export class Runner {
     // How many soaks each lane may take. Per lane rather than one total: the
     // queue is in stream-id order, and one account's run of low ids used to
     // fill every batch while the other accounts' connections sat idle.
-    const rounds = generous ? Math.floor(budgetMs / (soakSeconds * 1_000)) : 1;
-    const quotas = laneQuotas(limits, rounds);
+    // What a soak may use: the pass's free slots, less the spare every account
+    // keeps. Everything below -- quotas, the login draw, the lanes -- runs on
+    // this rather than on `limits`, so a soak never holds an account at its
+    // exact limit for minutes. See `soakLimits`.
+    const gentle = soakLimits(limits, config.PODIUM_SOAK_SPARE_SLOTS);
+    const cooldownMs = Math.max(0, config.PODIUM_SOAK_COOLDOWN_MS);
+    const kicks = makeKickDetector();
+    const warned = new Set<number>();
+
+    // The rest before each soak comes out of the round, so it is counted in.
+    const rounds = generous ? Math.floor(budgetMs / (soakSeconds * 1_000 + cooldownMs)) : 1;
+    const quotas = laneQuotas(gentle, rounds);
     const capacity = [...quotas.values()].reduce((sum, n) => sum + n, 0);
     if (capacity <= 0) return none;
 
@@ -2877,10 +2889,12 @@ export class Runner {
     }
 
     if (!generous) {
-      budgetMs = oneRoundBudgetMs(
-        soakSeconds,
-        requested.map((row) => row.seconds),
-      );
+      // Plus the rest every soak takes before it connects.
+      budgetMs =
+        oneRoundBudgetMs(
+          soakSeconds,
+          requested.map((row) => row.seconds),
+        ) + cooldownMs;
     }
 
     const asked = new Set(requested.map((row) => row.streamId));
@@ -2944,10 +2958,10 @@ export class Runner {
             : [{ variantId: POOLED_VARIANT, profileId: 0, url: stream.url }];
         const seq = drawSeq.get(stream.providerId) ?? 0;
         drawSeq.set(stream.providerId, seq + 1);
-        const variant = drawVariant(menu, stream.providerId, limits, seq);
+        const variant = drawVariant(menu, stream.providerId, gentle, seq);
         const lane = laneKey(stream.providerId, variant.profileId);
         yield {
-          lane: (limits.get(lane) ?? 0) > 0 ? lane : null,
+          lane: (gentle.get(lane) ?? 0) > 0 ? lane : null,
           job: {
             streamId,
             channelId: 0,
@@ -3014,7 +3028,7 @@ export class Runner {
           queued: 0,
           current: [] as string[],
         };
-        row.limit += limits.get(key) ?? 0;
+        row.limit += gentle.get(key) ?? 0;
         row.queued += queuedOnLane;
         row.done += soakDone.get(key) ?? 0;
         row.current.push(...(soakCurrent.get(key)?.values() ?? []));
@@ -3049,27 +3063,47 @@ export class Runner {
     );
     try {
       await runLanes<SoakResult>(jobs, {
-        limits,
+        limits: gentle,
         abort,
         maxConcurrent: config.PODIUM_MAX_CONCURRENT_PROBES,
         staggerMs: config.PODIUM_LANE_STAGGER_MS,
         log,
         probe: async (job) => {
+          const skipped: SoakResult = {
+            legs: [],
+            heldMs: 0,
+            drops: 0,
+            failedDials: 0,
+            unreachable: false,
+            stopped: true,
+          };
+          // An account that has been closing soaks as fast as Podium opens
+          // them gets no more this pass. The request stays queued.
+          if (kicks.tripped(job.providerId)) return skipped;
+
           // Re-checked per job rather than only up front: the queue was sized
           // against an estimate, and a soak that would cross the deadline is
-          // better skipped than truncated into a leg that reads as a drop.
+          // better skipped than truncated into a leg that reads as a drop. The
+          // rest before dialling is part of what has to fit.
           const jobSeconds = secondsFor.get(job.streamId) ?? soakSeconds;
           const left = deadline - Date.now();
-          if (left < jobSeconds * 1_000) {
-            return {
-              legs: [],
-              heldMs: 0,
-              drops: 0,
-              failedDials: 0,
-              unreachable: false,
-              stopped: false,
-            };
+          if (left < jobSeconds * 1_000 + cooldownMs) return skipped;
+
+          // Rest before connecting. The slot this job holds was, moments ago,
+          // either a probe or another soak, and a provider still counting that
+          // closed connection would see this one as one too many. Resting
+          // before rather than after also covers the first soak of a phase,
+          // whose slot the probe lanes were using a second earlier.
+          if (cooldownMs > 0) {
+            const until = Date.now() + cooldownMs;
+            while (Date.now() < until) {
+              if (abort.aborted || kicks.tripped(job.providerId)) return skipped;
+              await new Promise((resolve) =>
+                setTimeout(resolve, Math.min(500, until - Date.now())),
+              );
+            }
           }
+
           const laneId = laneKey(job.providerId, job.profileId);
           let inflight = soakCurrent.get(laneId);
           if (!inflight) {
@@ -3082,14 +3116,21 @@ export class Runner {
           const result = await soakStream(job.url, {
             seconds: jobSeconds,
             userAgent: config.PODIUM_USER_AGENT,
+            minGapMs: cooldownMs,
+            onConnect: (at) => kicks.opened(job.providerId, job.streamId, at),
             // Killed mid-connection rather than left to finish. runLanes stops
             // *dispatching* on an abort, which is right for a ten-second probe
             // and wrong for a three-minute soak: without this, a viewer
             // arriving would wait out every soak already in flight before
-            // getting the connections back.
-            stop: () => abort.aborted,
+            // getting the connections back. An account that trips the kick
+            // detector is let go of the same way.
+            stop: () => abort.aborted || kicks.tripped(job.providerId),
           });
+          inflight.delete(job.streamId);
+
           const jobLegs: Leg[] = [];
+          let recordedDrops = 0;
+          let suspect = 0;
           for (const leg of result.legs) {
             // A failed dial served nothing, so it is neither clean watching
             // nor a break -- it is recorded in the result and the progress
@@ -3097,6 +3138,32 @@ export class Runner {
             // charged as a drop, which is how one refused reconnect after
             // another turned a single failure into four.
             if (leg.failedDial) continue;
+            // A drop landing just as another soak on the same account
+            // connected is the account making room, not the stream failing.
+            // Recording it would charge the stream for Podium's own crowding.
+            if (
+              leg.dropped &&
+              kicks.isSuspect(job.providerId, job.streamId, leg.startedAt + leg.heldMs)
+            ) {
+              suspect += 1;
+              if (kicks.noteSuspect(job.providerId) && !warned.has(job.providerId)) {
+                warned.add(job.providerId);
+                const account = providerNames.get(job.providerId) ?? `#${job.providerId}`;
+                log(
+                  `${account}: soaks are being closed as fast as new ones open -- stopped ` +
+                    'soaking this account for this pass. Its connection limit may be lower ' +
+                    'than Dispatcharr has it, or the provider counts closed connections for ' +
+                    'longer than PODIUM_SOAK_COOLDOWN_MS.',
+                );
+                this.emit({
+                  message:
+                    `${account}: soaks were being cut off by the provider -- ` +
+                    'stopped soaking this account for this pass',
+                });
+              }
+              continue;
+            }
+            if (leg.dropped) recordedDrops += 1;
             jobLegs.push({
               channelKey: `soak:${job.streamId}`,
               channelId: null,
@@ -3115,8 +3182,22 @@ export class Runner {
               ended: leg.dropped ? 'dropped' : 'gone',
             });
           }
-          drops += result.drops;
-          inflight.delete(job.streamId);
+
+          // A soak that was cut off by its own account even once is not a
+          // measurement of the stream, clean legs included: for some of it the
+          // connection was living on borrowed room. Nothing is written and the
+          // request stays queued for a quieter pass. Waiting for the account to
+          // trip before doing this spent the first few such soaks with nothing
+          // recorded -- marked done, unmeasured.
+          if (suspect > 0 || kicks.tripped(job.providerId)) {
+            this.emit({
+              lanes: soakLanes(),
+              message: `${name}: cut off by its account, left in the queue`,
+            });
+            return { ...result, stopped: true };
+          }
+
+          drops += recordedDrops;
           // Written the moment this soak lands, not at the end of the phase.
           // A phase can run for half an hour, and batching the writes meant a
           // restart -- a deploy, say -- threw away every result it had
@@ -3146,13 +3227,14 @@ export class Runner {
           // have the sweep redial the same dead address every night.
           spent += 1;
           soakDone.set(laneId, (soakDone.get(laneId) ?? 0) + 1);
+          const reported: SoakResult = { ...result, drops: recordedDrops };
           this.emit({
             soaked: spent,
             soakDrops: drops,
             lanes: soakLanes(),
             // Named rather than only counted: on a run measured in hours, the
             // question somebody actually has is "what is it doing right now".
-            message: `${name}: ${describeSoak(result)}`,
+            message: `${name}: ${describeSoak(reported)}`,
           });
           return result;
         },

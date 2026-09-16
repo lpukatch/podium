@@ -759,6 +759,33 @@ The first real run showed why this matters: that stream played for 100
 seconds, was closed, and had three immediate reconnects refused. Counted the
 old way it read as four drops — a rate four times the truth.
 
+### Being gentle with an account
+
+A soak holds an account's connections for minutes, which is exactly where a
+provider's own bookkeeping gets in the way. Many providers keep a closed
+connection counted for a few seconds, so opening the next one straight away
+looks like one connection too many — and the provider closes another soak to
+make room. That soak reconnects, the next one is closed, and the account
+churns. On the install this was found on, a five-connection account soaked five
+at a time recorded 1,106 drops at a median of 6.5 seconds, none of them the
+streams' fault.
+
+Three things prevent that now:
+
+- **A spare connection.** Soaks leave one connection free per account (**Settings
+  → Probing → Connections a soak leaves free**), so a five-connection account
+  soaks four at a time. A single-connection account still soaks one.
+- **A rest between connections.** Every soak slot waits after a connection
+  closes before opening another — a reconnect or the next stream alike — and
+  that includes the first soak of a pass, whose slot a probe was using a moment
+  earlier. Ten seconds by default (**Rest between soak connections**).
+- **A safety stop.** A drop that lands within three seconds of another soak on
+  the same account connecting is treated as the account making room, not the
+  stream failing. That soak's results are not recorded and it stays queued. If
+  an account does it three times in a pass, soaking on it stops for the rest of
+  the pass, and the log says so — its connection limit may be lower than
+  Dispatcharr has it, or it holds closed connections longer than the rest.
+
 ### How a soak run is spread
 
 Each pass gives every account its own share of the work — free connections

@@ -386,6 +386,28 @@ export const configSchema = z.object({
    * rather than "re-measure whatever is oldest, forever".
    */
   PODIUM_SOAK_MAX_AGE_MS: num(14 * 86_400_000),
+  /**
+   * How long a soak connection slot rests after a connection closes, before it
+   * opens another -- a reconnect or the next stream alike.
+   *
+   * Providers often keep a closed connection counted for some seconds, so a
+   * slot that hands straight over looks, to the provider, like one connection
+   * too many; it closes the oldest, that soak reconnects, and the account
+   * churns. On the install this was found on, an account run at its limit with
+   * a two-second retry dropped a soak every 6.5 seconds. Ten seconds clears
+   * that with room to spare, and costs a few percent of a three-minute soak.
+   */
+  PODIUM_SOAK_COOLDOWN_MS: num(10_000),
+  /**
+   * Connections per account a soak leaves unused.
+   *
+   * One, so an account is never run exactly at its limit for minutes at a
+   * time -- the condition under which a provider's lingering connection count
+   * tips it over -- and so a real viewer has somewhere to land before the
+   * watcher notices them. Never takes an account below one. 0 runs soaks at
+   * the full limit.
+   */
+  PODIUM_SOAK_SPARE_SLOTS: num(1),
 
   /** Freshness target: every channel checked within this window. */
   PODIUM_MAX_AGE_MS: num(24 * 3_600_000),
