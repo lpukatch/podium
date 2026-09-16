@@ -678,9 +678,28 @@ feed that dies at forty, which is the failure the whole thing was built for;
 three minutes is the thorough answer and is more than one night. Re-soak
 whatever it finds wanting at the longer length afterwards.
 
-The Progress tab shows what is waiting and splits it by which of the two drains
-will take it, with a **Clear the queue** button. Nothing queued has been
-measured yet, so clearing it loses nothing.
+### Watching one happen
+
+While a pass is soaking, the Progress tab says **Soaking** and shows its own bar
+— `12 / 47 soaked · 26% · 3 drops found` — with the lane bars underneath naming
+the stream each provider is holding open right now. Those bars are the useful
+part: a soak's wall clock is set by your narrowest provider rather than by the
+total, because accounts soak in parallel, and the bars are where that shows.
+
+It gets its own bar rather than sharing the probe one because the two measure
+different work at different scales: a pass probes hundreds of streams at seconds
+each and soaks tens of them at minutes each, so a single bar would sit still for
+half an hour and then jump.
+
+The block above it shows what is still waiting, split by which drain will take
+it, with a **Clear the queue** button. Nothing queued has been measured yet, so
+clearing it loses nothing.
+
+On a channel, each stream's row in the check panel says where it is: **queued**
+while it waits, then **soaked — re-check the channel to see what it found**. The
+row reads the real queue rather than only remembering your own clicks, so it
+survives a refresh and picks up streams queued by the channel or group buttons
+too.
 
 None of them measures anything on the spot. They queue, exactly as
 [re-checking a group](#re-checking-on-demand) does, and for the same reason: a

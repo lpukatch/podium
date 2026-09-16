@@ -231,10 +231,17 @@ export default function Page() {
   // A catalogue-wide re-check covers every group, so a group that has not been
   // asked for on its own is still being re-checked while this is set.
   const [refreshAllAt, setRefreshAllAt] = useState<number | null>(null);
-  // One line under whichever soak button was last pressed. Not per button:
-  // queueing is instant and the useful feedback is "how many are waiting now",
-  // which is a property of the queue rather than of the thing you clicked.
-  const [soakNote, setSoakNote] = useState('');
+  /**
+   * One line under the soak button that was pressed, and only that one.
+   *
+   * Scoped rather than shared because a group can be expanded while a channel
+   * inside it is open, so both buttons are on screen at once -- and an unscoped
+   * note rendered "Queued 847 stream(s)" under the channel button after the
+   * group button was pressed, which reads as a promise about the wrong thing.
+   */
+  const [soakNote, setSoakNote] = useState<{ scope: 'group' | 'channel'; text: string } | null>(
+    null,
+  );
   const [error, setError] = useState<{
     error: string;
     detail?: string;
@@ -701,7 +708,8 @@ export default function Page() {
    * The worker drains the queue at the provider limits and stops for viewers.
    */
   const queueSoak = async (scope: 'group' | 'channel', id: number) => {
-    setSoakNote('');
+    setSoakNote(null);
+    const note = (text: string) => setSoakNote({ scope, text });
     try {
       const resp = await fetch('/api/soak', {
         method: 'POST',
@@ -715,17 +723,17 @@ export default function Page() {
         total?: number;
       };
       if (!resp.ok || body.error) {
-        setSoakNote(body.error ?? `HTTP ${resp.status}`);
+        note(body.error ?? `HTTP ${resp.status}`);
         return;
       }
       const already = (body.requested ?? 0) - (body.queued ?? 0);
-      setSoakNote(
+      note(
         `Queued ${body.queued} stream(s) to soak` +
           (already > 0 ? `; ${already} already waiting` : '') +
-          `. ${body.total} in the queue.`,
+          `. ${body.total} in the queue — the worker works through it at the provider limits.`,
       );
     } catch (e) {
-      setSoakNote(String(e));
+      note(String(e));
     }
   };
 
@@ -1586,8 +1594,8 @@ export default function Page() {
                       stops while anyone is watching, so a big group takes several nights.
                     </span>
                   </div>
-                  {soakNote && (
-                    <p className="mt-2 text-sm text-[var(--color-accent)]">{soakNote}</p>
+                  {soakNote?.scope === 'group' && (
+                    <p className="mt-2 text-sm text-[var(--color-accent)]">{soakNote.text}</p>
                   )}
                 </div>
               )}
@@ -1771,7 +1779,9 @@ export default function Page() {
                 Measures how long each of them holds, rather than how it looks in five seconds.
               </span>
             </div>
-            {soakNote && <p className="mt-2 text-sm text-[var(--color-accent)]">{soakNote}</p>}
+            {soakNote?.scope === 'channel' && (
+              <p className="mt-2 text-sm text-[var(--color-accent)]">{soakNote.text}</p>
+            )}
 
             <CheckPanel channelId={channel.id} onApplied={() => void resync()} />
 

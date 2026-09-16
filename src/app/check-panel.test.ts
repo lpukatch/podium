@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { orderToApply, pendingChange } from './check-panel';
+import { orderToApply, pendingChange, reconcileSoaks } from './check-panel';
 
 /**
  * A channel whose rule claims three of its five streams, with the ranking
@@ -77,5 +77,52 @@ describe('whether an apply would change anything', () => {
     const differs = { ...settled, identical: false };
     expect(pendingChange(differs, false).nothingToChange).toBe(false);
     expect(pendingChange(differs, true).nothingToChange).toBe(false);
+  });
+});
+
+describe('reconciling the soak queue with what the panel shows', () => {
+  const queued = (error = '') => ({ phase: 'queued' as const, error });
+
+  it('marks a row measured once it leaves the queue', () => {
+    // The gap this closes: nothing was watching for a soak to *finish*, so a
+    // row said "queued" forever even after it had been measured.
+    const next = reconcileSoaks({ 7: queued() }, new Set());
+    expect(next[7]?.phase).toBe('done');
+  });
+
+  it('leaves a row alone while it is still waiting', () => {
+    const prev = { 7: queued() };
+    expect(reconcileSoaks(prev, new Set([7]))).toBe(prev);
+  });
+
+  it('picks up rows queued by something else', () => {
+    // A group or channel button, or another tab. The panel reports the queue,
+    // not only its own clicks.
+    const next = reconcileSoaks({}, new Set([4, 9]));
+    expect(next[4]?.phase).toBe('queued');
+    expect(next[9]?.phase).toBe('queued');
+  });
+
+  it('does not call a mid-request row done', () => {
+    // `queueing` has not reached the table yet, so its absence from the queue
+    // says nothing -- reading it as finished would flash "soaked" on a stream
+    // that had not been.
+    const next = reconcileSoaks({ 7: { phase: 'queueing', error: '' } }, new Set());
+    expect(next[7]?.phase).toBe('queueing');
+  });
+
+  it('leaves an errored row showing its error', () => {
+    const next = reconcileSoaks({ 7: { phase: 'error', error: 'nope' } }, new Set());
+    expect(next[7]).toEqual({ phase: 'error', error: 'nope' });
+  });
+
+  it('does not re-queue a row it has already reported as done', () => {
+    const prev = { 7: { phase: 'done' as const, error: '' } };
+    expect(reconcileSoaks(prev, new Set())).toBe(prev);
+  });
+
+  it('returns the same object when nothing moved, so no render is wasted', () => {
+    const prev = { 7: { phase: 'done' as const, error: '' }, 8: queued() };
+    expect(reconcileSoaks(prev, new Set([8]))).toBe(prev);
   });
 });
