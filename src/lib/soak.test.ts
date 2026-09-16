@@ -100,6 +100,46 @@ describe('soakStream', () => {
     expect(result.legs[0]?.error).toContain('spawn failed');
   });
 
+  it.runIf(usable)('stops between connections when told to', async () => {
+    let calls = 0;
+    const result = await soakStream(URL_, {
+      seconds: 30,
+      ffmpegPath: dropsAfterOneSecond,
+      // Let the first connection finish, then stop.
+      stop: () => ++calls > 3,
+    });
+    expect(result.legs.length).toBeLessThan(5);
+  });
+
+  it.runIf(usable)('kills a connection already running rather than waiting it out', async () => {
+    // The point of the stop hook. runLanes stops *dispatching* on an abort,
+    // which is right for a ten-second probe and wrong for a three-minute soak:
+    // without this a viewer arriving would wait out every soak in flight
+    // before getting the connections back.
+    const startedAt = Date.now();
+    const result = await soakStream(URL_, {
+      seconds: 30,
+      ffmpegPath: holds,
+      stop: () => Date.now() - startedAt > 1_000,
+    });
+    // Well inside the 30s budget it was given.
+    expect(Date.now() - startedAt).toBeLessThan(10_000);
+    // The killed connection is not recorded: charging the stream for a
+    // connection this process cut would invent evidence against it.
+    expect(result.legs).toEqual([]);
+    expect(result.drops).toBe(0);
+  });
+
+  it.runIf(usable)('does not stop when the hook stays false', async () => {
+    const result = await soakStream(URL_, {
+      seconds: 2,
+      ffmpegPath: holds,
+      stop: () => false,
+    });
+    expect(result.legs).toHaveLength(1);
+    expect(result.legs[0]?.dropped).toBe(false);
+  });
+
   it('refuses a hostile url without spawning anything', async () => {
     const result = await soakStream('file:///etc/passwd', { seconds: 60 });
     expect(result).toEqual({ legs: [], heldMs: 0, drops: 0, unreachable: false });

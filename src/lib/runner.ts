@@ -2015,7 +2015,10 @@ export class Runner {
       // viewer aborted the pass. Best-effort: a soak is extra information, and
       // a failure to gather it must not fail a pass that already did its job.
       try {
-        await this.soakPhase({ abort, limits, loginsByProvider, streamById, log }, config);
+        await this.soakPhase(
+          { abort, limits, loginsByProvider, streamById, log, client, uuidMap, guard },
+          config,
+        );
       } catch (error) {
         log(`soak phase failed: ${errorText(error)}`);
       }
@@ -2734,6 +2737,10 @@ export class Runner {
       loginsByProvider: Map<number, ProviderLogin[]>;
       streamById: Map<number, Stream>;
       log: (m: string) => void;
+      /** For this phase's own viewer watcher -- see below. */
+      client: DispatcharrClient;
+      uuidMap: Map<string, number>;
+      guard: ViewerGuard | undefined;
     },
     config: Config,
   ): Promise<{ soaked: number; drops: number }> {
@@ -2745,14 +2752,18 @@ export class Runner {
 
     const store = this.deps.store;
     const soakSeconds = Math.max(10, config.PODIUM_SOAK_SECONDS);
-    const lanes = [...limits.values()].filter((slots) => slots > 0).length;
-    if (lanes === 0) return none;
+    // Slots, not lanes: a login with three free connections runs three soaks at
+    // once, and counting it as one would leave two thirds of the window unused.
+    // `runLanes` enforces the real per-lane limit regardless, so this only ever
+    // decides how much work to queue.
+    const slots = [...limits.values()].reduce((sum, free) => sum + Math.max(0, free), 0);
+    if (slots === 0) return none;
 
     const windowOpen = soakWindowOpen(config.PODIUM_SOAK_WINDOW);
     const budgetMs = windowOpen
       ? Math.min(minutesLeftInWindow(config.PODIUM_SOAK_WINDOW) * 60_000, SOAK_WINDOW_BUDGET_MS)
       : soakSeconds * 1_000;
-    const room = soaksThatFit(budgetMs / 60_000, lanes, soakSeconds);
+    const room = soaksThatFit(budgetMs / 60_000, slots, soakSeconds);
     if (room <= 0) return none;
 
     let requested: StoredSoakRequest[];
@@ -2824,54 +2835,78 @@ export class Runner {
       `soaking ${jobs.length} stream(s) at ${soakSeconds}s each` +
         `${windowOpen ? ' (inside the soak window)' : ''}`,
     );
-    await runLanes<SoakResult>(jobs, {
-      limits,
+
+    // Its own watcher, because the probe run's was cleared when it finished
+    // and this phase is the longest thing a pass does -- up to
+    // SOAK_WINDOW_BUDGET_MS. Without one the single least interruptible piece
+    // of work here would be the only piece nobody was watching over, which is
+    // exactly backwards: a viewer arriving during a half-hour sweep would find
+    // every lane occupied until it chose to finish.
+    const watcher = this.watchForViewers(
+      context.client,
       abort,
-      maxConcurrent: config.PODIUM_MAX_CONCURRENT_PROBES,
-      staggerMs: config.PODIUM_LANE_STAGGER_MS,
       log,
-      probe: async (job) => {
-        // Re-checked per job rather than only up front: the queue was sized
-        // against an estimate, and a soak that would cross the deadline is
-        // better skipped than truncated into a leg that reads as a drop.
-        const left = deadline - Date.now();
-        if (left < soakSeconds * 1_000) {
-          return { legs: [], heldMs: 0, drops: 0, unreachable: false };
-        }
-        const startedAt = Date.now();
-        const result = await soakStream(job.url, {
-          seconds: soakSeconds,
-          userAgent: config.PODIUM_USER_AGENT,
-        });
-        let cursor = startedAt;
-        for (const leg of result.legs) {
-          legs.push({
-            channelKey: `soak:${job.streamId}`,
-            channelId: null,
-            streamId: job.streamId,
-            startedAt: cursor,
-            endedAt: cursor + leg.heldMs,
-            watchedMs: leg.heldMs,
-            stalledMs: 0,
-            stalls: 0,
-            // A soak that ran its budget out is this process stopping the
-            // watching, which is charged to nobody -- the same reading a
-            // viewer switching off gets.
-            ended: leg.dropped ? 'dropped' : 'gone',
+      context.uuidMap,
+      context.guard,
+    );
+    try {
+      await runLanes<SoakResult>(jobs, {
+        limits,
+        abort,
+        maxConcurrent: config.PODIUM_MAX_CONCURRENT_PROBES,
+        staggerMs: config.PODIUM_LANE_STAGGER_MS,
+        log,
+        probe: async (job) => {
+          // Re-checked per job rather than only up front: the queue was sized
+          // against an estimate, and a soak that would cross the deadline is
+          // better skipped than truncated into a leg that reads as a drop.
+          const left = deadline - Date.now();
+          if (left < soakSeconds * 1_000) {
+            return { legs: [], heldMs: 0, drops: 0, unreachable: false };
+          }
+          const startedAt = Date.now();
+          const result = await soakStream(job.url, {
+            seconds: soakSeconds,
+            userAgent: config.PODIUM_USER_AGENT,
+            // Killed mid-connection rather than left to finish. runLanes stops
+            // *dispatching* on an abort, which is right for a ten-second probe
+            // and wrong for a three-minute soak: without this, a viewer
+            // arriving would wait out every soak already in flight before
+            // getting the connections back.
+            stop: () => abort.aborted,
           });
-          cursor += leg.heldMs;
-        }
-        drops += result.drops;
-        // Spent whatever it found, including nothing: a stream that would not
-        // connect has said what it had to say, and leaving the request would
-        // have the sweep redial the same dead address every night.
-        spent.push(job.streamId);
-        return result;
-      },
-      onChannelComplete: async () => {
-        // Soaks are per stream; there is no channel to settle.
-      },
-    });
+          let cursor = startedAt;
+          for (const leg of result.legs) {
+            legs.push({
+              channelKey: `soak:${job.streamId}`,
+              channelId: null,
+              streamId: job.streamId,
+              startedAt: cursor,
+              endedAt: cursor + leg.heldMs,
+              watchedMs: leg.heldMs,
+              stalledMs: 0,
+              stalls: 0,
+              // A soak that ran its budget out is this process stopping the
+              // watching, which is charged to nobody -- the same reading a
+              // viewer switching off gets.
+              ended: leg.dropped ? 'dropped' : 'gone',
+            });
+            cursor += leg.heldMs;
+          }
+          drops += result.drops;
+          // Spent whatever it found, including nothing: a stream that would not
+          // connect has said what it had to say, and leaving the request would
+          // have the sweep redial the same dead address every night.
+          spent.push(job.streamId);
+          return result;
+        },
+        onChannelComplete: async () => {
+          // Soaks are per stream; there is no channel to settle.
+        },
+      });
+    } finally {
+      clearInterval(watcher);
+    }
 
     try {
       store.recordLegs(legs);

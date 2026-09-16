@@ -842,6 +842,18 @@ export async function soakStream(
      * rest of a three-minute budget rediscovering that helps nobody.
      */
     maxDeadConnections?: number;
+    /**
+     * Polled to decide whether to stop early -- a viewer arriving, or the
+     * worker shutting down.
+     *
+     * Checked between connections *and* while one is running, and the running
+     * one is killed rather than left to finish. That distinction is the whole
+     * point of having this at all: a probe cut short costs the ten seconds it
+     * had left, where a soak left to finish holds a provider connection for up
+     * to three more minutes after somebody has started watching -- which is
+     * precisely the capacity the abort exists to hand back.
+     */
+    stop?: () => boolean;
     /** Injected by the tests; defaults to the real clock. */
     now?: () => number;
   } = {},
@@ -851,6 +863,7 @@ export async function soakStream(
     userAgent = 'VLC/3.0.14',
     ffmpegPath = 'ffmpeg',
     maxDeadConnections = 2,
+    stop,
     now = Date.now,
   } = options;
 
@@ -862,6 +875,7 @@ export async function soakStream(
   let deadInARow = 0;
 
   while (now() < deadline) {
+    if (stop?.()) break;
     const remainingMs = deadline - now();
     // Below about a second there is no leg worth measuring: the connection
     // would not finish establishing before its own deadline, and would be
@@ -873,8 +887,21 @@ export async function soakStream(
     // the drop test is made against, so the two cannot disagree.
     const legSeconds = Math.max(1, Math.floor(remainingMs / 1000));
     const startedAt = now();
-    const { error } = await runSoakLeg(url, { seconds: legSeconds, userAgent, ffmpegPath });
+    const { error, stopped } = await runSoakLeg(url, {
+      seconds: legSeconds,
+      userAgent,
+      ffmpegPath,
+      stop,
+    });
     const heldMs = now() - startedAt;
+    if (stopped) {
+      // Killed on the way out, not dropped by the far end. Recording it as a
+      // leg at all would charge the stream for a connection this process cut,
+      // so the time is discarded rather than counted as clean or as a break --
+      // the same refusal to invent evidence the passive ledger makes about a
+      // session that merely ended.
+      break;
+    }
     // Measured against what this leg was actually told to run for, not against
     // the budget: the two differ by up to a second once `-t` is floored, and
     // testing the wrong one reads a real drop at the end of a soak as a clean
@@ -919,8 +946,13 @@ export async function soakStream(
  */
 function runSoakLeg(
   url: string,
-  options: { seconds: number; userAgent: string; ffmpegPath: string },
-): Promise<{ error: string }> {
+  options: {
+    seconds: number;
+    userAgent: string;
+    ffmpegPath: string;
+    stop?: (() => boolean) | undefined;
+  },
+): Promise<{ error: string; stopped: boolean }> {
   const nul = process.platform === 'win32' ? 'NUL' : '/dev/null';
   const args = [
     '-y',
@@ -944,7 +976,7 @@ function runSoakLeg(
     nul,
   ];
 
-  return new Promise<{ error: string }>((resolve) => {
+  return new Promise<{ error: string; stopped: boolean }>((resolve) => {
     // See `sampleStream` for why the path is opted out of Turbopack's tracing.
     const child = spawn(/*turbopackIgnore: true*/ options.ffmpegPath, args, {
       stdio: ['ignore', 'ignore', 'pipe'],
@@ -953,12 +985,23 @@ function runSoakLeg(
 
     let stderr = '';
     let settled = false;
+    let stopped = false;
     const finish = (error: string) => {
       if (settled) return;
       settled = true;
+      clearInterval(poll);
       runningChildren.delete(child);
-      resolve({ error });
+      resolve({ error, stopped });
     };
+
+    // A second is fine: the thing being handed back is a provider connection,
+    // and a second of one is not worth a tighter loop on every soak in flight.
+    const poll = setInterval(() => {
+      if (settled || !options.stop?.()) return;
+      stopped = true;
+      child.kill('SIGKILL');
+    }, 1_000);
+    poll.unref?.();
 
     child.stderr.on('data', (chunk) => {
       stderr += String(chunk);
