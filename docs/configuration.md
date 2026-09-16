@@ -257,6 +257,10 @@ It needs `PODIUM_PROBE_IDLE_PROVIDERS` on, which in turn needs
 | `PODIUM_DETECT_BLACK` | `true` | black-screen detection |
 | `PODIUM_STABILITY` | `true` | record how long streams hold |
 | `PODIUM_STABILITY_POLL_MS` | `10000` | how often live sessions are sampled |
+| `PODIUM_SOAK_WINDOW` | *(empty)* | hours the automatic soak sweep may run, `HH:MM-HH:MM`; empty is off |
+| `PODIUM_SOAK_SECONDS` | `180` | how long each soak holds its stream |
+| `PODIUM_SOAK_MAX_PER_CHANNEL` | `3` | how deep into each channel's order the sweep measures; `0` for all |
+| `PODIUM_SOAK_MAX_AGE_MS` | `1209600000` | a stream observed more recently than this is left alone (14 days) |
 
 ### Recording how long streams hold
 
@@ -564,8 +568,12 @@ Four gauges summarise the [stability ledger](usage.md#stability-the-failure-a-pr
 | `podium_stability_watched_seconds` | observed serving time across them |
 | `podium_stability_breaks` | failovers, dropped soaks and stalls recorded |
 | `podium_stability_flapping_streams` | streams with at least two breaks *and* more than one an hour |
+| `podium_stability_dead_channels` | channels where every stream has been measured and every one drops |
+| `podium_soak_queue` | streams waiting to be soaked |
 
-The last is the one worth an alert. It is counted per stream rather than derived
+`podium_stability_dead_channels` is the one worth an alert above all: it counts
+the state reordering cannot improve, so it is the one that needs a person.
+`podium_stability_flapping_streams` It is counted per stream rather than derived
 from the two above it, because a rate over a sum is not the same thing: one
 dreadful stream and a hundred good ones average out to fine.
 

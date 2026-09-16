@@ -429,6 +429,70 @@ export function summarise(legs: Leg[]): Map<number, StabilityRecord> {
   return out;
 }
 
+/** What the ledger says about a channel taken as a whole. */
+export interface ChannelStability {
+  /** Streams on the channel. */
+  total: number;
+  /** Of those, how many have enough evidence to be judged at all. */
+  measured: number;
+  /** Of the measured ones, how many drop more often than tolerated. */
+  unstable: number;
+  /**
+   * Every stream on the channel has been measured, and every one of them
+   * drops.
+   *
+   * The distinction worth drawing, because it is the one case reordering
+   * cannot help. Everything else Podium does assumes a channel has a better
+   * stream in it somewhere and the job is to find it; when this is true there
+   * is no better stream, and shuffling the order only changes which bad feed a
+   * viewer gets. That is a different instruction to the operator -- find
+   * another source, or accept the channel is bad -- and stating it as
+   * "reordered, no change" would hide it.
+   *
+   * Requires full coverage deliberately. A channel with three of six streams
+   * measured and all three bad is a strong hint, but the three nobody has
+   * watched might be fine, and telling somebody their channel is unfixable on
+   * half the evidence is how they go and cancel a provider they did not need
+   * to. `measured` and `total` are both reported so a caller can phrase the
+   * partial case honestly instead.
+   */
+  allBad: boolean;
+}
+
+/**
+ * Judge a channel by every stream on it.
+ *
+ * `minMeasured` is not a parameter because the answer is "all of them": any
+ * lower bar makes `allBad` a claim about a sample rather than about the
+ * channel. Callers wanting the partial picture read `measured` against
+ * `total`.
+ */
+export function channelStability(
+  streamIds: number[],
+  records: Map<number, StabilityRecord>,
+  maxDropsPerHour: number,
+): ChannelStability {
+  let measured = 0;
+  let unstable = 0;
+  for (const streamId of streamIds) {
+    const record = records.get(streamId);
+    // "Measured" means the ledger could reach a verdict, which is the same
+    // evidence floor the weight uses -- not merely that a row exists.
+    if (!record || record.breaks + record.stalls < MIN_FAILURES) {
+      if (record && record.watchedMs > 0 && record.breaks + record.stalls === 0) measured += 1;
+      continue;
+    }
+    measured += 1;
+    if (dropsPerHour(record) > maxDropsPerHour) unstable += 1;
+  }
+  return {
+    total: streamIds.length,
+    measured,
+    unstable,
+    allBad: streamIds.length > 0 && measured === streamIds.length && unstable === measured,
+  };
+}
+
 /** One line for the UI: what the ledger has on this stream. */
 export function describeStability(record: StabilityRecord | undefined): string {
   if (!record || record.legs === 0) return 'never observed playing';

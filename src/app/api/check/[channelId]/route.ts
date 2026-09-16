@@ -32,7 +32,13 @@ import {
   config as serverConfig,
   snapshot,
 } from '@/lib/server/state';
-import { describeStability, type StabilityRecord, tooUnstable } from '@/lib/stability';
+import {
+  channelStability,
+  describeStability,
+  type StabilityRecord,
+  TOLERATED_DROPS_PER_HOUR,
+  tooUnstable,
+} from '@/lib/stability';
 import { Store } from '@/lib/store';
 import {
   buildVariants,
@@ -510,6 +516,19 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       };
     };
 
+    // The channel taken as a whole, which is a different question from any of
+    // its rows. Reordering assumes there is a better stream somewhere in the
+    // channel; when every stream on it has been measured and every one drops,
+    // there is not, and the operator needs to hear that rather than watch the
+    // order shuffle.
+    const channelVerdict = channelStability(
+      [...new Set([...current, ...proposed])],
+      stability,
+      strategy.weights.maxDropsPerHour > 0
+        ? strategy.weights.maxDropsPerHour
+        : TOLERATED_DROPS_PER_HOUR,
+    );
+
     const rows = proposed.map(describe);
     // Streams Dispatcharr has on the channel that this rule does not claim.
     const unclaimed = unclaimedIds.map(describe);
@@ -547,6 +566,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       // ranking whenever the rules file overrode it.
       minBitrateKbps: strategy.weights.minBitrateKbps,
       minResolution: strategy.weights.minResolution ?? null,
+      channelStability: channelVerdict,
       rows,
       unclaimed,
       unprobed,

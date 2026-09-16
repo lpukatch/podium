@@ -639,12 +639,67 @@ the two produce the same rows and feed the same score. A soak that holds for the
 full three minutes is written too: clean time is half of what a rate is made of,
 and it is how a stream with an old bad record is shown to have recovered.
 
-It is a button rather than a schedule because it is not free. A soak occupies a
-provider connection for its whole window, and since the failure takes tens of
-seconds to appear, a meaningful one is minutes. Across six streams on each of
-hundreds of channels that would cost more slots than probing the catalogue does.
-If somebody is watching when you press it, the result says so — the soak was
-competing for a slot, and a bad reading may be yours rather than the provider's.
+Three places ask for one:
+
+- **Soak** on a stream's row in the check panel — that stream alone.
+- **Soak every stream on this channel** — above the check panel.
+- **Soak every stream here** — on a group, which is every stream on every
+  channel in it.
+
+None of them measures anything on the spot. They queue, exactly as
+[re-checking a group](#re-checking-on-demand) does, and for the same reason: a
+soak holds a provider connection for minutes, so doing it inside the request
+would be a second scheduler that knows nothing about provider limits or who is
+watching — and a multi-minute HTTP request that most ingresses cut off anyway.
+The worker drains the queue at the end of a pass, oldest request first, at the
+provider limits, and stops the moment somebody starts watching. Asking twice is
+harmless: the queue is keyed on the stream, so a group and one of its channels
+leave one request each.
+
+### The nightly sweep
+
+**Settings → Probing → Soak during these hours** turns on the automatic version.
+Give it a range like `03:00-06:00` (ranges that cross midnight are fine) and
+Podium fills whatever capacity is spare inside it, measuring streams it knows
+least about first: never-observed before stale, oldest before newest, slot 0
+before the rest.
+
+It cannot cover everything, and the arithmetic is worth seeing before you widen
+it. On a 449-channel install with 3,318 matched streams and 13 provider
+connections across five accounts, every stream at three minutes is about 166
+hours of connection time — roughly 21 hours of wall clock once the lanes are
+full, or a week of three-hour windows for one sweep. So **Soak the top N
+streams per channel** bounds it to the only part that matters: a stream ranked
+fifth of six will never be served to anybody, so whether it holds changes
+nothing. At the default of three that is ~1,350 streams, about three nights.
+
+The window governs the sweep only. A soak you asked for with a button runs
+whenever there is spare capacity, whatever the hour — it already waits for
+nobody to be watching, which is the protection the window exists to give.
+
+A pass spends at most half an hour soaking, or whatever is left of the window if
+that is less, so the sweep walks across as many passes as the window holds
+rather than starving the ordinary probing for a whole night.
+
+### When every stream on a channel is bad
+
+Everything else here assumes a channel has a better stream in it somewhere and
+the job is to find it. Sometimes it does not. When every stream on a channel has
+been measured and every one of them drops, the check panel says so outright:
+
+> Every stream on this channel has been measured and every one of them drops
+> (6 of 6). Reordering cannot fix this — the channel needs another source.
+
+That is a different instruction from anything else Podium reports, which is why
+it gets its own line rather than showing up as yet another reshuffle. It
+requires **full** coverage deliberately: three of six measured and all three bad
+is a strong hint, but the three nobody has watched might be fine, and telling
+somebody their channel is unfixable on half the evidence is how they go and
+cancel a provider they did not need to. The partial case is reported as what it
+is — "2 of the 3 streams measured here drop often (6 on the channel)" — with a
+nudge to soak the rest.
+
+`podium_stability_dead_channels` counts them for alerting.
 
 ### Bitrate is not comparable across codecs
 

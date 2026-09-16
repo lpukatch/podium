@@ -336,6 +336,57 @@ export const configSchema = z.object({
    */
   PODIUM_STABILITY_POLL_MS: num(10_000),
 
+  /**
+   * Hours the automatic soak sweep may run, as `HH:MM-HH:MM`. Empty is off.
+   *
+   * A soak holds a provider connection for minutes rather than seconds, and on
+   * a typical install the accounts have single-digit connection limits. Doing
+   * that at random hours is not a trade anybody would make, so the sweep is
+   * confined to hours the operator names -- ranges that wrap past midnight
+   * (`22:00-04:00`) are the normal case and are handled as such.
+   *
+   * Off by default. Nothing should start spending connections because an
+   * upgrade landed.
+   *
+   * It governs the sweep only. A soak somebody asked for by pressing a button
+   * is queued and drained whenever there is spare capacity: it already waits
+   * for nobody to be watching, which is the same protection the window gives,
+   * applied continuously instead of by the clock.
+   */
+  PODIUM_SOAK_WINDOW: z.string().default(''),
+  /**
+   * How long each soak holds its stream.
+   *
+   * Three minutes. The failure this exists to catch takes tens of seconds to
+   * appear -- the feed it was built against dropped every 36 to 55 seconds --
+   * so a shorter soak mostly reports that nothing has gone wrong *yet*, which
+   * is the answer that misleads. Longer buys little: by three minutes a
+   * flapping feed has dropped three or four times and a steady one has proved
+   * it.
+   */
+  PODIUM_SOAK_SECONDS: num(180),
+  /**
+   * How deep into each channel's order the sweep bothers to measure.
+   *
+   * A stream ranked fifth of six will never be served to anybody, so whether
+   * it holds changes nothing. Measuring only the top few is what makes the
+   * sweep finish: on the install this was built against, every matched stream
+   * is 166 hours of connection time where the top three per channel is about
+   * three nights of a three-hour window.
+   *
+   * 0 measures every matched stream, which is honest and takes several times
+   * as long.
+   */
+  PODIUM_SOAK_MAX_PER_CHANNEL: num(3),
+  /**
+   * A stream observed more recently than this is left alone by the sweep.
+   *
+   * Defaults to the fortnight the ledger remembers, so the sweep's natural
+   * cadence is "re-measure a stream as its evidence is about to age out"
+   * rather than "re-measure whatever is oldest, forever".
+   */
+  PODIUM_SOAK_MAX_AGE_MS: num(14 * 86_400_000),
+
   /** Freshness target: every channel checked within this window. */
   PODIUM_MAX_AGE_MS: num(24 * 3_600_000),
   /** How often a pass is considered. Each pass takes a slice, not everything. */

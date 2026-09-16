@@ -26,12 +26,13 @@ import { errorText } from './error-text';
 import type { Matcher, StreamIndex } from './matcher';
 import { resolveOrdering, withResolutionFloor } from './ordering';
 import { Pacer, type PacerConfig, viewersByProvider } from './pacer';
-import { type ProbeResult, probe } from './probe';
+import { type ProbeResult, probe, type SoakResult, soakStream } from './probe';
 import { tierOf } from './quality';
 import { channelResolutionFloor, type MinResolution } from './resolution';
 import { pruneDeletedChannelRules } from './rule-sync';
 import type { RulesSource } from './rules-source';
 import { AbortFlag, laneKey, type ProbeJob, runLanes } from './scheduler';
+import { minutesLeftInWindow, planSoaks, soaksThatFit, soakWindowOpen } from './soak-plan';
 
 // Re-exported: `statsPayload` lived here before the rule check needed it too,
 // and the API route and tests that import it from here still can.
@@ -45,10 +46,17 @@ import {
   rank,
   type Weights,
 } from './scoring';
-import type { StabilityRecord } from './stability';
+import type { Leg, StabilityRecord } from './stability';
 import { statsPayload } from './stats';
 import type { CatalogueRow, DeadStreamRow } from './store';
-import { ALL_GROUPS, forcedAtFor, type Progress, type Store, ttlFor } from './store';
+import {
+  ALL_GROUPS,
+  forcedAtFor,
+  type Progress,
+  type Store,
+  type StoredSoakRequest,
+  ttlFor,
+} from './store';
 import { type ChannelInput, checkRules, factsFor, type RuleInput } from './teamarr';
 import {
   buildVariants,
@@ -248,6 +256,20 @@ export interface DeadRemoval {
 }
 
 /** Above this share of a provider's *managed* streams reading dead, assume an outage. */
+/**
+ * The longest a single pass will spend soaking inside the window.
+ *
+ * Half an hour. A pass that soaks is a pass doing nothing else -- no re-probes,
+ * no reorders -- so an unbounded one would let a busy sweep starve the ordinary
+ * work for a whole night. Half an hour still fits ten rounds of a three-minute
+ * soak per lane, which on eight lanes is eighty streams a pass, and the window
+ * is walked across as many passes as it holds.
+ *
+ * Always taken as the *smaller* of this and what is left of the window, so the
+ * sweep cannot run past its own closing time.
+ */
+export const SOAK_WINDOW_BUDGET_MS = 30 * 60_000;
+
 export const PROVIDER_OUTAGE_SHARE = 0.5;
 
 /**
@@ -1988,6 +2010,16 @@ export class Runner {
         settler.drain();
       }
       counters.skipped = stats.skipped;
+
+      // After the probing, on whatever capacity it left, and never when a
+      // viewer aborted the pass. Best-effort: a soak is extra information, and
+      // a failure to gather it must not fail a pass that already did its job.
+      try {
+        await this.soakPhase({ abort, limits, loginsByProvider, streamById, log }, config);
+      } catch (error) {
+        log(`soak phase failed: ${errorText(error)}`);
+      }
+
       this.emit({
         phase: 'done',
         probed: counters.probed,
@@ -2667,6 +2699,190 @@ export class Runner {
           gapKbps: row.gapKbps,
         })),
     });
+  }
+
+  /**
+   * Spend spare provider capacity finding out how long streams actually hold.
+   *
+   * Runs at the end of a pass, on what the probe lanes left behind, and is the
+   * *only* place a soak ever happens unattended. Deliberately inside the pass
+   * rather than on a timer of its own: everything that makes a soak safe --
+   * lane limits, the abort the moment a viewer appears, the concurrency cap
+   * that keeps the container alive -- already exists here, and a soak
+   * scheduler beside the probe scheduler would have to reimplement all of it
+   * and would get it wrong. Same argument as `refresh_marks`.
+   *
+   * Two sources, drained in this order:
+   *
+   *   - what somebody asked for by pressing a button, oldest request first.
+   *     Honoured whatever the hour, because a request is an instruction; it
+   *     still waits for spare capacity and still stops for a viewer.
+   *   - the nightly sweep, but only inside `PODIUM_SOAK_WINDOW`, topping up
+   *     whatever room the requests left.
+   *
+   * Bounded by wall clock either way. Inside the window a pass may spend up to
+   * `SOAK_WINDOW_BUDGET_MS`, or whatever is left of the window if that is less
+   * -- never more, so the sweep cannot run on into the morning holding
+   * connections somebody now wants. Outside it a pass spends one round per
+   * lane, which drains a queued channel over a few passes instead of stalling
+   * the loop for an hour on one button press.
+   */
+  private async soakPhase(
+    context: {
+      abort: AbortFlag;
+      limits: Map<string, number>;
+      loginsByProvider: Map<number, ProviderLogin[]>;
+      streamById: Map<number, Stream>;
+      log: (m: string) => void;
+    },
+    config: Config,
+  ): Promise<{ soaked: number; drops: number }> {
+    const { abort, limits, loginsByProvider, streamById, log } = context;
+    const none = { soaked: 0, drops: 0 };
+    // A viewer arrived during the probe lanes. Whatever capacity looked free a
+    // moment ago is not, and a soak is the least interruptible work here.
+    if (abort.aborted) return none;
+
+    const store = this.deps.store;
+    const soakSeconds = Math.max(10, config.PODIUM_SOAK_SECONDS);
+    const lanes = [...limits.values()].filter((slots) => slots > 0).length;
+    if (lanes === 0) return none;
+
+    const windowOpen = soakWindowOpen(config.PODIUM_SOAK_WINDOW);
+    const budgetMs = windowOpen
+      ? Math.min(minutesLeftInWindow(config.PODIUM_SOAK_WINDOW) * 60_000, SOAK_WINDOW_BUDGET_MS)
+      : soakSeconds * 1_000;
+    const room = soaksThatFit(budgetMs / 60_000, lanes, soakSeconds);
+    if (room <= 0) return none;
+
+    let requested: StoredSoakRequest[];
+    try {
+      requested = store.pendingSoaks(room);
+    } catch (error) {
+      log(`could not read the soak queue: ${errorText(error)}`);
+      return none;
+    }
+
+    const wanted = requested.map((row) => row.streamId);
+    const asked = new Set(wanted);
+    if (windowOpen && wanted.length < room) {
+      try {
+        const catalogue = store.catalogue().rows;
+        const planned = planSoaks({
+          candidates: catalogue
+            .filter((row) => !asked.has(row.streamId))
+            .map((row) => ({ streamId: row.streamId, channelId: row.channelId, slot: row.slot })),
+          records: store.stabilityRecords(),
+          maxPerChannel: Math.max(0, config.PODIUM_SOAK_MAX_PER_CHANNEL),
+          maxAgeMs: Math.max(0, config.PODIUM_SOAK_MAX_AGE_MS),
+          now: Date.now(),
+          limit: room - wanted.length,
+        });
+        wanted.push(...planned);
+      } catch (error) {
+        // The sweep is the optional half. A catalogue or ledger that cannot be
+        // read leaves the requested soaks to run on their own.
+        log(`soak sweep could not plan: ${errorText(error)}`);
+      }
+    }
+    if (wanted.length === 0) return none;
+
+    // The same variant machinery the probe jobs use, so a soak occupies the
+    // login it would really have occupied and an Xtream account's URL is
+    // rewritten the way playback rewrites it.
+    const jobs: ProbeJob[] = [];
+    const drawSeq = new Map<number, number>();
+    for (const streamId of wanted) {
+      const stream = streamById.get(streamId);
+      if (!stream) continue;
+      const logins = loginsByProvider.get(stream.providerId);
+      const menu =
+        logins && logins.length > 0
+          ? buildVariants(stream.url, logins)
+          : [{ variantId: POOLED_VARIANT, profileId: 0, url: stream.url }];
+      const seq = drawSeq.get(stream.providerId) ?? 0;
+      drawSeq.set(stream.providerId, seq + 1);
+      const variant = drawVariant(menu, stream.providerId, limits, seq);
+      if ((limits.get(laneKey(stream.providerId, variant.profileId)) ?? 0) <= 0) continue;
+      jobs.push({
+        streamId,
+        channelId: 0,
+        url: variant.url,
+        providerId: stream.providerId,
+        profileId: variant.profileId,
+        stepOrder: 0,
+      });
+    }
+    if (jobs.length === 0) return none;
+
+    const deadline = Date.now() + budgetMs;
+    const legs: Leg[] = [];
+    const spent: number[] = [];
+    let drops = 0;
+
+    log(
+      `soaking ${jobs.length} stream(s) at ${soakSeconds}s each` +
+        `${windowOpen ? ' (inside the soak window)' : ''}`,
+    );
+    await runLanes<SoakResult>(jobs, {
+      limits,
+      abort,
+      maxConcurrent: config.PODIUM_MAX_CONCURRENT_PROBES,
+      staggerMs: config.PODIUM_LANE_STAGGER_MS,
+      log,
+      probe: async (job) => {
+        // Re-checked per job rather than only up front: the queue was sized
+        // against an estimate, and a soak that would cross the deadline is
+        // better skipped than truncated into a leg that reads as a drop.
+        const left = deadline - Date.now();
+        if (left < soakSeconds * 1_000) {
+          return { legs: [], heldMs: 0, drops: 0, unreachable: false };
+        }
+        const startedAt = Date.now();
+        const result = await soakStream(job.url, {
+          seconds: soakSeconds,
+          userAgent: config.PODIUM_USER_AGENT,
+        });
+        let cursor = startedAt;
+        for (const leg of result.legs) {
+          legs.push({
+            channelKey: `soak:${job.streamId}`,
+            channelId: null,
+            streamId: job.streamId,
+            startedAt: cursor,
+            endedAt: cursor + leg.heldMs,
+            watchedMs: leg.heldMs,
+            stalledMs: 0,
+            stalls: 0,
+            // A soak that ran its budget out is this process stopping the
+            // watching, which is charged to nobody -- the same reading a
+            // viewer switching off gets.
+            ended: leg.dropped ? 'dropped' : 'gone',
+          });
+          cursor += leg.heldMs;
+        }
+        drops += result.drops;
+        // Spent whatever it found, including nothing: a stream that would not
+        // connect has said what it had to say, and leaving the request would
+        // have the sweep redial the same dead address every night.
+        spent.push(job.streamId);
+        return result;
+      },
+      onChannelComplete: async () => {
+        // Soaks are per stream; there is no channel to settle.
+      },
+    });
+
+    try {
+      store.recordLegs(legs);
+      store.clearSoaks(spent);
+    } catch (error) {
+      log(`could not record ${legs.length} soak leg(s): ${errorText(error)}`);
+    }
+    if (spent.length > 0) {
+      log(`soaked ${spent.length} stream(s), ${drops} drop(s) recorded`);
+    }
+    return { soaked: spent.length, drops };
   }
 
   /**
