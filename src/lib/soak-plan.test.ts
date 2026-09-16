@@ -5,6 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  laneQuotas,
   minutesLeftInWindow,
   oneRoundBudgetMs,
   parseSoakWindow,
@@ -13,6 +14,7 @@ import {
   type SoakCandidate,
   soaksThatFit,
   soakWindowOpen,
+  takePerLane,
 } from './soak-plan';
 import type { StabilityRecord } from './stability';
 
@@ -254,5 +256,75 @@ describe('oneRoundBudgetMs', () => {
 
   it('falls back to the setting when no row asks for a length', () => {
     expect(oneRoundBudgetMs(180, [null, undefined, 0])).toBe(180_000 + SOAK_DISPATCH_SLACK_MS);
+  });
+});
+
+describe('spreading a pass across providers', () => {
+  const lane = (id: number, l: string | null) => ({ id, lane: l });
+
+  it('gives each lane its free slots times the rounds', () => {
+    expect(
+      laneQuotas(
+        new Map([
+          ['6:0', 3],
+          ['5:0', 5],
+          ['7:0', 0],
+        ]),
+        10,
+      ),
+    ).toEqual(
+      new Map([
+        ['6:0', 30],
+        ['5:0', 50],
+      ]),
+    );
+  });
+
+  it('gives nothing when no round fits', () => {
+    expect(laneQuotas(new Map([['6:0', 3]]), 0).size).toBe(0);
+  });
+
+  it('does not let one account crowd out the rest', () => {
+    // The regression: a queue in stream-id order whose head is all one
+    // account. A single total of 4 took four of account A's streams and left
+    // B idle; per-lane quotas take two of each.
+    const queue = [
+      lane(1, 'A'),
+      lane(2, 'A'),
+      lane(3, 'A'),
+      lane(4, 'A'),
+      lane(5, 'B'),
+      lane(6, 'B'),
+    ];
+    const taken = takePerLane(
+      queue,
+      new Map([
+        ['A', 2],
+        ['B', 2],
+      ]),
+    );
+    expect(taken.map((c) => c.id)).toEqual([1, 2, 5, 6]);
+  });
+
+  it('keeps queue order within a lane', () => {
+    const taken = takePerLane([lane(9, 'A'), lane(3, 'A')], new Map([['A', 2]]));
+    expect(taken.map((c) => c.id)).toEqual([9, 3]);
+  });
+
+  it('skips candidates with no lane or a lane with no quota', () => {
+    const taken = takePerLane([lane(1, null), lane(2, 'Z'), lane(3, 'A')], new Map([['A', 1]]));
+    expect(taken.map((c) => c.id)).toEqual([3]);
+  });
+
+  it('stops walking once every lane is full', () => {
+    let seen = 0;
+    function* queue() {
+      for (let i = 0; i < 1_000_000; i++) {
+        seen++;
+        yield lane(i, 'A');
+      }
+    }
+    takePerLane(queue(), new Map([['A', 3]]));
+    expect(seen).toBe(3);
   });
 });

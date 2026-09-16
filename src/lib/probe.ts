@@ -977,7 +977,6 @@ function runSoakLeg(
     stop?: (() => boolean) | undefined;
   },
 ): Promise<{ error: string; stopped: boolean; ranOut: boolean }> {
-  const nul = process.platform === 'win32' ? 'NUL' : '/dev/null';
   const args = [
     '-y',
     '-hide_banner',
@@ -996,9 +995,14 @@ function runSoakLeg(
     '0',
     '-c',
     'copy',
+    // The null muxer, not MPEG-TS. Nothing reads what a soak writes, and a real
+    // container has opinions about what it will carry -- a codec or data track
+    // it refuses makes ffmpeg exit on the spot, which this would record as the
+    // stream dropping. `null` accepts anything, so the only way a leg ends
+    // early is the far end closing it.
     '-f',
-    'mpegts',
-    nul,
+    'null',
+    '-',
   ];
 
   return new Promise<{ error: string; stopped: boolean; ranOut: boolean }>((resolve) => {

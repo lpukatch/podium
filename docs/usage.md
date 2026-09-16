@@ -645,7 +645,12 @@ Four places ask for one:
 - **Soak every stream on this channel** — above the check panel.
 - **Soak every stream here** — on a group, which is every stream on every
   channel in it.
-- **Soak everything** — on the Progress tab, which is the whole catalogue.
+- **Soak everything** — on the Progress tab, which is every stream on the
+  channels Podium manages.
+
+The channel, group and whole-catalogue buttons leave out streams that were dead
+at their last probe; soaking one would only re-learn what the probe already
+said. A single stream asked for by name is soaked regardless.
 
 The first three run whenever a pass has spare capacity and nobody is watching,
 whatever the hour: somebody is waiting for the answer, and it is a handful of
@@ -735,6 +740,29 @@ nobody to be watching, which is the protection the window exists to give.
 A pass spends at most half an hour soaking, or whatever is left of the window if
 that is less, so the sweep walks across as many passes as the window holds
 rather than starving the ordinary probing for a whole night.
+
+### How a soak run is spread
+
+Each pass gives every account its own share of the work — free connections
+times the soak rounds that fit — and walks the queue in order within that
+share. Without this, the queue's own order decided where the work went: it is
+in stream-id order, one account's streams often come first, and every batch
+landed on that account's few connections while the rest sat idle. Providers
+now soak in parallel, which is what the timing table above assumes.
+
+Each soak is saved the moment it finishes, so restarting Podium in the middle
+of a run loses only the soaks that were in flight. A queued stream that can
+never run — gone from Dispatcharr, or on an account that has been deactivated —
+is dropped from the queue rather than holding it open forever.
+
+### Audio channels
+
+Soaking a radio or music channel is as valid as soaking video: a feed that
+dies every forty seconds is unlistenable too, and the soak only cares whether
+the connection stays open. The stability weight applies to audio-only channels
+the same way it applies to video. The one thing to weigh is cost — music
+channels tend to sit on a single account, so a few hundred of them is many
+hours on that account's connections.
 
 ### When every stream on a channel is bad
 

@@ -203,3 +203,48 @@ describe('the maxDropsPerHour health check', () => {
     expect(order).toEqual([2, 1]);
   });
 });
+
+describe('the stability term on an audio-only channel', () => {
+  const radio = probe({
+    width: 0,
+    height: 0,
+    fps: 0,
+    videoCodec: '',
+    pixelFormat: '',
+    bitrateKbps: 128,
+    audioCodec: 'aac',
+    audioChannels: 2,
+    audioBitrateKbps: 128,
+  });
+
+  it('changes nothing at weight zero', () => {
+    expect(score(radio, DEFAULT_WEIGHTS, true, FLAPPING)).toBe(
+      score(radio, DEFAULT_WEIGHTS, true, undefined),
+    );
+  });
+
+  it('marks down a radio feed with a record of dropping', () => {
+    // It used to be skipped for audio entirely, so a soaked radio channel's
+    // evidence changed nothing.
+    expect(score(radio, seeded, true, FLAPPING)).toBeLessThan(
+      score(radio, seeded, true, undefined),
+    );
+  });
+
+  it('does not mark up a radio feed merely for having been measured', () => {
+    expect(score(radio, seeded, true, SOLID)).toBe(score(radio, seeded, true, undefined));
+  });
+
+  it('lets a steady feed overtake a flapping one of the same quality', () => {
+    const order = rank(
+      entries([radio, FLAPPING], [radio, SOLID]),
+      {
+        mode: 'quality',
+        weights: seeded,
+        providerRank: new Map(),
+      },
+      true,
+    );
+    expect(order).toEqual([2, 1]);
+  });
+});

@@ -478,9 +478,16 @@ export function score(
     if (ac === 'flac' || ac === 'alac') codec = 1.0;
     else if (ac === 'eac3' || ac === 'ac3' || ac === 'aac') codec = 0.8;
     else if (ac === 'mp3') codec = 0.6;
-    return (
-      Math.round((channels * 0.4 + rate * 0.4 + sampleRate * 0.1 + codec * 0.1) * 10_000) / 10_000
-    );
+    const quality = channels * 0.4 + rate * 0.4 + sampleRate * 0.1 + codec * 0.1;
+    // The stability term applies to a radio feed exactly as it does to video --
+    // a stream that dies every forty seconds is unlistenable too. It used to
+    // be missing from this branch, so soaking audio channels gathered evidence
+    // the ranking then ignored. The four audio terms above sum to 1, so this
+    // is normalised the same way the video branch is: at weight 0 the result
+    // is unchanged to the last digit, which is what keeps an upgrade still.
+    const w = Math.max(0, weights.stability);
+    const total = (quality + stabilityScore(stability) * w) / (1 + w);
+    return Math.round(total * 10_000) / 10_000;
   }
 
   const resolution = result.height ? Math.min(result.height / MAX_HEIGHT, 1) : 0;

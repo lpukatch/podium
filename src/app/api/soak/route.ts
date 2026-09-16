@@ -46,6 +46,15 @@ interface Scope {
    * makes "soak everything" a safe thing to press.
    */
   source: SoakSource;
+  /**
+   * Leave out streams whose last probe found them dead.
+   *
+   * For the bulk scopes only. A soak of a dead stream is two quick failed
+   * dials that re-learn what the probe already said -- cheap once, but on a
+   * whole catalogue it was one queued stream in eight. A single stream asked
+   * for by name is soaked regardless: somebody pointed at it.
+   */
+  skipDead: boolean;
 }
 
 function open(): Store {
@@ -80,6 +89,7 @@ async function resolveScope(
   scope: string | null,
   rawId: unknown,
   now: boolean,
+  store: Store,
 ): Promise<Scope | { error: string }> {
   const id = Number(rawId);
   if (scope === 'stream') {
@@ -87,7 +97,12 @@ async function resolveScope(
     // Deliberately not checked against the catalogue: a stream the snapshot has
     // not caught up with yet is still a legitimate thing to queue, and the pass
     // simply skips a row it cannot resolve to a URL.
-    return { streams: [{ streamId: id }], label: `stream ${id}`, source: 'manual' };
+    return {
+      streams: [{ streamId: id }],
+      label: `stream ${id}`,
+      source: 'manual',
+      skipDead: false,
+    };
   }
   if (scope === 'channel') {
     if (!Number.isInteger(id)) return { error: 'bad channel id' };
@@ -95,6 +110,7 @@ async function resolveScope(
       streams: await streamsForChannels([id]),
       label: `channel ${id}`,
       source: 'manual',
+      skipDead: true,
     };
   }
   if (scope === 'group') {
@@ -105,16 +121,35 @@ async function resolveScope(
       streams: await streamsForChannels(channelIds),
       label: `group ${id} (${channelIds.length} channel(s))`,
       source: 'manual',
+      skipDead: true,
     };
   }
   if (scope === 'all') {
-    const snap = await snapshot();
-    // Every stream on every channel, not the top few per channel: the depth
-    // limit is a property of the automatic planner deciding what is worth its
-    // night, and "soak everything" is an instruction rather than a budget.
+    // The catalogue Podium manages, not every channel Dispatcharr has. The
+    // latter is what this used to read, and on the install it was found on a
+    // sixth of what it queued sat on channels Podium ranks nothing for --
+    // hours of connection time measuring streams whose result could change
+    // no order anywhere.
+    //
+    // Every stream on those channels, though, not the top few per channel:
+    // the depth limit is a property of the automatic planner deciding what is
+    // worth its night, and "soak everything" is an instruction, not a budget.
+    const rows = store.catalogue().rows;
+    if (rows.length === 0) {
+      return { error: 'no managed catalogue yet -- let a pass finish first' };
+    }
+    const seen = new Set<number>();
+    const streams: SoakRequest[] = [];
+    for (const row of rows) {
+      if (seen.has(row.streamId)) continue;
+      seen.add(row.streamId);
+      streams.push({ streamId: row.streamId, channelId: row.channelId });
+    }
+    const channels = new Set(rows.map((row) => row.channelId)).size;
     return {
-      streams: await streamsForChannels(snap.channels.map((c) => c.id)),
-      label: `the whole catalogue (${snap.channels.length} channel(s))`,
+      streams,
+      label: `every managed channel (${channels})`,
+      skipDead: true,
       // `now` is the operator saying they know the house is empty. It overrides
       // the clock and nothing else -- pause-while-watching, the yielded
       // providers and the reserve are all decided by `laneLimits`, long before
@@ -152,12 +187,37 @@ export async function POST(request: Request) {
       now?: boolean;
       seconds?: unknown;
     };
-    const resolved = await resolveScope(body.scope ?? null, body.id, body.now === true);
+    store = open();
+    const resolved = await resolveScope(body.scope ?? null, body.id, body.now === true, store);
     if ('error' in resolved) {
       return NextResponse.json({ error: resolved.error }, { status: 400 });
     }
-    if (resolved.streams.length === 0) {
-      return NextResponse.json({ error: `nothing to soak for ${resolved.label}` }, { status: 404 });
+
+    let candidates = resolved.streams;
+    let skippedDead = 0;
+    if (resolved.skipDead) {
+      // Alive-but-black streams are kept: the connection holds, and whether it
+      // keeps holding is still a fair question. Only a stream the probe could
+      // not play at all is left out.
+      const dead = new Set(
+        store
+          .deadStreams()
+          .filter((row) => !row.result.alive)
+          .map((row) => row.streamId),
+      );
+      candidates = resolved.streams.filter((row) => !dead.has(row.streamId));
+      skippedDead = resolved.streams.length - candidates.length;
+    }
+    if (candidates.length === 0) {
+      return NextResponse.json(
+        {
+          error:
+            skippedDead > 0
+              ? `every stream on ${resolved.label} was dead at its last probe`
+              : `nothing to soak for ${resolved.label}`,
+        },
+        { status: 404 },
+      );
     }
 
     // A length for this run only, so a first baseline of a whole catalogue can
@@ -168,9 +228,8 @@ export async function POST(request: Request) {
     const seconds =
       Number.isFinite(asked) && asked > 0 ? Math.min(Math.max(Math.round(asked), 10), 900) : null;
 
-    store = open();
     const queued = store.queueSoaks(
-      seconds === null ? resolved.streams : resolved.streams.map((row) => ({ ...row, seconds })),
+      seconds === null ? candidates : candidates.map((row) => ({ ...row, seconds })),
       resolved.source,
     );
     return NextResponse.json({
@@ -178,8 +237,11 @@ export async function POST(request: Request) {
       label: resolved.label,
       // Asked for, and newly queued. They differ when some were already
       // waiting, which is worth saying rather than reporting a silent no-op.
-      requested: resolved.streams.length,
+      requested: candidates.length,
       queued,
+      // Reported, so a group whose count looks short is explained rather than
+      // mysterious.
+      skippedDead,
       // Said back, because it changes when the work will happen: a sweep-sourced
       // request sits until the soak window opens.
       source: resolved.source,

@@ -33,11 +33,12 @@ import { pruneDeletedChannelRules } from './rule-sync';
 import type { RulesSource } from './rules-source';
 import { AbortFlag, laneKey, type ProbeJob, runLanes } from './scheduler';
 import {
+  laneQuotas,
   minutesLeftInWindow,
   oneRoundBudgetMs,
   planSoaks,
-  soaksThatFit,
   soakWindowOpen,
+  takePerLane,
 } from './soak-plan';
 
 // Re-exported: `statsPayload` lived here before the rule check needed it too,
@@ -275,6 +276,15 @@ export interface DeadRemoval {
  * sweep cannot run past its own closing time.
  */
 export const SOAK_WINDOW_BUDGET_MS = 30 * 60_000;
+
+/**
+ * The most queued soak requests one pass reads.
+ *
+ * Far above any real queue -- a whole catalogue on the install this was built
+ * against is under four thousand -- and there only so a runaway table cannot
+ * turn a pass into an unbounded read.
+ */
+export const SOAK_QUEUE_SCAN = 50_000;
 
 export const PROVIDER_OUTAGE_SHARE = 0.5;
 
@@ -2815,8 +2825,13 @@ export class Runner {
         ? Math.min(minutesLeftInWindow(config.PODIUM_SOAK_WINDOW) * 60_000, SOAK_WINDOW_BUDGET_MS)
         : SOAK_WINDOW_BUDGET_MS
       : 0;
-    const room = generous ? soaksThatFit(budgetMs / 60_000, slots, soakSeconds) : slots;
-    if (room <= 0) return none;
+    // How many soaks each lane may take. Per lane rather than one total: the
+    // queue is in stream-id order, and one account's run of low ids used to
+    // fill every batch while the other accounts' connections sat idle.
+    const rounds = generous ? Math.floor(budgetMs / (soakSeconds * 1_000)) : 1;
+    const quotas = laneQuotas(limits, rounds);
+    const capacity = [...quotas.values()].reduce((sum, n) => sum + n, 0);
+    if (capacity <= 0) return none;
 
     let requested: StoredSoakRequest[];
     try {
@@ -2825,7 +2840,11 @@ export class Runner {
       // is capacity; "soak everything" is queued as a sweep, because hours of
       // connection time draining through a weekday afternoon is exactly the
       // runaway the window exists to prevent.
-      requested = store.pendingSoaks(room, { excludeSweep: !windowOpen });
+      //
+      // The whole queue rather than the first `capacity` rows, because which
+      // rows this pass can use depends on their account, and the first rows
+      // may all be one account's. A few thousand small rows is cheap.
+      requested = store.pendingSoaks(SOAK_QUEUE_SCAN, { excludeSweep: !windowOpen });
     } catch (error) {
       log(`could not read the soak queue: ${errorText(error)}`);
       return none;
@@ -2838,9 +2857,9 @@ export class Runner {
       );
     }
 
+    const asked = new Set(requested.map((row) => row.streamId));
     const wanted = requested.map((row) => row.streamId);
-    const asked = new Set(wanted);
-    if (windowOpen && wanted.length < room) {
+    if (windowOpen) {
       try {
         const catalogue = store.catalogue().rows;
         const planned = planSoaks({
@@ -2851,7 +2870,9 @@ export class Runner {
           maxPerChannel: Math.max(0, config.PODIUM_SOAK_MAX_PER_CHANNEL),
           maxAgeMs: Math.max(0, config.PODIUM_SOAK_MAX_AGE_MS),
           now: Date.now(),
-          limit: room - wanted.length,
+          // Generous on purpose: the per-lane cut below decides what runs, and
+          // a planner capped at the total would hand it one account's streams.
+          limit: capacity * 4,
         });
         wanted.push(...planned);
       } catch (error) {
@@ -2862,9 +2883,6 @@ export class Runner {
     }
     if (wanted.length === 0) return none;
 
-    // The same variant machinery the probe jobs use, so a soak occupies the
-    // login it would really have occupied and an Xtream account's URL is
-    // rewritten the way playback rewrites it.
     // Per stream, because a row may carry its own length: a baseline run of a
     // whole catalogue at sixty seconds and a routine three-minute soak can sit
     // in the queue together.
@@ -2873,34 +2891,65 @@ export class Runner {
       if (row.seconds && row.seconds > 0) secondsFor.set(row.streamId, Math.max(10, row.seconds));
     }
 
-    const jobs: ProbeJob[] = [];
+    // Requests that can never run: the stream is gone from Dispatcharr, or its
+    // account has been deactivated. Left queued they would be read every pass
+    // and, worse, counted in `soakBacklog` forever -- a worker that never gets
+    // to idle because of a row nothing can drain. Only judged when both the
+    // stream listing and the account list actually came back, so a failed or
+    // empty fetch cannot read as "everything is gone" and wipe the queue.
+    const canJudge = streamById.size > 0 && loginsByProvider.size > 0;
+    const orphaned: number[] = [];
+
+    // The same variant machinery the probe jobs use, so a soak occupies the
+    // login it would really have occupied and an Xtream account's URL is
+    // rewritten the way playback rewrites it.
     const drawSeq = new Map<number, number>();
-    for (const streamId of wanted) {
-      const stream = streamById.get(streamId);
-      if (!stream) continue;
-      const logins = loginsByProvider.get(stream.providerId);
-      const menu =
-        logins && logins.length > 0
-          ? buildVariants(stream.url, logins)
-          : [{ variantId: POOLED_VARIANT, profileId: 0, url: stream.url }];
-      const seq = drawSeq.get(stream.providerId) ?? 0;
-      drawSeq.set(stream.providerId, seq + 1);
-      const variant = drawVariant(menu, stream.providerId, limits, seq);
-      if ((limits.get(laneKey(stream.providerId, variant.profileId)) ?? 0) <= 0) continue;
-      jobs.push({
-        streamId,
-        channelId: 0,
-        url: variant.url,
-        providerId: stream.providerId,
-        profileId: variant.profileId,
-        stepOrder: 0,
-      });
+    function* resolved() {
+      for (const streamId of wanted) {
+        const stream = streamById.get(streamId);
+        const logins = stream ? loginsByProvider.get(stream.providerId) : undefined;
+        if (!stream || !logins) {
+          if (canJudge && asked.has(streamId)) orphaned.push(streamId);
+          continue;
+        }
+        const menu =
+          logins.length > 0
+            ? buildVariants(stream.url, logins)
+            : [{ variantId: POOLED_VARIANT, profileId: 0, url: stream.url }];
+        const seq = drawSeq.get(stream.providerId) ?? 0;
+        drawSeq.set(stream.providerId, seq + 1);
+        const variant = drawVariant(menu, stream.providerId, limits, seq);
+        const lane = laneKey(stream.providerId, variant.profileId);
+        yield {
+          lane: (limits.get(lane) ?? 0) > 0 ? lane : null,
+          job: {
+            streamId,
+            channelId: 0,
+            url: variant.url,
+            providerId: stream.providerId,
+            profileId: variant.profileId,
+            stepOrder: 0,
+          } satisfies ProbeJob,
+        };
+      }
+    }
+    const jobs: ProbeJob[] = takePerLane(resolved(), quotas).map((entry) => entry.job);
+
+    if (orphaned.length > 0) {
+      try {
+        store.clearSoaks(orphaned);
+        log(
+          `dropped ${orphaned.length} soak request(s) that can never run ` +
+            '(stream gone, or its account inactive)',
+        );
+      } catch (error) {
+        log(`could not drop unrunnable soak requests: ${errorText(error)}`);
+      }
     }
     if (jobs.length === 0) return none;
 
     const deadline = Date.now() + budgetMs;
-    const legs: Leg[] = [];
-    const spent: number[] = [];
+    let spent = 0;
     let drops = 0;
 
     /**
@@ -3009,8 +3058,9 @@ export class Runner {
             stop: () => abort.aborted,
           });
           let cursor = startedAt;
+          const jobLegs: Leg[] = [];
           for (const leg of result.legs) {
-            legs.push({
+            jobLegs.push({
               channelKey: `soak:${job.streamId}`,
               channelId: null,
               streamId: job.streamId,
@@ -3028,6 +3078,18 @@ export class Runner {
           }
           drops += result.drops;
           inflight.delete(job.streamId);
+          // Written the moment this soak lands, not at the end of the phase.
+          // A phase can run for half an hour, and batching the writes meant a
+          // restart -- a deploy, say -- threw away every result it had
+          // gathered, and put every one of those streams back to be soaked
+          // again. Now a restart loses only what was still in flight.
+          const spend = !result.stopped;
+          try {
+            store.recordLegs(jobLegs);
+            if (spend) store.clearSoaks([job.streamId]);
+          } catch (error) {
+            log(`could not record the soak of ${name}: ${errorText(error)}`);
+          }
           if (result.stopped) {
             // A viewer arrived and the soak was cut short. Whatever legs had
             // already finished are genuine and are kept above, but the request
@@ -3043,10 +3105,10 @@ export class Runner {
           // Spent whatever it found, including nothing: a stream that would not
           // connect has said what it had to say, and leaving the request would
           // have the sweep redial the same dead address every night.
-          spent.push(job.streamId);
+          spent += 1;
           soakDone.set(laneId, (soakDone.get(laneId) ?? 0) + 1);
           this.emit({
-            soaked: spent.length,
+            soaked: spent,
             soakDrops: drops,
             lanes: soakLanes(),
             // Named rather than only counted: on a run measured in hours, the
@@ -3069,16 +3131,10 @@ export class Runner {
       clearInterval(watcher);
     }
 
-    try {
-      store.recordLegs(legs);
-      store.clearSoaks(spent);
-    } catch (error) {
-      log(`could not record ${legs.length} soak leg(s): ${errorText(error)}`);
+    if (spent > 0) {
+      log(`soaked ${spent} stream(s), ${drops} drop(s) recorded`);
     }
-    if (spent.length > 0) {
-      log(`soaked ${spent.length} stream(s), ${drops} drop(s) recorded`);
-    }
-    return { soaked: spent.length, drops };
+    return { soaked: spent, drops };
   }
 
   /**

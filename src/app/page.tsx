@@ -721,6 +721,7 @@ export default function Page() {
         queued?: number;
         requested?: number;
         total?: number;
+        skippedDead?: number;
       };
       if (!resp.ok || body.error) {
         note(body.error ?? `HTTP ${resp.status}`);
@@ -730,6 +731,9 @@ export default function Page() {
       note(
         `Queued ${body.queued} stream(s) to soak` +
           (already > 0 ? `; ${already} already waiting` : '') +
+          ((body.skippedDead ?? 0) > 0
+            ? `; left out ${body.skippedDead} that were dead at their last probe`
+            : '') +
           `. ${body.total} in the queue — the worker works through it at the provider limits.`,
       );
     } catch (e) {

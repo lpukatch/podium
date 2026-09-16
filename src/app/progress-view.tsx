@@ -646,7 +646,8 @@ export function ProgressView() {
           ) : confirmingSoak ? (
             <div className="flex flex-wrap items-center gap-3">
               <span className="text-sm">
-                Hold every stream open in turn to find out how long each one really lasts?{' '}
+                Hold every stream on the channels Podium manages open in turn, to find out how long
+                each one really lasts?{' '}
                 <span className="text-[var(--color-muted)]">
                   This is the slow measurement, and how long it takes is set by your narrowest
                   provider rather than by the total: one connection and a few hundred streams is the
@@ -654,7 +655,8 @@ export function ProgressView() {
                   window and begins on the next pass — for a night you know the house is empty. It
                   does not ignore anything else: it runs at the provider limits and still stops the
                   moment anyone starts watching. Nothing is written to Dispatcharr, and the queue
-                  can be cleared at any time.
+                  can be cleared at any time. Streams that were dead at their last probe are left
+                  out.
                 </span>
               </span>
               <span className="flex-1" />
