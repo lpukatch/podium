@@ -457,6 +457,33 @@ CREATE TABLE IF NOT EXISTS stream_legs (
     ended       TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS stream_legs_stream ON stream_legs (stream_id, ended_at);
+
+-- "Soak these, when there is room."
+--
+-- The same bargain refresh_marks strikes, for the same reason. A soak holds a
+-- provider connection for minutes, so a button that ran one on the spot would
+-- be a second scheduler -- one that knows nothing about lane limits, the pause
+-- while somebody is watching, or how many connections the account has. It would
+-- also be a three-minute HTTP request, which most ingresses cut off long before
+-- it answers. So the button writes rows and returns; the ordinary pass drains
+-- them under every gate it already applies.
+--
+-- Keyed on stream_id alone, so asking twice is idempotent: a group and one of
+-- its channels both queued leaves one row per stream, not two. queued_at is the
+-- drain order, oldest first, so an earlier request is not starved by a later
+-- one over a catalogue that takes several nights to cover.
+--
+-- source separates the two callers for reporting only -- 'manual' is somebody
+-- pressing a button, 'sweep' is the nightly window filling spare capacity. The
+-- drain treats them alike; what differs is that a sweep only ever enqueues
+-- inside its window, where a manual request waits for capacity and nothing else.
+CREATE TABLE IF NOT EXISTS soak_requests (
+    stream_id  INTEGER PRIMARY KEY,
+    channel_id INTEGER,
+    queued_at  INTEGER NOT NULL,
+    source     TEXT    NOT NULL DEFAULT 'manual'
+);
+CREATE INDEX IF NOT EXISTS soak_requests_queued ON soak_requests (queued_at);
 CREATE INDEX IF NOT EXISTS stream_legs_ended_at ON stream_legs (ended_at);
 
 CREATE INDEX IF NOT EXISTS quality_samples_bucket
@@ -474,6 +501,18 @@ CREATE INDEX IF NOT EXISTS quality_samples_bucket
  * while the new watch time does not.
  */
 export const STABILITY_HISTORY_MS = 14 * 86_400_000;
+
+/** One stream waiting to be soaked. */
+export interface SoakRequest {
+  streamId: number;
+  channelId?: number | null;
+}
+
+export interface StoredSoakRequest extends SoakRequest {
+  channelId: number | null;
+  queuedAt: number;
+  source: 'manual' | 'sweep';
+}
 
 /**
  * The `group_id` a whole-catalogue refresh is stored under.
@@ -2483,6 +2522,76 @@ export class Store {
       });
     }
     return out;
+  }
+
+  /**
+   * Ask for these streams to be soaked when a pass has room.
+   *
+   * Idempotent per stream: queueing a group and then one of its channels
+   * leaves one row each, and re-queueing something already waiting keeps its
+   * original place rather than sending it to the back. A request that is
+   * already pending is not news, and starving it because somebody pressed the
+   * button twice would be.
+   */
+  queueSoaks(rows: SoakRequest[], source: 'manual' | 'sweep' = 'manual'): number {
+    if (rows.length === 0) return 0;
+    const now = Date.now();
+    let queued = 0;
+    this.db.transaction(() => {
+      const insert = this.sql(
+        `INSERT INTO soak_requests (stream_id, channel_id, queued_at, source)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(stream_id) DO NOTHING`,
+      );
+      for (const row of rows) {
+        queued += insert.run(row.streamId, row.channelId ?? null, now, source).changes;
+      }
+    })();
+    return queued;
+  }
+
+  /** What is waiting, oldest request first. */
+  pendingSoaks(limit = 1000): StoredSoakRequest[] {
+    const rows = this.sql(
+      `SELECT stream_id, channel_id, queued_at, source
+         FROM soak_requests ORDER BY queued_at, stream_id LIMIT ?`,
+    ).all(limit) as Array<{
+      stream_id: number;
+      channel_id: number | null;
+      queued_at: number;
+      source: string;
+    }>;
+    return rows.map((row) => ({
+      streamId: row.stream_id,
+      channelId: row.channel_id,
+      queuedAt: row.queued_at,
+      source: row.source === 'sweep' ? 'sweep' : 'manual',
+    }));
+  }
+
+  pendingSoakCount(): number {
+    const row = this.sql('SELECT COUNT(*) AS n FROM soak_requests').get() as { n: number };
+    return row?.n ?? 0;
+  }
+
+  /**
+   * Drop requests, by stream or wholesale.
+   *
+   * Called by the pass as each soak lands -- a request is spent once it has
+   * been measured, whatever it found -- and by the cancel endpoint. Spent
+   * rather than retried on failure: a stream that would not connect has told
+   * the ledger what it had to say, and leaving the row would have the sweep
+   * spend every night redialling the same dead address.
+   */
+  clearSoaks(streamIds?: number[]): number {
+    if (streamIds === undefined) return this.sql('DELETE FROM soak_requests').run().changes;
+    if (streamIds.length === 0) return 0;
+    let cleared = 0;
+    this.db.transaction(() => {
+      const del = this.sql('DELETE FROM soak_requests WHERE stream_id = ?');
+      for (const id of streamIds) cleared += del.run(id).changes;
+    })();
+    return cleared;
   }
 
   /** The legs themselves, newest first, for one stream or for all of them. */

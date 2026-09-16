@@ -12,7 +12,7 @@
 
 import { DEAD_REASONS, type DeadReason, deadReason, type ProbeResult } from './probe';
 import { DEFAULT_WEIGHTS, isUsable, score } from './scoring';
-import { dropsPerHour, MIN_FAILURES } from './stability';
+import { channelStability, dropsPerHour, MIN_FAILURES } from './stability';
 import { type Progress, STALE_LOCK_MS, type Store } from './store';
 
 type Labels = Record<string, string>;
@@ -232,7 +232,8 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
   // question worth alerting on is "is anything flapping", not "which". The
   // per-stream view lives on the check panel, where it has a name beside it.
   try {
-    const records = [...store.stabilityRecords().values()];
+    const byStream = store.stabilityRecords();
+    const records = [...byStream.values()];
     const watchedMs = records.reduce((sum, r) => sum + r.watchedMs, 0);
     const breaks = records.reduce((sum, r) => sum + r.breaks + r.stalls, 0);
     out.add(
@@ -265,6 +266,33 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
       'Streams with at least two recorded breaks and more than one an hour.',
       'gauge',
       flapping,
+    );
+
+    // Channels where every stream has been measured and every one drops. The
+    // series worth alerting on above all the others: it is the one state
+    // reordering cannot improve, so it is the one that needs a person.
+    const byChannel = new Map<number, number[]>();
+    for (const row of store.catalogue().rows) {
+      const list = byChannel.get(row.channelId);
+      if (list) list.push(row.streamId);
+      else byChannel.set(row.channelId, [row.streamId]);
+    }
+    let allBad = 0;
+    for (const streamIds of byChannel.values()) {
+      if (channelStability(streamIds, byStream, 1).allBad) allBad += 1;
+    }
+    out.add(
+      'podium_stability_dead_channels',
+      'Channels where every stream has been measured and every one of them drops.',
+      'gauge',
+      allBad,
+    );
+
+    out.add(
+      'podium_soak_queue',
+      'Streams waiting to be soaked.',
+      'gauge',
+      store.pendingSoakCount(),
     );
   } catch {
     // The ledger is an extra, not a dependency: a table that cannot be read

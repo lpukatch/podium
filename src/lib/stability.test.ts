@@ -5,6 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  channelStability,
   describeStability,
   dropsPerHour,
   type Leg,
@@ -305,5 +306,63 @@ describe('describeStability', () => {
     expect(describeStability(record({ breaks: 2, watchedMs: 110_000 }))).toBe(
       '2m watched, 2 drops (65/h)',
     );
+  });
+});
+
+describe('channelStability', () => {
+  const records = (entries: Array<[number, Partial<StabilityRecord>]>) =>
+    new Map(entries.map(([id, over]) => [id, record({ streamId: id, ...over })]));
+
+  it('says nothing about a channel nobody has watched', () => {
+    const verdict = channelStability([1, 2, 3], new Map(), 1);
+    expect(verdict).toEqual({ total: 3, measured: 0, unstable: 0, allBad: false });
+  });
+
+  it('counts a stream watched cleanly as measured and not unstable', () => {
+    const verdict = channelStability([1], records([[1, { watchedMs: 3_600_000, breaks: 0 }]]), 1);
+    expect(verdict).toMatchObject({ measured: 1, unstable: 0, allBad: false });
+  });
+
+  it('does not call a channel bad on partial evidence', () => {
+    // Three of six measured and all three dreadful is a strong hint, but the
+    // three nobody has watched might be fine.
+    const verdict = channelStability(
+      [1, 2, 3, 4, 5, 6],
+      records([
+        [1, { breaks: 3, watchedMs: 110_000 }],
+        [2, { breaks: 3, watchedMs: 110_000 }],
+        [3, { breaks: 3, watchedMs: 110_000 }],
+      ]),
+      1,
+    );
+    expect(verdict).toMatchObject({ total: 6, measured: 3, unstable: 3, allBad: false });
+  });
+
+  it('calls a channel bad only when every stream on it has been measured and drops', () => {
+    const verdict = channelStability(
+      [1, 2],
+      records([
+        [1, { breaks: 3, watchedMs: 110_000 }],
+        [2, { breaks: 3, watchedMs: 110_000 }],
+      ]),
+      1,
+    );
+    expect(verdict.allBad).toBe(true);
+  });
+
+  it('spares a channel with one stream that holds', () => {
+    const verdict = channelStability(
+      [1, 2],
+      records([
+        [1, { breaks: 3, watchedMs: 110_000 }],
+        [2, { breaks: 0, watchedMs: 3_600_000 }],
+      ]),
+      1,
+    );
+    expect(verdict).toMatchObject({ measured: 2, unstable: 1, allBad: false });
+  });
+
+  it('is empty for a channel with no streams', () => {
+    expect(channelStability([], new Map(), 1).allBad).toBe(false);
   });
 });

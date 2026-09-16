@@ -231,6 +231,10 @@ export default function Page() {
   // A catalogue-wide re-check covers every group, so a group that has not been
   // asked for on its own is still being re-checked while this is set.
   const [refreshAllAt, setRefreshAllAt] = useState<number | null>(null);
+  // One line under whichever soak button was last pressed. Not per button:
+  // queueing is instant and the useful feedback is "how many are waiting now",
+  // which is a property of the queue rather than of the thing you clicked.
+  const [soakNote, setSoakNote] = useState('');
   const [error, setError] = useState<{
     error: string;
     detail?: string;
@@ -687,6 +691,42 @@ export default function Page() {
   const cancelRefresh = async (groupId: number) => {
     await fetch(`/api/refresh?scope=group&groupId=${groupId}`, { method: 'DELETE' });
     await load();
+  };
+
+  /**
+   * Ask for every stream in a group -- or on one channel -- to be soaked.
+   *
+   * Queues for the same reason `queueRefresh` does, and more so: a soak holds a
+   * provider connection for minutes, and a group can be hundreds of channels.
+   * The worker drains the queue at the provider limits and stops for viewers.
+   */
+  const queueSoak = async (scope: 'group' | 'channel', id: number) => {
+    setSoakNote('');
+    try {
+      const resp = await fetch('/api/soak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope, id }),
+      });
+      const body = (await resp.json()) as {
+        error?: string;
+        queued?: number;
+        requested?: number;
+        pending?: number;
+      };
+      if (!resp.ok || body.error) {
+        setSoakNote(body.error ?? `HTTP ${resp.status}`);
+        return;
+      }
+      const already = (body.requested ?? 0) - (body.queued ?? 0);
+      setSoakNote(
+        `Queued ${body.queued} stream(s) to soak` +
+          (already > 0 ? `; ${already} already waiting` : '') +
+          `. ${body.pending} in the queue.`,
+      );
+    } catch (e) {
+      setSoakNote(String(e));
+    }
   };
 
   const setMode = async (id: number, mode: Mode) => {
@@ -1532,6 +1572,23 @@ export default function Page() {
                       </span>
                     </div>
                   )}
+                  <div className="mt-3 flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => void queueSoak('group', group.id)}
+                      className={btn}
+                    >
+                      Soak every stream here
+                    </button>
+                    <span className="text-sm text-[var(--color-muted)]">
+                      Holds each stream open for a few minutes to find out how long it really lasts
+                      — the failure a probe is too short to see. Runs at the provider limits and
+                      stops while anyone is watching, so a big group takes several nights.
+                    </span>
+                  </div>
+                  {soakNote && (
+                    <p className="mt-2 text-sm text-[var(--color-accent)]">{soakNote}</p>
+                  )}
                 </div>
               )}
               <input
@@ -1701,6 +1758,20 @@ export default function Page() {
                 />
               )}
             </div>
+
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => void queueSoak('channel', channel.id)}
+                className={btn}
+              >
+                Soak every stream on this channel
+              </button>
+              <span className="text-sm text-[var(--color-muted)]">
+                Measures how long each of them holds, rather than how it looks in five seconds.
+              </span>
+            </div>
+            {soakNote && <p className="mt-2 text-sm text-[var(--color-accent)]">{soakNote}</p>}
 
             <CheckPanel channelId={channel.id} onApplied={() => void resync()} />
 

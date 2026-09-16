@@ -31,14 +31,11 @@ interface Row {
   unstable?: boolean;
 }
 
-/** What a finished soak reports back, as the row renders it. */
+/** Whether this row's stream is waiting to be soaked. */
 interface SoakState {
   busy: boolean;
+  queued: boolean;
   error: string;
-  heldSeconds: number;
-  drops: number;
-  unreachable: boolean;
-  contended: boolean;
 }
 
 interface CheckResult {
@@ -60,6 +57,13 @@ interface CheckResult {
   minBitrateKbps: number;
   /** The channel's resolution floor, from its rule or its group; null for none. */
   minResolution?: string | null;
+  /** The channel taken as a whole -- see `channelStability`. */
+  channelStability?: {
+    total: number;
+    measured: number;
+    unstable: number;
+    allBad: boolean;
+  };
   rows: Row[];
   unclaimed: Row[];
   unprobed?: Row[];
@@ -128,71 +132,8 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
   const [dropUnclaimed, setDropUnclaimed] = useState(false);
   // Per stream, because a soak is per stream and several can be asked for in
   // turn. Keyed by id rather than held on the row so a re-check does not wipe
-  // a result the operator is still reading.
+  // what the operator just queued.
   const [soaks, setSoaks] = useState<Record<number, SoakState>>({});
-
-  /**
-   * Hold one stream open for a few minutes and report what happened.
-   *
-   * Minutes, not seconds, and that is the point: the failure it looks for --
-   * a feed that plays perfectly and then stops -- is invisible to the
-   * five-second probe above it. The result is written to the ledger, so a
-   * stream that drops here sinks on the next pass as well as saying so now.
-   */
-  const soak = async (streamId: number, seconds: number) => {
-    setSoaks((prev) => ({
-      ...prev,
-      [streamId]: {
-        busy: true,
-        error: '',
-        heldSeconds: 0,
-        drops: 0,
-        unreachable: false,
-        contended: false,
-      },
-    }));
-    try {
-      const resp = await fetch(`/api/soak/${streamId}?seconds=${seconds}`, { method: 'POST' });
-      const body = await resp.json();
-      if (!resp.ok || body.error) {
-        setSoaks((prev) => ({
-          ...prev,
-          [streamId]: {
-            busy: false,
-            error: body.error ?? `HTTP ${resp.status}`,
-            heldSeconds: 0,
-            drops: 0,
-            unreachable: false,
-            contended: false,
-          },
-        }));
-        return;
-      }
-      setSoaks((prev) => ({
-        ...prev,
-        [streamId]: {
-          busy: false,
-          error: '',
-          heldSeconds: body.heldSeconds ?? 0,
-          drops: body.drops ?? 0,
-          unreachable: Boolean(body.unreachable),
-          contended: Boolean(body.contended),
-        },
-      }));
-    } catch (e) {
-      setSoaks((prev) => ({
-        ...prev,
-        [streamId]: {
-          busy: false,
-          error: String(e),
-          heldSeconds: 0,
-          drops: 0,
-          unreachable: false,
-          contended: false,
-        },
-      }));
-    }
-  };
 
   const check = async (force = false) => {
     setBusy(true);
@@ -246,6 +187,40 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
       setError(String(e));
     } finally {
       setApplying(false);
+    }
+  };
+
+  /**
+   * Ask for one stream to be soaked.
+   *
+   * Queues rather than measures. A soak holds a provider connection for
+   * minutes, which is both too long for an HTTP request to survive most
+   * ingresses and exactly the sort of work that has to go through the pass --
+   * where the provider limits and the pause-while-watching rule apply. The
+   * result appears on this line the next time the channel is checked.
+   */
+  const soak = async (streamId: number) => {
+    setSoaks((prev) => ({ ...prev, [streamId]: { busy: true, queued: false, error: '' } }));
+    try {
+      const resp = await fetch('/api/soak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope: 'stream', id: streamId }),
+      });
+      const body = (await resp.json()) as { error?: string };
+      setSoaks((prev) => ({
+        ...prev,
+        [streamId]: {
+          busy: false,
+          queued: resp.ok && !body.error,
+          error: !resp.ok || body.error ? (body.error ?? `HTTP ${resp.status}`) : '',
+        },
+      }));
+    } catch (e) {
+      setSoaks((prev) => ({
+        ...prev,
+        [streamId]: { busy: false, queued: false, error: String(e) },
+      }));
     }
   };
 
@@ -320,6 +295,25 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
               </button>
             )}
           </div>
+
+          {result.channelStability && result.channelStability.unstable > 0 && (
+            <p
+              className={`mt-3 text-sm ${
+                result.channelStability.allBad
+                  ? 'text-[var(--color-bad)]'
+                  : 'text-[var(--color-warn)]'
+              }`}
+            >
+              {result.channelStability.allBad
+                ? `Every stream on this channel has been measured and every one of them drops ` +
+                  `(${result.channelStability.unstable} of ${result.channelStability.total}). ` +
+                  `Reordering cannot fix this — the channel needs another source.`
+                : `${result.channelStability.unstable} of the ` +
+                  `${result.channelStability.measured} stream(s) measured here drop often ` +
+                  `(${result.channelStability.total} on the channel). ` +
+                  `Soak the rest to find out whether any of them holds.`}
+            </p>
+          )}
 
           {result.rows.length > 0 && (
             <div className="mt-3 overflow-x-auto">
@@ -407,7 +401,7 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
                         <StabilityCell
                           row={row}
                           soak={soaks[row.id]}
-                          onSoak={(seconds) => void soak(row.id, seconds)}
+                          onSoak={() => void soak(row.id)}
                         />
                       </td>
                       <td className="py-2 tabular-nums">{row.score.toFixed(3)}</td>
@@ -482,17 +476,16 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
  * What the ledger knows about one stream, and the button that finds out more.
  *
  * Both halves of the stability feature meet on this line. The sentence is the
- * passive record -- how long the stream has actually held for real viewers,
- * which for most streams is "never observed playing", because most streams sit
- * behind slot 0 and nobody has ever been served them. The button is the way out
- * of that: it holds the stream open for a few minutes and writes what happens
- * to the same ledger, so a stream can be given a record on request rather than
- * only by being lucky enough to have been watched.
+ * passive record -- how long the stream has held for real viewers, which for
+ * most streams is "never observed playing", because most streams sit behind
+ * slot 0 and nobody has ever been served them. The button is the way out of
+ * that: it queues the stream to be held open for a few minutes, and the worker
+ * measures it on a pass where there is capacity to spare.
  *
- * Three minutes by default. The failure worth finding takes tens of seconds to
- * show -- the feed this was built against dropped every 36 to 55 seconds -- so a
- * shorter soak mostly reports that nothing went wrong yet, which is the answer
- * that misleads.
+ * Queued rather than measured on the spot, which is why the button says so
+ * rather than spinning. A soak takes minutes, and doing it inside this request
+ * would be both a second scheduler and an HTTP request most ingresses would cut
+ * off before it answered.
  */
 function StabilityCell({
   row,
@@ -501,43 +494,32 @@ function StabilityCell({
 }: {
   row: Row;
   soak: SoakState | undefined;
-  onSoak: (seconds: number) => void;
+  onSoak: () => void;
 }) {
   // Only for streams that play. Soaking a dead stream re-learns what the probe
-  // in the same row already said, at a cost of three minutes and a connection.
+  // in the same row already said, at a cost of minutes and a connection.
   const canSoak = row.alive === true;
 
   return (
     <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--color-muted)]">
       <span>{row.stability ?? 'never observed playing'}</span>
-      {canSoak && (
+      {canSoak && !soak?.queued && (
         <button
           type="button"
           className="rounded border border-[var(--color-line)] px-1.5 py-0.5 hover:border-[var(--color-accent)] disabled:opacity-50"
           disabled={soak?.busy}
-          onClick={() => onSoak(180)}
-          title="Hold this stream open for three minutes and record how long it lasts"
+          onClick={onSoak}
+          title="Queue this stream to be held open for a few minutes and measured"
         >
-          {soak?.busy ? 'Soaking…' : 'Soak 3m'}
+          {soak?.busy ? 'Queueing…' : 'Soak'}
         </button>
       )}
-      {soak?.error && <span className="text-[var(--color-bad)]">{soak.error}</span>}
-      {soak && !soak.busy && !soak.error && (
-        <span
-          className={
-            soak.drops > 0 || soak.unreachable
-              ? 'text-[var(--color-bad)]'
-              : 'text-[var(--color-accent)]'
-          }
-        >
-          {soak.unreachable
-            ? 'soak: would not reconnect'
-            : soak.drops > 0
-              ? `soak: ${soak.drops} drop${soak.drops === 1 ? '' : 's'} in ${soak.heldSeconds}s`
-              : `soak: held ${soak.heldSeconds}s clean`}
-          {soak.contended && ' (someone was watching)'}
+      {soak?.queued && (
+        <span className="text-[var(--color-accent)]">
+          queued — the worker soaks it when there is spare capacity
         </span>
       )}
+      {soak?.error && <span className="text-[var(--color-bad)]">{soak.error}</span>}
     </div>
   );
 }
