@@ -225,11 +225,22 @@ export function ProgressView() {
   const [error, setError] = useState('');
   // Outstanding re-check requests: when the whole catalogue was queued, and how
   // many groups were queued on their own.
-  const [soakQueue, setSoakQueue] = useState<{ total: number; manual: number; sweep: number }>({
-    total: 0,
-    manual: 0,
-    sweep: 0,
-  });
+  const [soakQueue, setSoakQueue] = useState<{
+    total: number;
+    manual: number;
+    now: number;
+    sweep: number;
+  }>({ total: 0, manual: 0, now: 0, sweep: 0 });
+  /**
+   * Seconds per stream for a baseline run.
+   *
+   * The lever that decides whether "soak everything" is a night or most of a
+   * day, and the reason it is offered rather than assumed. Measured against
+   * this catalogue: at 180s the slowest provider takes ~14h, at 90s ~7h, at
+   * 60s ~5h. Sixty still catches a feed that dies at forty seconds, which is
+   * the failure the whole thing was built for.
+   */
+  const [baselineSeconds, setBaselineSeconds] = useState(90);
   const [confirmingSoak, setConfirmingSoak] = useState(false);
   const [refresh, setRefresh] = useState<{ all: number | null; groups: number }>({
     all: null,
@@ -274,6 +285,7 @@ export function ProgressView() {
           setSoakQueue({
             total: Number(soakBody.total ?? 0),
             manual: Number(soakBody.manual ?? 0),
+            now: Number(soakBody.now ?? 0),
             sweep: Number(soakBody.sweep ?? 0),
           });
         }
@@ -301,11 +313,11 @@ export function ProgressView() {
     await poll();
   };
 
-  const queueSoakAll = async () => {
+  const queueSoakAll = async (now: boolean) => {
     await fetch('/api/soak', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scope: 'all' }),
+      body: JSON.stringify({ scope: 'all', now, ...(now ? { seconds: baselineSeconds } : {}) }),
     });
     setConfirmingSoak(false);
     await poll();
@@ -571,7 +583,12 @@ export function ProgressView() {
               <span className="text-sm">
                 <b>{n(soakQueue.total)} waiting to be soaked</b>{' '}
                 <span className="text-[var(--color-muted)]">
-                  {soakQueue.sweep > 0 ? (
+                  {soakQueue.now > 0 ? (
+                    <>
+                      — {n(soakQueue.now)} of them are a baseline run and are going now, as fast as
+                      the provider limits allow. It still stops the moment anyone starts watching.
+                    </>
+                  ) : soakQueue.sweep > 0 ? (
                     <>
                       — {n(soakQueue.sweep)} of them run inside the soak window, so they wait for
                       the hours you set in Settings.
@@ -594,30 +611,48 @@ export function ProgressView() {
               <span className="text-sm">
                 Hold every stream open in turn to find out how long each one really lasts?{' '}
                 <span className="text-[var(--color-muted)]">
-                  This is the slow measurement: minutes per stream rather than seconds, so a whole
-                  catalogue is days of it. It only runs inside the soak window, at the provider
-                  limits, and stops whenever anyone is watching. Nothing is written to Dispatcharr
-                  and the queue can be cleared at any time.
+                  This is the slow measurement, and how long it takes is set by your narrowest
+                  provider rather than by the total: one connection and a few hundred streams is the
+                  same wall clock however idle the rest are. <b>Start now</b> ignores the soak
+                  window and begins on the next pass — for a night you know the house is empty. It
+                  does not ignore anything else: it runs at the provider limits and still stops the
+                  moment anyone starts watching. Nothing is written to Dispatcharr, and the queue
+                  can be cleared at any time.
                 </span>
               </span>
               <span className="flex-1" />
+              <label className="text-sm text-[var(--color-muted)]">
+                Seconds each{' '}
+                <select
+                  value={baselineSeconds}
+                  onChange={(e) => setBaselineSeconds(Number(e.target.value))}
+                  className="rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-2 py-1 outline-none focus:border-[var(--color-accent)]"
+                >
+                  <option value={60}>60 — fastest</option>
+                  <option value={90}>90 — balanced</option>
+                  <option value={180}>180 — thorough</option>
+                </select>
+              </label>
               <button type="button" onClick={() => setConfirmingSoak(false)} className={btn}>
                 Cancel
               </button>
+              <button type="button" onClick={() => void queueSoakAll(false)} className={btn}>
+                Queue for the soak window
+              </button>
               <button
                 type="button"
-                onClick={() => void queueSoakAll()}
-                className={`${btn} border-[var(--color-accent)] text-[var(--color-accent)]`}
+                onClick={() => void queueSoakAll(true)}
+                className={`${btn} border-[var(--color-bad)] text-[var(--color-bad)]`}
               >
-                Soak everything
+                Start now
               </button>
             </div>
           ) : (
             <div className="flex flex-wrap items-center gap-3">
               <span className="text-sm text-[var(--color-muted)]">
-                Measure how long every stream holds, not just how it looks in five seconds. Runs in
-                the soak window only — set one in <b>Settings → Probing</b> first, or this will sit
-                in the queue.
+                Measure how long every stream holds, not just how it looks in five seconds. Queue it
+                for the soak window, or start a baseline run straight away on a night nobody is
+                watching.
               </span>
               <span className="flex-1" />
               <button type="button" onClick={() => setConfirmingSoak(true)} className={btn}>

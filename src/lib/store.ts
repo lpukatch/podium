@@ -481,7 +481,17 @@ CREATE TABLE IF NOT EXISTS soak_requests (
     stream_id  INTEGER PRIMARY KEY,
     channel_id INTEGER,
     queued_at  INTEGER NOT NULL,
-    source     TEXT    NOT NULL DEFAULT 'manual'
+    -- 'manual' | 'now' | 'sweep'. See SoakSource.
+    source     TEXT    NOT NULL DEFAULT 'manual',
+    -- How long this one should be held open, overriding PODIUM_SOAK_SECONDS.
+    --
+    -- Per row rather than per pass because the useful baseline run and the
+    -- useful routine one are different lengths: a first sweep of a whole
+    -- catalogue at three minutes a stream is over half a day of wall clock,
+    -- where the same sweep at sixty seconds is a night and still catches a feed
+    -- that dies at forty. NULL means "whatever the setting says", which is what
+    -- every row queued before this existed meant.
+    seconds    INTEGER
 );
 CREATE INDEX IF NOT EXISTS soak_requests_queued ON soak_requests (queued_at);
 CREATE INDEX IF NOT EXISTS stream_legs_ended_at ON stream_legs (ended_at);
@@ -502,16 +512,41 @@ CREATE INDEX IF NOT EXISTS quality_samples_bucket
  */
 export const STABILITY_HISTORY_MS = 14 * 86_400_000;
 
+/**
+ * Which drain takes a request, and when.
+ *
+ * `manual` -- a stream, channel or group somebody asked about. Runs whenever a
+ * pass has spare capacity, at any hour: somebody is waiting for the answer and
+ * it is a handful of streams.
+ *
+ * `sweep` -- the nightly planner's own choices, and the whole-catalogue button.
+ * Waits for `PODIUM_SOAK_WINDOW`, because it is days of provider connection
+ * time and draining it through a weekday afternoon is the one way this feature
+ * could run away with an account.
+ *
+ * `now` -- the whole catalogue, deliberately un-gated, for an operator who
+ * knows the house is empty and wants a baseline tonight rather than over the
+ * next fortnight. It ignores the window and takes the same generous per-pass
+ * budget a window sweep gets. It does *not* ignore anything that protects a
+ * viewer: `pauseWhenWatching`, the yielded providers and the reserve all still
+ * apply, because those are decided by `laneLimits` long before the queue is
+ * read. The only thing it overrides is the clock.
+ */
+export type SoakSource = 'manual' | 'now' | 'sweep';
+
 /** One stream waiting to be soaked. */
 export interface SoakRequest {
   streamId: number;
   channelId?: number | null;
+  /** Overrides PODIUM_SOAK_SECONDS for this row; omitted means use the setting. */
+  seconds?: number | null;
 }
 
 export interface StoredSoakRequest extends SoakRequest {
   channelId: number | null;
+  seconds: number | null;
   queuedAt: number;
-  source: 'manual' | 'sweep';
+  source: SoakSource;
 }
 
 /**
@@ -1195,6 +1230,9 @@ export class Store {
         // "not known", which is why the miner's codec guard keys on the name
         // token rather than on this being absent.
         ['quality_samples', "video_codec TEXT NOT NULL DEFAULT ''"],
+        // NULL is the truth for every request queued before a per-request
+        // length existed: they all meant "whatever PODIUM_SOAK_SECONDS says".
+        ['soak_requests', 'seconds INTEGER'],
       ] as const) {
         try {
           this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`);
@@ -2533,21 +2571,33 @@ export class Store {
    * already pending is not news, and starving it because somebody pressed the
    * button twice would be.
    */
-  queueSoaks(rows: SoakRequest[], source: 'manual' | 'sweep' = 'manual'): number {
+  queueSoaks(rows: SoakRequest[], source: SoakSource = 'manual'): number {
     if (rows.length === 0) return 0;
     const now = Date.now();
-    let queued = 0;
+    // Counted as the change in table size rather than from `changes`, which
+    // counts an updated row as well as an inserted one now that a re-queue
+    // promotes rather than being ignored. Callers report this as "newly
+    // queued" against what was asked for, so it has to mean exactly that.
+    const before = this.pendingSoakCount().total;
     this.db.transaction(() => {
       const insert = this.sql(
-        `INSERT INTO soak_requests (stream_id, channel_id, queued_at, source)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(stream_id) DO NOTHING`,
+        `INSERT INTO soak_requests (stream_id, channel_id, queued_at, source, seconds)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(stream_id) DO UPDATE SET
+           -- A stream already waiting keeps its place, but is promoted to the
+           -- more urgent source and to whichever length was asked for last.
+           -- Without this, "soak everything now" would silently do nothing on
+           -- the streams a nightly sweep had already queued -- which on a
+           -- settled install is most of them.
+           source  = CASE WHEN excluded.source = 'now' THEN excluded.source
+                          ELSE soak_requests.source END,
+           seconds = excluded.seconds`,
       );
       for (const row of rows) {
-        queued += insert.run(row.streamId, row.channelId ?? null, now, source).changes;
+        insert.run(row.streamId, row.channelId ?? null, now, source, row.seconds ?? null);
       }
     })();
-    return queued;
+    return this.pendingSoakCount().total - before;
   }
 
   /**
@@ -2561,16 +2611,16 @@ export class Store {
    * exists to prevent. Outside the window the drain therefore sees only the
    * manual rows, and the sweep-sourced ones sit until the hours come round.
    */
-  pendingSoaks(limit = 1000, options: { manualOnly?: boolean } = {}): StoredSoakRequest[] {
+  pendingSoaks(limit = 1000, options: { excludeSweep?: boolean } = {}): StoredSoakRequest[] {
     const rows = (
-      options.manualOnly
+      options.excludeSweep
         ? this.sql(
-            `SELECT stream_id, channel_id, queued_at, source
-               FROM soak_requests WHERE source = 'manual'
+            `SELECT stream_id, channel_id, queued_at, source, seconds
+               FROM soak_requests WHERE source <> 'sweep'
               ORDER BY queued_at, stream_id LIMIT ?`,
           ).all(limit)
         : this.sql(
-            `SELECT stream_id, channel_id, queued_at, source
+            `SELECT stream_id, channel_id, queued_at, source, seconds
                FROM soak_requests ORDER BY queued_at, stream_id LIMIT ?`,
           ).all(limit)
     ) as Array<{
@@ -2578,25 +2628,29 @@ export class Store {
       channel_id: number | null;
       queued_at: number;
       source: string;
+      seconds: number | null;
     }>;
     return rows.map((row) => ({
       streamId: row.stream_id,
       channelId: row.channel_id,
       queuedAt: row.queued_at,
-      source: row.source === 'sweep' ? 'sweep' : 'manual',
+      source: row.source === 'sweep' || row.source === 'now' ? row.source : 'manual',
+      seconds: row.seconds,
     }));
   }
 
   /** How many are waiting, split by what will drain them and when. */
-  pendingSoakCount(): { total: number; manual: number; sweep: number } {
+  pendingSoakCount(): { total: number; manual: number; now: number; sweep: number } {
     const row = this.sql(
       `SELECT COUNT(*) AS total,
-              SUM(CASE WHEN source = 'manual' THEN 1 ELSE 0 END) AS manual
+              SUM(CASE WHEN source = 'manual' THEN 1 ELSE 0 END) AS manual,
+              SUM(CASE WHEN source = 'now' THEN 1 ELSE 0 END)    AS urgent
          FROM soak_requests`,
-    ).get() as { total: number; manual: number | null };
+    ).get() as { total: number; manual: number | null; urgent: number | null };
     const total = row?.total ?? 0;
     const manual = row?.manual ?? 0;
-    return { total, manual, sweep: total - manual };
+    const urgent = row?.urgent ?? 0;
+    return { total, manual, now: urgent, sweep: total - manual - urgent };
   }
 
   /**
