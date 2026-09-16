@@ -682,12 +682,27 @@ describe('idle back-off', () => {
     nextDueAt: null,
     nextEligibleAt: null,
     runnableBacklog: 0,
+    soakBacklog: 0,
     oldestProbedAt: null,
     eligibleChannels: 0,
     heldBack: {},
     lanes: {},
     paused: false,
     ...over,
+  });
+
+  it('comes straight back while soaks are still waiting', () => {
+    // A pass that only soaked probed nothing and reordered nothing, so it used
+    // to read as idle and sleep with the queue still full -- roughly halving
+    // the rate a baseline run could manage.
+    const { waitMs, idle } = nextWait(config, summary({ soakBacklog: 12 }), NOW + 400_000, NOW);
+    expect(waitMs).toBe(60_000);
+    expect(idle).toBe(false);
+  });
+
+  it('sleeps as usual once the soak queue has nothing it can start', () => {
+    const { idle } = nextWait(config, summary({ soakBacklog: 0 }), NOW + 400_000, NOW);
+    expect(idle).toBe(true);
   });
 
   it('sleeps until the next verdict expires when a pass did nothing', () => {

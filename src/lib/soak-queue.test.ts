@@ -142,3 +142,40 @@ describe('a baseline run', () => {
     expect(store.pendingSoaks()[0]?.source).toBe('now');
   });
 });
+
+describe('the queue version the heartbeat wakes on', () => {
+  let store: Store;
+
+  beforeEach(() => {
+    store = new Store(':memory:');
+  });
+
+  afterEach(() => store.close());
+
+  it('changes when a stream is queued', () => {
+    const before = store.soakQueueVersion();
+    store.queueSoaks([{ streamId: 1 }]);
+    expect(store.soakQueueVersion()).not.toBe(before);
+  });
+
+  it('changes when a waiting stream is promoted to a baseline run', () => {
+    // The case the newest queue time alone would miss: a promotion keeps the
+    // row's place, so every queued_at stays put -- and that is exactly what
+    // "Start now" does on a settled install.
+    store.queueSoaks([{ streamId: 1 }], 'sweep');
+    const before = store.soakQueueVersion();
+    store.queueSoaks([{ streamId: 1 }], 'now');
+    expect(store.soakQueueVersion()).not.toBe(before);
+  });
+
+  it('does not change when nothing new was asked for', () => {
+    store.queueSoaks([{ streamId: 1 }]);
+    const before = store.soakQueueVersion();
+    store.queueSoaks([{ streamId: 1 }]);
+    expect(store.soakQueueVersion()).toBe(before);
+  });
+
+  it('is stable on an empty queue', () => {
+    expect(store.soakQueueVersion()).toBe(store.soakQueueVersion());
+  });
+});

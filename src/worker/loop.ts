@@ -83,7 +83,10 @@ export function nextWait(
     summary.probed > 0 ||
     summary.reordered > 0 ||
     summary.deferred > 0 ||
-    summary.runnableBacklog > 0;
+    summary.runnableBacklog > 0 ||
+    // Soaks it could start and has not. `?? 0` because a summary from a
+    // runner that predates the field must still sleep rather than spin.
+    (summary.soakBacklog ?? 0) > 0;
   if (worked) return { waitMs: base, idle: false };
 
   const wakes = [nextDueAt, summary.nextEligibleAt].filter((at): at is number => at !== null);
@@ -189,6 +192,9 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
   let running = false;
   let wakeRequested = false;
   let lastMark = 0;
+  // The soak queue's equivalent of `lastMark`. A string rather than a number
+  // because the thing it watches has two parts -- see `soakQueueVersion`.
+  let lastSoakVersion = '';
   // Guards re-entry the way `running` does for a pass: the push fetches a
   // catalogue and scores it twice, so two at once would race each other into
   // Teamarr's whole-set replacement.
@@ -516,6 +522,44 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
   };
 
   /**
+   * Notice a soak somebody queued and bring the next pass forward.
+   *
+   * `checkWake` for the soak queue, and missing until an operator pressed a
+   * soak button on a settled install and watched nothing happen: the worker
+   * had found nothing due and gone to sleep for ten minutes, and the queue had
+   * no way to reach it. The button said "queued" the whole time, which was
+   * true and useless.
+   *
+   * Same channel, same cost: the database, read on the heartbeat that already
+   * writes every 30 seconds. So the worst case between pressing a button and a
+   * pass starting is one beat rather than one idle sleep.
+   *
+   * Does not decide whether the soak can run. A request that is only a sweep
+   * outside its window still wakes a pass, which then finds nothing it may
+   * start and sleeps again -- one pass per button press, which is cheap, and it
+   * keeps the rule about what may run in exactly one place.
+   */
+  const checkSoakWake = (): void => {
+    if (stopping || !holding) return;
+    let version: string;
+    try {
+      version = store.soakQueueVersion();
+    } catch {
+      return;
+    }
+    if (version === lastSoakVersion) return;
+    lastSoakVersion = version;
+    wakeRequested = true;
+    if (running) return;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    log('soak requested; starting a pass now');
+    void tick();
+  };
+
+  /**
    * Beat, and hand the lock back if it is no longer ours.
    *
    * Losing a lock we believe we hold should be impossible -- it takes two
@@ -589,9 +633,17 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
     } catch {
       lastMark = 0;
     }
+    // Same reasoning as `lastMark`: whatever is already queued is picked up by
+    // the first pass below, so it is not a wake-up.
+    try {
+      lastSoakVersion = store.soakQueueVersion();
+    } catch {
+      lastSoakVersion = '';
+    }
     beat = setInterval(() => {
       if (!keepLock()) return;
       checkWake();
+      checkSoakWake();
       checkSync();
     }, 30_000);
     beat.unref?.();
