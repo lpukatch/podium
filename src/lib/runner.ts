@@ -2760,9 +2760,21 @@ export class Runner {
     if (slots === 0) return none;
 
     const windowOpen = soakWindowOpen(config.PODIUM_SOAK_WINDOW);
+    // A whole-catalogue run someone asked to start *now* gets the same generous
+    // per-pass budget a window sweep gets, and is the only thing that overrides
+    // the clock. Everything that protects a viewer is decided by `laneLimits`
+    // long before this and is untouched by it.
+    let urgent = false;
+    try {
+      urgent = store.pendingSoakCount().now > 0;
+    } catch {
+      // An unreadable queue is handled below, where it can be reported.
+    }
     const budgetMs = windowOpen
       ? Math.min(minutesLeftInWindow(config.PODIUM_SOAK_WINDOW) * 60_000, SOAK_WINDOW_BUDGET_MS)
-      : soakSeconds * 1_000;
+      : urgent
+        ? SOAK_WINDOW_BUDGET_MS
+        : soakSeconds * 1_000;
     const room = soaksThatFit(budgetMs / 60_000, slots, soakSeconds);
     if (room <= 0) return none;
 
@@ -2773,7 +2785,7 @@ export class Runner {
       // is capacity; "soak everything" is queued as a sweep, because hours of
       // connection time draining through a weekday afternoon is exactly the
       // runaway the window exists to prevent.
-      requested = store.pendingSoaks(room, { manualOnly: !windowOpen });
+      requested = store.pendingSoaks(room, { excludeSweep: !windowOpen });
     } catch (error) {
       log(`could not read the soak queue: ${errorText(error)}`);
       return none;
@@ -2806,6 +2818,14 @@ export class Runner {
     // The same variant machinery the probe jobs use, so a soak occupies the
     // login it would really have occupied and an Xtream account's URL is
     // rewritten the way playback rewrites it.
+    // Per stream, because a row may carry its own length: a baseline run of a
+    // whole catalogue at sixty seconds and a routine three-minute soak can sit
+    // in the queue together.
+    const secondsFor = new Map<number, number>();
+    for (const row of requested) {
+      if (row.seconds && row.seconds > 0) secondsFor.set(row.streamId, Math.max(10, row.seconds));
+    }
+
     const jobs: ProbeJob[] = [];
     const drawSeq = new Map<number, number>();
     for (const streamId of wanted) {
@@ -2838,7 +2858,7 @@ export class Runner {
 
     log(
       `soaking ${jobs.length} stream(s) at ${soakSeconds}s each` +
-        `${windowOpen ? ' (inside the soak window)' : ''}`,
+        `${windowOpen ? ' (inside the soak window)' : urgent ? ' (baseline run)' : ''}`,
     );
 
     // Its own watcher, because the probe run's was cleared when it finished
@@ -2865,13 +2885,14 @@ export class Runner {
           // Re-checked per job rather than only up front: the queue was sized
           // against an estimate, and a soak that would cross the deadline is
           // better skipped than truncated into a leg that reads as a drop.
+          const jobSeconds = secondsFor.get(job.streamId) ?? soakSeconds;
           const left = deadline - Date.now();
-          if (left < soakSeconds * 1_000) {
+          if (left < jobSeconds * 1_000) {
             return { legs: [], heldMs: 0, drops: 0, unreachable: false };
           }
           const startedAt = Date.now();
           const result = await soakStream(job.url, {
-            seconds: soakSeconds,
+            seconds: jobSeconds,
             userAgent: config.PODIUM_USER_AGENT,
             // Killed mid-connection rather than left to finish. runLanes stops
             // *dispatching* on an abort, which is right for a ten-second probe

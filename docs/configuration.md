@@ -569,13 +569,13 @@ Four gauges summarise the [stability ledger](usage.md#stability-the-failure-a-pr
 | `podium_stability_breaks` | failovers, dropped soaks and stalls recorded |
 | `podium_stability_flapping_streams` | streams with at least two breaks *and* more than one an hour |
 | `podium_stability_dead_channels` | channels where every stream has been measured and every one drops |
-| `podium_soak_queue` | streams waiting to be soaked, labelled `source="manual"` / `source="sweep"` |
+| `podium_soak_queue` | streams waiting to be soaked, labelled `source="manual"` / `"now"` / `"sweep"` |
 
-`podium_soak_queue` is split by source because the two halves mean different
-things: `manual` drains whenever a pass has capacity, where `sweep` -- which is
-what **Soak everything** queues -- waits for `PODIUM_SOAK_WINDOW`. A single
-total would read as "nothing is happening" through a whole afternoon when the
-queue is simply waiting for the right hours.
+`podium_soak_queue` is split by source because the three mean different things:
+`manual` drains whenever a pass has capacity, `now` is a baseline run going as
+fast as the provider limits allow, and `sweep` waits for `PODIUM_SOAK_WINDOW`.
+A single total would read as "nothing is happening" through a whole afternoon
+when the queue is simply waiting for the right hours.
 
 `podium_stability_dead_channels` is the one worth an alert above all: it counts
 the state reordering cannot improve, so it is the one that needs a person.
