@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 interface Row {
   id: number;
@@ -31,11 +31,56 @@ interface Row {
   unstable?: boolean;
 }
 
-/** Whether this row's stream is waiting to be soaked. */
-interface SoakState {
-  busy: boolean;
-  queued: boolean;
+/**
+ * Where this row's stream is in the soak queue.
+ *
+ * `done` is not "the result is on screen" -- it is "the queue no longer holds
+ * it", which is the most this panel can know without re-probing the channel.
+ * Saying that plainly, and pointing at the button that would show the result,
+ * beats either silence or a claim the panel cannot substantiate.
+ */
+type SoakPhase = 'queueing' | 'queued' | 'done' | 'error';
+
+export interface SoakState {
+  phase: SoakPhase;
   error: string;
+}
+
+/**
+ * Fold the queue the worker can see into the rows this panel is showing.
+ *
+ * Pure and exported so the three cases that made the button feel broken can be
+ * pinned: a row that was waiting and has now been measured, a row queued by
+ * something else entirely, and a row mid-request that the queue has no opinion
+ * about yet.
+ *
+ * Returns the same object when nothing moved, so the caller can skip a render.
+ */
+export function reconcileSoaks(
+  prev: Record<number, SoakState>,
+  waiting: Set<number>,
+): Record<number, SoakState> {
+  const next: Record<number, SoakState> = {};
+  let changed = false;
+  for (const [key, state] of Object.entries(prev)) {
+    const id = Number(key);
+    // A row that was waiting and no longer is has been measured. Anything
+    // mid-request or errored is this panel's own business, not the queue's,
+    // and is left alone -- a `queueing` row has not reached the table yet, so
+    // its absence from the queue means nothing.
+    const phase: SoakPhase = state.phase === 'queued' && !waiting.has(id) ? 'done' : state.phase;
+    if (phase !== state.phase) changed = true;
+    next[id] = { ...state, phase };
+  }
+  // Rows queued by something else -- the channel button, a group, another tab
+  // -- so the panel reports the queue rather than only its own clicks.
+  for (const id of waiting) {
+    if (next[id] === undefined) {
+      next[id] = { phase: 'queued', error: '' };
+      changed = true;
+    }
+  }
+  return changed ? next : prev;
 }
 
 interface CheckResult {
@@ -200,7 +245,7 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
    * result appears on this line the next time the channel is checked.
    */
   const soak = async (streamId: number) => {
-    setSoaks((prev) => ({ ...prev, [streamId]: { busy: true, queued: false, error: '' } }));
+    setSoaks((prev) => ({ ...prev, [streamId]: { phase: 'queueing', error: '' } }));
     try {
       const resp = await fetch('/api/soak', {
         method: 'POST',
@@ -208,21 +253,50 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
         body: JSON.stringify({ scope: 'stream', id: streamId }),
       });
       const body = (await resp.json()) as { error?: string };
+      const failed = !resp.ok || Boolean(body.error);
       setSoaks((prev) => ({
         ...prev,
         [streamId]: {
-          busy: false,
-          queued: resp.ok && !body.error,
-          error: !resp.ok || body.error ? (body.error ?? `HTTP ${resp.status}`) : '',
+          phase: failed ? 'error' : 'queued',
+          error: failed ? (body.error ?? `HTTP ${resp.status}`) : '',
         },
       }));
     } catch (e) {
-      setSoaks((prev) => ({
-        ...prev,
-        [streamId]: { busy: false, queued: false, error: String(e) },
-      }));
+      setSoaks((prev) => ({ ...prev, [streamId]: { phase: 'error', error: String(e) } }));
     }
   };
+
+  /**
+   * Reconcile the rows against the queue the worker can actually see.
+   *
+   * Two things this fixes, both of which made the button feel broken. React
+   * state alone is lost on a refresh, so a stream genuinely waiting showed a
+   * Soak button as though nothing had been asked -- and pressing it again read
+   * as a no-op. And a soak that had *finished* left the row saying "queued"
+   * forever, because nothing here was watching for it to leave.
+   */
+  const syncQueue = useCallback(async () => {
+    try {
+      const resp = await fetch('/api/soak');
+      const body = (await resp.json()) as { streamIds?: number[]; error?: string };
+      if (!resp.ok || body.error) return;
+      setSoaks((prev) => reconcileSoaks(prev, new Set(body.streamIds ?? [])));
+    } catch {
+      // A queue that cannot be read leaves the rows as they are; it is a
+      // progress hint, not a verdict.
+    }
+  }, []);
+
+  // On mount, and while anything is waiting. Ten seconds is well inside the
+  // minutes a soak takes, and the poll stops entirely once the queue is clear
+  // of this panel's rows.
+  const waitingHere = Object.values(soaks).some((state) => state.phase === 'queued');
+  useEffect(() => {
+    void syncQueue();
+    if (!waitingHere) return;
+    const timer = setInterval(() => void syncQueue(), 10_000);
+    return () => clearInterval(timer);
+  }, [syncQueue, waitingHere]);
 
   const { dropPending, nothingToChange } = result
     ? pendingChange(result, dropUnclaimed)
@@ -503,23 +577,32 @@ function StabilityCell({
   return (
     <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--color-muted)]">
       <span>{row.stability ?? 'never observed playing'}</span>
-      {canSoak && !soak?.queued && (
+      {canSoak && soak?.phase !== 'queued' && (
         <button
           type="button"
           className="rounded border border-[var(--color-line)] px-1.5 py-0.5 hover:border-[var(--color-accent)] disabled:opacity-50"
-          disabled={soak?.busy}
+          disabled={soak?.phase === 'queueing'}
           onClick={onSoak}
           title="Queue this stream to be held open for a few minutes and measured"
         >
-          {soak?.busy ? 'Queueing…' : 'Soak'}
+          {soak?.phase === 'queueing'
+            ? 'Queueing…'
+            : soak?.phase === 'done'
+              ? 'Soak again'
+              : 'Soak'}
         </button>
       )}
-      {soak?.queued && (
+      {soak?.phase === 'queued' && (
         <span className="text-[var(--color-accent)]">
           queued — the worker soaks it when there is spare capacity
         </span>
       )}
-      {soak?.error && <span className="text-[var(--color-bad)]">{soak.error}</span>}
+      {soak?.phase === 'done' && (
+        <span className="text-[var(--color-accent)]">
+          soaked — re-check the channel to see what it found
+        </span>
+      )}
+      {soak?.phase === 'error' && <span className="text-[var(--color-bad)]">{soak.error}</span>}
     </div>
   );
 }

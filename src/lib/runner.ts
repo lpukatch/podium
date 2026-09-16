@@ -2016,7 +2016,17 @@ export class Runner {
       // a failure to gather it must not fail a pass that already did its job.
       try {
         await this.soakPhase(
-          { abort, limits, loginsByProvider, streamById, log, client, uuidMap, guard },
+          {
+            abort,
+            limits,
+            loginsByProvider,
+            streamById,
+            providerNames,
+            log,
+            client,
+            uuidMap,
+            guard,
+          },
           config,
         );
       } catch (error) {
@@ -2736,6 +2746,8 @@ export class Runner {
       limits: Map<string, number>;
       loginsByProvider: Map<number, ProviderLogin[]>;
       streamById: Map<number, Stream>;
+      /** Only for the lane bars, which are drawn per provider. */
+      providerNames: Map<number, string>;
       log: (m: string) => void;
       /** For this phase's own viewer watcher -- see below. */
       client: DispatcharrClient;
@@ -2744,7 +2756,7 @@ export class Runner {
     },
     config: Config,
   ): Promise<{ soaked: number; drops: number }> {
-    const { abort, limits, loginsByProvider, streamById, log } = context;
+    const { abort, limits, loginsByProvider, streamById, providerNames, log } = context;
     const none = { soaked: 0, drops: 0 };
     // A viewer arrived during the probe lanes. Whatever capacity looked free a
     // moment ago is not, and a soak is the least interruptible work here.
@@ -2856,10 +2868,61 @@ export class Runner {
     const spent: number[] = [];
     let drops = 0;
 
-    log(
-      `soaking ${jobs.length} stream(s) at ${soakSeconds}s each` +
-        `${windowOpen ? ' (inside the soak window)' : urgent ? ' (baseline run)' : ''}`,
-    );
+    /**
+     * The lane bars, built from the soak jobs rather than the probe run's.
+     *
+     * Its own snapshot rather than reusing the pass's `laneSnapshot`: that one
+     * counts probes, so reusing it would draw soak names into bars whose totals
+     * describe different work. The shape is identical, so the progress view
+     * needs no second renderer.
+     *
+     * These are the useful part of watching a soak. Its wall clock is set by
+     * the narrowest provider rather than by the total -- accounts soak in
+     * parallel, so one login with a few hundred streams behind it paces the
+     * whole run however idle the others are -- and the bars are where that
+     * shows.
+     */
+    const soakQueued = new Map<string, number>();
+    const soakDone = new Map<string, number>();
+    const soakCurrent = new Map<string, Map<number, string>>();
+    for (const job of jobs) {
+      const key = laneKey(job.providerId, job.profileId);
+      soakQueued.set(key, (soakQueued.get(key) ?? 0) + 1);
+    }
+    const soakLanes = (): Progress['lanes'] => {
+      const rows = new Map<number, Progress['lanes'][number]>();
+      for (const [key, queuedOnLane] of soakQueued) {
+        const pid = Number(key.split(':')[0]);
+        if (!Number.isFinite(pid)) continue;
+        const row = rows.get(pid) ?? {
+          id: pid,
+          name: providerNames.get(pid) ?? String(pid),
+          limit: 0,
+          done: 0,
+          dead: 0,
+          failed: 0,
+          queued: 0,
+          current: [] as string[],
+        };
+        row.limit += limits.get(key) ?? 0;
+        row.queued += queuedOnLane;
+        row.done += soakDone.get(key) ?? 0;
+        row.current.push(...(soakCurrent.get(key)?.values() ?? []));
+        rows.set(pid, row);
+      }
+      return [...rows.values()].sort((a, b) => a.name.localeCompare(b.name));
+    };
+
+    const label = windowOpen ? ' (inside the soak window)' : urgent ? ' (baseline run)' : '';
+    log(`soaking ${jobs.length} stream(s) at ${soakSeconds}s each${label}`);
+    this.emit({
+      phase: 'soaking',
+      soaked: 0,
+      soakTotal: jobs.length,
+      soakDrops: 0,
+      lanes: soakLanes(),
+      message: `holding ${jobs.length} stream(s) open${label}`,
+    });
 
     // Its own watcher, because the probe run's was cleared when it finished
     // and this phase is the longest thing a pass does -- up to
@@ -2890,6 +2953,15 @@ export class Runner {
           if (left < jobSeconds * 1_000) {
             return { legs: [], heldMs: 0, drops: 0, unreachable: false };
           }
+          const laneId = laneKey(job.providerId, job.profileId);
+          let inflight = soakCurrent.get(laneId);
+          if (!inflight) {
+            inflight = new Map();
+            soakCurrent.set(laneId, inflight);
+          }
+          const name = streamById.get(job.streamId)?.name ?? `#${job.streamId}`;
+          inflight.set(job.streamId, name);
+          this.emit({ lanes: soakLanes() });
           const startedAt = Date.now();
           const result = await soakStream(job.url, {
             seconds: jobSeconds,
@@ -2924,6 +2996,22 @@ export class Runner {
           // connect has said what it had to say, and leaving the request would
           // have the sweep redial the same dead address every night.
           spent.push(job.streamId);
+          inflight.delete(job.streamId);
+          soakDone.set(laneId, (soakDone.get(laneId) ?? 0) + 1);
+          this.emit({
+            soaked: spent.length,
+            soakDrops: drops,
+            lanes: soakLanes(),
+            // Named rather than only counted: on a run measured in hours, the
+            // question somebody actually has is "what is it doing right now".
+            message: `${name}: ${
+              result.unreachable
+                ? 'would not connect'
+                : result.drops > 0
+                  ? `${result.drops} drop(s) in ${Math.round(result.heldMs / 1000)}s`
+                  : `held ${Math.round(result.heldMs / 1000)}s clean`
+            }`,
+          });
           return result;
         },
         onChannelComplete: async () => {

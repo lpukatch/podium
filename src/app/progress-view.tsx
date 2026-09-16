@@ -34,10 +34,14 @@ export function laneCompleted(lane: Pick<Lane, 'done' | 'failed'> & { dead?: num
 
 interface Progress {
   runId: string | null;
-  phase: 'idle' | 'fetching' | 'planning' | 'probing' | 'paused' | 'done' | 'failed';
+  phase: 'idle' | 'fetching' | 'planning' | 'probing' | 'soaking' | 'paused' | 'done' | 'failed';
   startedAt: number | null;
   probed: number;
   total: number;
+  /** The soak phase, while one is running. Absent otherwise. */
+  soaked?: number;
+  soakTotal?: number;
+  soakDrops?: number;
   dead: number;
   reordered: number;
   /** Optional: a progress row written by an older worker will not have it. */
@@ -128,6 +132,7 @@ const PHASES: Record<Progress['phase'], { label: string; tone: string }> = {
   fetching: { label: 'Fetching', tone: 'bg-[var(--color-accent-soft)] text-[var(--color-accent)]' },
   planning: { label: 'Planning', tone: 'bg-[var(--color-accent-soft)] text-[var(--color-accent)]' },
   probing: { label: 'Probing', tone: 'bg-[var(--color-accent)] text-white' },
+  soaking: { label: 'Soaking', tone: 'bg-[var(--color-accent)] text-white' },
   paused: { label: 'Paused', tone: 'bg-[var(--color-warn)] text-white' },
   done: { label: 'Done', tone: 'bg-[var(--color-accent-soft)] text-[var(--color-accent)]' },
   failed: { label: 'Failed', tone: 'bg-[var(--color-bad)] text-white' },
@@ -356,6 +361,12 @@ export function ProgressView() {
   const p = progress;
   const phase = PHASES[p?.phase ?? 'idle'];
   const pct = p && p.total > 0 ? Math.min(Math.round((p.probed / p.total) * 100), 100) : 0;
+  // Its own bar rather than sharing the probe one: a pass probes hundreds of
+  // streams at seconds each and soaks tens of them at minutes each, so one bar
+  // over both would sit still for half an hour and then jump.
+  const soakTotal = p?.soakTotal ?? 0;
+  const soakPct =
+    soakTotal > 0 ? Math.min(Math.round(((p?.soaked ?? 0) / soakTotal) * 100), 100) : 0;
   const cache = stats?.cache;
   const entries = collapseRuns(runs);
   // The worker's numbers when it has published them, the cache-wide ones only
@@ -464,6 +475,32 @@ export function ProgressView() {
             </div>
             <p className="mt-2 text-sm tabular-nums text-[var(--color-muted)]">
               {n(p.probed)} / {n(p.total)} probed · {pct}%
+            </p>
+          </>
+        )}
+
+        {p && p.phase === 'soaking' && soakTotal > 0 && (
+          <>
+            <div className="mt-4 h-2 overflow-hidden rounded-full bg-[var(--color-line)]">
+              <div
+                className="h-full rounded-full bg-[var(--color-accent)] transition-[width] duration-500"
+                style={{ width: `${soakPct}%` }}
+              />
+            </div>
+            <p className="mt-2 text-sm tabular-nums text-[var(--color-muted)]">
+              {n(p.soaked ?? 0)} / {n(soakTotal)} soaked · {soakPct}%
+              {/* The reason anybody watches this phase. Only when there are
+                  any: a zero that never moves says less than nothing. */}
+              {(p.soakDrops ?? 0) > 0 && (
+                <span className="text-[var(--color-bad)]">
+                  {' '}
+                  · {n(p.soakDrops ?? 0)} drop{(p.soakDrops ?? 0) === 1 ? '' : 's'} found
+                </span>
+              )}
+            </p>
+            <p className="mt-1 text-sm text-[var(--color-muted)]">
+              Holding each stream open to see how long it lasts. This is minutes per stream, not
+              seconds — it runs at the provider limits and stops the moment anyone starts watching.
             </p>
           </>
         )}

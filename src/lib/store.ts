@@ -592,7 +592,7 @@ export function forcedAtFor(marks: RefreshMarks, groupId: number | null | undefi
 
 export interface Progress {
   runId: string | null;
-  phase: 'idle' | 'fetching' | 'planning' | 'probing' | 'paused' | 'done' | 'failed';
+  phase: 'idle' | 'fetching' | 'planning' | 'probing' | 'soaking' | 'paused' | 'done' | 'failed';
   startedAt: number | null;
   probed: number;
   total: number;
@@ -626,6 +626,20 @@ export interface Progress {
    * zero whenever no request is outstanding.
    */
   retired?: number;
+  /**
+   * The soak phase, while one is running.
+   *
+   * Its own counters rather than reusing `probed`/`total`, because the two
+   * measure different work at different scales: a pass probes hundreds of
+   * streams at seconds each and soaks tens of them at minutes each, and folding
+   * them into one bar makes both unreadable. All three are absent on a pass
+   * that is not soaking, which is how the view knows not to draw the block
+   * rather than drawing an empty one.
+   */
+  soaked?: number;
+  soakTotal?: number;
+  /** Drops recorded so far this phase -- the reason anybody watches it. */
+  soakDrops?: number;
   dueAt: number | null;
   heldBack: Record<string, number>;
   lanes: Array<{
