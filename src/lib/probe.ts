@@ -755,17 +755,6 @@ export function deadReason(error: string): DeadReason {
   return 'other';
 }
 
-/**
- * How much short of its deadline a connection may come back and still count as
- * having run its course.
- *
- * Covers process startup and the flooring of `-t` to whole seconds, and no
- * more. Generous here is expensive: every millisecond of slack is a window in
- * which a genuine drop at the end of a leg reads as a clean finish, and a soak
- * that misses the drop it was run to find reports the opposite of the truth.
- */
-const SOAK_SLACK_MS = 500;
-
 /** What one ffmpeg leg of a soak did. */
 export interface SoakLeg {
   /** How long the connection served before it ended, in milliseconds. */
@@ -799,6 +788,15 @@ export interface SoakResult {
    * stops rather than spending its remaining budget failing to dial.
    */
   unreachable: boolean;
+  /**
+   * True when the `stop` hook cut the soak short.
+   *
+   * What a caller needs to tell "measured and found nothing" from "never got
+   * to measure". Both come back with no legs and no drops, and treating the
+   * second as the first is how a queued soak was marked done -- and dropped
+   * from the queue -- when a viewer arriving had killed it seconds in.
+   */
+  stopped: boolean;
 }
 
 /**
@@ -823,9 +821,27 @@ export interface SoakResult {
  * log line at a verbosity that changes between builds, and counting drops by
  * parsing it would be guessing. Running one connection at a time and letting it
  * end is not a workaround for that; it is the measurement. A connection that
- * comes back before its deadline dropped, and the wall time it lasted is the
+ * ends before this process ends it dropped, and the wall time it lasted is the
  * leg. That is exactly what the passive ledger records from the other side, so
  * the two produce the same rows and feed the same score.
+ *
+ * ## Why the deadline is a wall-clock kill and not `-t`
+ *
+ * This used to hand ffmpeg `-t <seconds>` and call any leg that came back early
+ * a drop. `-t` is *media* time. A live provider sends a burst of buffered
+ * stream the moment a connection opens, so a perfectly healthy feed reaches
+ * 180 seconds of media after about 164 of wall clock and exits -- which read
+ * as a drop sixteen seconds before the end. Each retry then asked for the
+ * remainder, where the same burst is a larger share: sixteen seconds of media
+ * arrived in six, nine in under half a second, and two of those sub-second
+ * legs in a row were then called unreachable. The first real soak of a feed
+ * already watched playing clean for five minutes came back with four drops and
+ * no connection, every one of them manufactured.
+ *
+ * So ffmpeg is given no length at all, and this process kills it on its own
+ * clock. The question being asked is "did the connection end before we ended
+ * it", and only a wall-clock deadline can answer that; no media timestamp
+ * can.
  */
 export async function soakStream(
   url: string,
@@ -867,28 +883,34 @@ export async function soakStream(
     now = Date.now,
   } = options;
 
-  const empty: SoakResult = { legs: [], heldMs: 0, drops: 0, unreachable: false };
+  const empty: SoakResult = {
+    legs: [],
+    heldMs: 0,
+    drops: 0,
+    unreachable: false,
+    stopped: false,
+  };
   if (rejectUrl(url)) return empty;
 
   const deadline = now() + seconds * 1000;
   const legs: SoakLeg[] = [];
   let deadInARow = 0;
+  let wasStopped = false;
 
   while (now() < deadline) {
-    if (stop?.()) break;
+    if (stop?.()) {
+      wasStopped = true;
+      break;
+    }
     const remainingMs = deadline - now();
     // Below about a second there is no leg worth measuring: the connection
     // would not finish establishing before its own deadline, and would be
     // recorded as a drop it did not earn.
     if (remainingMs < 1_000) break;
 
-    // Floored, never rounded: ffmpeg's `-t` is in whole seconds, and rounding
-    // up would ask for time the budget does not have. This is also the number
-    // the drop test is made against, so the two cannot disagree.
-    const legSeconds = Math.max(1, Math.floor(remainingMs / 1000));
     const startedAt = now();
-    const { error, stopped } = await runSoakLeg(url, {
-      seconds: legSeconds,
+    const { error, stopped, ranOut } = await runSoakLeg(url, {
+      ms: remainingMs,
       userAgent,
       ffmpegPath,
       stop,
@@ -900,13 +922,12 @@ export async function soakStream(
       // so the time is discarded rather than counted as clean or as a break --
       // the same refusal to invent evidence the passive ledger makes about a
       // session that merely ended.
+      wasStopped = true;
       break;
     }
-    // Measured against what this leg was actually told to run for, not against
-    // the budget: the two differ by up to a second once `-t` is floored, and
-    // testing the wrong one reads a real drop at the end of a soak as a clean
-    // finish. `SOAK_SLACK_MS` covers process startup and the flooring itself.
-    const dropped = heldMs < legSeconds * 1_000 - SOAK_SLACK_MS;
+    // Ours ended it, or theirs did. No threshold, no slack: the only fact that
+    // matters is which side closed the connection.
+    const dropped = !ranOut;
     legs.push({ heldMs, dropped, error: dropped ? error : '' });
 
     if (!dropped) break;
@@ -921,6 +942,7 @@ export async function soakStream(
           heldMs: legs.reduce((sum, leg) => sum + leg.heldMs, 0),
           drops: legs.filter((leg) => leg.dropped).length,
           unreachable: true,
+          stopped: false,
         };
       }
     } else {
@@ -933,6 +955,7 @@ export async function soakStream(
     heldMs: legs.reduce((sum, leg) => sum + leg.heldMs, 0),
     drops: legs.filter((leg) => leg.dropped).length,
     unreachable: false,
+    stopped: wasStopped,
   };
 }
 
@@ -947,12 +970,13 @@ export async function soakStream(
 function runSoakLeg(
   url: string,
   options: {
-    seconds: number;
+    /** Wall clock to hold the connection for, after which this process ends it. */
+    ms: number;
     userAgent: string;
     ffmpegPath: string;
     stop?: (() => boolean) | undefined;
   },
-): Promise<{ error: string; stopped: boolean }> {
+): Promise<{ error: string; stopped: boolean; ranOut: boolean }> {
   const nul = process.platform === 'win32' ? 'NUL' : '/dev/null';
   const args = [
     '-y',
@@ -963,8 +987,9 @@ function runSoakLeg(
     '1',
     ...userAgentArgs(url, options.userAgent),
     ...protocolArgs(url),
-    '-t',
-    String(options.seconds),
+    // Deliberately no `-t`. See "Why the deadline is a wall-clock kill" on
+    // `soakStream`: a media-time limit is reached early by any feed that
+    // bursts on connect, which every live provider does.
     '-i',
     url,
     '-map',
@@ -976,7 +1001,7 @@ function runSoakLeg(
     nul,
   ];
 
-  return new Promise<{ error: string; stopped: boolean }>((resolve) => {
+  return new Promise<{ error: string; stopped: boolean; ranOut: boolean }>((resolve) => {
     // See `sampleStream` for why the path is opted out of Turbopack's tracing.
     const child = spawn(/*turbopackIgnore: true*/ options.ffmpegPath, args, {
       stdio: ['ignore', 'ignore', 'pipe'],
@@ -986,13 +1011,26 @@ function runSoakLeg(
     let stderr = '';
     let settled = false;
     let stopped = false;
+    let ranOut = false;
     const finish = (error: string) => {
       if (settled) return;
       settled = true;
       clearInterval(poll);
+      clearTimeout(deadline);
       runningChildren.delete(child);
-      resolve({ error, stopped });
+      resolve({ error, stopped, ranOut });
     };
+
+    // The deadline, on this process's clock. Reaching it is the clean ending:
+    // the connection was still serving when we stopped asking.
+    const deadline = setTimeout(
+      () => {
+        if (settled) return;
+        ranOut = true;
+        child.kill('SIGKILL');
+      },
+      Math.max(0, options.ms),
+    );
 
     // A second is fine: the thing being handed back is a provider connection,
     // and a second of one is not worth a tighter loop on every soak in flight.

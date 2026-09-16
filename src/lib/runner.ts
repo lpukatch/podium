@@ -32,7 +32,13 @@ import { channelResolutionFloor, type MinResolution } from './resolution';
 import { pruneDeletedChannelRules } from './rule-sync';
 import type { RulesSource } from './rules-source';
 import { AbortFlag, laneKey, type ProbeJob, runLanes } from './scheduler';
-import { minutesLeftInWindow, planSoaks, soaksThatFit, soakWindowOpen } from './soak-plan';
+import {
+  minutesLeftInWindow,
+  oneRoundBudgetMs,
+  planSoaks,
+  soaksThatFit,
+  soakWindowOpen,
+} from './soak-plan';
 
 // Re-exported: `statsPayload` lived here before the rule check needed it too,
 // and the API route and tests that import it from here still can.
@@ -2799,12 +2805,17 @@ export class Runner {
     } catch {
       // An unreadable queue is handled below, where it can be reported.
     }
-    const budgetMs = windowOpen
-      ? Math.min(minutesLeftInWindow(config.PODIUM_SOAK_WINDOW) * 60_000, SOAK_WINDOW_BUDGET_MS)
-      : urgent
-        ? SOAK_WINDOW_BUDGET_MS
-        : soakSeconds * 1_000;
-    const room = soaksThatFit(budgetMs / 60_000, slots, soakSeconds);
+    // Two shapes of pass. Inside the window, or on a baseline run, the phase
+    // may spend a long stretch and is sized by how many soaks fit in it.
+    // Otherwise it runs exactly one round -- one soak per free slot -- so a
+    // button press drains over a few passes rather than stalling the loop.
+    const generous = windowOpen || urgent;
+    let budgetMs = generous
+      ? windowOpen
+        ? Math.min(minutesLeftInWindow(config.PODIUM_SOAK_WINDOW) * 60_000, SOAK_WINDOW_BUDGET_MS)
+        : SOAK_WINDOW_BUDGET_MS
+      : 0;
+    const room = generous ? soaksThatFit(budgetMs / 60_000, slots, soakSeconds) : slots;
     if (room <= 0) return none;
 
     let requested: StoredSoakRequest[];
@@ -2818,6 +2829,13 @@ export class Runner {
     } catch (error) {
       log(`could not read the soak queue: ${errorText(error)}`);
       return none;
+    }
+
+    if (!generous) {
+      budgetMs = oneRoundBudgetMs(
+        soakSeconds,
+        requested.map((row) => row.seconds),
+      );
     }
 
     const wanted = requested.map((row) => row.streamId);
@@ -2968,7 +2986,7 @@ export class Runner {
           const jobSeconds = secondsFor.get(job.streamId) ?? soakSeconds;
           const left = deadline - Date.now();
           if (left < jobSeconds * 1_000) {
-            return { legs: [], heldMs: 0, drops: 0, unreachable: false };
+            return { legs: [], heldMs: 0, drops: 0, unreachable: false, stopped: false };
           }
           const laneId = laneKey(job.providerId, job.profileId);
           let inflight = soakCurrent.get(laneId);
@@ -3009,11 +3027,23 @@ export class Runner {
             cursor += leg.heldMs;
           }
           drops += result.drops;
+          inflight.delete(job.streamId);
+          if (result.stopped) {
+            // A viewer arrived and the soak was cut short. Whatever legs had
+            // already finished are genuine and are kept above, but the request
+            // is *not* spent: it was never measured, and marking it done is how
+            // a stream used to vanish from the queue unmeasured the moment
+            // somebody turned the television on. It runs again on a later pass.
+            this.emit({
+              lanes: soakLanes(),
+              message: `${name}: stopped for a viewer, left in the queue`,
+            });
+            return result;
+          }
           // Spent whatever it found, including nothing: a stream that would not
           // connect has said what it had to say, and leaving the request would
           // have the sweep redial the same dead address every night.
           spent.push(job.streamId);
-          inflight.delete(job.streamId);
           soakDone.set(laneId, (soakDone.get(laneId) ?? 0) + 1);
           this.emit({
             soaked: spent.length,

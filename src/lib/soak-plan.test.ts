@@ -6,8 +6,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   minutesLeftInWindow,
+  oneRoundBudgetMs,
   parseSoakWindow,
   planSoaks,
+  SOAK_DISPATCH_SLACK_MS,
   type SoakCandidate,
   soaksThatFit,
   soakWindowOpen,
@@ -231,5 +233,26 @@ describe('planSoaks', () => {
       records: new Map(),
     });
     expect(plan).toEqual([1, 3]);
+  });
+});
+
+describe('oneRoundBudgetMs', () => {
+  it('leaves room for a job that starts after the deadline was set', () => {
+    // The regression: the budget was exactly one soak long, so a job that had
+    // waited even a millisecond no longer fitted and was skipped. Five of six
+    // queued streams were skipped this way on the first real run.
+    const budget = oneRoundBudgetMs(180, []);
+    const startedAfter = 5_000;
+    expect(budget - startedAfter).toBeGreaterThanOrEqual(180_000);
+  });
+
+  it('is sized to the longest soak in the round', () => {
+    // A row asking for longer than the setting must still fit, or it is
+    // skipped forever outside the window.
+    expect(oneRoundBudgetMs(90, [60, 300, null])).toBe(300_000 + SOAK_DISPATCH_SLACK_MS);
+  });
+
+  it('falls back to the setting when no row asks for a length', () => {
+    expect(oneRoundBudgetMs(180, [null, undefined, 0])).toBe(180_000 + SOAK_DISPATCH_SLACK_MS);
   });
 });

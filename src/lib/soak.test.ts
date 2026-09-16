@@ -8,7 +8,7 @@
  * on demand, which is the whole reason this feature exists.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -30,15 +30,19 @@ describe('soakStream', () => {
   let holds: string;
   let dropsAfterOneSecond: string;
   let refuses: string;
+  let recordsArgs: string;
+  let argsFile: string;
 
   beforeAll(() => {
     if (!usable) return;
     dir = mkdtempSync(join(tmpdir(), 'podium-soak-'));
-    // Serves for as long as it was asked to. `-t <seconds>` is the 8th
-    // argument-ish, so rather than parse it the stub sleeps longer than any
-    // budget the tests use and relies on nothing killing it early -- which is
-    // wrong for a real ffmpeg but right for "this connection did not drop".
-    holds = stub('holds', ['sleep 2']);
+    // A live stream never ends on its own, so neither does this: it serves
+    // until the soak's own clock kills it. `exec` so the kill lands on the
+    // process holding the pipe -- a `sleep` left behind as a child of `sh`
+    // would keep stderr open and the leg would not end until it did.
+    holds = stub('holds', ['exec sleep 60']);
+    argsFile = join(dir, 'args.txt');
+    recordsArgs = stub('records', [`printf '%s\\n' "$@" > '${argsFile}'`, 'exec sleep 60']);
     dropsAfterOneSecond = stub('drops', [
       'sleep 1',
       "printf '[in#0/mpegts @ 0x1] Error during demuxing: Connection timed out\\n' >&2",
@@ -128,6 +132,10 @@ describe('soakStream', () => {
     // connection this process cut would invent evidence against it.
     expect(result.legs).toEqual([]);
     expect(result.drops).toBe(0);
+    // And it says so, which is what keeps the request in the queue. Without
+    // this a stopped soak looked identical to a measured clean one and was
+    // marked done unmeasured.
+    expect(result.stopped).toBe(true);
   });
 
   it.runIf(usable)('does not stop when the hook stays false', async () => {
@@ -138,11 +146,38 @@ describe('soakStream', () => {
     });
     expect(result.legs).toHaveLength(1);
     expect(result.legs[0]?.dropped).toBe(false);
+    expect(result.stopped).toBe(false);
+  });
+
+  it.runIf(usable)('does not hand ffmpeg a media-time length', async () => {
+    // The regression. `-t` is media time, and a live provider bursts buffered
+    // stream on connect, so a healthy feed reached its `-t` before the wall
+    // clock did and every such early finish was recorded as a drop. The first
+    // real soak of a feed already seen playing clean for five minutes came back
+    // with four drops, every one manufactured.
+    await soakStream(URL_, { seconds: 1, ffmpegPath: recordsArgs });
+    const args = readFileSync(argsFile, 'utf8').split('\n');
+    expect(args).not.toContain('-t');
+  });
+
+  it.runIf(usable)('counts a connection still serving at the deadline as clean', async () => {
+    const startedAt = Date.now();
+    const result = await soakStream(URL_, { seconds: 1, ffmpegPath: holds });
+    expect(result.drops).toBe(0);
+    expect(result.legs).toEqual([{ heldMs: expect.any(Number), dropped: false, error: '' }]);
+    // Ended by the soak's clock, not by the stub, which would have run a minute.
+    expect(Date.now() - startedAt).toBeLessThan(10_000);
   });
 
   it('refuses a hostile url without spawning anything', async () => {
     const result = await soakStream('file:///etc/passwd', { seconds: 60 });
-    expect(result).toEqual({ legs: [], heldMs: 0, drops: 0, unreachable: false });
+    expect(result).toEqual({
+      legs: [],
+      heldMs: 0,
+      drops: 0,
+      unreachable: false,
+      stopped: false,
+    });
   });
 
   it('spends nothing when the budget is already gone', async () => {

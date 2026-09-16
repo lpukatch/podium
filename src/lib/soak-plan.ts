@@ -184,3 +184,38 @@ export function soaksThatFit(minutesLeft: number, lanes: number, soakSeconds: nu
   const perLane = Math.floor((minutesLeft * 60) / soakSeconds);
   return Math.max(0, perLane * lanes);
 }
+
+/**
+ * How long a one-round soak pass allows for its jobs to get started.
+ *
+ * Covers lane stagger and dispatch, which on a full lane set is a few seconds,
+ * with plenty to spare. It is not a measurement tolerance -- a soak's length is
+ * enforced on the wall clock inside `soakStream` -- only the window in which a
+ * job may still *begin* and finish before the round is considered over.
+ */
+export const SOAK_DISPATCH_SLACK_MS = 60_000;
+
+/**
+ * The deadline budget for one round of soaks: one soak per free slot.
+ *
+ * Sized to the longest soak in the round plus `SOAK_DISPATCH_SLACK_MS`. It used
+ * to be exactly one soak length, and a job refuses to start unless a whole
+ * soak still fits before the deadline -- so the moment a single millisecond had
+ * passed, nothing fitted. On the first real run, five of six queued streams
+ * were skipped pass after pass; only one that happened to start in the same
+ * millisecond the deadline was set ever ran.
+ *
+ * `rowSeconds` are the per-request lengths, null or absent meaning "use the
+ * setting". A row asking for longer than the setting still has to fit, or it
+ * would be skipped forever outside the window.
+ */
+export function oneRoundBudgetMs(
+  defaultSeconds: number,
+  rowSeconds: Array<number | null | undefined>,
+): number {
+  const longest = Math.max(
+    defaultSeconds,
+    ...rowSeconds.map((seconds) => (seconds && seconds > 0 ? seconds : 0)),
+  );
+  return longest * 1_000 + SOAK_DISPATCH_SLACK_MS;
+}
