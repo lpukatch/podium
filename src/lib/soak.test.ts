@@ -160,6 +160,15 @@ describe('soakStream', () => {
     expect(args).not.toContain('-t');
   });
 
+  it.runIf(usable)('writes to the null muxer, which accepts any track', async () => {
+    // A real container refuses some codecs and data tracks, and a refusal
+    // makes ffmpeg exit on the spot -- which a soak would record as a drop.
+    await soakStream(URL_, { seconds: 1, ffmpegPath: recordsArgs });
+    const args = readFileSync(argsFile, 'utf8').split('\n');
+    expect(args[args.indexOf('-f') + 1]).toBe('null');
+    expect(args).not.toContain('mpegts');
+  });
+
   it.runIf(usable)('counts a connection still serving at the deadline as clean', async () => {
     const startedAt = Date.now();
     const result = await soakStream(URL_, { seconds: 1, ffmpegPath: holds });

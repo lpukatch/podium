@@ -219,3 +219,53 @@ export function oneRoundBudgetMs(
   );
   return longest * 1_000 + SOAK_DISPATCH_SLACK_MS;
 }
+
+/**
+ * How many soaks each lane may take this pass: its free slots times the rounds
+ * that fit.
+ *
+ * Per lane rather than one total, which is the whole fix. A single total let
+ * the queue's own order decide where the work went, and the queue is in
+ * stream-id order -- on the install this was found on, the lowest ids are all
+ * one account. Every batch of 130 landed on that account's three connections
+ * while the other ten sat idle, and a full soak that should have run in about
+ * fourteen hours was on course for sixty.
+ */
+export function laneQuotas(limits: Map<string, number>, rounds: number): Map<string, number> {
+  const out = new Map<string, number>();
+  if (rounds <= 0) return out;
+  for (const [lane, free] of limits) {
+    if (free > 0) out.set(lane, free * rounds);
+  }
+  return out;
+}
+
+/**
+ * Walk candidates in queue order, keeping each until its lane is full.
+ *
+ * Order is preserved within a lane, so the oldest request on an account still
+ * goes first -- what changes is only that one account's backlog can no longer
+ * crowd out every other account's. A candidate with no lane is skipped.
+ */
+export function takePerLane<T extends { lane: string | null }>(
+  candidates: Iterable<T>,
+  quotas: Map<string, number>,
+): T[] {
+  const left = new Map(quotas);
+  let open = [...left.values()].reduce((sum, n) => sum + n, 0);
+  const out: T[] = [];
+  if (open <= 0) return out;
+  for (const candidate of candidates) {
+    if (candidate.lane === null) continue;
+    const remaining = left.get(candidate.lane) ?? 0;
+    if (remaining <= 0) continue;
+    left.set(candidate.lane, remaining - 1);
+    open -= 1;
+    out.push(candidate);
+    // Checked after taking, not before the next pull: the candidates may be a
+    // lazily read queue, and one more read than needed is one more row paid
+    // for and thrown away.
+    if (open <= 0) break;
+  }
+  return out;
+}
