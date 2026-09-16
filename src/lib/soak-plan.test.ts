@@ -6,12 +6,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   laneQuotas,
+  makeKickDetector,
   minutesLeftInWindow,
   oneRoundBudgetMs,
   parseSoakWindow,
   planSoaks,
   SOAK_DISPATCH_SLACK_MS,
   type SoakCandidate,
+  soakLimits,
   soaksThatFit,
   soakWindowOpen,
   takePerLane,
@@ -326,5 +328,80 @@ describe('spreading a pass across providers', () => {
     }
     takePerLane(queue(), new Map([['A', 3]]));
     expect(seen).toBe(3);
+  });
+});
+
+describe('soakLimits', () => {
+  it('leaves one connection spare on each account', () => {
+    expect(
+      soakLimits(
+        new Map([
+          ['7:0', 5],
+          ['6:0', 3],
+        ]),
+        1,
+      ),
+    ).toEqual(
+      new Map([
+        ['7:0', 4],
+        ['6:0', 2],
+      ]),
+    );
+  });
+
+  it('never takes a single-connection account to zero', () => {
+    expect(soakLimits(new Map([['5:0', 1]]), 1)).toEqual(new Map([['5:0', 1]]));
+  });
+
+  it('can be switched off', () => {
+    expect(soakLimits(new Map([['7:0', 5]]), 0)).toEqual(new Map([['7:0', 5]]));
+  });
+
+  it('leaves out lanes with nothing free', () => {
+    expect(soakLimits(new Map([['7:0', 0]]), 1).size).toBe(0);
+  });
+});
+
+describe('makeKickDetector', () => {
+  it('flags a drop that lands just after another soak on the account connects', () => {
+    // The Provider B signature: 63% of its drops landed within 1.5s of another
+    // soak on the same account opening.
+    const d = makeKickDetector(3_000, 3);
+    d.opened(7, 1, 0);
+    d.opened(7, 2, 60_000);
+    expect(d.isSuspect(7, 1, 61_000)).toBe(true);
+  });
+
+  it('does not blame a drop on the soak itself connecting', () => {
+    const d = makeKickDetector(3_000, 3);
+    d.opened(7, 1, 60_000);
+    expect(d.isSuspect(7, 1, 61_000)).toBe(false);
+  });
+
+  it('does not flag a drop with no connect nearby', () => {
+    const d = makeKickDetector(3_000, 3);
+    d.opened(7, 2, 10_000);
+    expect(d.isSuspect(7, 1, 60_000)).toBe(false);
+  });
+
+  it('keeps accounts apart', () => {
+    const d = makeKickDetector(3_000, 3);
+    d.opened(12, 2, 60_000);
+    expect(d.isSuspect(7, 1, 61_000)).toBe(false);
+  });
+
+  it('does not count a connect that came after the drop', () => {
+    const d = makeKickDetector(3_000, 3);
+    d.opened(7, 2, 62_000);
+    expect(d.isSuspect(7, 1, 61_000)).toBe(false);
+  });
+
+  it('trips an account after enough suspect drops, and only that account', () => {
+    const d = makeKickDetector(3_000, 3);
+    expect(d.noteSuspect(7)).toBe(false);
+    expect(d.noteSuspect(7)).toBe(false);
+    expect(d.noteSuspect(7)).toBe(true);
+    expect(d.tripped(7)).toBe(true);
+    expect(d.tripped(12)).toBe(false);
   });
 });

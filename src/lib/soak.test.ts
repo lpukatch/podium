@@ -190,6 +190,32 @@ describe('soakStream', () => {
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(1_200);
   });
 
+  it.runIf(usable)('never reconnects sooner than the minimum gap', async () => {
+    // The account-wide cooldown overrides a shorter backoff step: a provider
+    // still counting the connection that just closed would see an early
+    // reconnect as one too many.
+    const startedAt = Date.now();
+    await soakStream(URL_, {
+      seconds: 60,
+      ffmpegPath: refuses,
+      backoffMs: [0],
+      minGapMs: 500,
+    });
+    // Three dials, two gaps of at least 500ms.
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(1_000);
+  });
+
+  it.runIf(usable)('reports each connection as it opens', async () => {
+    const opened: number[] = [];
+    const result = await soakStream(URL_, {
+      seconds: 60,
+      ffmpegPath: refuses,
+      backoffMs: [0],
+      onConnect: (at) => opened.push(at),
+    });
+    expect(opened).toEqual(result.legs.map((leg) => leg.startedAt));
+  });
+
   it.runIf(usable)('can be stopped during a backoff wait', async () => {
     const startedAt = Date.now();
     const result = await soakStream(URL_, {

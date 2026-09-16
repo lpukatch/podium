@@ -897,6 +897,16 @@ export async function soakStream(
     /** Waits before each reconnect. Injected by the tests to keep them quick. */
     backoffMs?: number[];
     /**
+     * The least any reconnect waits, whatever the backoff says.
+     *
+     * A provider that keeps a closed connection counted for a few seconds
+     * sees an early reconnect as one connection too many, and closes another.
+     * The caller sets this to the account-wide cooldown.
+     */
+    minGapMs?: number;
+    /** Called as each connection is opened, with the soak's clock. */
+    onConnect?: (at: number) => void;
+    /**
      * Polled to decide whether to stop early -- a viewer arriving, or the
      * worker shutting down.
      *
@@ -918,6 +928,8 @@ export async function soakStream(
     ffmpegPath = 'ffmpeg',
     maxDeadConnections = 3,
     backoffMs = SOAK_BACKOFF_MS,
+    minGapMs = 0,
+    onConnect,
     stop,
     now = Date.now,
   } = options;
@@ -958,7 +970,8 @@ export async function soakStream(
       // Every reconnect waits first, so a provider that refuses a quick redial
       // is not charged a failure per attempt. The wait is spent against the
       // budget and still honours `stop`.
-      const wait = backoffMs.length > 0 ? backoffMs[Math.min(retries, backoffMs.length - 1)] : 0;
+      const stepped = backoffMs.length > 0 ? backoffMs[Math.min(retries, backoffMs.length - 1)] : 0;
+      const wait = Math.max(stepped ?? 0, minGapMs);
       retries += 1;
       if ((wait ?? 0) > 0) {
         const waitUntil = Math.min(now() + (wait ?? 0), deadline);
@@ -979,6 +992,7 @@ export async function soakStream(
     if (remainingMs < SOAK_DIAL_FLOOR_MS) break;
 
     const startedAt = now();
+    onConnect?.(startedAt);
     const { error, stopped, ranOut } = await runSoakLeg(url, {
       ms: remainingMs,
       userAgent,

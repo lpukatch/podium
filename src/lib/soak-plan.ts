@@ -269,3 +269,90 @@ export function takePerLane<T extends { lane: string | null }>(
   }
   return out;
 }
+
+/**
+ * The concurrency a soak may use on each lane: its free slots, less a spare.
+ *
+ * A soak runs an account at its limit for minutes, which is exactly where a
+ * provider's own accounting gets in the way. Many providers keep a closed
+ * connection counted for some seconds, so a soak that finishes and hands its
+ * slot to the next one opens what the provider sees as one too many -- and the
+ * provider closes the oldest. On the install this was found on, an account
+ * with five connections, run five at a time, produced 1,106 drops at a median
+ * of 6.5 seconds, 63% of them within a second and a half of another soak on
+ * the same account opening. Leaving one connection spare absorbs that, and
+ * leaves room for a real viewer in the moment before the watcher sees them.
+ *
+ * Never below one: a single-connection account still soaks, relying on the
+ * cooldown between connections instead.
+ */
+export function soakLimits(limits: Map<string, number>, spare: number): Map<string, number> {
+  const out = new Map<string, number>();
+  const keep = Math.max(0, Math.floor(spare));
+  for (const [lane, free] of limits) {
+    if (free <= 0) continue;
+    out.set(lane, Math.max(1, free - keep));
+  }
+  return out;
+}
+
+/**
+ * Notices an account closing soak connections because Podium opened another.
+ *
+ * The safety net behind the spare slot and the cooldown. The signature is a
+ * drop that lands within a few seconds of a *different* soak on the same
+ * account connecting: the stream did not fail, the account ran out of room and
+ * the provider made some. Such a drop is not evidence about the stream, so it
+ * is not recorded; and once an account has done it a few times in one pass,
+ * soaking on it stops for the rest of the pass, so a wrong assumption about a
+ * provider can never again turn into a thousand reconnects.
+ */
+export interface KickDetector {
+  /** A soak connection opened. `job` identifies the soak it belongs to. */
+  opened(account: number, job: number, at: number): void;
+  /** Whether a drop at `endedAt` coincides with another soak connecting. */
+  isSuspect(account: number, job: number, endedAt: number): boolean;
+  /** Count one suspect drop; true once the account has had enough. */
+  noteSuspect(account: number): boolean;
+  tripped(account: number): boolean;
+}
+
+/** How close to another soak's connect a drop must land to be suspect. */
+export const KICK_WINDOW_MS = 3_000;
+/** Suspect drops on one account before soaking on it stops for the pass. */
+export const KICK_TRIP_AFTER = 3;
+
+export function makeKickDetector(
+  windowMs = KICK_WINDOW_MS,
+  tripAfter = KICK_TRIP_AFTER,
+): KickDetector {
+  const opens = new Map<number, Array<{ job: number; at: number }>>();
+  const suspects = new Map<number, number>();
+  const trippedAccounts = new Set<number>();
+  return {
+    opened(account, job, at) {
+      const list = opens.get(account) ?? [];
+      list.push({ job, at });
+      // Only recent opens can ever match, so the list is kept short.
+      const horizon = at - windowMs * 4;
+      opens.set(
+        account,
+        list.filter((entry) => entry.at >= horizon),
+      );
+    },
+    isSuspect(account, job, endedAt) {
+      return (opens.get(account) ?? []).some(
+        (entry) => entry.job !== job && entry.at <= endedAt && entry.at >= endedAt - windowMs,
+      );
+    },
+    noteSuspect(account) {
+      const count = (suspects.get(account) ?? 0) + 1;
+      suspects.set(account, count);
+      if (count >= tripAfter) trippedAccounts.add(account);
+      return trippedAccounts.has(account);
+    },
+    tripped(account) {
+      return trippedAccounts.has(account);
+    },
+  };
+}
