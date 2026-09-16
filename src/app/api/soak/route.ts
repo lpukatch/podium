@@ -32,6 +32,20 @@ export const dynamic = 'force-dynamic';
 interface Scope {
   streams: SoakRequest[];
   label: string;
+  /**
+   * Which drain picks these up.
+   *
+   * `manual` runs whenever a pass has spare capacity, whatever the hour --
+   * that is right for a request about one stream, one channel or one group,
+   * where somebody is waiting for the answer.
+   *
+   * `sweep` waits for `PODIUM_SOAK_WINDOW`. A catalogue-wide request is hours
+   * of provider connection time (166 of them on the install this was measured
+   * against), and letting that drain through a weekday afternoon is precisely
+   * the runaway the window exists to prevent. Queueing it as a sweep is what
+   * makes "soak everything" a safe thing to press.
+   */
+  source: 'manual' | 'sweep';
 }
 
 function open(): Store {
@@ -72,11 +86,15 @@ async function resolveScope(
     // Deliberately not checked against the catalogue: a stream the snapshot has
     // not caught up with yet is still a legitimate thing to queue, and the pass
     // simply skips a row it cannot resolve to a URL.
-    return { streams: [{ streamId: id }], label: `stream ${id}` };
+    return { streams: [{ streamId: id }], label: `stream ${id}`, source: 'manual' };
   }
   if (scope === 'channel') {
     if (!Number.isInteger(id)) return { error: 'bad channel id' };
-    return { streams: await streamsForChannels([id]), label: `channel ${id}` };
+    return {
+      streams: await streamsForChannels([id]),
+      label: `channel ${id}`,
+      source: 'manual',
+    };
   }
   if (scope === 'group') {
     if (!Number.isInteger(id)) return { error: 'bad group id' };
@@ -85,6 +103,18 @@ async function resolveScope(
     return {
       streams: await streamsForChannels(channelIds),
       label: `group ${id} (${channelIds.length} channel(s))`,
+      source: 'manual',
+    };
+  }
+  if (scope === 'all') {
+    const snap = await snapshot();
+    // Every stream on every channel, not the top few per channel: the depth
+    // limit is a property of the automatic planner deciding what is worth its
+    // night, and "soak everything" is an instruction rather than a budget.
+    return {
+      streams: await streamsForChannels(snap.channels.map((c) => c.id)),
+      label: `the whole catalogue (${snap.channels.length} channel(s))`,
+      source: 'sweep',
     };
   }
   return { error: `unknown scope ${JSON.stringify(scope)}` };
@@ -97,7 +127,7 @@ export function GET() {
     store = open();
     const pending = store.pendingSoaks(500);
     return NextResponse.json({
-      count: store.pendingSoakCount(),
+      ...store.pendingSoakCount(),
       // Enough for a panel to mark its own rows, not the whole queue.
       streamIds: pending.map((row) => row.streamId),
     });
@@ -121,7 +151,7 @@ export async function POST(request: Request) {
     }
 
     store = open();
-    const queued = store.queueSoaks(resolved.streams, 'manual');
+    const queued = store.queueSoaks(resolved.streams, resolved.source);
     return NextResponse.json({
       status: 'queued',
       label: resolved.label,
@@ -129,7 +159,10 @@ export async function POST(request: Request) {
       // waiting, which is worth saying rather than reporting a silent no-op.
       requested: resolved.streams.length,
       queued,
-      pending: store.pendingSoakCount(),
+      // Said back, because it changes when the work will happen: a sweep-sourced
+      // request sits until the soak window opens.
+      source: resolved.source,
+      ...store.pendingSoakCount(),
     });
   } catch (error) {
     return NextResponse.json({ error: errorText(error).slice(0, 300) }, { status: 500 });
@@ -147,7 +180,7 @@ export async function DELETE(request: Request) {
     store = open();
     const cleared =
       raw === null ? store.clearSoaks() : store.clearSoaks([Number(raw)].filter(Number.isInteger));
-    return NextResponse.json({ status: 'cleared', cleared, pending: store.pendingSoakCount() });
+    return NextResponse.json({ status: 'cleared', cleared, ...store.pendingSoakCount() });
   } catch (error) {
     return NextResponse.json({ error: errorText(error).slice(0, 300) }, { status: 500 });
   } finally {

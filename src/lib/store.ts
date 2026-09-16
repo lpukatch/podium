@@ -2550,12 +2550,30 @@ export class Store {
     return queued;
   }
 
-  /** What is waiting, oldest request first. */
-  pendingSoaks(limit = 1000): StoredSoakRequest[] {
-    const rows = this.sql(
-      `SELECT stream_id, channel_id, queued_at, source
-         FROM soak_requests ORDER BY queued_at, stream_id LIMIT ?`,
-    ).all(limit) as Array<{
+  /**
+   * What is waiting, oldest request first.
+   *
+   * `manualOnly` is how the window is enforced on the queue rather than only on
+   * the planner. A request somebody made about one stream, channel or group is
+   * an instruction and runs whenever there is capacity; a catalogue-wide one is
+   * queued as `sweep`, because "soak everything" is hours of connection time
+   * and letting it drain through a weekday afternoon is the runaway the window
+   * exists to prevent. Outside the window the drain therefore sees only the
+   * manual rows, and the sweep-sourced ones sit until the hours come round.
+   */
+  pendingSoaks(limit = 1000, options: { manualOnly?: boolean } = {}): StoredSoakRequest[] {
+    const rows = (
+      options.manualOnly
+        ? this.sql(
+            `SELECT stream_id, channel_id, queued_at, source
+               FROM soak_requests WHERE source = 'manual'
+              ORDER BY queued_at, stream_id LIMIT ?`,
+          ).all(limit)
+        : this.sql(
+            `SELECT stream_id, channel_id, queued_at, source
+               FROM soak_requests ORDER BY queued_at, stream_id LIMIT ?`,
+          ).all(limit)
+    ) as Array<{
       stream_id: number;
       channel_id: number | null;
       queued_at: number;
@@ -2569,9 +2587,16 @@ export class Store {
     }));
   }
 
-  pendingSoakCount(): number {
-    const row = this.sql('SELECT COUNT(*) AS n FROM soak_requests').get() as { n: number };
-    return row?.n ?? 0;
+  /** How many are waiting, split by what will drain them and when. */
+  pendingSoakCount(): { total: number; manual: number; sweep: number } {
+    const row = this.sql(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN source = 'manual' THEN 1 ELSE 0 END) AS manual
+         FROM soak_requests`,
+    ).get() as { total: number; manual: number | null };
+    const total = row?.total ?? 0;
+    const manual = row?.manual ?? 0;
+    return { total, manual, sweep: total - manual };
   }
 
   /**

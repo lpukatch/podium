@@ -288,12 +288,17 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
       allBad,
     );
 
-    out.add(
-      'podium_soak_queue',
-      'Streams waiting to be soaked.',
-      'gauge',
-      store.pendingSoakCount(),
-    );
+    // Split by what will drain them: a manual request runs whenever there is
+    // capacity, where a catalogue-wide one waits for the soak window. A single
+    // total would read as "nothing is happening" through a whole afternoon when
+    // the queue is simply waiting for the right hours.
+    const queue = store.pendingSoakCount();
+    out.add('podium_soak_queue', 'Streams waiting to be soaked.', 'gauge', queue.manual, {
+      source: 'manual',
+    });
+    out.add('podium_soak_queue', 'Streams waiting to be soaked.', 'gauge', queue.sweep, {
+      source: 'sweep',
+    });
   } catch {
     // The ledger is an extra, not a dependency: a table that cannot be read
     // must not take the whole metrics endpoint down with it.
