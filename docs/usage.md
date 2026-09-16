@@ -741,6 +741,24 @@ A pass spends at most half an hour soaking, or whatever is left of the window if
 that is less, so the sweep walks across as many passes as the window holds
 rather than starving the ordinary probing for a whole night.
 
+### Drops and refused reconnects
+
+When a connection ends early the soak waits before dialling again — 2
+seconds, then 5, then 15 — so a provider that refuses a reconnect that comes
+too soon is not charged a failure per attempt. A reconnect that comes straight
+back without playing anything (under two seconds) is counted as a **refused
+reconnect**, not a drop: it says the provider would not let the stream back for
+a while, which is worth knowing, but it is not the stream failing to hold.
+Three refusals in a row and the soak gives up on that stream for this run.
+
+Only drops go into the stability record. The progress line names both:
+
+> HBO Comedy: 1 drop in 101s, 3 reconnects refused, gave up
+
+The first real run showed why this matters: that stream played for 100
+seconds, was closed, and had three immediate reconnects refused. Counted the
+old way it read as four drops — a rate four times the truth.
+
 ### How a soak run is spread
 
 Each pass gives every account its own share of the work — free connections

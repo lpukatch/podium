@@ -756,19 +756,52 @@ export function deadReason(error: string): DeadReason {
 }
 
 /** What one ffmpeg leg of a soak did. */
+/**
+ * The shortest a connection can last and still count as having served.
+ *
+ * Anything under this came straight back: the provider refused the dial, or
+ * accepted it and closed before a byte of stream arrived. Two seconds rather
+ * than one because refusals are not instant -- the first real run recorded a
+ * refused reconnect at exactly 1.0s, which a one-second floor let through as
+ * a stream that had played and dropped.
+ */
+export const SOAK_DIAL_FLOOR_MS = 2_000;
+
+/**
+ * How long to wait before each reconnect after a connection ends, in turn.
+ *
+ * The first real soak of a one-connection account played for 100 seconds,
+ * was closed, and then had three immediate reconnects refused inside two
+ * seconds -- a provider cooldown, most likely. Redialling at once turned one
+ * failure into four. Waiting lets a cooldown pass, and the last entry repeats
+ * for any further retries. The wait comes out of the soak's own budget.
+ */
+export const SOAK_BACKOFF_MS = [2_000, 5_000, 15_000];
+
 export interface SoakLeg {
+  /** When the connection was opened, on the soak's clock. */
+  startedAt: number;
   /** How long the connection served before it ended, in milliseconds. */
   heldMs: number;
   /**
-   * True when the connection ended on its own rather than because the soak's
-   * budget ran out.
+   * True when a connection that had been serving was ended by the far end
+   * before the soak's budget ran out.
    *
-   * The whole output of the soak, really. ffmpeg is told to read for the rest
-   * of the budget and nothing else; if it comes back early the far end stopped
-   * serving, which is the event a five-second probe can never see.
+   * The whole output of the soak, really: the event a five-second probe can
+   * never see. False for a connection the soak itself ended at its deadline,
+   * and false for a failed dial -- see `failedDial`.
    */
   dropped: boolean;
-  /** ffmpeg's last words, when it dropped. Empty when the budget ended it. */
+  /**
+   * True when the connection came straight back without serving anything.
+   *
+   * Kept apart from `dropped` on purpose. A refused reconnect is evidence the
+   * stream is unavailable for a while, and it counts towards `unreachable`,
+   * but it is not the stream failing to *hold* -- and counting each refusal as
+   * a drop reported one failure as four and a rate four times the truth.
+   */
+  failedDial: boolean;
+  /** ffmpeg's last words, when the far end ended it. Empty otherwise. */
   error: string;
 }
 
@@ -777,8 +810,10 @@ export interface SoakResult {
   legs: SoakLeg[];
   /** Total time connections were serving. */
   heldMs: number;
-  /** Connections that ended on their own. */
+  /** Connections that served and were then ended by the far end. */
   drops: number;
+  /** Connections that came straight back without serving. */
+  failedDials: number;
   /**
    * True when the soak gave up because a reconnection would not establish at
    * all, rather than because its budget ran out.
@@ -853,11 +888,14 @@ export async function soakStream(
     /**
      * Give up after this many consecutive connections that never served.
      *
-     * One is a provider refusing a moment after accepting, which is the thing
-     * being measured. Two in a row is the stream being gone, and spending the
-     * rest of a three-minute budget rediscovering that helps nobody.
+     * Three, with the backoff between them, gives a provider's reconnect
+     * cooldown twenty-odd seconds to pass before the stream is called
+     * unreachable. Beyond that the stream is gone for now, and spending the
+     * rest of the budget rediscovering it helps nobody.
      */
     maxDeadConnections?: number;
+    /** Waits before each reconnect. Injected by the tests to keep them quick. */
+    backoffMs?: number[];
     /**
      * Polled to decide whether to stop early -- a viewer arriving, or the
      * worker shutting down.
@@ -878,7 +916,8 @@ export async function soakStream(
     seconds = 180,
     userAgent = 'VLC/3.0.14',
     ffmpegPath = 'ffmpeg',
-    maxDeadConnections = 2,
+    maxDeadConnections = 3,
+    backoffMs = SOAK_BACKOFF_MS,
     stop,
     now = Date.now,
   } = options;
@@ -887,6 +926,7 @@ export async function soakStream(
     legs: [],
     heldMs: 0,
     drops: 0,
+    failedDials: 0,
     unreachable: false,
     stopped: false,
   };
@@ -895,18 +935,48 @@ export async function soakStream(
   const deadline = now() + seconds * 1000;
   const legs: SoakLeg[] = [];
   let deadInARow = 0;
+  let retries = 0;
   let wasStopped = false;
+  let unreachable = false;
+
+  const summarise = (): SoakResult => ({
+    legs,
+    heldMs: legs.reduce((sum, leg) => sum + leg.heldMs, 0),
+    drops: legs.filter((leg) => leg.dropped).length,
+    failedDials: legs.filter((leg) => leg.failedDial).length,
+    unreachable,
+    stopped: wasStopped,
+  });
 
   while (now() < deadline) {
     if (stop?.()) {
       wasStopped = true;
       break;
     }
+
+    if (legs.length > 0) {
+      // Every reconnect waits first, so a provider that refuses a quick redial
+      // is not charged a failure per attempt. The wait is spent against the
+      // budget and still honours `stop`.
+      const wait = backoffMs.length > 0 ? backoffMs[Math.min(retries, backoffMs.length - 1)] : 0;
+      retries += 1;
+      if ((wait ?? 0) > 0) {
+        const waitUntil = Math.min(now() + (wait ?? 0), deadline);
+        while (now() < waitUntil) {
+          if (stop?.()) {
+            wasStopped = true;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, Math.min(250, waitUntil - now())));
+        }
+        if (wasStopped) break;
+      }
+    }
+
     const remainingMs = deadline - now();
-    // Below about a second there is no leg worth measuring: the connection
-    // would not finish establishing before its own deadline, and would be
-    // recorded as a drop it did not earn.
-    if (remainingMs < 1_000) break;
+    // Too little left for a connection to establish and show anything; it
+    // would only be recorded as a failed dial it did not earn.
+    if (remainingMs < SOAK_DIAL_FLOOR_MS) break;
 
     const startedAt = now();
     const { error, stopped, ranOut } = await runSoakLeg(url, {
@@ -925,38 +995,32 @@ export async function soakStream(
       wasStopped = true;
       break;
     }
-    // Ours ended it, or theirs did. No threshold, no slack: the only fact that
-    // matters is which side closed the connection.
-    const dropped = !ranOut;
-    legs.push({ heldMs, dropped, error: dropped ? error : '' });
 
-    if (!dropped) break;
+    // Ours ended it, or theirs did -- and if theirs, whether anything was
+    // served first. A connection still open at the deadline served however
+    // briefly it ran.
+    const failedDial = !ranOut && heldMs < SOAK_DIAL_FLOOR_MS;
+    const dropped = !ranOut && !failedDial;
+    legs.push({ startedAt, heldMs, dropped, failedDial, error: ranOut ? '' : error });
 
-    // A connection that served nothing at all did not drop, it failed to dial.
-    // `heldMs` under a second cannot contain a stream that played.
-    if (heldMs < 1_000) {
+    if (ranOut) break;
+
+    if (failedDial) {
       deadInARow += 1;
       if (deadInARow >= maxDeadConnections) {
-        return {
-          legs,
-          heldMs: legs.reduce((sum, leg) => sum + leg.heldMs, 0),
-          drops: legs.filter((leg) => leg.dropped).length,
-          unreachable: true,
-          stopped: false,
-        };
+        unreachable = true;
+        break;
       }
     } else {
       deadInARow = 0;
+      // A connection that served earns a fresh run of patience: the backoff
+      // restarts, so a stream that drops every few minutes is not redialled
+      // ever more slowly across a long soak.
+      retries = 0;
     }
   }
 
-  return {
-    legs,
-    heldMs: legs.reduce((sum, leg) => sum + leg.heldMs, 0),
-    drops: legs.filter((leg) => leg.dropped).length,
-    unreachable: false,
-    stopped: wasStopped,
-  };
+  return summarise();
 }
 
 /**
