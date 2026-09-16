@@ -28,7 +28,9 @@ function stub(name: string, body: string[]): string {
 
 describe('soakStream', () => {
   let holds: string;
-  let dropsAfterOneSecond: string;
+  let drops: string;
+  let returnsAfterOneSecond: string;
+  let servesThenRefuses: string;
   let refuses: string;
   let recordsArgs: string;
   let argsFile: string;
@@ -43,9 +45,26 @@ describe('soakStream', () => {
     holds = stub('holds', ['exec sleep 60']);
     argsFile = join(dir, 'args.txt');
     recordsArgs = stub('records', [`printf '%s\\n' "$@" > '${argsFile}'`, 'exec sleep 60']);
-    dropsAfterOneSecond = stub('drops', [
-      'sleep 1',
+    // Serves for three seconds -- past the dial floor -- then the far end
+    // closes it.
+    drops = stub('drops', [
+      'sleep 3',
       "printf '[in#0/mpegts @ 0x1] Error during demuxing: Connection timed out\\n' >&2",
+      'exit 1',
+    ]);
+    // Comes back after exactly a second: the refused reconnect the first real
+    // run recorded at 1.0s and a one-second floor let through as a drop.
+    returnsAfterOneSecond = stub('one-second', [
+      'sleep 1',
+      "printf 'Server returned 429 Too Many Requests\\n' >&2",
+      'exit 1',
+    ]);
+    // The pattern from the first real run: plays, is closed, and then every
+    // reconnect is refused.
+    const marker = join(dir, 'served-once');
+    servesThenRefuses = stub('serves-then-refuses', [
+      `if [ ! -e '${marker}' ]; then touch '${marker}'; sleep 3; exit 1; fi`,
+      "printf 'Server returned 403 Forbidden\\n' >&2",
       'exit 1',
     ]);
     refuses = stub('refuses', ["printf 'Server returned 403 Forbidden\\n' >&2", 'exit 1']);
@@ -63,25 +82,37 @@ describe('soakStream', () => {
     expect(result.unreachable).toBe(false);
   });
 
-  it.runIf(usable)('counts a connection that comes back early as a drop', async () => {
-    const result = await soakStream(URL_, { seconds: 4, ffmpegPath: dropsAfterOneSecond });
-    // It reconnects and drops again until the budget runs out, which is what a
-    // flapping feed looks like from this side.
-    expect(result.drops).toBeGreaterThanOrEqual(2);
-    expect(result.legs[0]?.dropped).toBe(true);
-    expect(result.heldMs).toBeGreaterThan(0);
-  });
+  it.runIf(usable)(
+    'counts a connection that comes back early as a drop',
+    async () => {
+      const result = await soakStream(URL_, { seconds: 7, ffmpegPath: drops, backoffMs: [0] });
+      // It reconnects and drops again until the budget runs out, which is what a
+      // flapping feed looks like from this side.
+      expect(result.drops).toBeGreaterThanOrEqual(2);
+      expect(result.failedDials).toBe(0);
+      expect(result.legs[0]?.dropped).toBe(true);
+      expect(result.heldMs).toBeGreaterThan(0);
+    },
+    20_000,
+  );
 
-  it.runIf(usable)('keeps what ffmpeg said about the drop', async () => {
-    const result = await soakStream(URL_, { seconds: 2, ffmpegPath: dropsAfterOneSecond });
-    expect(result.legs[0]?.error).toContain('Connection timed out');
-  });
+  it.runIf(usable)(
+    'keeps what ffmpeg said about the drop',
+    async () => {
+      const result = await soakStream(URL_, { seconds: 5, ffmpegPath: drops, backoffMs: [0] });
+      expect(result.legs[0]?.error).toContain('Connection timed out');
+    },
+    20_000,
+  );
 
   it.runIf(usable)('stops early, as unreachable, when it cannot connect at all', async () => {
-    const result = await soakStream(URL_, { seconds: 60, ffmpegPath: refuses });
-    // Two dead dials and it gives up rather than spending a minute redialling.
+    const result = await soakStream(URL_, { seconds: 60, ffmpegPath: refuses, backoffMs: [0] });
+    // Three dead dials and it gives up rather than spending a minute redialling.
     expect(result.unreachable).toBe(true);
-    expect(result.legs).toHaveLength(2);
+    expect(result.legs).toHaveLength(3);
+    expect(result.failedDials).toBe(3);
+    // None of them is a drop: nothing was ever served.
+    expect(result.drops).toBe(0);
     expect(result.legs[0]?.error).toContain('403');
   });
 
@@ -99,6 +130,7 @@ describe('soakStream', () => {
     const result = await soakStream(URL_, {
       seconds: 60,
       ffmpegPath: join(dir, 'does-not-exist'),
+      backoffMs: [0],
     });
     expect(result.unreachable).toBe(true);
     expect(result.legs[0]?.error).toContain('spawn failed');
@@ -108,11 +140,80 @@ describe('soakStream', () => {
     let calls = 0;
     const result = await soakStream(URL_, {
       seconds: 30,
-      ffmpegPath: dropsAfterOneSecond,
+      ffmpegPath: drops,
+      backoffMs: [0],
       // Let the first connection finish, then stop.
       stop: () => ++calls > 3,
     });
     expect(result.legs.length).toBeLessThan(5);
+  });
+
+  it.runIf(usable)(
+    'counts a refused reconnect as a failed dial, not a drop',
+    async () => {
+      // The regression, from the first real run: 100 seconds played, one real
+      // drop, then three immediate reconnects refused -- recorded as four drops.
+      const result = await soakStream(URL_, {
+        seconds: 60,
+        ffmpegPath: servesThenRefuses,
+        backoffMs: [0],
+      });
+      expect(result.drops).toBe(1);
+      expect(result.failedDials).toBe(3);
+      expect(result.unreachable).toBe(true);
+      expect(result.legs[0]?.dropped).toBe(true);
+      expect(result.legs.slice(1).every((leg) => leg.failedDial && !leg.dropped)).toBe(true);
+    },
+    20_000,
+  );
+
+  it.runIf(usable)('treats a leg of exactly one second as a failed dial', async () => {
+    // The boundary slip: a refusal at 1.0s cleared a one-second floor.
+    const result = await soakStream(URL_, {
+      seconds: 60,
+      ffmpegPath: returnsAfterOneSecond,
+      backoffMs: [0],
+      maxDeadConnections: 1,
+    });
+    expect(result.legs[0]?.failedDial).toBe(true);
+    expect(result.drops).toBe(0);
+  });
+
+  it.runIf(usable)('waits before each reconnect', async () => {
+    const startedAt = Date.now();
+    await soakStream(URL_, {
+      seconds: 60,
+      ffmpegPath: refuses,
+      backoffMs: [400, 800],
+    });
+    // Three dials, so two waits: 400ms then 800ms.
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(1_200);
+  });
+
+  it.runIf(usable)('can be stopped during a backoff wait', async () => {
+    const startedAt = Date.now();
+    const result = await soakStream(URL_, {
+      seconds: 60,
+      ffmpegPath: refuses,
+      backoffMs: [30_000],
+      stop: () => Date.now() - startedAt > 500,
+    });
+    expect(result.stopped).toBe(true);
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+  });
+
+  it.runIf(usable)('stamps each leg with its own start time', async () => {
+    const result = await soakStream(URL_, {
+      seconds: 60,
+      ffmpegPath: refuses,
+      backoffMs: [300],
+    });
+    const [first, second] = result.legs;
+    // The second leg starts after the first ended *and* after the wait -- a
+    // running sum of durations would put it too early.
+    expect(
+      (second?.startedAt ?? 0) - ((first?.startedAt ?? 0) + (first?.heldMs ?? 0)),
+    ).toBeGreaterThanOrEqual(250);
   });
 
   it.runIf(usable)('kills a connection already running rather than waiting it out', async () => {
@@ -155,7 +256,7 @@ describe('soakStream', () => {
     // clock did and every such early finish was recorded as a drop. The first
     // real soak of a feed already seen playing clean for five minutes came back
     // with four drops, every one manufactured.
-    await soakStream(URL_, { seconds: 1, ffmpegPath: recordsArgs });
+    await soakStream(URL_, { seconds: 3, ffmpegPath: recordsArgs });
     const args = readFileSync(argsFile, 'utf8').split('\n');
     expect(args).not.toContain('-t');
   });
@@ -163,7 +264,7 @@ describe('soakStream', () => {
   it.runIf(usable)('writes to the null muxer, which accepts any track', async () => {
     // A real container refuses some codecs and data tracks, and a refusal
     // makes ffmpeg exit on the spot -- which a soak would record as a drop.
-    await soakStream(URL_, { seconds: 1, ffmpegPath: recordsArgs });
+    await soakStream(URL_, { seconds: 3, ffmpegPath: recordsArgs });
     const args = readFileSync(argsFile, 'utf8').split('\n');
     expect(args[args.indexOf('-f') + 1]).toBe('null');
     expect(args).not.toContain('mpegts');
@@ -171,9 +272,17 @@ describe('soakStream', () => {
 
   it.runIf(usable)('counts a connection still serving at the deadline as clean', async () => {
     const startedAt = Date.now();
-    const result = await soakStream(URL_, { seconds: 1, ffmpegPath: holds });
+    const result = await soakStream(URL_, { seconds: 3, ffmpegPath: holds });
     expect(result.drops).toBe(0);
-    expect(result.legs).toEqual([{ heldMs: expect.any(Number), dropped: false, error: '' }]);
+    expect(result.legs).toEqual([
+      {
+        startedAt: expect.any(Number),
+        heldMs: expect.any(Number),
+        dropped: false,
+        failedDial: false,
+        error: '',
+      },
+    ]);
     // Ended by the soak's clock, not by the stub, which would have run a minute.
     expect(Date.now() - startedAt).toBeLessThan(10_000);
   });
@@ -184,9 +293,17 @@ describe('soakStream', () => {
       legs: [],
       heldMs: 0,
       drops: 0,
+      failedDials: 0,
       unreachable: false,
       stopped: false,
     });
+  });
+
+  it('does not dial when less than the dial floor is left', async () => {
+    // Too little time for a connection to show anything: it could only come
+    // back as a failed dial the stream had not earned.
+    const result = await soakStream(URL_, { seconds: 1, ffmpegPath: '/bin/false' });
+    expect(result.legs).toEqual([]);
   });
 
   it('spends nothing when the budget is already gone', async () => {

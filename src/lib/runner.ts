@@ -275,6 +275,32 @@ export interface DeadRemoval {
  * Always taken as the *smaller* of this and what is left of the window, so the
  * sweep cannot run past its own closing time.
  */
+/**
+ * One soak's outcome as a line for the progress view.
+ *
+ * Refused reconnects are named separately from drops, because they mean
+ * different things to someone deciding what to do about a stream: a drop is
+ * the feed failing to hold, a refusal is the provider not letting it back.
+ */
+export function describeSoak(result: SoakResult): string {
+  const held = `${Math.round(result.heldMs / 1000)}s`;
+  const refused =
+    result.failedDials > 0
+      ? `${result.failedDials} reconnect${result.failedDials === 1 ? '' : 's'} refused`
+      : '';
+  if (result.drops === 0 && result.heldMs === 0) {
+    return result.unreachable ? `would not connect (${refused})` : 'did not connect';
+  }
+  const parts = [
+    result.drops > 0
+      ? `${result.drops} drop${result.drops === 1 ? '' : 's'} in ${held}`
+      : `held ${held} clean`,
+  ];
+  if (refused) parts.push(refused);
+  if (result.unreachable) parts.push('gave up');
+  return parts.join(', ');
+}
+
 export const SOAK_WINDOW_BUDGET_MS = 30 * 60_000;
 
 /**
@@ -3035,7 +3061,14 @@ export class Runner {
           const jobSeconds = secondsFor.get(job.streamId) ?? soakSeconds;
           const left = deadline - Date.now();
           if (left < jobSeconds * 1_000) {
-            return { legs: [], heldMs: 0, drops: 0, unreachable: false, stopped: false };
+            return {
+              legs: [],
+              heldMs: 0,
+              drops: 0,
+              failedDials: 0,
+              unreachable: false,
+              stopped: false,
+            };
           }
           const laneId = laneKey(job.providerId, job.profileId);
           let inflight = soakCurrent.get(laneId);
@@ -3046,7 +3079,6 @@ export class Runner {
           const name = streamById.get(job.streamId)?.name ?? `#${job.streamId}`;
           inflight.set(job.streamId, name);
           this.emit({ lanes: soakLanes() });
-          const startedAt = Date.now();
           const result = await soakStream(job.url, {
             seconds: jobSeconds,
             userAgent: config.PODIUM_USER_AGENT,
@@ -3057,15 +3089,23 @@ export class Runner {
             // getting the connections back.
             stop: () => abort.aborted,
           });
-          let cursor = startedAt;
           const jobLegs: Leg[] = [];
           for (const leg of result.legs) {
+            // A failed dial served nothing, so it is neither clean watching
+            // nor a break -- it is recorded in the result and the progress
+            // line, and kept out of the ledger. Written as a leg it would be
+            // charged as a drop, which is how one refused reconnect after
+            // another turned a single failure into four.
+            if (leg.failedDial) continue;
             jobLegs.push({
               channelKey: `soak:${job.streamId}`,
               channelId: null,
               streamId: job.streamId,
-              startedAt: cursor,
-              endedAt: cursor + leg.heldMs,
+              // The leg's own start, not a running sum of durations: there are
+              // backoff waits between legs now, and a summed cursor would
+              // place every later leg too early.
+              startedAt: leg.startedAt,
+              endedAt: leg.startedAt + leg.heldMs,
               watchedMs: leg.heldMs,
               stalledMs: 0,
               stalls: 0,
@@ -3074,7 +3114,6 @@ export class Runner {
               // viewer switching off gets.
               ended: leg.dropped ? 'dropped' : 'gone',
             });
-            cursor += leg.heldMs;
           }
           drops += result.drops;
           inflight.delete(job.streamId);
@@ -3113,13 +3152,7 @@ export class Runner {
             lanes: soakLanes(),
             // Named rather than only counted: on a run measured in hours, the
             // question somebody actually has is "what is it doing right now".
-            message: `${name}: ${
-              result.unreachable
-                ? 'would not connect'
-                : result.drops > 0
-                  ? `${result.drops} drop(s) in ${Math.round(result.heldMs / 1000)}s`
-                  : `held ${Math.round(result.heldMs / 1000)}s clean`
-            }`,
+            message: `${name}: ${describeSoak(result)}`,
           });
           return result;
         },
