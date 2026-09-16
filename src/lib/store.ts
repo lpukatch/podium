@@ -2654,6 +2654,34 @@ export class Store {
   }
 
   /**
+   * A value that changes whenever the queue gains work a pass should start for.
+   *
+   * What the heartbeat compares, the way `refreshMarksVersion` is for a
+   * re-check. Without it a queued soak sat until the worker's idle sleep
+   * happened to end -- measured on a settled install, ten minutes after the
+   * button was pressed, and up to PODIUM_IDLE_MAX_MS in the worst case, with
+   * the UI saying "queued" the whole time.
+   *
+   * The newest queue time alone is not enough, and the second term is why.
+   * A re-queue promotes a row in place rather than moving it -- that is what
+   * stops "Start now" silently doing nothing on streams the nightly sweep had
+   * already queued -- so a promotion leaves every `queued_at` exactly where it
+   * was. Counting the `now` rows is what makes that promotion visible here.
+   *
+   * Deliberately blind to rows *leaving*. A drain happens during a pass, and a
+   * pass that has more to do is kept awake by `soakBacklog` rather than by
+   * being woken again.
+   */
+  soakQueueVersion(): string {
+    const row = this.sql(
+      `SELECT MAX(queued_at) AS newest,
+              SUM(CASE WHEN source = 'now' THEN 1 ELSE 0 END) AS urgent
+         FROM soak_requests`,
+    ).get() as { newest: number | null; urgent: number | null };
+    return `${row?.newest ?? 0}:${row?.urgent ?? 0}`;
+  }
+
+  /**
    * Drop requests, by stream or wholesale.
    *
    * Called by the pass as each soak lands -- a request is spent once it has

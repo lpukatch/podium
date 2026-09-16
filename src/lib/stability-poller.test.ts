@@ -235,3 +235,69 @@ describe('the session poller', () => {
     expect(lines.join('\n')).toContain('session poll failed');
   });
 });
+
+describe('the soak wake', () => {
+  let dir: string;
+  let stop: (() => void) | null = null;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'podium-soakwake-'));
+    writeFileSync(join(dir, 'rules.json'), JSON.stringify({ schema: 2, channels: [] }));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ count: 0, results: [], channels: [] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+      ),
+    );
+  });
+
+  afterEach(() => {
+    stop?.();
+    stop = null;
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('starts a pass when a soak is queued, instead of waiting out the idle sleep', async () => {
+    // The regression: a settled worker had found nothing due and slept for ten
+    // minutes, and a soak queued in the meantime had no way to reach it.
+    vi.useFakeTimers();
+    const cfg = loadConfig({ PODIUM_DATA_DIR: dir, DISPATCHARR_API_KEY: 'k' });
+    const lines: string[] = [];
+    stop = await startWorker(cfg, (m) => lines.push(m));
+    // Let the first pass finish and the loop settle into its sleep.
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    const store = new Store(cfg.dbPath);
+    try {
+      store.queueSoaks([{ streamId: 77013, channelId: 35200 }]);
+    } finally {
+      store.close();
+    }
+    // One heartbeat.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(lines.join('\n')).toContain('soak requested; starting a pass now');
+  });
+
+  it('does not wake for a queue that was already there at startup', async () => {
+    // Whatever is queued when the lock is taken is the first pass's business,
+    // so it is not a wake-up -- otherwise every restart would log one.
+    vi.useFakeTimers();
+    const cfg = loadConfig({ PODIUM_DATA_DIR: dir, DISPATCHARR_API_KEY: 'k' });
+    const store = new Store(cfg.dbPath);
+    try {
+      store.queueSoaks([{ streamId: 77013 }]);
+    } finally {
+      store.close();
+    }
+    const lines: string[] = [];
+    stop = await startWorker(cfg, (m) => lines.push(m));
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(lines.join('\n')).not.toContain('soak requested');
+  });
+});

@@ -926,6 +926,22 @@ export interface RunSummary {
    */
   runnableBacklog: number;
   /**
+   * Soak requests a pass could drain right now and has not yet.
+   *
+   * The soak half of `runnableBacklog`, and there for the same reason: work the
+   * loop must come straight back to rather than idle-sleeping on. Without it a
+   * pass that soaked one round of a group looked like a pass that did nothing
+   * -- it probed nothing and reordered nothing -- so the loop slept for up to
+   * PODIUM_IDLE_MAX_MS with the queue still full, which on a baseline run
+   * roughly halved the rate the providers would have allowed.
+   *
+   * "Could drain right now" is the part that matters. Sweep-sourced rows only
+   * count while the soak window is open: counting them outside it would keep
+   * the loop crawling Dispatcharr once a minute all afternoon to learn, every
+   * time, that it may not start them yet.
+   */
+  soakBacklog: number;
+  /**
    * Least-recently probed eligible stream (the honest "Oldest check"), or null
    * when nothing managed has been probed yet. Excluded/unmatched/removed streams
    * never appear here, unlike the cache-wide MIN(probed_at).
@@ -1131,6 +1147,7 @@ export class Runner {
         nextDueAt: null,
         nextEligibleAt: null,
         runnableBacklog: 0,
+        soakBacklog: 0,
         oldestProbedAt: null,
         eligibleChannels: 0,
         heldBack: { 'no credentials': 1 },
@@ -2947,6 +2964,24 @@ export class Runner {
   }
 
   /**
+   * How many queued soaks a pass could start now. See `RunSummary.soakBacklog`.
+   *
+   * Zero on any read failure. This only ever keeps the loop awake, and an
+   * unreadable queue is not a reason to stop the loop from sleeping -- the
+   * alternative is a worker spinning once a minute on a table it cannot read.
+   */
+  private drainableSoaks(): number {
+    try {
+      const config = this.deps.config();
+      const queue = this.deps.store.pendingSoakCount();
+      const windowOpen = soakWindowOpen(config.PODIUM_SOAK_WINDOW);
+      return queue.manual + queue.now + (windowOpen ? queue.sweep : 0);
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
    * What the passive ledger has on every stream it has seen play.
    *
    * Swallows a read failure and returns an empty map, which is not the usual
@@ -3287,6 +3322,7 @@ export class Runner {
       elapsedMs: Date.now() - started,
       channels: eligibleChannels,
       ...counters,
+      soakBacklog: paused ? 0 : this.drainableSoaks(),
       eligibleChannels,
       heldBack,
       lanes,
