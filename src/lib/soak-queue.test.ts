@@ -15,7 +15,7 @@ describe('the soak queue', () => {
   afterEach(() => store.close());
 
   it('starts empty', () => {
-    expect(store.pendingSoakCount()).toEqual({ total: 0, manual: 0, sweep: 0 });
+    expect(store.pendingSoakCount()).toEqual({ total: 0, manual: 0, now: 0, sweep: 0 });
     expect(store.pendingSoaks()).toEqual([]);
   });
 
@@ -54,7 +54,7 @@ describe('the soak queue', () => {
   it('counts the two sources apart, because they drain at different times', () => {
     store.queueSoaks([{ streamId: 1 }, { streamId: 2 }], 'manual');
     store.queueSoaks([{ streamId: 3 }], 'sweep');
-    expect(store.pendingSoakCount()).toEqual({ total: 3, manual: 2, sweep: 1 });
+    expect(store.pendingSoakCount()).toEqual({ total: 3, manual: 2, now: 0, sweep: 1 });
   });
 
   it('hands back only the manual rows when the window is shut', () => {
@@ -63,7 +63,7 @@ describe('the soak queue', () => {
     // request about one channel runs whenever there is capacity.
     store.queueSoaks([{ streamId: 1 }], 'sweep');
     store.queueSoaks([{ streamId: 2 }], 'manual');
-    expect(store.pendingSoaks(10, { manualOnly: true }).map((r) => r.streamId)).toEqual([2]);
+    expect(store.pendingSoaks(10, { excludeSweep: true }).map((r) => r.streamId)).toEqual([2]);
     expect(store.pendingSoaks(10).map((r) => r.streamId)).toEqual([1, 2]);
   });
 
@@ -87,5 +87,58 @@ describe('the soak queue', () => {
   it('writes nothing for an empty request', () => {
     expect(store.queueSoaks([])).toBe(0);
     expect(store.clearSoaks([])).toBe(0);
+  });
+});
+
+describe('a baseline run', () => {
+  let store: Store;
+
+  beforeEach(() => {
+    store = new Store(':memory:');
+  });
+
+  afterEach(() => store.close());
+
+  it('drains whatever the window says, unlike a sweep', () => {
+    store.queueSoaks([{ streamId: 1 }], 'now');
+    store.queueSoaks([{ streamId: 2 }], 'sweep');
+    // `excludeSweep` is what a shut window asks for: the baseline run is still
+    // handed over, the ordinary sweep is not.
+    expect(store.pendingSoaks(10, { excludeSweep: true }).map((r) => r.streamId)).toEqual([1]);
+  });
+
+  it('is counted apart from the other two', () => {
+    store.queueSoaks([{ streamId: 1 }], 'now');
+    store.queueSoaks([{ streamId: 2 }], 'manual');
+    store.queueSoaks([{ streamId: 3 }], 'sweep');
+    expect(store.pendingSoakCount()).toEqual({ total: 3, manual: 1, now: 1, sweep: 1 });
+  });
+
+  it('carries its own length', () => {
+    store.queueSoaks([{ streamId: 1, seconds: 60 }], 'now');
+    expect(store.pendingSoaks()[0]?.seconds).toBe(60);
+  });
+
+  it('means the setting when it carries no length', () => {
+    store.queueSoaks([{ streamId: 1 }], 'manual');
+    expect(store.pendingSoaks()[0]?.seconds).toBeNull();
+  });
+
+  it('promotes a stream a sweep had already queued', () => {
+    // The regression this guards: on a settled install the nightly sweep has
+    // already queued most of the catalogue, so a baseline run that skipped
+    // rows already present would silently do almost nothing.
+    store.queueSoaks([{ streamId: 1 }], 'sweep');
+    store.queueSoaks([{ streamId: 1, seconds: 60 }], 'now');
+    const [row] = store.pendingSoaks();
+    expect(row?.source).toBe('now');
+    expect(row?.seconds).toBe(60);
+    expect(store.pendingSoakCount().total).toBe(1);
+  });
+
+  it('does not demote a baseline row back to a sweep', () => {
+    store.queueSoaks([{ streamId: 1 }], 'now');
+    store.queueSoaks([{ streamId: 1 }], 'sweep');
+    expect(store.pendingSoaks()[0]?.source).toBe('now');
   });
 });

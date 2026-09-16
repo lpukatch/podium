@@ -648,11 +648,35 @@ Four places ask for one:
 - **Soak everything** — on the Progress tab, which is the whole catalogue.
 
 The first three run whenever a pass has spare capacity and nobody is watching,
-whatever the hour: somebody is waiting for the answer. **Soak everything** is
-different — it waits for the soak window below, because a whole catalogue is
-days of provider connection time and draining that through a weekday afternoon
-is the one way this feature could run away with an account. Set a window before
-pressing it, or the queue simply sits there.
+whatever the hour: somebody is waiting for the answer, and it is a handful of
+streams. **Soak everything** offers two:
+
+- **Queue for the soak window** — the safe default. It waits for the hours you
+  set below, because a whole catalogue is many hours of provider connection
+  time and draining that through a weekday afternoon is the one way this could
+  run away with an account.
+- **Start now** — a baseline run, for a night you know the house is empty. It
+  ignores the window and begins on the next pass. It ignores nothing else: it
+  still runs at the provider limits, still yields whichever providers your
+  probe-while-watching settings say to, and still stops the moment anyone starts
+  watching.
+
+**How long it takes is set by your narrowest provider, not by the total.**
+Providers soak in parallel, so the wall clock is the slowest one on its own.
+Measured on a 3,192-stream catalogue with 13 connections across five accounts,
+the binding constraint was an account with a single connection and 283 soakable
+streams:
+
+| Seconds each | Wall clock |
+|---|---|
+| 60 | ~5 hours |
+| 90 | ~7 hours |
+| 180 | ~14 hours |
+
+which is why the baseline run lets you choose. Sixty seconds still catches a
+feed that dies at forty, which is the failure the whole thing was built for;
+three minutes is the thorough answer and is more than one night. Re-soak
+whatever it finds wanting at the longer length afterwards.
 
 The Progress tab shows what is waiting and splits it by which of the two drains
 will take it, with a **Clear the queue** button. Nothing queued has been

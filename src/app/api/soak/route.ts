@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
 import { errorText } from '@/lib/error-text';
 import { snapshot } from '@/lib/server/state';
-import { type SoakRequest, Store } from '@/lib/store';
+import { type SoakRequest, type SoakSource, Store } from '@/lib/store';
 
 export const dynamic = 'force-dynamic';
 
@@ -45,7 +45,7 @@ interface Scope {
    * the runaway the window exists to prevent. Queueing it as a sweep is what
    * makes "soak everything" a safe thing to press.
    */
-  source: 'manual' | 'sweep';
+  source: SoakSource;
 }
 
 function open(): Store {
@@ -79,6 +79,7 @@ async function streamsForChannels(channelIds: number[]): Promise<SoakRequest[]> 
 async function resolveScope(
   scope: string | null,
   rawId: unknown,
+  now: boolean,
 ): Promise<Scope | { error: string }> {
   const id = Number(rawId);
   if (scope === 'stream') {
@@ -114,7 +115,11 @@ async function resolveScope(
     return {
       streams: await streamsForChannels(snap.channels.map((c) => c.id)),
       label: `the whole catalogue (${snap.channels.length} channel(s))`,
-      source: 'sweep',
+      // `now` is the operator saying they know the house is empty. It overrides
+      // the clock and nothing else -- pause-while-watching, the yielded
+      // providers and the reserve are all decided by `laneLimits`, long before
+      // the queue is read, and a viewer arriving still aborts the phase.
+      source: now ? 'now' : 'sweep',
     };
   }
   return { error: `unknown scope ${JSON.stringify(scope)}` };
@@ -141,8 +146,13 @@ export function GET() {
 export async function POST(request: Request) {
   let store: Store | null = null;
   try {
-    const body = (await request.json().catch(() => ({}))) as { scope?: string; id?: unknown };
-    const resolved = await resolveScope(body.scope ?? null, body.id);
+    const body = (await request.json().catch(() => ({}))) as {
+      scope?: string;
+      id?: unknown;
+      now?: boolean;
+      seconds?: unknown;
+    };
+    const resolved = await resolveScope(body.scope ?? null, body.id, body.now === true);
     if ('error' in resolved) {
       return NextResponse.json({ error: resolved.error }, { status: 400 });
     }
@@ -150,8 +160,19 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: `nothing to soak for ${resolved.label}` }, { status: 404 });
     }
 
+    // A length for this run only, so a first baseline of a whole catalogue can
+    // be taken at a minute a stream -- hours rather than most of a day -- and
+    // the streams it finds wanting re-soaked properly afterwards. Bounded to
+    // the same range the setting allows.
+    const asked = Number(body.seconds);
+    const seconds =
+      Number.isFinite(asked) && asked > 0 ? Math.min(Math.max(Math.round(asked), 10), 900) : null;
+
     store = open();
-    const queued = store.queueSoaks(resolved.streams, resolved.source);
+    const queued = store.queueSoaks(
+      seconds === null ? resolved.streams : resolved.streams.map((row) => ({ ...row, seconds })),
+      resolved.source,
+    );
     return NextResponse.json({
       status: 'queued',
       label: resolved.label,
@@ -162,6 +183,7 @@ export async function POST(request: Request) {
       // Said back, because it changes when the work will happen: a sweep-sourced
       // request sits until the soak window opens.
       source: resolved.source,
+      seconds,
       ...store.pendingSoakCount(),
     });
   } catch (error) {

@@ -296,6 +296,9 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
     out.add('podium_soak_queue', 'Streams waiting to be soaked.', 'gauge', queue.manual, {
       source: 'manual',
     });
+    out.add('podium_soak_queue', 'Streams waiting to be soaked.', 'gauge', queue.now, {
+      source: 'now',
+    });
     out.add('podium_soak_queue', 'Streams waiting to be soaked.', 'gauge', queue.sweep, {
       source: 'sweep',
     });
