@@ -225,6 +225,12 @@ export function ProgressView() {
   const [error, setError] = useState('');
   // Outstanding re-check requests: when the whole catalogue was queued, and how
   // many groups were queued on their own.
+  const [soakQueue, setSoakQueue] = useState<{ total: number; manual: number; sweep: number }>({
+    total: 0,
+    manual: 0,
+    sweep: 0,
+  });
+  const [confirmingSoak, setConfirmingSoak] = useState(false);
   const [refresh, setRefresh] = useState<{ all: number | null; groups: number }>({
     all: null,
     groups: 0,
@@ -258,6 +264,23 @@ export function ProgressView() {
       setRefresh(
         (body.refresh as { all: number | null; groups: number }) ?? { all: null, groups: 0 },
       );
+      // Its own request rather than a field on /api/progress: the queue is
+      // owned by a different table and a different endpoint, and folding it in
+      // would make the progress payload depend on it being readable.
+      try {
+        const soakResp = await fetch('/api/soak');
+        const soakBody = await soakResp.json();
+        if (soakResp.ok && !soakBody.error) {
+          setSoakQueue({
+            total: Number(soakBody.total ?? 0),
+            manual: Number(soakBody.manual ?? 0),
+            sweep: Number(soakBody.sweep ?? 0),
+          });
+        }
+      } catch {
+        // A queue that cannot be read leaves the last count on screen rather
+        // than flashing zero; it is a progress figure, not a verdict.
+      }
     } catch (e) {
       setError(String(e));
     }
@@ -275,6 +298,21 @@ export function ProgressView() {
 
   const cancelAll = async () => {
     await fetch('/api/refresh?scope=all', { method: 'DELETE' });
+    await poll();
+  };
+
+  const queueSoakAll = async () => {
+    await fetch('/api/soak', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'all' }),
+    });
+    setConfirmingSoak(false);
+    await poll();
+  };
+
+  const clearSoakQueue = async () => {
+    await fetch('/api/soak', { method: 'DELETE' });
     await poll();
   };
 
@@ -516,6 +554,74 @@ export function ProgressView() {
               <span className="flex-1" />
               <button type="button" onClick={() => setConfirming(true)} className={btn}>
                 Re-check everything
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Soaking is the other whole-catalogue job, and a much more expensive
+            one: a probe is seconds of a provider connection where a soak is
+            minutes of it. So this asks first like the one above, and what it
+            queues waits for the soak window rather than draining through the
+            afternoon -- which is the difference between a useful button and a
+            way to spend a week of connection time by accident. */}
+        <div className="mt-4 border-t border-[var(--color-line)] pt-4">
+          {soakQueue.total > 0 ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-sm">
+                <b>{n(soakQueue.total)} waiting to be soaked</b>{' '}
+                <span className="text-[var(--color-muted)]">
+                  {soakQueue.sweep > 0 ? (
+                    <>
+                      — {n(soakQueue.sweep)} of them run inside the soak window, so they wait for
+                      the hours you set in Settings.
+                      {soakQueue.manual > 0 && (
+                        <> The other {n(soakQueue.manual)} run as soon as there is capacity.</>
+                      )}
+                    </>
+                  ) : (
+                    <>— they run as soon as a pass has spare capacity and nobody is watching.</>
+                  )}
+                </span>
+              </span>
+              <span className="flex-1" />
+              <button type="button" onClick={() => void clearSoakQueue()} className={btn}>
+                Clear the queue
+              </button>
+            </div>
+          ) : confirmingSoak ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-sm">
+                Hold every stream open in turn to find out how long each one really lasts?{' '}
+                <span className="text-[var(--color-muted)]">
+                  This is the slow measurement: minutes per stream rather than seconds, so a whole
+                  catalogue is days of it. It only runs inside the soak window, at the provider
+                  limits, and stops whenever anyone is watching. Nothing is written to Dispatcharr
+                  and the queue can be cleared at any time.
+                </span>
+              </span>
+              <span className="flex-1" />
+              <button type="button" onClick={() => setConfirmingSoak(false)} className={btn}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void queueSoakAll()}
+                className={`${btn} border-[var(--color-accent)] text-[var(--color-accent)]`}
+              >
+                Soak everything
+              </button>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-sm text-[var(--color-muted)]">
+                Measure how long every stream holds, not just how it looks in five seconds. Runs in
+                the soak window only — set one in <b>Settings → Probing</b> first, or this will sit
+                in the queue.
+              </span>
+              <span className="flex-1" />
+              <button type="button" onClick={() => setConfirmingSoak(true)} className={btn}>
+                Soak everything
               </button>
             </div>
           )}

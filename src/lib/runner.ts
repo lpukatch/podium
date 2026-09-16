@@ -2768,7 +2768,12 @@ export class Runner {
 
     let requested: StoredSoakRequest[];
     try {
-      requested = store.pendingSoaks(room);
+      // Outside the window only the manual rows are drained. A request about
+      // one stream, channel or group is an instruction and runs whenever there
+      // is capacity; "soak everything" is queued as a sweep, because hours of
+      // connection time draining through a weekday afternoon is exactly the
+      // runaway the window exists to prevent.
+      requested = store.pendingSoaks(room, { manualOnly: !windowOpen });
     } catch (error) {
       log(`could not read the soak queue: ${errorText(error)}`);
       return none;

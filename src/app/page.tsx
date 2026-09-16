@@ -712,7 +712,7 @@ export default function Page() {
         error?: string;
         queued?: number;
         requested?: number;
-        pending?: number;
+        total?: number;
       };
       if (!resp.ok || body.error) {
         setSoakNote(body.error ?? `HTTP ${resp.status}`);
@@ -722,7 +722,7 @@ export default function Page() {
       setSoakNote(
         `Queued ${body.queued} stream(s) to soak` +
           (already > 0 ? `; ${already} already waiting` : '') +
-          `. ${body.pending} in the queue.`,
+          `. ${body.total} in the queue.`,
       );
     } catch (e) {
       setSoakNote(String(e));

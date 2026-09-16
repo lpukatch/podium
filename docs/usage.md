@@ -639,12 +639,24 @@ the two produce the same rows and feed the same score. A soak that holds for the
 full three minutes is written too: clean time is half of what a rate is made of,
 and it is how a stream with an old bad record is shown to have recovered.
 
-Three places ask for one:
+Four places ask for one:
 
 - **Soak** on a stream's row in the check panel — that stream alone.
 - **Soak every stream on this channel** — above the check panel.
 - **Soak every stream here** — on a group, which is every stream on every
   channel in it.
+- **Soak everything** — on the Progress tab, which is the whole catalogue.
+
+The first three run whenever a pass has spare capacity and nobody is watching,
+whatever the hour: somebody is waiting for the answer. **Soak everything** is
+different — it waits for the soak window below, because a whole catalogue is
+days of provider connection time and draining that through a weekday afternoon
+is the one way this feature could run away with an account. Set a window before
+pressing it, or the queue simply sits there.
+
+The Progress tab shows what is waiting and splits it by which of the two drains
+will take it, with a **Clear the queue** button. Nothing queued has been
+measured yet, so clearing it loses nothing.
 
 None of them measures anything on the spot. They queue, exactly as
 [re-checking a group](#re-checking-on-demand) does, and for the same reason: a
