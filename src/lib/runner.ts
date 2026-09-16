@@ -45,6 +45,7 @@ import {
   rank,
   type Weights,
 } from './scoring';
+import type { StabilityRecord } from './stability';
 import { statsPayload } from './stats';
 import type { CatalogueRow, DeadStreamRow } from './store';
 import { ALL_GROUPS, forcedAtFor, type Progress, type Store, ttlFor } from './store';
@@ -1438,6 +1439,12 @@ export class Runner {
       );
       // Every later step reads this rather than matching the channel again.
       const plannedById = new Map(planned.map((entry) => [entry.channel.id, entry]));
+      // Read once for the pass rather than per channel: it is one grouped
+      // query over a fortnight of legs, and the ranking wants the same view of
+      // it for every channel it writes. A store that cannot answer leaves the
+      // map empty, which scores every stream full marks on the term -- the
+      // ledger being unreadable must not reorder anything.
+      const stability = this.stabilityRecords();
       const eligibleChannels = new Set(jobs.map((j) => j.channelId)).size;
       // Counted per stream, which is also one per job under pooling. Kept as a
       // set rather than a length so a planner that ever queues a stream twice
@@ -1933,6 +1940,7 @@ export class Runner {
                   stepOrder,
                   providerId: streamById.get(streamId)?.providerId ?? 0,
                   result: best,
+                  stability: stability.get(streamId),
                 });
                 continue;
               }
@@ -2661,6 +2669,26 @@ export class Runner {
     });
   }
 
+  /**
+   * What the passive ledger has on every stream it has seen play.
+   *
+   * Swallows a read failure and returns an empty map, which is not the usual
+   * bargain here but is the right one for this input. Every other thing a pass
+   * reads is something it cannot rank without; this is a penalty term, and an
+   * empty map scores every stream full marks on it -- the exact behaviour of an
+   * install that has the feature switched off. So a ledger that cannot be read
+   * degrades to "no evidence against anybody" rather than stopping a pass or,
+   * worse, reordering channels on a partial read.
+   */
+  private stabilityRecords(): Map<number, StabilityRecord> {
+    try {
+      return this.deps.store.stabilityRecords();
+    } catch (error) {
+      this.deps.log?.(`stability ledger unreadable, ranking without it: ${errorText(error)}`);
+      return new Map();
+    }
+  }
+
   private async reorderCachedOnly(
     client: DispatcharrClient,
     planned: PlannedChannel[],
@@ -2677,6 +2705,7 @@ export class Runner {
     removal?: DeadRemoval,
   ): Promise<void> {
     const log = this.deps.log ?? (() => {});
+    const stability = this.stabilityRecords();
     for (const entry of planned) {
       const { channel, hits, fresh, cacheComplete, audioOnly, measureOnly } = entry;
       if (!cacheComplete) continue;
@@ -2700,6 +2729,7 @@ export class Runner {
           stepOrder,
           providerId: byId.get(streamId)?.providerId ?? 0,
           result: best,
+          stability: stability.get(streamId),
         });
       }
       if (entries.length === 0) continue;

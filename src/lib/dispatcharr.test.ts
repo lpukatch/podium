@@ -487,12 +487,14 @@ describe('resource mapping', () => {
       },
     }));
     const sessions = await new DispatcharrClient('http://d', { apiKey: 'k' }).activeSessions();
-    expect(sessions).toEqual([
-      { channelId: 8, profileId: 9 },
-      { channelId: 10, profileId: 5 },
+    // The pairing is what this is about; sessions also carry the stability
+    // fields, which are null on a payload that names none of them.
+    expect(sessions.map((s) => [s.channelId, s.profileId])).toEqual([
+      [8, 9],
+      [10, 5],
       // No login named: unattributed, not assumed onto a lane.
-      { channelId: 11, profileId: null },
-      { channelId: 12, profileId: null },
+      [11, null],
+      [12, null],
     ]);
   });
 

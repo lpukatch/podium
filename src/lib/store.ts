@@ -36,6 +36,7 @@ import { createHash } from 'crypto';
 import { mkdirSync } from 'fs';
 import { dirname } from 'path';
 import type { ProbeResult } from './probe';
+import type { Leg, StabilityRecord } from './stability';
 import { pickBestVariant, type VariantVerdict, verdictStatus } from './variants';
 
 const SCHEMA = `
@@ -413,9 +414,66 @@ CREATE TABLE IF NOT EXISTS rule_check_misses (
 );
 CREATE INDEX IF NOT EXISTS rule_check_misses_at ON rule_check_misses (checked_at DESC);
 
+-- How long each stream actually held, from watching Dispatcharr watch it.
+--
+-- One row per *leg*: a continuous span in which one stream served one channel
+-- session, closed when Dispatcharr failed over, the viewer retuned, or the
+-- session ended. Written by the worker's status poller, never by a pass --
+-- this is the one table here whose contents come from observing real viewing
+-- rather than from probing. See stability.ts for what is and is not charged
+-- against a stream, and why a session merely ending is charged to nobody.
+--
+-- Legs rather than a running per-stream mean, for the reason quality_samples
+-- keeps samples: the useful summary is a rate over a window, and a stored mean
+-- freezes the choice of window forever. It costs little -- a leg is written
+-- only when one ends, so an install nobody is watching writes nothing at all,
+-- and a heavy evening's viewing is a few dozen rows.
+--
+-- ended is the column the whole thing turns on and is deliberately kept
+-- rather than folded into a boolean: failover is evidence the feed broke,
+-- gone is a session that stopped for reasons this process cannot see, and
+-- collapsing the two would let every channel anyone ever switches off read as
+-- a stream that failed.
+CREATE TABLE IF NOT EXISTS stream_legs (
+    stream_id   INTEGER NOT NULL,
+    -- Which channel it was serving. Not used by the ranking -- a stream's
+    -- stability is a property of the stream -- but kept because "which channel
+    -- was this happening on" is the first question anyone asks of a bad row,
+    -- and the catalogue that could answer it later may have moved on.
+    --
+    -- The key is the status endpoint's own identifier, a uuid, and is always
+    -- present because the poller needs no catalogue to read one. The numeric
+    -- id is null until something has fetched the channels that could resolve
+    -- it, which is why it is nullable and the key is not.
+    channel_key TEXT    NOT NULL,
+    channel_id  INTEGER,
+    started_at  INTEGER NOT NULL,
+    ended_at    INTEGER NOT NULL,
+    watched_ms  INTEGER NOT NULL,
+    stalled_ms  INTEGER NOT NULL,
+    stalls      INTEGER NOT NULL,
+    -- 'failover' | 'dropped' | 'retune' | 'gone' | 'drain'; the first two are
+    -- the ones that count against the stream. See BREAKING_ENDS.
+    ended       TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS stream_legs_stream ON stream_legs (stream_id, ended_at);
+CREATE INDEX IF NOT EXISTS stream_legs_ended_at ON stream_legs (ended_at);
+
 CREATE INDEX IF NOT EXISTS quality_samples_bucket
     ON quality_samples (provider_id, tier, sampled_at);
 `;
+
+/**
+ * How far back the stability ledger looks, for both scoring and retention.
+ *
+ * Two weeks. Long enough for an evening's viewing here and there to add up to
+ * evidence, short enough that it describes the provider's feed as it is now
+ * rather than as it was last season -- the same reason `quality_samples` trims
+ * to its most recent few hundred per bucket. A stream that flapped a fortnight
+ * ago and has behaved since is not punished for it: the old failures age out
+ * while the new watch time does not.
+ */
+export const STABILITY_HISTORY_MS = 14 * 86_400_000;
 
 /**
  * The `group_id` a whole-catalogue refresh is stored under.
@@ -1310,6 +1368,11 @@ export class Store {
       now - RULE_CHECK_MISS_HISTORY_MS,
     );
     this.sql('DELETE FROM rule_checks WHERE checked_at < ?').run(now - RULE_CHECK_HISTORY_MS);
+    // Same sweep, same place, same bargain. The ledger is written by the
+    // poller rather than by a pass, so trimming it here means an install
+    // nobody watches never accumulates rows *and* never pays to look -- the
+    // index seek matches nothing on all but the first pass of the day.
+    this.sql('DELETE FROM stream_legs WHERE ended_at < ?').run(now - STABILITY_HISTORY_MS);
   }
 
   finishRun(runId: string, fields: RunUpdate = {}): void {
@@ -2335,6 +2398,129 @@ export class Store {
       height: row.height,
       fps: row.fps,
       videoCodec: row.video_codec ?? '',
+    }));
+  }
+
+  /**
+   * Record legs the status poller closed.
+   *
+   * One transaction for the batch: a poll can close several at once -- a
+   * worker losing the lock drains every open leg in one go -- and a partial
+   * write there would leave a stream credited with watch time whose failure
+   * was never recorded, which biases in the one direction this must not.
+   *
+   * Zero-length legs are dropped rather than stored. A leg that opened and
+   * closed inside one poll carries no watch time to rate a failure against,
+   * so it can only make `dropsPerHour` divide by something smaller than the
+   * truth. The failover it represents is real, but it is unmeasurable here and
+   * an unmeasurable failure must not become an infinitely bad one.
+   */
+  recordLegs(legs: Leg[]): void {
+    const usable = legs.filter((leg) => leg.watchedMs > 0);
+    if (usable.length === 0) return;
+    this.db.transaction(() => {
+      const insert = this.sql(
+        `INSERT INTO stream_legs
+           (stream_id, channel_key, channel_id, started_at, ended_at, watched_ms, stalled_ms,
+            stalls, ended)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const leg of usable) {
+        insert.run(
+          leg.streamId,
+          leg.channelKey,
+          leg.channelId,
+          leg.startedAt,
+          leg.endedAt,
+          leg.watchedMs,
+          leg.stalledMs,
+          leg.stalls,
+          leg.ended,
+        );
+      }
+    })();
+  }
+
+  /**
+   * What the ledger knows about every stream it has seen play, over the window.
+   *
+   * Aggregated in SQL rather than by reading the legs back and folding them:
+   * the ranking asks for this once per pass and wants one small map, not the
+   * fortnight of rows behind it. `stabilityLegs` is there for the pages that
+   * do want the rows.
+   */
+  stabilityRecords(windowMs = STABILITY_HISTORY_MS): Map<number, StabilityRecord> {
+    const rows = this.sql(
+      `SELECT stream_id,
+              COUNT(*)                                          AS legs,
+              SUM(CASE WHEN ended IN ('failover', 'dropped') THEN 1 ELSE 0 END) AS breaks,
+              SUM(stalls)                                       AS stalls,
+              SUM(watched_ms)                                   AS watched_ms,
+              SUM(stalled_ms)                                   AS stalled_ms,
+              MAX(ended_at)                                     AS last_seen_at
+         FROM stream_legs
+        WHERE ended_at >= ?
+        GROUP BY stream_id`,
+    ).all(Date.now() - windowMs) as Array<{
+      stream_id: number;
+      legs: number;
+      breaks: number;
+      stalls: number;
+      watched_ms: number;
+      stalled_ms: number;
+      last_seen_at: number;
+    }>;
+    const out = new Map<number, StabilityRecord>();
+    for (const row of rows) {
+      out.set(row.stream_id, {
+        streamId: row.stream_id,
+        legs: row.legs,
+        breaks: row.breaks ?? 0,
+        stalls: row.stalls ?? 0,
+        watchedMs: row.watched_ms ?? 0,
+        stalledMs: row.stalled_ms ?? 0,
+        lastSeenAt: row.last_seen_at ?? 0,
+      });
+    }
+    return out;
+  }
+
+  /** The legs themselves, newest first, for one stream or for all of them. */
+  stabilityLegs(streamId?: number, windowMs = STABILITY_HISTORY_MS): Leg[] {
+    const since = Date.now() - windowMs;
+    const rows = (
+      streamId === undefined
+        ? this.sql(
+            `SELECT stream_id, channel_key, channel_id, started_at, ended_at, watched_ms,
+                    stalled_ms, stalls, ended
+               FROM stream_legs WHERE ended_at >= ? ORDER BY ended_at DESC`,
+          ).all(since)
+        : this.sql(
+            `SELECT stream_id, channel_key, channel_id, started_at, ended_at, watched_ms,
+                    stalled_ms, stalls, ended
+               FROM stream_legs WHERE stream_id = ? AND ended_at >= ? ORDER BY ended_at DESC`,
+          ).all(streamId, since)
+    ) as Array<{
+      stream_id: number;
+      channel_key: string;
+      channel_id: number | null;
+      started_at: number;
+      ended_at: number;
+      watched_ms: number;
+      stalled_ms: number;
+      stalls: number;
+      ended: string;
+    }>;
+    return rows.map((row) => ({
+      streamId: row.stream_id,
+      channelKey: row.channel_key,
+      channelId: row.channel_id,
+      startedAt: row.started_at,
+      endedAt: row.ended_at,
+      watchedMs: row.watched_ms,
+      stalledMs: row.stalled_ms,
+      stalls: row.stalls,
+      ended: row.ended as Leg['ended'],
     }));
   }
 

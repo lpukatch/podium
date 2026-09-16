@@ -22,6 +22,7 @@ import {
   NEW_INSTALL_AUDIO,
   NEW_INSTALL_HDR,
   NEW_INSTALL_HEVC_FACTOR,
+  NEW_INSTALL_STABILITY,
   NEW_INSTALL_UHD_BITRATE_KBPS,
 } from './scoring';
 
@@ -79,6 +80,8 @@ const orderingWeightsSchema = z
     min_bitrate_kbps: z.coerce.number().optional(),
     hevc_bitrate_factor: z.coerce.number().optional(),
     uhd_bitrate_kbps: z.coerce.number().optional(),
+    stability: z.coerce.number().optional(),
+    max_drops_per_hour: z.coerce.number().optional(),
   })
   .optional();
 
@@ -224,6 +227,8 @@ function parseOrdering(doc: RulesDoc): OrderingConfig {
       ...(w.min_bitrate_kbps !== undefined ? { minBitrateKbps: w.min_bitrate_kbps } : {}),
       ...(w.hevc_bitrate_factor !== undefined ? { hevcBitrateFactor: w.hevc_bitrate_factor } : {}),
       ...(w.uhd_bitrate_kbps !== undefined ? { uhdBitrateKbps: w.uhd_bitrate_kbps } : {}),
+      ...(w.stability !== undefined ? { stability: w.stability } : {}),
+      ...(w.max_drops_per_hour !== undefined ? { maxDropsPerHour: w.max_drops_per_hour } : {}),
     },
   };
 }
@@ -248,6 +253,9 @@ export const EMPTY_RULES_DOC = {
       hdr: NEW_INSTALL_HDR,
       hevc_bitrate_factor: NEW_INSTALL_HEVC_FACTOR,
       uhd_bitrate_kbps: NEW_INSTALL_UHD_BITRATE_KBPS,
+      // Seeded; `max_drops_per_hour` deliberately is not. See
+      // NEW_INSTALL_STABILITY for why the weight ships on and the cliff does not.
+      stability: NEW_INSTALL_STABILITY,
     },
   },
 };

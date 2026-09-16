@@ -18,6 +18,8 @@ interface Weights {
   codec: string;
   audio: string;
   hdr: string;
+  /** How much a stream's record of actually holding is worth. */
+  stability: string;
   preferH265: boolean;
   /** Which HDR flavour the HDR weight rewards. Not a weight. */
   hdrPreference: HdrPreference;
@@ -25,6 +27,8 @@ interface Weights {
   hevcBitrateFactor: string;
   /** A bitrate, not a weight: what scores full marks above 1080p. */
   uhdBitrateKbps: string;
+  /** A rate, not a weight: drops an hour past which a stream stops leading. 0 is off. */
+  maxDropsPerHour: string;
 }
 
 interface OrderingState {
@@ -43,10 +47,12 @@ interface Response {
     codec: number;
     audio: number;
     hdr: number;
+    stability: number;
     preferH265: boolean;
     hdrPreference: HdrPreference;
     hevcBitrateFactor: number;
     uhdBitrateKbps: number;
+    maxDropsPerHour: number;
   };
   defaults: {
     resolution: number;
@@ -55,10 +61,12 @@ interface Response {
     codec: number;
     audio: number;
     hdr: number;
+    stability: number;
     preferH265: boolean;
     hdrPreference: HdrPreference;
     hevcBitrateFactor: number;
     uhdBitrateKbps: number;
+    maxDropsPerHour: number;
   };
   providers: Provider[];
 }
@@ -93,6 +101,7 @@ const WEIGHT_FIELDS: { key: keyof Omit<Weights, 'preferH265' | 'hdrPreference'>;
     { key: 'codec', label: 'Codec' },
     { key: 'audio', label: 'Audio' },
     { key: 'hdr', label: 'HDR' },
+    { key: 'stability', label: 'Stability' },
   ];
 
 const HDR_OPTIONS: { value: HdrPreference; label: string }[] = [
@@ -108,10 +117,12 @@ const toWeights = (w: Response['weights']): Weights => ({
   codec: String(w.codec),
   audio: String(w.audio),
   hdr: String(w.hdr),
+  stability: String(w.stability),
   preferH265: w.preferH265,
   hdrPreference: w.hdrPreference,
   hevcBitrateFactor: String(w.hevcBitrateFactor),
   uhdBitrateKbps: String(w.uhdBitrateKbps),
+  maxDropsPerHour: String(w.maxDropsPerHour),
 });
 
 const same = (a: OrderingState, b: OrderingState): boolean =>
@@ -137,10 +148,12 @@ export function OrderingView() {
     codec: '',
     audio: '',
     hdr: '',
+    stability: '',
     preferH265: true,
     hdrPreference: 'none',
     hevcBitrateFactor: '',
     uhdBitrateKbps: '',
+    maxDropsPerHour: '',
   });
   const [defaults, setDefaults] = useState<Weights>(weights);
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -206,10 +219,12 @@ export function OrderingView() {
             codec: num(weights.codec),
             audio: num(weights.audio),
             hdr: num(weights.hdr),
+            stability: num(weights.stability),
             preferH265: weights.preferH265,
             hdrPreference: weights.hdrPreference,
             hevcBitrateFactor: num(weights.hevcBitrateFactor),
             uhdBitrateKbps: num(weights.uhdBitrateKbps),
+            maxDropsPerHour: num(weights.maxDropsPerHour),
           },
         }),
       });
@@ -427,6 +442,21 @@ export function OrderingView() {
                 <span className="mt-1 block">
                   The bitrate that scores full marks above 1080p. The 12000 that suits 1080p leaves
                   most 4K streams tied at the ceiling. New installs: 24000.
+                </span>
+              </label>
+              <label className="block text-xs text-[var(--color-muted)]">
+                Max drops per hour
+                <input
+                  value={weights.maxDropsPerHour}
+                  onChange={(e) => setWeights({ ...weights, maxDropsPerHour: e.target.value })}
+                  inputMode="decimal"
+                  className={`${input} mt-1`}
+                />
+                <span className="mt-1 block">
+                  A stream measured dropping more often than this is ranked after every stream that
+                  is not, whatever its picture looks like — and is never served first. Needs at
+                  least two observed drops before it can fire. 0 turns it off, which is the default:
+                  the Stability weight above handles the ordinary case without a cliff.
                 </span>
               </label>
             </div>

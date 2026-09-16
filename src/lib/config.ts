@@ -307,6 +307,35 @@ export const configSchema = z.object({
    */
   PODIUM_MAX_CONCURRENT_PROBES: num(6),
 
+  /**
+   * Watch Dispatcharr's live sessions and record how long each stream holds.
+   *
+   * On by default, and safe to be: it costs one small GET against an endpoint
+   * the worker already calls, it writes a row only when a leg *ends* -- so an
+   * install nobody is watching writes nothing at all -- and the ranking term it
+   * feeds is inert until somebody gives it a weight. Collecting by default is
+   * what makes that weight worth turning on: a ledger switched on at the same
+   * moment as the weight has nothing in it, and would take a fortnight of
+   * viewing before it could say anything.
+   *
+   * Note the endpoint sweeps its own stale client entries as a side effect of
+   * being read. That is cleanup Dispatcharr does anyway and its own stats page
+   * polls the same endpoint continuously, so this is well inside normal use --
+   * but it is why this is a switch rather than an unconditional behaviour.
+   */
+  PODIUM_STABILITY: bool(true),
+  /**
+   * How often live sessions are sampled.
+   *
+   * Ten seconds, which is a resolution rather than a load decision. The failure
+   * this exists to catch runs in tens of seconds -- the feed it was written
+   * against held for 36 and 55 seconds between drops -- so a poll much slower
+   * than this stops being able to see the legs at all, and one much faster buys
+   * precision on a number that is reported per hour. A leg shorter than one
+   * interval is never seen; see the note on undercounting in stability.ts.
+   */
+  PODIUM_STABILITY_POLL_MS: num(10_000),
+
   /** Freshness target: every channel checked within this window. */
   PODIUM_MAX_AGE_MS: num(24 * 3_600_000),
   /** How often a pass is considered. Each pass takes a slice, not everything. */

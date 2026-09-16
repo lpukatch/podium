@@ -5,6 +5,7 @@ import {
   NEW_INSTALL_AUDIO,
   NEW_INSTALL_HDR,
   NEW_INSTALL_HEVC_FACTOR,
+  NEW_INSTALL_STABILITY,
   NEW_INSTALL_UHD_BITRATE_KBPS,
 } from '@/lib/scoring';
 import { ordering, readRulesDoc, snapshot, writeRulesDoc } from '@/lib/server/state';
@@ -12,7 +13,7 @@ import { ordering, readRulesDoc, snapshot, writeRulesDoc } from '@/lib/server/st
 export const dynamic = 'force-dynamic';
 
 /** The editable weight keys exposed in the UI (the bitrate floor has its own field). */
-const WEIGHT_KEYS = ['resolution', 'bitrate', 'fps', 'codec', 'audio', 'hdr'] as const;
+const WEIGHT_KEYS = ['resolution', 'bitrate', 'fps', 'codec', 'audio', 'hdr', 'stability'] as const;
 type WeightKey = (typeof WEIGHT_KEYS)[number];
 
 /**
@@ -30,6 +31,15 @@ interface ScaleKnobs {
   hdrPreference: HdrPreference;
   hevcBitrateFactor: number;
   uhdBitrateKbps: number;
+  /**
+   * Drops an hour past which a stream stops being fit to lead. 0 is off.
+   *
+   * A rate rather than a weight in [0, 1], so it belongs here beside the other
+   * two scales rather than on the sliders -- and it travels for the same
+   * reason they do: PUT replaces the block wholesale, so a knob left out of
+   * the payload is silently reset the first time anyone saves the form.
+   */
+  maxDropsPerHour: number;
 }
 
 export interface OrderingResponse {
@@ -63,10 +73,12 @@ export async function GET() {
       codec: pick('codec'),
       audio: pick('audio'),
       hdr: pick('hdr'),
+      stability: pick('stability'),
       preferH265: merged.preferH265,
       hdrPreference: merged.hdrPreference,
       hevcBitrateFactor: merged.hevcBitrateFactor,
       uhdBitrateKbps: merged.uhdBitrateKbps,
+      maxDropsPerHour: merged.maxDropsPerHour,
     };
     const defaults = {
       resolution: DEFAULT_WEIGHTS.resolution,
@@ -77,10 +89,14 @@ export async function GET() {
       // upgrades still: "reset" should hand back what podium ships today.
       audio: NEW_INSTALL_AUDIO,
       hdr: NEW_INSTALL_HDR,
+      stability: NEW_INSTALL_STABILITY,
       preferH265: DEFAULT_WEIGHTS.preferH265,
       hdrPreference: DEFAULT_WEIGHTS.hdrPreference,
       hevcBitrateFactor: NEW_INSTALL_HEVC_FACTOR,
       uhdBitrateKbps: NEW_INSTALL_UHD_BITRATE_KBPS,
+      // Not seeded: "reset" restores what podium ships, and it ships the cliff
+      // switched off. See NEW_INSTALL_STABILITY.
+      maxDropsPerHour: DEFAULT_WEIGHTS.maxDropsPerHour,
     };
 
     return NextResponse.json({
@@ -133,11 +149,15 @@ export async function PUT(request: Request) {
       codec: num(w.codec),
       audio: num(w.audio),
       hdr: num(w.hdr),
+      stability: num(w.stability),
       prefer_h265: Boolean(w.preferH265),
       hdr_preference:
         w.hdrPreference === 'hlg' || w.hdrPreference === 'pq' ? w.hdrPreference : 'none',
       hevc_bitrate_factor: positive(w.hevcBitrateFactor, DEFAULT_WEIGHTS.hevcBitrateFactor),
       uhd_bitrate_kbps: positive(w.uhdBitrateKbps, DEFAULT_WEIGHTS.uhdBitrateKbps),
+      // `num`, not `positive`: 0 is a real value here and means "off", so the
+      // fallback the other two need would make this knob impossible to clear.
+      max_drops_per_hour: num(w.maxDropsPerHour),
     };
 
     const doc = readRulesDoc();

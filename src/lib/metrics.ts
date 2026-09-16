@@ -12,6 +12,7 @@
 
 import { DEAD_REASONS, type DeadReason, deadReason, type ProbeResult } from './probe';
 import { DEFAULT_WEIGHTS, isUsable, score } from './scoring';
+import { dropsPerHour, MIN_FAILURES } from './stability';
 import { type Progress, STALE_LOCK_MS, type Store } from './store';
 
 type Labels = Record<string, string>;
@@ -222,6 +223,52 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
       'gauge',
       lastRun.error ? 1 : 0,
     );
+  }
+
+  // --- stability ledger ----------------------------------------------------
+  //
+  // Aggregates only, no per-stream series: a catalogue's worth of stream ids is
+  // exactly the cardinality the channel series above is gated for, and the
+  // question worth alerting on is "is anything flapping", not "which". The
+  // per-stream view lives on the check panel, where it has a name beside it.
+  try {
+    const records = [...store.stabilityRecords().values()];
+    const watchedMs = records.reduce((sum, r) => sum + r.watchedMs, 0);
+    const breaks = records.reduce((sum, r) => sum + r.breaks + r.stalls, 0);
+    out.add(
+      'podium_stability_streams',
+      'Streams the ledger has seen play inside its window.',
+      'gauge',
+      records.length,
+    );
+    out.add(
+      'podium_stability_watched_seconds',
+      'Observed serving time across those streams.',
+      'gauge',
+      Math.round(watchedMs / 1000),
+    );
+    out.add(
+      'podium_stability_breaks',
+      'Failovers, dropped soaks and stalls recorded across those streams.',
+      'gauge',
+      breaks,
+    );
+    // The one worth an alert: streams with enough evidence to be called bad.
+    // Counted here rather than derived from the two above, because a rate over
+    // a sum is not the same as the number of streams whose own rate is high --
+    // one dreadful stream and a hundred good ones average to fine.
+    const flapping = records.filter(
+      (r) => r.breaks + r.stalls >= MIN_FAILURES && dropsPerHour(r) > 1,
+    ).length;
+    out.add(
+      'podium_stability_flapping_streams',
+      'Streams with at least two recorded breaks and more than one an hour.',
+      'gauge',
+      flapping,
+    );
+  } catch {
+    // The ledger is an extra, not a dependency: a table that cannot be read
+    // must not take the whole metrics endpoint down with it.
   }
 
   // --- freshness -----------------------------------------------------------
