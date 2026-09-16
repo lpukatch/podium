@@ -14,10 +14,12 @@
 import { randomUUID } from 'crypto';
 import { hostname } from 'os';
 import { type Config, loadConfig } from '../lib/config';
+import { DispatcharrClient } from '../lib/dispatcharr';
 import { errorText } from '../lib/error-text';
 import { RulesSource } from '../lib/rules-source';
 import { Runner, type RunSummary } from '../lib/runner';
 import { resolveEnv } from '../lib/settings';
+import { type Leg, makeStabilityTracker, type SessionSample } from '../lib/stability';
 import { Store } from '../lib/store';
 import { DEFER_RETRY_MS, syncToTeamarr } from '../lib/teamarr-sync';
 
@@ -191,6 +193,19 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
   // catalogue and scores it twice, so two at once would race each other into
   // Teamarr's whole-set replacement.
   let syncing = false;
+  // The stability ledger's half of the loop. `tracker` holds the legs still
+  // open, so it must outlive any one poll; `polling` keeps a slow poll from
+  // being overlapped by the next interval, which would hand the tracker two
+  // samples out of order and read the older one as a session going backwards.
+  const tracker = makeStabilityTracker();
+  let polling = false;
+  let sessionTimer: ReturnType<typeof setInterval> | null = null;
+  // Held across polls so the JWT is not re-fetched every ten seconds, and
+  // rebuilt whenever the credentials it was built from change -- or after a
+  // failure, which is the cheapest way to recover from a token this client
+  // cannot refresh.
+  let client: DispatcharrClient | null = null;
+  let clientSignature = '';
 
   /**
    * Read live, so changing the check interval in the UI takes effect on the
@@ -203,6 +218,49 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
     } catch {
       return config;
     }
+  };
+
+  /**
+   * The client the session poller reads through, built once and kept.
+   *
+   * Rebuilt only when the credentials change, so a settings edit takes effect
+   * on the next poll without the ten-second timer paying a handshake each time.
+   *
+   * The login is explicit and happens exactly once per client, which matters
+   * more than it looks. On a username/password install `headers()` sends an
+   * empty API key until a token exists, and `request` only *refreshes* a token
+   * -- it never mints the first one. A poller that skipped this would 401 every
+   * ten seconds forever and record nothing, on precisely the installs that do
+   * not use an API key. It is a no-op when only a key is configured.
+   */
+  const sessionClient = async (live: Config): Promise<DispatcharrClient> => {
+    // JSON rather than a joined string: no separator can appear inside a
+    // quoted field, so there is no character a credential could contain that
+    // would make two different configurations hash alike.
+    const signature = JSON.stringify([
+      live.DISPATCHARR_URL,
+      live.DISPATCHARR_API_KEY,
+      live.DISPATCHARR_USERNAME,
+      live.DISPATCHARR_PASSWORD,
+    ]);
+    if (!client || signature !== clientSignature) {
+      client = new DispatcharrClient(live.DISPATCHARR_URL, {
+        apiKey: live.DISPATCHARR_API_KEY,
+        username: live.DISPATCHARR_USERNAME,
+        password: live.DISPATCHARR_PASSWORD,
+      });
+      clientSignature = signature;
+      // Inside the rebuild, and before the client is handed out: a failed
+      // login leaves `client` null so the next poll starts over rather than
+      // reusing an unauthenticated one forever.
+      try {
+        await client.login();
+      } catch (error) {
+        client = null;
+        throw error;
+      }
+    }
+    return client;
   };
 
   const tick = async (): Promise<void> => {
@@ -377,6 +435,87 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
   };
 
   /**
+   * Sample Dispatcharr's live sessions and write the legs that have closed.
+   *
+   * On its own timer rather than on the 30-second heartbeat, and that is the
+   * whole reason it exists as separate machinery: the failure it records runs
+   * in tens of seconds, so a heartbeat-paced sample would miss most of the
+   * legs it is meant to measure. See `PODIUM_STABILITY_POLL_MS`.
+   *
+   * Only while the lock is held. Two workers sampling would double-count every
+   * failover -- each would see the same stream change and write its own leg --
+   * and the ledger's whole output is a rate, which doubling silently ruins.
+   * The lock is already the answer to that question for probing, and it is the
+   * same answer here.
+   *
+   * Every failure path leads to the same place: log it and come back next
+   * interval. A poll that cannot be read costs one sample out of a fortnight,
+   * and there is nothing here worth stopping a worker for.
+   */
+  const pollSessions = async (): Promise<void> => {
+    if (stopping || !holding || polling) return;
+    const live = currentConfig();
+    if (!live.PODIUM_STABILITY || !live.DISPATCHARR_URL.trim()) {
+      // Turned off mid-session: close what is open rather than leaving legs
+      // to be silently abandoned, and do it once -- `drain` empties the
+      // tracker, so the next poll finds nothing to do.
+      flushLegs(tracker.drain(Date.now()));
+      return;
+    }
+    polling = true;
+    try {
+      const poller = await sessionClient(live);
+      const at = Date.now();
+      const channels = await poller.liveChannels();
+      const samples: SessionSample[] = channels.map((channel) => ({
+        at,
+        channelKey: channel.key,
+        channelId: channel.channelId,
+        sessionKey: channel.startedAt,
+        streamId: channel.streamId,
+        state: channel.state,
+        healthy: channel.healthy,
+        totalBytes: channel.totalBytes,
+        clientCount: channel.clientCount,
+      }));
+      flushLegs(tracker.observe(samples, at));
+    } catch (error) {
+      // Debug-ish by nature but logged plainly: an install whose credentials
+      // have gone stale would otherwise show an empty ledger and no reason.
+      log(`session poll failed: ${errorText(error)}`);
+      // The token may be the thing that went stale; the next poll rebuilds.
+      client = null;
+    } finally {
+      polling = false;
+    }
+  };
+
+  /**
+   * Write closed legs, and say so when one of them is a failover.
+   *
+   * Failovers are logged and the other three endings are not, because a
+   * failover is the only one that is news: a session ending is somebody
+   * turning the television off. On a healthy install this line never appears,
+   * which is what makes it worth reading when it does.
+   */
+  const flushLegs = (legs: Leg[]): void => {
+    if (legs.length === 0) return;
+    try {
+      store.recordLegs(legs);
+    } catch (error) {
+      log(`could not record ${legs.length} stream leg(s): ${errorText(error)}`);
+      return;
+    }
+    for (const leg of legs) {
+      if (leg.ended !== 'failover') continue;
+      log(
+        `stream ${leg.streamId} failed over after ${(leg.watchedMs / 1000).toFixed(0)}s ` +
+          `on channel ${leg.channelId ?? leg.channelKey}`,
+      );
+    }
+  };
+
+  /**
    * Beat, and hand the lock back if it is no longer ours.
    *
    * Losing a lock we believe we hold should be impossible -- it takes two
@@ -411,6 +550,13 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
     beat = null;
     if (timer) clearTimeout(timer);
     timer = null;
+    if (sessionTimer) clearInterval(sessionTimer);
+    sessionTimer = null;
+    // Before the other worker starts sampling the same sessions. Its legs
+    // would otherwise overlap ours and both would be written, which is the
+    // double-count the lock exists to prevent -- and `holding` is already
+    // false above, so `pollSessions` will not reopen them.
+    flushLegs(tracker.drain(Date.now()));
     retry = setTimeout(acquire, LOCK_RETRY_MS);
     return false;
   };
@@ -450,6 +596,15 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
     }, 30_000);
     beat.unref?.();
 
+    // Its own interval, read once at acquire. Changing the poll rate in
+    // Settings therefore takes effect on the next lock acquisition rather than
+    // immediately, which is the one thing here that is not live -- rebuilding
+    // a timer whose only job is to fire on a fixed cadence, on every beat, to
+    // catch a setting nobody changes twice, is not worth the machinery.
+    const pollMs = Math.max(currentConfig().PODIUM_STABILITY_POLL_MS, 1_000);
+    sessionTimer = setInterval(() => void pollSessions(), pollMs);
+    sessionTimer.unref?.();
+
     // The *effective* dry run, not the booted one. `startWorker` is handed the
     // environment-only config and `PODIUM_DRY_RUN` defaults to on, so an
     // install that turned it off in Settings -- where the value is stored
@@ -473,6 +628,15 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
     if (timer) clearTimeout(timer);
     if (retry) clearTimeout(retry);
     if (beat) clearInterval(beat);
+    if (sessionTimer) clearInterval(sessionTimer);
+    try {
+      // Before the store closes. A container restarting during an evening's
+      // viewing would otherwise lose every leg in flight, which on an install
+      // that redeploys often is most of what the ledger would ever see.
+      if (holding) flushLegs(tracker.drain(Date.now()));
+    } catch {
+      // Shutting down anyway; a lost leg is not worth failing a stop over.
+    }
     try {
       // Only ours to release: a worker still waiting on someone else's lock
       // must not delete it on the way out.

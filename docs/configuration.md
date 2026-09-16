@@ -255,6 +255,36 @@ It needs `PODIUM_PROBE_IDLE_PROVIDERS` on, which in turn needs
 | `PODIUM_ANALYZE_SECONDS` | `6` | biggest lever on run time |
 | `PODIUM_MIN_BITRATE_KBPS` | `500` | below this counts as dead |
 | `PODIUM_DETECT_BLACK` | `true` | black-screen detection |
+| `PODIUM_STABILITY` | `true` | record how long streams hold |
+| `PODIUM_STABILITY_POLL_MS` | `10000` | how often live sessions are sampled |
+
+### Recording how long streams hold
+
+`PODIUM_STABILITY` watches Dispatcharr's live sessions and records which stream
+served, for how long, and when it failed over — the failure a five-second probe
+cannot see. See [Stability](usage.md#stability-the-failure-a-probe-cannot-see)
+for what it does with that.
+
+On by default, and cheap to be: it is one small GET against `/proxy/ts/status`,
+an endpoint the worker already calls, and it writes a row only when a viewing
+*ends*, so an install nobody is watching writes nothing at all. Rows age out
+after a fortnight.
+
+Collecting is deliberately separate from acting on it. The Stability weight on
+the Ranking page decides whether any of this changes an order, and it starts at
+0 on an install that predates the feature. Leave the recording on even if you
+have not turned that weight up, or the ledger will be empty on the day you do.
+
+`PODIUM_STABILITY_POLL_MS` is a resolution rather than a load knob. The failure
+worth catching runs in tens of seconds, so sampling much slower than ten misses
+the legs it is meant to measure, and sampling much faster buys precision on a
+figure reported per hour. A stream that drops faster than one interval is never
+seen holding at all. It takes effect the next time the worker takes its lock.
+
+Reading that endpoint makes Dispatcharr sweep its own stale client entries as a
+side effect. That is cleanup it does anyway and its own stats page polls the
+same endpoint continuously, so a ten-second poll is well inside normal use — but
+it is why this is a switch rather than an unconditional behaviour.
 
 ## Quality priors
 
@@ -523,6 +553,25 @@ scrape_configs:
 
 Verdicts change at pass cadence, and every scrape re-reads the whole probe
 cache, so a minute is plenty.
+
+### Stability series
+
+Four gauges summarise the [stability ledger](usage.md#stability-the-failure-a-probe-cannot-see):
+
+| Series | Meaning |
+| --- | --- |
+| `podium_stability_streams` | streams seen playing inside the fortnight window |
+| `podium_stability_watched_seconds` | observed serving time across them |
+| `podium_stability_breaks` | failovers, dropped soaks and stalls recorded |
+| `podium_stability_flapping_streams` | streams with at least two breaks *and* more than one an hour |
+
+The last is the one worth an alert. It is counted per stream rather than derived
+from the two above it, because a rate over a sum is not the same thing: one
+dreadful stream and a hundred good ones average out to fine.
+
+Aggregates only, with no per-stream labels — a catalogue's worth of stream ids
+is exactly the cardinality `PODIUM_METRICS_CHANNELS` exists to gate. The
+per-stream view is on the check panel, where it has a name beside it.
 
 ### Example dashboard
 

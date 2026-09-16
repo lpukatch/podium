@@ -754,3 +754,218 @@ export function deadReason(error: string): DeadReason {
     return 'unsupported';
   return 'other';
 }
+
+/**
+ * How much short of its deadline a connection may come back and still count as
+ * having run its course.
+ *
+ * Covers process startup and the flooring of `-t` to whole seconds, and no
+ * more. Generous here is expensive: every millisecond of slack is a window in
+ * which a genuine drop at the end of a leg reads as a clean finish, and a soak
+ * that misses the drop it was run to find reports the opposite of the truth.
+ */
+const SOAK_SLACK_MS = 500;
+
+/** What one ffmpeg leg of a soak did. */
+export interface SoakLeg {
+  /** How long the connection served before it ended, in milliseconds. */
+  heldMs: number;
+  /**
+   * True when the connection ended on its own rather than because the soak's
+   * budget ran out.
+   *
+   * The whole output of the soak, really. ffmpeg is told to read for the rest
+   * of the budget and nothing else; if it comes back early the far end stopped
+   * serving, which is the event a five-second probe can never see.
+   */
+  dropped: boolean;
+  /** ffmpeg's last words, when it dropped. Empty when the budget ended it. */
+  error: string;
+}
+
+export interface SoakResult {
+  /** Each connection the soak made, in order. */
+  legs: SoakLeg[];
+  /** Total time connections were serving. */
+  heldMs: number;
+  /** Connections that ended on their own. */
+  drops: number;
+  /**
+   * True when the soak gave up because a reconnection would not establish at
+   * all, rather than because its budget ran out.
+   *
+   * Distinct from a drop: a stream that will not connect a second time is dead,
+   * and `probe` already has a vocabulary for dead. The soak reports it and
+   * stops rather than spending its remaining budget failing to dial.
+   */
+  unreachable: boolean;
+}
+
+/**
+ * How long a stream actually holds, by holding it.
+ *
+ * The active counterpart to the passive ledger in `stability.ts`, and the
+ * answer to that module's one blind spot: it can only measure streams somebody
+ * has watched, which on a channel with six sources is usually one of them. This
+ * measures any stream on request.
+ *
+ * Deliberately *not* on a schedule. It costs a provider connection for its
+ * whole window -- minutes, because the failure it is looking for takes tens of
+ * seconds to appear -- so running it across a catalogue would cost more slots
+ * than probing the catalogue does, and would contend with the viewers the whole
+ * pacer exists to stay out of the way of. It is a button, and the operator
+ * pressing it is the authorisation.
+ *
+ * ## Why a loop of short reads rather than one long one with reconnect
+ *
+ * ffmpeg can be told to reconnect (`-reconnect 1`), and then one invocation
+ * covers the whole window -- but what it reports about those reconnections is a
+ * log line at a verbosity that changes between builds, and counting drops by
+ * parsing it would be guessing. Running one connection at a time and letting it
+ * end is not a workaround for that; it is the measurement. A connection that
+ * comes back before its deadline dropped, and the wall time it lasted is the
+ * leg. That is exactly what the passive ledger records from the other side, so
+ * the two produce the same rows and feed the same score.
+ */
+export async function soakStream(
+  url: string,
+  options: {
+    /** Total wall time to spend, across every connection. */
+    seconds?: number;
+    userAgent?: string;
+    ffmpegPath?: string;
+    /**
+     * Give up after this many consecutive connections that never served.
+     *
+     * One is a provider refusing a moment after accepting, which is the thing
+     * being measured. Two in a row is the stream being gone, and spending the
+     * rest of a three-minute budget rediscovering that helps nobody.
+     */
+    maxDeadConnections?: number;
+    /** Injected by the tests; defaults to the real clock. */
+    now?: () => number;
+  } = {},
+): Promise<SoakResult> {
+  const {
+    seconds = 180,
+    userAgent = 'VLC/3.0.14',
+    ffmpegPath = 'ffmpeg',
+    maxDeadConnections = 2,
+    now = Date.now,
+  } = options;
+
+  const empty: SoakResult = { legs: [], heldMs: 0, drops: 0, unreachable: false };
+  if (rejectUrl(url)) return empty;
+
+  const deadline = now() + seconds * 1000;
+  const legs: SoakLeg[] = [];
+  let deadInARow = 0;
+
+  while (now() < deadline) {
+    const remainingMs = deadline - now();
+    // Below about a second there is no leg worth measuring: the connection
+    // would not finish establishing before its own deadline, and would be
+    // recorded as a drop it did not earn.
+    if (remainingMs < 1_000) break;
+
+    // Floored, never rounded: ffmpeg's `-t` is in whole seconds, and rounding
+    // up would ask for time the budget does not have. This is also the number
+    // the drop test is made against, so the two cannot disagree.
+    const legSeconds = Math.max(1, Math.floor(remainingMs / 1000));
+    const startedAt = now();
+    const { error } = await runSoakLeg(url, { seconds: legSeconds, userAgent, ffmpegPath });
+    const heldMs = now() - startedAt;
+    // Measured against what this leg was actually told to run for, not against
+    // the budget: the two differ by up to a second once `-t` is floored, and
+    // testing the wrong one reads a real drop at the end of a soak as a clean
+    // finish. `SOAK_SLACK_MS` covers process startup and the flooring itself.
+    const dropped = heldMs < legSeconds * 1_000 - SOAK_SLACK_MS;
+    legs.push({ heldMs, dropped, error: dropped ? error : '' });
+
+    if (!dropped) break;
+
+    // A connection that served nothing at all did not drop, it failed to dial.
+    // `heldMs` under a second cannot contain a stream that played.
+    if (heldMs < 1_000) {
+      deadInARow += 1;
+      if (deadInARow >= maxDeadConnections) {
+        return {
+          legs,
+          heldMs: legs.reduce((sum, leg) => sum + leg.heldMs, 0),
+          drops: legs.filter((leg) => leg.dropped).length,
+          unreachable: true,
+        };
+      }
+    } else {
+      deadInARow = 0;
+    }
+  }
+
+  return {
+    legs,
+    heldMs: legs.reduce((sum, leg) => sum + leg.heldMs, 0),
+    drops: legs.filter((leg) => leg.dropped).length,
+    unreachable: false,
+  };
+}
+
+/**
+ * One connection: read the stream to nowhere until it stops or the time is up.
+ *
+ * A stream copy with no decoding, unlike `sampleStream` -- nothing here looks
+ * at the picture, so paying to decode minutes of 1080p would be memory and CPU
+ * spent to learn nothing. That also makes a soak far cheaper on the machine
+ * than its duration suggests: it is a socket and a mux.
+ */
+function runSoakLeg(
+  url: string,
+  options: { seconds: number; userAgent: string; ffmpegPath: string },
+): Promise<{ error: string }> {
+  const nul = process.platform === 'win32' ? 'NUL' : '/dev/null';
+  const args = [
+    '-y',
+    '-hide_banner',
+    '-v',
+    'error',
+    '-threads',
+    '1',
+    ...userAgentArgs(url, options.userAgent),
+    ...protocolArgs(url),
+    '-t',
+    String(options.seconds),
+    '-i',
+    url,
+    '-map',
+    '0',
+    '-c',
+    'copy',
+    '-f',
+    'mpegts',
+    nul,
+  ];
+
+  return new Promise<{ error: string }>((resolve) => {
+    // See `sampleStream` for why the path is opted out of Turbopack's tracing.
+    const child = spawn(/*turbopackIgnore: true*/ options.ffmpegPath, args, {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    runningChildren.add(child);
+
+    let stderr = '';
+    let settled = false;
+    const finish = (error: string) => {
+      if (settled) return;
+      settled = true;
+      runningChildren.delete(child);
+      resolve({ error });
+    };
+
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk);
+      // The tail is what matters: the last thing ffmpeg said before it gave up.
+      if (stderr.length > 8192) stderr = stderr.slice(-4096);
+    });
+    child.on('error', (err) => finish(`spawn failed: ${String(err)}`));
+    child.on('close', () => finish(stderr.trim().split('\n').at(-1)?.trim() ?? ''));
+  });
+}

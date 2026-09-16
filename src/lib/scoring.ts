@@ -8,6 +8,7 @@
 
 import { isInterlaced, type ProbeResult } from './probe';
 import { MIN_RESOLUTIONS, type MinResolution } from './resolution';
+import { type StabilityRecord, stabilityScore, tooUnstable } from './stability';
 
 /** Normalisation ceilings. Anything at or above these scores 1.0 for that term. */
 const MAX_HEIGHT = 2160;
@@ -136,6 +137,47 @@ export interface Weights {
    */
   uhdBitrateKbps: number;
   /**
+   * How much a stream's record of actually holding is worth.
+   *
+   * The term that answers a failure no probe can see: a feed that measures
+   * perfectly for five seconds and then dies every forty. See `stability.ts`
+   * for where the evidence comes from and what does and does not count as
+   * some.
+   *
+   * Larger than `audio` or `hdr` on purpose, and for the opposite reason those
+   * two are small. They separate streams that are already near-equals; this
+   * one has to be able to overturn a genuine quality lead, because the stream
+   * it exists to demote is usually the best-looking one on the channel -- that
+   * is how it got to slot 0.
+   *
+   * It can only ever subtract: a stream with no evidence against it scores full
+   * marks on this term, so raising the weight cannot promote a stream for
+   * having been watched. See the note on promotion in `stability.ts`.
+   *
+   * Defaults to 0 -- inert -- for the reason every term added since the first
+   * release does: an existing rules file cannot mention a term that did not
+   * exist when it was written, and an upgrade must not reshuffle channels
+   * nobody asked to change. New installs are seeded with
+   * `NEW_INSTALL_STABILITY`.
+   */
+  stability: number;
+  /**
+   * Drops an hour above which a stream is not fit to lead a channel.
+   *
+   * The health check beside the weight, in the relation `minBitrateKbps` has to
+   * the `bitrate` term. The weight expresses a preference among streams worth
+   * ranking; this says a stream has proved itself unwatchable and must not be
+   * served first whatever its picture measures. A stream over the line sinks
+   * below every stream that has not, keeps its score, and stays ahead of the
+   * ones that are actually broken -- the same treatment `minResolution` gets,
+   * and for the same reason: it is a preference about what leads, not a
+   * verdict that the stream is dead.
+   *
+   * Needs the same evidence floor the weight does, so a single incident can
+   * never trip it. 0 disables it, which is the default.
+   */
+  maxDropsPerHour: number;
+  /**
    * The smallest picture a stream may carry and still be offered.
    *
    * Never read from the rules file's `ordering` block: it is resolved per
@@ -168,6 +210,12 @@ export const DEFAULT_WEIGHTS: Weights = {
   // the same anyway. Both exist so an upgrade cannot reshuffle anything.
   hdr: 0,
   hdrPreference: 'none',
+  // Inert for the same reason, and doubly so: at weight 0 the term contributes
+  // nothing, and at `maxDropsPerHour` 0 the health check never fires. An
+  // install upgrading into the ledger collects evidence without acting on it
+  // until somebody says to.
+  stability: 0,
+  maxDropsPerHour: 0,
   preferH265: true,
   minBitrateKbps: 500,
   // Both inert: 1.0 applies no codec correction, and a UHD ceiling equal to
@@ -182,6 +230,37 @@ export const DEFAULT_WEIGHTS: Weights = {
  * Also what "Reset to defaults" restores, since it is what podium ships today.
  */
 export const NEW_INSTALL_AUDIO = 0.1;
+
+/**
+ * The stability weight a fresh install starts with.
+ *
+ * Sized by measuring it, against the H.264 1080p / 5.3 Mbps feed the whole
+ * ledger was written for. At 0.15 on the default set, scoring that stream four
+ * ways:
+ *
+ *     clean                      0.5449
+ *     two drops in six hours     0.5123   (-0.033)
+ *     two drops in 110 seconds   0.4165   (-0.128)
+ *
+ * and the streams it then has to place against:
+ *
+ *     clean 1080p at 2 Mbps      0.4493   beats the flapping 5.3 Mbps feed
+ *     clean 720p  at 3 Mbps      0.4275   beats it
+ *     clean 480p  at 1.2 Mbps    0.3415   does not
+ *
+ * which is the shape to want. A demonstrably flapping stream loses slot 0 to
+ * any comparable stream that holds -- including one carrying barely a third of
+ * the bitrate -- without falling below a genuinely poor feed it would still be
+ * better than between drops. The occasional dropper gives up 0.033 and moves
+ * nowhere, which is the other half: an evening with a hiccup in it must not
+ * reshuffle a channel.
+ *
+ * `maxDropsPerHour` is deliberately *not* seeded alongside it. The weight
+ * degrades gracefully and shows its work in the score column; the health check
+ * is a cliff, and a cliff belongs to an operator who has looked at their own
+ * ledger and chosen where to put it.
+ */
+export const NEW_INSTALL_STABILITY = 0.15;
 
 /**
  * The HDR weight a fresh install starts with. Half of `audio`, for choosing
@@ -383,6 +462,7 @@ export function score(
   result: ProbeResult,
   weights: Weights = DEFAULT_WEIGHTS,
   audioOnly = false,
+  stability?: StabilityRecord,
 ): number {
   if (!isHealthy(result, weights, audioOnly)) return 0;
 
@@ -446,7 +526,8 @@ export function score(
     weights.fps +
     weights.codec +
     weights.audio +
-    weights.hdr;
+    weights.hdr +
+    weights.stability;
   if (sum <= 0) return 0;
 
   const total =
@@ -455,7 +536,8 @@ export function score(
       fps * weights.fps +
       codec * weights.codec +
       audioScore(result) * weights.audio +
-      hdrScore(result, weights) * weights.hdr) /
+      hdrScore(result, weights) * weights.hdr +
+      stabilityScore(stability) * weights.stability) /
     sum;
 
   return Math.round(Math.min(total, 1) * 10_000) / 10_000;
@@ -466,6 +548,15 @@ export interface RankEntry {
   stepOrder: number;
   providerId: number;
   result: ProbeResult;
+  /**
+   * What the passive ledger has on this stream, when anything.
+   *
+   * Optional because most streams have none: nobody has watched them, and the
+   * scoring reads absence as full marks rather than as a gap. Supplied by the
+   * caller from `Store.stabilityRecords` so that ranking stays a pure function
+   * of what it is handed.
+   */
+  stability?: StabilityRecord;
 }
 
 /** How the comparator chooses between two equally-usable streams. */
@@ -527,6 +618,19 @@ export function rank(
         (isHealthy(b.result, weights, audioOnly) ? 0 : 1);
       if (healthy !== 0) return healthy;
 
+      // Above the mode keys, unlike the unmeasured-bitrate one below it, and
+      // that is the difference between a preference and a fact. Provider and
+      // alias order say which stream an operator would rather serve; this says
+      // one of them has been measured failing to serve at all. A curated order
+      // is worth overruling for that, where it is not worth overruling merely
+      // because a bitrate is missing.
+      //
+      // Inert unless `maxDropsPerHour` is set, which it is not by default.
+      const stable =
+        (tooUnstable(a.stability, weights.maxDropsPerHour) ? 1 : 0) -
+        (tooUnstable(b.stability, weights.maxDropsPerHour) ? 1 : 0);
+      if (stable !== 0) return stable;
+
       if (mode === 'alias' && a.stepOrder !== b.stepOrder) return a.stepOrder - b.stepOrder;
       if (mode === 'provider') {
         const ta = providerRank.get(a.providerId) ?? Number.MAX_SAFE_INTEGER;
@@ -548,7 +652,9 @@ export function rank(
       const measured = (bitrateUnknown(a.result) ? 1 : 0) - (bitrateUnknown(b.result) ? 1 : 0);
       if (measured !== 0) return measured;
 
-      const scoreDelta = score(b.result, weights, audioOnly) - score(a.result, weights, audioOnly);
+      const scoreDelta =
+        score(b.result, weights, audioOnly, b.stability) -
+        score(a.result, weights, audioOnly, a.stability);
       if (scoreDelta !== 0) return scoreDelta;
       return a.streamId - b.streamId;
     })

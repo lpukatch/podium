@@ -32,6 +32,7 @@ import {
   config as serverConfig,
   snapshot,
 } from '@/lib/server/state';
+import { describeStability, type StabilityRecord, tooUnstable } from '@/lib/stability';
 import { Store } from '@/lib/store';
 import {
   buildVariants,
@@ -343,16 +344,37 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       }
     }
 
+    // What the ledger has on these streams, read once. The panel is where an
+    // operator goes to ask why a stream sank, so a demotion this term caused
+    // has to be legible on the row that moved -- a score that dropped for
+    // reasons the table does not show is worse than no term at all.
+    let stability = new Map<number, StabilityRecord>();
+    try {
+      const store = new Store(config.dbPath);
+      try {
+        stability = store.stabilityRecords();
+      } finally {
+        store.close();
+      }
+    } catch {
+      // As the runner does: an unreadable ledger ranks as no evidence rather
+      // than failing the check.
+    }
+
     const jobMeta = new Map(jobs.map((job) => [job.streamId, job]));
     const entries: RankEntry[] = [...results.entries()]
       .map(([streamId, result]) => {
         const job = jobMeta.get(streamId);
         if (!job) return null;
+        // Spread rather than assigned: the key must be absent, not present and
+        // undefined, or the `satisfies` below reads it as a required field.
+        const record = stability.get(streamId);
         return {
           streamId,
           stepOrder: job.stepOrder,
           providerId: job.providerId,
           result,
+          ...(record ? { stability: record } : {}),
         } satisfies RankEntry;
       })
       .filter((entry): entry is RankEntry => entry !== null);
@@ -471,7 +493,13 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         videoCodec: result?.videoCodec ?? '',
         error: result?.error ?? '',
         elapsedMs: result?.elapsedMs ?? 0,
-        score: result ? score(result, strategy.weights, audioOnly) : 0,
+        score: result ? score(result, strategy.weights, audioOnly, stability.get(streamId)) : 0,
+        // One line, pre-rendered rather than shipped as counters: every reader
+        // of it wants the same sentence, and rendering it here keeps the
+        // wording in one place alongside the maths that produced it.
+        stability: describeStability(stability.get(streamId)),
+        /** True when `maxDropsPerHour` is sinking this stream. */
+        unstable: tooUnstable(stability.get(streamId), strategy.weights.maxDropsPerHour),
         usable: result ? isUsable(result, strategy.weights, audioOnly) : false,
         // Separates "below the resolution floor" from "does not play", which
         // the panel explains differently and the ranking treats differently.

@@ -126,10 +126,193 @@ export interface Provider {
  * `profileId` is null when the payload does not name a login -- an entry that
  * is a bare channel id, or a build that does not carry `m3u_profile_id`. The
  * pacer treats those as unattributed rather than assuming a lane.
+ *
+ * Everything below `profileId` is what the stability ledger reads, and every
+ * one of those fields is optional in the same sense: the endpoint has carried
+ * them since the builds this was written against, but a bare-id entry has
+ * none of them and an older build may omit any. Absent must read as "not
+ * observed" rather than as a value -- a missing `totalBytes` is not zero
+ * bytes, and the tracker treats it as a sample it cannot draw a conclusion
+ * from. See `stability.ts`.
  */
 export interface ActiveSession {
   channelId: number;
   profileId: number | null;
+  /**
+   * The stream currently feeding the channel, from Redis metadata.
+   *
+   * The field the whole passive ledger turns on: this changing under a session
+   * that never stopped is Dispatcharr failing over, which is the event no
+   * probe can observe and the one worth recording.
+   */
+  streamId?: number | null;
+  /**
+   * Epoch milliseconds the *channel session* was initialised, converted from
+   * the endpoint's float seconds.
+   *
+   * Channel init, not connection start: a same-URL reconnect leaves this
+   * alone, so it identifies the session rather than the connection. That is
+   * exactly what makes it useful -- it is the key that says two samples belong
+   * to one viewing, so a failover can be told from a fresh tune-in.
+   */
+  startedAt?: number | null;
+  /** `active`, `connecting`, `initializing`; '' when the payload omits it. */
+  state?: string;
+  /** The stream manager's own health flag, when the worker owning it answered. */
+  healthy?: boolean | null;
+  /**
+   * Bytes the proxy has pulled for this session so far.
+   *
+   * The stall signal. A same-URL reconnect moves neither `streamId` nor
+   * `startedAt`, so the only trace of ffmpeg timing out and reconnecting is
+   * this not advancing while somebody is still watching.
+   */
+  totalBytes?: number | null;
+  /** Clients attached. Zero means the session is winding down, not watching. */
+  clientCount?: number;
+}
+
+/**
+ * One live channel from `/proxy/ts/status`, before anything is resolved.
+ *
+ * `key` is the endpoint's own identifier -- a channel uuid on current builds --
+ * and is what the stability ledger keys legs on. Keeping it means the poller
+ * needs no channel catalogue to make sense of a poll, which is the difference
+ * between a ten-second timer and one that fetches every channel first.
+ *
+ * `channelId` is the numeric id when a uuid map was supplied and knew the key,
+ * and null otherwise. Null is usable here in a way it is not for the pacer: a
+ * leg still records which stream held and for how long, and the channel is
+ * only ever context for a person reading the row back.
+ */
+export interface LiveChannel {
+  key: string;
+  channelId: number | null;
+  profileId: number | null;
+  streamId: number | null;
+  /** Epoch milliseconds, converted from the endpoint's float seconds. */
+  startedAt: number | null;
+  state: string;
+  healthy: boolean | null;
+  totalBytes: number | null;
+  clientCount: number;
+}
+
+/** A numeric field, or null when the payload did not carry a usable one. */
+function statusNumber(val: unknown): number | null {
+  if (typeof val === 'number') return Number.isFinite(val) ? val : null;
+  if (typeof val !== 'string' || val.trim() === '') return null;
+  const n = Number(val);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Parse a `/proxy/ts/status` body into one row per live channel.
+ *
+ * Shared by `activeSessions` and `liveChannels` so the two cannot drift: they
+ * differ in what they do with an unresolvable id, not in how they read the
+ * payload. `rawCount` comes back alongside because the pacer's fail-closed
+ * check needs to know the payload *claimed* sessions even when none resolved.
+ *
+ * Null rather than 0 for every absent number, throughout. A missing
+ * `total_bytes` means "this sample says nothing about throughput"; a zero
+ * would assert the session has pulled nothing, which reads as a stall and
+ * would charge a perfectly good stream with one on every poll of a build that
+ * does not report the field.
+ */
+export function parseStatusPayload(
+  body: { channels?: unknown[]; count?: number },
+  uuidMap?: Map<string, number> | Record<string, number>,
+): { rawCount: number; channels: LiveChannel[] } {
+  const rawCount = Math.max(
+    typeof body.count === 'number' ? body.count : 0,
+    Array.isArray(body.channels) ? body.channels.length : 0,
+  );
+  const entries = Array.isArray(body.channels) ? body.channels : [];
+  const resolve = (val: unknown): number | null => {
+    if (typeof val === 'number') return val;
+    if (typeof val !== 'string' || val.trim() === '') return null;
+    if (!val.includes('-') && !Number.isNaN(Number(val))) return Number(val);
+    if (!uuidMap) return null;
+    const mapped = uuidMap instanceof Map ? uuidMap.get(val) : uuidMap[val];
+    return typeof mapped === 'number' ? mapped : null;
+  };
+
+  const channels: LiveChannel[] = [];
+  for (const entry of entries) {
+    if (typeof entry === 'number' || typeof entry === 'string') {
+      // A bare id carries no login, so it stays unattributed. The uuid form is
+      // looser than the object form below, which rejects a bare number string
+      // only when it looks like a uuid.
+      const channelId =
+        typeof entry === 'number'
+          ? entry
+          : entry.trim() !== '' && !Number.isNaN(Number(entry))
+            ? Number(entry)
+            : resolve(entry);
+      const key = String(entry).trim();
+      if (key === '') continue;
+      channels.push({
+        key,
+        channelId,
+        profileId: null,
+        streamId: null,
+        startedAt: null,
+        state: '',
+        healthy: null,
+        totalBytes: null,
+        clientCount: 0,
+      });
+      continue;
+    }
+    if (!entry || typeof entry !== 'object') continue;
+    const row = entry as Record<string, unknown>;
+    let channelId: number | null = null;
+    let key = '';
+    for (const field of ['channel_id', 'id', 'channel']) {
+      const raw = row[field];
+      if (raw === undefined || raw === null) continue;
+      const asKey = String(raw).trim();
+      if (asKey === '') continue;
+      // The first field that carries anything wins the key, even when it does
+      // not resolve to a number -- the key is what identifies the channel to
+      // the ledger, and a uuid nobody has mapped still identifies it fine.
+      if (key === '') key = asKey;
+      const resolved = resolve(raw);
+      if (resolved !== null) {
+        channelId = resolved;
+        key = asKey;
+        break;
+      }
+    }
+    if (key === '') continue;
+    const rawProfile = row.m3u_profile_id;
+    const profileId =
+      typeof rawProfile === 'number'
+        ? rawProfile
+        : typeof rawProfile === 'string' &&
+            rawProfile.trim() !== '' &&
+            !Number.isNaN(Number(rawProfile))
+          ? Number(rawProfile)
+          : null;
+    // Seconds on the wire, milliseconds everywhere in this codebase. Floored
+    // rather than rounded so two samples of one session agree on the key
+    // exactly: the endpoint reports a float and a half-millisecond of drift
+    // between polls must not read as a new session.
+    const startedAtSec = statusNumber(row.started_at);
+    channels.push({
+      key,
+      channelId,
+      profileId,
+      streamId: statusNumber(row.stream_id),
+      startedAt: startedAtSec === null ? null : Math.floor(startedAtSec * 1000),
+      state: typeof row.state === 'string' ? row.state : '',
+      healthy: typeof row.healthy === 'boolean' ? row.healthy : null,
+      totalBytes: statusNumber(row.total_bytes),
+      clientCount: statusNumber(row.client_count) ?? 0,
+    });
+  }
+  return { rawCount, channels };
 }
 
 export class DispatcharrError extends Error {}
@@ -724,60 +907,31 @@ export class DispatcharrClient {
    * `m3u_profile_id` is the field that matters here: Dispatcharr picks a
    * profile per session and reports which one, so a viewer can be charged to
    * the lane they are actually occupying rather than guessed at.
+   *
+   * Sessions whose channel id could not be resolved are dropped, and a payload
+   * that had entries but resolved none of them throws. Both are deliberate and
+   * both are for the pacer: it fails closed on a viewer it cannot place, and a
+   * silent empty list here would read as "nobody is watching" and let a pass
+   * probe straight over them. `liveChannels` makes the opposite trade -- see
+   * there.
    */
   async activeSessions(
     uuidMap?: Map<string, number> | Record<string, number>,
   ): Promise<ActiveSession[]> {
-    const resp = await this.request('GET', '/proxy/ts/status');
-    if (!resp.ok) throw new DispatcharrError(`activity probe -> ${resp.status}`);
-    const body = (await resp.json()) as { channels?: unknown[]; count?: number };
-    const rawCount = Math.max(
-      typeof body.count === 'number' ? body.count : 0,
-      Array.isArray(body.channels) ? body.channels.length : 0,
-    );
-    const entries = Array.isArray(body.channels) ? body.channels : [];
-    const resolve = (val: unknown): number | null => {
-      if (typeof val === 'number') return val;
-      if (typeof val !== 'string' || val.trim() === '') return null;
-      if (!val.includes('-') && !Number.isNaN(Number(val))) return Number(val);
-      if (!uuidMap) return null;
-      const mapped = uuidMap instanceof Map ? uuidMap.get(val) : uuidMap[val];
-      return typeof mapped === 'number' ? mapped : null;
-    };
-
+    const { rawCount, channels } = await this.liveStatus(uuidMap);
     const sessions: ActiveSession[] = [];
-    for (const entry of entries) {
-      if (typeof entry === 'number' || typeof entry === 'string') {
-        // A bare id carries no login, so it stays unattributed. The uuid form
-        // is looser than the object form below, which rejects a bare number
-        // string only when it looks like a uuid.
-        const channelId =
-          typeof entry === 'number'
-            ? entry
-            : entry.trim() !== '' && !Number.isNaN(Number(entry))
-              ? Number(entry)
-              : resolve(entry);
-        if (channelId !== null) sessions.push({ channelId, profileId: null });
-        continue;
-      }
-      if (!entry || typeof entry !== 'object') continue;
-      const row = entry as Record<string, unknown>;
-      let channelId: number | null = null;
-      for (const key of ['channel_id', 'id', 'channel']) {
-        channelId = resolve(row[key]);
-        if (channelId !== null) break;
-      }
-      if (channelId === null) continue;
-      const rawProfile = row.m3u_profile_id;
-      const profileId =
-        typeof rawProfile === 'number'
-          ? rawProfile
-          : typeof rawProfile === 'string' &&
-              rawProfile.trim() !== '' &&
-              !Number.isNaN(Number(rawProfile))
-            ? Number(rawProfile)
-            : null;
-      sessions.push({ channelId, profileId });
+    for (const channel of channels) {
+      if (channel.channelId === null) continue;
+      sessions.push({
+        channelId: channel.channelId,
+        profileId: channel.profileId,
+        streamId: channel.streamId,
+        startedAt: channel.startedAt,
+        state: channel.state,
+        healthy: channel.healthy,
+        totalBytes: channel.totalBytes,
+        clientCount: channel.clientCount,
+      });
     }
 
     if (rawCount > 0 && sessions.length === 0) {
@@ -786,6 +940,34 @@ export class DispatcharrClient {
       );
     }
     return sessions;
+  }
+
+  /**
+   * The same poll, as the stability ledger wants it.
+   *
+   * Two differences from `activeSessions`, both because the ledger's failure
+   * mode is the opposite one. It keys legs on the endpoint's own channel key
+   * rather than on a resolved numeric id, so it needs no channel catalogue and
+   * can run on a ten-second timer without fetching one -- and it returns what
+   * it could read rather than throwing when nothing resolved, because a poll
+   * that comes back unreadable should cost the ledger one sample, not stop it.
+   * Missing a session is a gap in a rate; for the pacer it would be a viewer
+   * probed over.
+   */
+  async liveChannels(
+    uuidMap?: Map<string, number> | Record<string, number>,
+  ): Promise<LiveChannel[]> {
+    return (await this.liveStatus(uuidMap)).channels;
+  }
+
+  /** The shared read and parse behind the two above. */
+  private async liveStatus(
+    uuidMap?: Map<string, number> | Record<string, number>,
+  ): Promise<{ rawCount: number; channels: LiveChannel[] }> {
+    const resp = await this.request('GET', '/proxy/ts/status');
+    if (!resp.ok) throw new DispatcharrError(`activity probe -> ${resp.status}`);
+    const body = (await resp.json()) as { channels?: unknown[]; count?: number };
+    return parseStatusPayload(body, uuidMap);
   }
 
   /** Channel ids currently being streamed. Resolves UUIDs if uuidMap is provided. */

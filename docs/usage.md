@@ -564,6 +564,88 @@ declares one. Podium reads a few seconds of the stream, which also gives it the
 black-screen check from the same read, so it costs one provider connection
 rather than two.
 
+### Stability: the failure a probe cannot see
+
+Every measurement above is a snapshot. ffprobe resolves codec, resolution and
+bitrate in a few seconds, and a stream that answers well in those seconds is
+ranked as a good stream. Some are not: a feed can play perfectly for forty
+seconds and then go silent, over and over. It probes clean every pass, takes
+slot 0 on merit, and is unwatchable.
+
+Podium learns about that by watching Dispatcharr watch it. The `/proxy/ts/status`
+endpoint reports, per live channel, which stream is feeding it, when the session
+started and how many bytes it has pulled. Sampling that every ten seconds while
+somebody is watching reconstructs what no probe can reach: how long each stream
+actually held.
+
+Two things count against a stream, and both are unambiguous:
+
+- a **failover**, where the stream serving a session changes while the session
+  carries on. Dispatcharr only does that because the feed failed.
+- a **stall**, where the byte counter stops advancing while somebody is still
+  watching. This is the same-URL reconnect, which moves neither the stream id
+  nor the session and would otherwise leave no trace at all.
+
+A session that simply *ends* is charged to nobody. From outside, a channel
+stopping because the feed died looks exactly like a channel stopping because
+somebody switched over to the news, and there is no field that separates them.
+So it counts as clean watched time and no failure — which under-counts real
+failures and never invents one.
+
+**It can only ever subtract.** A stream with nothing recorded against it — which
+is most of them, since most streams sit behind slot 0 and have never served
+anybody — scores full marks on this term. Turning the weight up cannot promote a
+stream for having been watched, or the ranking would drift towards whatever
+happens to be popular.
+
+The weight is seeded at 0.15 on new installs and 0 on existing ones, like every
+other term added since the first release. On the H.264 1080p feed it was
+measured against:
+
+| | score |
+|---|---|
+| clean | 0.5449 |
+| two drops in six hours | 0.5123 |
+| two drops in 110 seconds | 0.4165 |
+
+and the streams it then has to place against: a clean 1080p at 2 Mbps scores
+0.4493 and a clean 720p at 3 Mbps scores 0.4275, so both beat the flapping
+5.3 Mbps feed — while a clean 480p at 1.2 Mbps scores 0.3415 and does not. A
+demonstrably flapping stream loses slot 0 to any comparable stream that holds,
+without falling below a genuinely poor feed it would still be better than
+between drops. The occasional dropper gives up 0.033 and moves nowhere.
+
+Two drops are needed before the term bites at all. One is an incident — an
+encoder restarting, a moment of weather — and demoting on it would make the
+ranking jumpy in a way nobody could explain.
+
+**Max drops per hour**, under Advanced on the same page, is the harder version:
+a stream over the line is ranked after every stream that is not, whatever its
+picture looks like, and is never served first. It stays ahead of streams that do
+not play at all — it is sunk, not condemned. Off by default.
+
+### Soaking a stream
+
+The ledger can only learn about streams somebody has watched, which on a
+six-stream channel is usually the one already in slot 0 — exactly the stream
+whose replacement you want to know about. **Soak 3m**, on each row of the check
+panel, is the way out: it holds that stream open for three minutes and records
+how long it lasts.
+
+It works by making one connection at a time and letting it end. A connection
+that comes back before its deadline dropped, and the time it lasted is the
+measurement — the same thing the passive ledger records from the other side, so
+the two produce the same rows and feed the same score. A soak that holds for the
+full three minutes is written too: clean time is half of what a rate is made of,
+and it is how a stream with an old bad record is shown to have recovered.
+
+It is a button rather than a schedule because it is not free. A soak occupies a
+provider connection for its whole window, and since the failure takes tens of
+seconds to appear, a meaningful one is minutes. Across six streams on each of
+hundreds of channels that would cost more slots than probing the catalogue does.
+If somebody is watching when you press it, the result says so — the soak was
+competing for a slot, and a bad reading may be yours rather than the provider's.
+
 ### Bitrate is not comparable across codecs
 
 HEVC delivers the same picture at a fraction of the bitrate, so comparing the
