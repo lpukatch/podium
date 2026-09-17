@@ -217,7 +217,9 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       snap.channels.filter((c) => c.uuid).map((c) => [c.uuid as string, c.id]),
     );
     // Fail closed, as the worker does: unknown means assume somebody is there.
-    const sessions = await client.activeSessions(uuidMap, activityOptions(config)).catch(() => null);
+    const sessions = await client
+      .activeSessions(uuidMap, activityOptions(config))
+      .catch(() => null);
     const watching = sessions === null || sessions.length > 0;
     const loginsByProvider = new Map(snap.providers.map((p) => [p.id, providerLogins(p)]));
     const providerOfProfile = new Map<number, number>();

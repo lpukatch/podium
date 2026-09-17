@@ -341,7 +341,10 @@ export function parseStatusPayload(
 export class DispatcharrError extends Error {}
 
 /** The proxy endpoint that plays one stream through its Dispatcharr profile. */
-export function proxyStreamUrl(baseUrl: string, streamHash: string | null | undefined): string | null {
+export function proxyStreamUrl(
+  baseUrl: string,
+  streamHash: string | null | undefined,
+): string | null {
   if (!streamHash || streamHash.trim() === '') return null;
   const base = normaliseBaseUrl(baseUrl, 'Dispatcharr');
   return `${base}/proxy/ts/stream/${encodeURIComponent(streamHash.trim())}`;

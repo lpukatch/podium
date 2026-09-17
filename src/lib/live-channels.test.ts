@@ -99,7 +99,10 @@ describe('parseStatusPayload', () => {
       {
         channels: [
           live({ clients: [{ user_agent: 'Podium-Probe/1' }] }),
-          live({ channel_id: 12, clients: [{ user_agent: 'Podium-Probe/1' }, { user_agent: 'VLC' }] }),
+          live({
+            channel_id: 12,
+            clients: [{ user_agent: 'Podium-Probe/1' }, { user_agent: 'VLC' }],
+          }),
           live({ channel_id: 13 }),
         ],
       },
