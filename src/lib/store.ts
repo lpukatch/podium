@@ -35,7 +35,7 @@ import Database from 'better-sqlite3';
 import { createHash } from 'crypto';
 import { mkdirSync } from 'fs';
 import { dirname } from 'path';
-import type { ProbeResult } from './probe';
+import type { ProbeResult, SoakResult } from './probe';
 import type { Leg, StabilityRecord } from './stability';
 import { pickBestVariant, type VariantVerdict, verdictStatus } from './variants';
 
@@ -494,6 +494,19 @@ CREATE TABLE IF NOT EXISTS soak_requests (
     seconds    INTEGER
 );
 CREATE INDEX IF NOT EXISTS soak_requests_queued ON soak_requests (queued_at);
+
+-- The latest completed active measurement for each stream. The stability ledger
+-- keeps every leg for ranking; this small summary lets the channel editor show
+-- the result of one soak without guessing its boundaries from those legs.
+CREATE TABLE IF NOT EXISTS soak_results (
+    stream_id    INTEGER PRIMARY KEY,
+    completed_at INTEGER NOT NULL,
+    held_ms      INTEGER NOT NULL,
+    drops        INTEGER NOT NULL,
+    failed_dials INTEGER NOT NULL,
+    unreachable  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS soak_results_completed_at ON soak_results (completed_at);
 CREATE INDEX IF NOT EXISTS stream_legs_ended_at ON stream_legs (ended_at);
 
 CREATE INDEX IF NOT EXISTS quality_samples_bucket
@@ -547,6 +560,16 @@ export interface StoredSoakRequest extends SoakRequest {
   seconds: number | null;
   queuedAt: number;
   source: SoakSource;
+}
+
+/** The last fully completed active soak for a stream. */
+export interface StoredSoakResult {
+  streamId: number;
+  completedAt: number;
+  heldMs: number;
+  drops: number;
+  failedDials: number;
+  unreachable: boolean;
 }
 
 /**
@@ -2713,6 +2736,62 @@ export class Store {
       for (const id of streamIds) cleared += del.run(id).changes;
     })();
     return cleared;
+  }
+
+  /** Save the display summary for a soak that was allowed to finish. */
+  recordSoakResult(streamId: number, result: SoakResult): void {
+    this.sql(
+      `INSERT INTO soak_results
+         (stream_id, completed_at, held_ms, drops, failed_dials, unreachable)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(stream_id) DO UPDATE SET
+         completed_at = excluded.completed_at,
+         held_ms = excluded.held_ms,
+         drops = excluded.drops,
+         failed_dials = excluded.failed_dials,
+         unreachable = excluded.unreachable`,
+    ).run(
+      streamId,
+      Date.now(),
+      result.heldMs,
+      result.drops,
+      result.failedDials,
+      result.unreachable ? 1 : 0,
+    );
+  }
+
+  /** Latest completed soak summaries, keyed by stream id for channel displays. */
+  soakResults(streamIds: number[]): Map<number, StoredSoakResult> {
+    const out = new Map<number, StoredSoakResult>();
+    if (streamIds.length === 0) return out;
+    for (let i = 0; i < streamIds.length; i += 400) {
+      const chunk = streamIds.slice(i, i + 400);
+      const holes = chunk.map(() => '?').join(',');
+      const rows = this.db
+        .prepare(
+          `SELECT stream_id, completed_at, held_ms, drops, failed_dials, unreachable
+             FROM soak_results WHERE stream_id IN (${holes})`,
+        )
+        .all(...chunk) as Array<{
+        stream_id: number;
+        completed_at: number;
+        held_ms: number;
+        drops: number;
+        failed_dials: number;
+        unreachable: number;
+      }>;
+      for (const row of rows) {
+        out.set(row.stream_id, {
+          streamId: row.stream_id,
+          completedAt: row.completed_at,
+          heldMs: row.held_ms,
+          drops: row.drops,
+          failedDials: row.failed_dials,
+          unreachable: Boolean(row.unreachable),
+        });
+      }
+    }
+    return out;
   }
 
   /** The legs themselves, newest first, for one stream or for all of them. */

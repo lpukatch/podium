@@ -115,4 +115,34 @@ describe('the stability ledger', () => {
     store.recordLegs([]);
     expect(store.stabilityLegs()).toEqual([]);
   });
+
+  it('keeps the latest completed soak summary per stream', () => {
+    store.recordSoakResult(77013, {
+      legs: [],
+      heldMs: 60_000,
+      drops: 1,
+      failedDials: 2,
+      unreachable: true,
+      stopped: false,
+    });
+    vi.setSystemTime(NOW + HOUR);
+    store.recordSoakResult(77013, {
+      legs: [],
+      heldMs: 180_000,
+      drops: 0,
+      failedDials: 0,
+      unreachable: false,
+      stopped: false,
+    });
+
+    expect(store.soakResults([77013, 77177]).get(77013)).toEqual({
+      streamId: 77013,
+      completedAt: NOW + HOUR,
+      heldMs: 180_000,
+      drops: 0,
+      failedDials: 0,
+      unreachable: false,
+    });
+    expect(store.soakResults([77177])).toEqual(new Map());
+  });
 });

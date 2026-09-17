@@ -3209,7 +3209,10 @@ export class Runner {
           const spend = !result.stopped;
           try {
             store.recordLegs(jobLegs);
-            if (spend) store.clearSoaks([job.streamId]);
+            if (spend) {
+              store.recordSoakResult(job.streamId, { ...result, drops: recordedDrops });
+              store.clearSoaks([job.streamId]);
+            }
           } catch (error) {
             log(`could not record the soak of ${name}: ${errorText(error)}`);
           }
