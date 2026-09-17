@@ -55,10 +55,22 @@ export async function POST(request: Request) {
     // Last probe result per stream, so the editor can show what is known
     // without having to probe again.
     let verdicts = new Map<number, { probedAt: number; alive: boolean; result: ProbeResult }>();
+    let soakResults = new Map<
+      number,
+      {
+        completedAt: number;
+        heldMs: number;
+        drops: number;
+        failedDials: number;
+        unreachable: boolean;
+      }
+    >();
     let store: Store | null = null;
     try {
       store = new Store(loadConfig().dbPath);
-      verdicts = store.verdicts([...new Set([...matchedIds, ...assigned])]);
+      const streamIds = [...new Set([...matchedIds, ...assigned])];
+      verdicts = store.verdicts(streamIds);
+      soakResults = store.soakResults(streamIds);
     } catch {
       // Cache unavailable is not fatal; the editor just shows nothing known.
     } finally {
@@ -87,6 +99,7 @@ export async function POST(request: Request) {
         lastHeight: verdicts.get(id)?.result.height ?? null,
         lastBitrateKbps: verdicts.get(id)?.result.bitrateKbps ?? null,
         lastBlack: verdicts.get(id)?.result.black ?? null,
+        lastSoak: soakResults.get(id) ?? null,
       };
     };
 

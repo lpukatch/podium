@@ -88,6 +88,13 @@ interface StreamRow {
   lastHeight: number | null;
   lastBitrateKbps: number | null;
   lastBlack: boolean | null;
+  lastSoak: {
+    completedAt: number;
+    heldMs: number;
+    drops: number;
+    failedDials: number;
+    unreachable: boolean;
+  } | null;
 }
 
 interface Preview {
@@ -2102,6 +2109,19 @@ function StreamList({
                       </>
                     ) : (
                       <span className="text-[var(--color-muted)]">never probed</span>
+                    )}
+                    {r.lastSoak && (
+                      <span className="mt-1 block text-[var(--color-muted)]">
+                        {r.lastSoak.unreachable
+                          ? 'soak would not connect'
+                          : r.lastSoak.drops > 0
+                            ? `soak ${r.lastSoak.drops} drop${r.lastSoak.drops === 1 ? '' : 's'} in ${Math.round(r.lastSoak.heldMs / 1000)}s`
+                            : `soak held ${Math.round(r.lastSoak.heldMs / 1000)}s clean`}
+                        {r.lastSoak.failedDials > 0
+                          ? ` · ${r.lastSoak.failedDials} reconnect${r.lastSoak.failedDials === 1 ? '' : 's'} refused`
+                          : ''}
+                        {` · soaked ${since(r.lastSoak.completedAt)}`}
+                      </span>
                     )}
                   </span>
                 </span>

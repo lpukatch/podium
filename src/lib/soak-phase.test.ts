@@ -200,6 +200,12 @@ describe('the soak phase', () => {
     const records = store.stabilityRecords();
     expect([...records.values()].reduce((sum, r) => sum + r.breaks, 0)).toBeGreaterThan(0);
     expect(store.pendingSoakCount().total).toBeLessThan(STREAMS.length);
+    expect(store.soakResults(STREAMS).get(STREAMS[0]!)).toMatchObject({
+      heldMs: 5_000,
+      drops: 1,
+      failedDials: 0,
+      unreachable: false,
+    });
   });
 
   it('keeps a soak queued when even one of its drops was the account making room', async () => {
@@ -254,6 +260,7 @@ describe('the soak phase', () => {
 
     expect(store.stabilityLegs()).toEqual([]);
     expect(store.pendingSoakCount().total).toBe(STREAMS.length);
+    expect(store.soakResults(STREAMS)).toEqual(new Map());
     expect(lines.join('\n')).toContain('soaks are being closed as fast as new ones open');
   });
 });
