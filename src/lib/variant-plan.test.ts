@@ -158,7 +158,12 @@ describe('the planner with several logins', () => {
   function build() {
     const rules = new RulesSource(rulesPath);
     const runner = new Runner({
-      config: () => loadConfig({ DISPATCHARR_API_KEY: 'k', PODIUM_DATA_DIR: dir }),
+      config: () =>
+        loadConfig({
+          DISPATCHARR_API_KEY: 'k',
+          PODIUM_DATA_DIR: dir,
+          PODIUM_PROBE_VIA_DISPATCHARR: 'false',
+        }),
       store,
       rules,
     });

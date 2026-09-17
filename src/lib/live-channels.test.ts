@@ -94,6 +94,25 @@ describe('parseStatusPayload', () => {
     expect(channels).toHaveLength(1);
   });
 
+  it('drops a proxy session only when every client is a Podium probe', () => {
+    const { channels, ignoredCount } = parseStatusPayload(
+      {
+        channels: [
+          live({ clients: [{ user_agent: 'Podium-Probe/1' }] }),
+          live({
+            channel_id: 12,
+            clients: [{ user_agent: 'Podium-Probe/1' }, { user_agent: 'VLC' }],
+          }),
+          live({ channel_id: 13 }),
+        ],
+      },
+      undefined,
+      { ignoreUserAgent: 'Podium-Probe/1' },
+    );
+    expect(ignoredCount).toBe(1);
+    expect(channels.map((channel) => channel.channelId)).toEqual([12, 13]);
+  });
+
   it('is empty on a payload with no channels', () => {
     expect(parseStatusPayload({ channels: [], count: 0 }).channels).toEqual([]);
     expect(parseStatusPayload({}).channels).toEqual([]);

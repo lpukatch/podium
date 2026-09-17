@@ -255,6 +255,8 @@ It needs `PODIUM_PROBE_IDLE_PROVIDERS` on, which in turn needs
 | `PODIUM_ANALYZE_SECONDS` | `6` | biggest lever on run time |
 | `PODIUM_MIN_BITRATE_KBPS` | `500` | below this counts as dead |
 | `PODIUM_DETECT_BLACK` | `true` | black-screen detection |
+| `PODIUM_PROBE_VIA_DISPATCHARR` | `true` | probe through Dispatcharr instead of directly at the provider |
+| `PODIUM_PROBE_CLIENT_USER_AGENT` | `Podium-Probe/1` | identifies those probes in Dispatcharr activity reads |
 | `PODIUM_STABILITY` | `true` | record how long streams hold |
 | `PODIUM_STABILITY_POLL_MS` | `10000` | how often live sessions are sampled |
 | `PODIUM_SOAK_WINDOW` | *(empty)* | hours the automatic soak sweep may run, `HH:MM-HH:MM`; empty is off |
@@ -263,6 +265,14 @@ It needs `PODIUM_PROBE_IDLE_PROVIDERS` on, which in turn needs
 | `PODIUM_SOAK_MAX_AGE_MS` | `1209600000` | a stream observed more recently than this is left alone (14 days) |
 | `PODIUM_SOAK_COOLDOWN_MS` | `10000` | rest after a soak connection closes before that slot opens another |
 | `PODIUM_SOAK_SPARE_SLOTS` | `1` | connections per account soaks leave unused; never below one soak |
+
+### Probing through Dispatcharr
+
+By default Podium probes `/proxy/ts/stream/<stream_hash>` through Dispatcharr, measuring the stream profile, proxy mode, account user agent and any transcode that a viewer receives. Set `PODIUM_PROBE_VIA_DISPATCHARR=false` to probe the provider URL directly instead. Proxy probing is useful when the origin behaves differently from playback or when the transcode is what should be ranked.
+
+Every proxy probe becomes a real Dispatcharr client and holds a provider connection while it runs. Set Dispatcharr's channel shutdown delay to `0` so that connection is released when the probe ends. Streams without a hash continue to be probed directly.
+
+Proxy probes identify themselves with `PODIUM_PROBE_CLIENT_USER_AGENT`. Keep its value unique: Podium excludes sessions whose clients all carry that agent from pacing and stability reads, but retains sessions shared with a real viewer.
 
 ### Recording how long streams hold
 

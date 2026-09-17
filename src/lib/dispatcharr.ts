@@ -198,6 +198,22 @@ export interface LiveChannel {
   clientCount: number;
 }
 
+/** Status reads may exclude sessions created by Podium's own proxy probes. */
+export interface StatusOptions {
+  /** Drop an entry only when every reported client uses this User-Agent. */
+  ignoreUserAgent?: string;
+}
+
+function isOwnProbeSession(row: Record<string, unknown>, userAgent: string): boolean {
+  const clients = row.clients;
+  if (!Array.isArray(clients) || clients.length === 0) return false;
+  return clients.every(
+    (client) =>
+      typeof (client as { user_agent?: unknown })?.user_agent === 'string' &&
+      (client as { user_agent: string }).user_agent.trim() === userAgent,
+  );
+}
+
 /** A numeric field, or null when the payload did not carry a usable one. */
 function statusNumber(val: unknown): number | null {
   if (typeof val === 'number') return Number.isFinite(val) ? val : null;
@@ -223,12 +239,15 @@ function statusNumber(val: unknown): number | null {
 export function parseStatusPayload(
   body: { channels?: unknown[]; count?: number },
   uuidMap?: Map<string, number> | Record<string, number>,
-): { rawCount: number; channels: LiveChannel[] } {
+  options?: StatusOptions,
+): { rawCount: number; ignoredCount: number; channels: LiveChannel[] } {
   const rawCount = Math.max(
     typeof body.count === 'number' ? body.count : 0,
     Array.isArray(body.channels) ? body.channels.length : 0,
   );
   const entries = Array.isArray(body.channels) ? body.channels : [];
+  const ignoreAgent = options?.ignoreUserAgent?.trim() ?? '';
+  let ignoredCount = 0;
   const resolve = (val: unknown): number | null => {
     if (typeof val === 'number') return val;
     if (typeof val !== 'string' || val.trim() === '') return null;
@@ -267,6 +286,10 @@ export function parseStatusPayload(
     }
     if (!entry || typeof entry !== 'object') continue;
     const row = entry as Record<string, unknown>;
+    if (ignoreAgent && isOwnProbeSession(row, ignoreAgent)) {
+      ignoredCount += 1;
+      continue;
+    }
     let channelId: number | null = null;
     let key = '';
     for (const field of ['channel_id', 'id', 'channel']) {
@@ -312,10 +335,20 @@ export function parseStatusPayload(
       clientCount: statusNumber(row.client_count) ?? 0,
     });
   }
-  return { rawCount, channels };
+  return { rawCount, ignoredCount, channels };
 }
 
 export class DispatcharrError extends Error {}
+
+/** The proxy endpoint that plays one stream through its Dispatcharr profile. */
+export function proxyStreamUrl(
+  baseUrl: string,
+  streamHash: string | null | undefined,
+): string | null {
+  if (!streamHash || streamHash.trim() === '') return null;
+  const base = normaliseBaseUrl(baseUrl, 'Dispatcharr');
+  return `${base}/proxy/ts/stream/${encodeURIComponent(streamHash.trim())}`;
+}
 
 /**
  * Translate a profile's search pattern into one JS can compile.
@@ -917,8 +950,9 @@ export class DispatcharrClient {
    */
   async activeSessions(
     uuidMap?: Map<string, number> | Record<string, number>,
+    options?: StatusOptions,
   ): Promise<ActiveSession[]> {
-    const { rawCount, channels } = await this.liveStatus(uuidMap);
+    const { rawCount, ignoredCount, channels } = await this.liveStatus(uuidMap, options);
     const sessions: ActiveSession[] = [];
     for (const channel of channels) {
       if (channel.channelId === null) continue;
@@ -934,7 +968,7 @@ export class DispatcharrClient {
       });
     }
 
-    if (rawCount > 0 && sessions.length === 0) {
+    if (rawCount - ignoredCount > 0 && sessions.length === 0) {
       throw new DispatcharrError(
         `active channel probe status payload had ${rawCount} active entry/entries but 0 channel IDs resolved`,
       );
@@ -956,25 +990,28 @@ export class DispatcharrClient {
    */
   async liveChannels(
     uuidMap?: Map<string, number> | Record<string, number>,
+    options?: StatusOptions,
   ): Promise<LiveChannel[]> {
-    return (await this.liveStatus(uuidMap)).channels;
+    return (await this.liveStatus(uuidMap, options)).channels;
   }
 
   /** The shared read and parse behind the two above. */
   private async liveStatus(
     uuidMap?: Map<string, number> | Record<string, number>,
-  ): Promise<{ rawCount: number; channels: LiveChannel[] }> {
+    options?: StatusOptions,
+  ): Promise<{ rawCount: number; ignoredCount: number; channels: LiveChannel[] }> {
     const resp = await this.request('GET', '/proxy/ts/status');
     if (!resp.ok) throw new DispatcharrError(`activity probe -> ${resp.status}`);
     const body = (await resp.json()) as { channels?: unknown[]; count?: number };
-    return parseStatusPayload(body, uuidMap);
+    return parseStatusPayload(body, uuidMap, options);
   }
 
   /** Channel ids currently being streamed. Resolves UUIDs if uuidMap is provided. */
   async activeChannelIds(
     uuidMap?: Map<string, number> | Record<string, number>,
+    options?: StatusOptions,
   ): Promise<number[]> {
-    return (await this.activeSessions(uuidMap)).map((session) => session.channelId);
+    return (await this.activeSessions(uuidMap, options)).map((session) => session.channelId);
   }
 
   /**

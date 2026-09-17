@@ -53,6 +53,10 @@ export const configSchema = z.object({
    */
   PODIUM_PROBE_TIMEOUT_MS: num(20_000),
   PODIUM_USER_AGENT: z.string().default('VLC/3.0.14'),
+  /** Route probes through Dispatcharr to measure the viewer playback path. */
+  PODIUM_PROBE_VIA_DISPATCHARR: bool(true),
+  /** Identifies proxy-mode probes so they are not counted as viewers. */
+  PODIUM_PROBE_CLIENT_USER_AGENT: z.string().default('Podium-Probe/1'),
   /** Live TS/HLS rarely declares a bitrate; measuring it keeps ranking honest. */
   PODIUM_MEASURE_BITRATE: bool(true),
   PODIUM_MEASURE_SECONDS: num(5),

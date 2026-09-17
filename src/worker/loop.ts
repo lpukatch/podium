@@ -16,6 +16,7 @@ import { hostname } from 'os';
 import { type Config, loadConfig } from '../lib/config';
 import { DispatcharrClient } from '../lib/dispatcharr';
 import { errorText } from '../lib/error-text';
+import { activityOptions } from '../lib/probe-routing';
 import { RulesSource } from '../lib/rules-source';
 import { Runner, type RunSummary } from '../lib/runner';
 import { resolveEnv } from '../lib/settings';
@@ -472,7 +473,7 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
     try {
       const poller = await sessionClient(live);
       const at = Date.now();
-      const channels = await poller.liveChannels();
+      const channels = await poller.liveChannels(undefined, activityOptions(live));
       const samples: SessionSample[] = channels.map((channel) => ({
         at,
         channelKey: channel.key,
