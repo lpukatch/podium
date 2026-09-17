@@ -459,6 +459,22 @@ export const FIELDS: FieldSpec[] = [
     section: 'probing',
   },
   {
+    key: 'PODIUM_PROBE_VIA_DISPATCHARR',
+    kind: 'boolean',
+    label: 'Probe through Dispatcharr',
+    help: 'Measure playback through Dispatcharr’s stream profile instead of directly at the provider.',
+    more:
+      'This measures the proxy mode, account user agent and any transcode a viewer receives. It makes each probe a real Dispatcharr client and consumes a provider slot while it runs, so leave it off unless that playback path is what you need to rank.',
+    section: 'probing',
+  },
+  {
+    key: 'PODIUM_PROBE_CLIENT_USER_AGENT',
+    kind: 'string',
+    label: 'Dispatcharr probe user agent',
+    help: 'Identifies proxy-mode probes so Podium does not count them as viewers.',
+    section: 'probing',
+  },
+  {
     key: 'PODIUM_ANALYZE_SECONDS',
     kind: 'number',
     label: 'Analyze seconds',

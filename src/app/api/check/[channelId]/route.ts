@@ -10,6 +10,7 @@ import {
 import { Mutex } from '@/lib/mutex';
 import { resolveOrdering, withResolutionFloor } from '@/lib/ordering';
 import { isInterlaced, type ProbeResult, probe } from '@/lib/probe';
+import { activityOptions, probeProxyBase, probeUserAgent } from '@/lib/probe-routing';
 import { channelResolutionFloor } from '@/lib/resolution';
 import {
   assignedCandidates,
@@ -45,6 +46,7 @@ import {
   drawVariant,
   POOLED_VARIANT,
   pickBestVariant,
+  probeTargetUrl,
   providerLogins,
   type VariantVerdict,
 } from '@/lib/variants';
@@ -215,7 +217,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       snap.channels.filter((c) => c.uuid).map((c) => [c.uuid as string, c.id]),
     );
     // Fail closed, as the worker does: unknown means assume somebody is there.
-    const sessions = await client.activeSessions(uuidMap).catch(() => null);
+    const sessions = await client.activeSessions(uuidMap, activityOptions(config)).catch(() => null);
     const watching = sessions === null || sessions.length > 0;
     const loginsByProvider = new Map(snap.providers.map((p) => [p.id, providerLogins(p)]));
     const providerOfProfile = new Map<number, number>();
@@ -281,7 +283,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       jobs.push({
         streamId,
         channelId: id,
-        url: variant.url,
+        url: probeTargetUrl(variant, stream.streamHash, probeProxyBase(config)),
         providerId: stream.providerId,
         profileId: variant.profileId,
         stepOrder,
@@ -310,7 +312,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         const result = await probe(job.url, {
           timeoutMs: config.PODIUM_PROBE_TIMEOUT_MS,
           analyzeSeconds: config.PODIUM_ANALYZE_SECONDS,
-          userAgent: config.PODIUM_USER_AGENT,
+          userAgent: probeUserAgent(config),
           measureBitrate: config.PODIUM_MEASURE_BITRATE,
           measureSeconds: config.PODIUM_MEASURE_SECONDS,
           detectBlack: config.PODIUM_DETECT_BLACK,

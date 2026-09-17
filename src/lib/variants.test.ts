@@ -13,6 +13,7 @@ import {
   drawVariant,
   POOLED_VARIANT,
   pickBestVariant,
+  probeTargetUrl,
   providerLogins,
   type VariantVerdict,
 } from './variants';
@@ -291,6 +292,24 @@ describe('buildVariants', () => {
     // no default to charge the connection to.
     expect(variants).toEqual([{ variantId: 0, profileId: 4, url: URL }]);
     expect(issues).toEqual(['unusable-pattern']);
+  });
+});
+
+describe('probeTargetUrl', () => {
+  const variant = { variantId: 0, profileId: 0, url: URL };
+
+  it('keeps direct probing as the default', () => {
+    expect(probeTargetUrl(variant, 'stream-123', null)).toBe(URL);
+  });
+
+  it('routes a hashed stream through Dispatcharr after the login is drawn', () => {
+    expect(probeTargetUrl(variant, 'stream/123', 'http://dispatcharr:9191/')).toBe(
+      'http://dispatcharr:9191/proxy/ts/stream/stream%2F123',
+    );
+  });
+
+  it('falls back to the provider URL until Dispatcharr has assigned a hash', () => {
+    expect(probeTargetUrl(variant, '', 'http://dispatcharr:9191')).toBe(URL);
   });
 });
 

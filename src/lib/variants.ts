@@ -21,6 +21,7 @@
 import {
   type Provider,
   type ProviderProfile,
+  proxyStreamUrl,
   transformUrl,
   xtreamPlaybackUrl,
 } from './dispatcharr';
@@ -158,6 +159,16 @@ export interface StreamVariant {
 
 /** The cache key every pooled verdict is written under. See `StreamVariant`. */
 export const POOLED_VARIANT = 0;
+
+/** Swap only the final probe address, after login selection has used provider URLs. */
+export function probeTargetUrl(
+  variant: StreamVariant,
+  streamHash: string | null | undefined,
+  proxyBaseUrl: string | null,
+): string {
+  if (!proxyBaseUrl) return variant.url;
+  return proxyStreamUrl(proxyBaseUrl, streamHash) ?? variant.url;
+}
 
 /**
  * Why a login contributed no target of its own.
