@@ -1317,6 +1317,15 @@ export class Runner {
         this.epgRows(client, config),
         client.groups(),
       ]);
+      const profileUserAgents =
+        config.PODIUM_DIRECT_PROFILE_USER_AGENT && !config.PODIUM_PROBE_VIA_DISPATCHARR
+          ? await client.streamProfileUserAgents().catch((error) => {
+              log(
+                `could not resolve Dispatcharr stream-profile user agents; using Podium user agent: ${errorText(error)}`,
+              );
+              return new Map<number, string>();
+            })
+          : new Map<number, string>();
       const epgRows = epg.rows;
       const groupNames = new Map(groups.map((g) => [g.id, g.name]));
       // Built once here -- both the lane snapshot below and the ranking strategy
@@ -1527,6 +1536,7 @@ export class Runner {
         getIndex(),
         streamById,
         variantsByStream,
+        profileUserAgents,
       );
       // Every later step reads this rather than matching the channel again.
       const plannedById = new Map(planned.map((entry) => [entry.channel.id, entry]));
@@ -1946,7 +1956,7 @@ export class Runner {
               result = await probe(job.url, {
                 timeoutMs: config.PODIUM_PROBE_TIMEOUT_MS,
                 analyzeSeconds: config.PODIUM_ANALYZE_SECONDS,
-                userAgent: probeUserAgent(config),
+                userAgent: probeUserAgent(config, job.userAgent),
                 measureBitrate: config.PODIUM_MEASURE_BITRATE,
                 measureSeconds: config.PODIUM_MEASURE_SECONDS,
                 detectBlack: config.PODIUM_DETECT_BLACK,
@@ -2343,6 +2353,7 @@ export class Runner {
     passedIndex?: StreamIndex,
     passedById?: Map<number, Stream>,
     variantsByStream?: Map<number, StreamVariant[]>,
+    profileUserAgents = new Map<number, string>(),
   ): {
     jobs: ProbeJob[];
     ages: number[];
@@ -2563,6 +2574,10 @@ export class Runner {
               url: probeTargetUrl(variant, stream.streamHash, proxyBase),
               providerId: stream.providerId,
               profileId: variant.profileId,
+              userAgent:
+                stream.streamProfileId === null || stream.streamProfileId === undefined
+                  ? undefined
+                  : profileUserAgents.get(stream.streamProfileId),
               stepOrder,
               audioOnly: policy.audioOnly,
             },

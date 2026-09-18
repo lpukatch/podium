@@ -160,6 +160,10 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     store = new Store(config.dbPath);
 
     const current = channel.streams ?? [];
+    const profileUserAgents =
+      config.PODIUM_DIRECT_PROFILE_USER_AGENT && !config.PODIUM_PROBE_VIA_DISPATCHARR
+        ? await client.streamProfileUserAgents().catch(() => new Map<number, string>())
+        : new Map<number, string>();
 
     if (!verdict.allowed && !force) {
       const removeUnmatched = config.PODIUM_REMOVE_UNMATCHED;
@@ -288,6 +292,10 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         url: probeTargetUrl(variant, stream.streamHash, probeProxyBase(config)),
         providerId: stream.providerId,
         profileId: variant.profileId,
+        userAgent:
+          stream.streamProfileId === null || stream.streamProfileId === undefined
+            ? undefined
+            : profileUserAgents.get(stream.streamProfileId),
         stepOrder,
       });
     }
@@ -314,7 +322,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         const result = await probe(job.url, {
           timeoutMs: config.PODIUM_PROBE_TIMEOUT_MS,
           analyzeSeconds: config.PODIUM_ANALYZE_SECONDS,
-          userAgent: probeUserAgent(config),
+          userAgent: probeUserAgent(config, job.userAgent),
           measureBitrate: config.PODIUM_MEASURE_BITRATE,
           measureSeconds: config.PODIUM_MEASURE_SECONDS,
           detectBlack: config.PODIUM_DETECT_BLACK,

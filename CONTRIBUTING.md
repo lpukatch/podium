@@ -44,6 +44,9 @@ npm run test:run
 
 CI runs exactly these three, plus a Docker build.
 
+Do not open a pull or merge request until these checks and the Docker build pass
+locally; CI is confirmation, not the first test run.
+
 Commit messages are [Conventional Commits](https://www.conventionalcommits.org/)
 — `feat:`, `fix:`, `chore:`, and `feat!:`/`BREAKING CHANGE:` for anything
 breaking. They are not decoration: the release job reads them to decide whether

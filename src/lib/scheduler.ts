@@ -40,6 +40,8 @@ export interface ProbeJob {
    * otherwise a Dispatcharr profile id.
    */
   profileId: number;
+  /** Resolved stream-profile UA for an opt-in direct probe. */
+  userAgent?: string;
   stepOrder: number;
   audioOnly?: boolean;
 }

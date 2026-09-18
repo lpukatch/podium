@@ -79,6 +79,8 @@ export interface Stream {
    * group list for both -- but in practice a group holds one or the other.
    */
   groupId: number | null;
+  /** The stream profile Dispatcharr applies at playback, when the API provides one. */
+  streamProfileId?: number | null;
   is_stale?: boolean;
 }
 
@@ -575,6 +577,25 @@ function trimProgramme(row: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
+/** An id returned either directly or as a compact nested API relation. */
+function relatedId(value: unknown): number | null {
+  const raw =
+    typeof value === 'object' && value !== null && 'id' in value
+      ? (value as { id?: unknown }).id
+      : value;
+  if (typeof raw === 'number') return Number.isInteger(raw) ? raw : null;
+  if (typeof raw !== 'string' || raw.trim() === '') return null;
+  const id = Number(raw);
+  return Number.isInteger(id) ? id : null;
+}
+
+function streamProfileId(row: {
+  stream_profile?: unknown;
+  stream_profile_id?: unknown;
+}): number | null {
+  return relatedId(row.stream_profile_id) ?? relatedId(row.stream_profile);
+}
+
 export class DispatcharrClient {
   private readonly base: string;
   private accessToken: string | null = null;
@@ -843,6 +864,8 @@ export class DispatcharrClient {
       stream_hash?: string;
       current_viewers?: number;
       channel_group?: number | null;
+      stream_profile?: number | { id?: number | string | null } | null;
+      stream_profile_id?: number | string | null;
     };
     const rows = await this.paged<Row>('/api/channels/streams/');
     const out: Stream[] = [];
@@ -856,7 +879,43 @@ export class DispatcharrClient {
         streamHash: row.stream_hash ?? '',
         currentViewers: row.current_viewers ?? 0,
         groupId: row.channel_group ?? null,
+        streamProfileId: streamProfileId(row),
       });
+    }
+    return out;
+  }
+
+  /**
+   * Resolve the request identity a stream profile contributes without copying
+   * its processing command. Missing or inactive rows are omitted so callers
+   * can fall back to their ordinary probe user agent.
+   */
+  async streamProfileUserAgents(): Promise<Map<number, string>> {
+    type ProfileRow = {
+      id: number;
+      user_agent?: number | { id?: number | string | null } | null;
+      is_active?: boolean;
+    };
+    type UserAgentRow = {
+      id: number;
+      user_agent?: string;
+      is_active?: boolean;
+    };
+    const [profiles, userAgents] = await Promise.all([
+      this.paged<ProfileRow>('/api/core/streamprofiles/'),
+      this.paged<UserAgentRow>('/api/core/useragents/'),
+    ]);
+    const agents = new Map<number, string>();
+    for (const agent of userAgents) {
+      if (agent.is_active === false || !agent.user_agent?.trim()) continue;
+      agents.set(agent.id, agent.user_agent.trim());
+    }
+    const out = new Map<number, string>();
+    for (const profile of profiles) {
+      if (profile.is_active === false) continue;
+      const agentId = relatedId(profile.user_agent);
+      const agent = agentId === null ? undefined : agents.get(agentId);
+      if (agent) out.set(profile.id, agent);
     }
     return out;
   }

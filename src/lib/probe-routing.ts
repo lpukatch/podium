@@ -14,10 +14,9 @@ export function probeProxyBase(config: RoutingConfig): string | null {
   return config.PODIUM_PROBE_VIA_DISPATCHARR ? config.DISPATCHARR_URL : null;
 }
 
-export function probeUserAgent(config: RoutingConfig): string {
-  return config.PODIUM_PROBE_VIA_DISPATCHARR
-    ? config.PODIUM_PROBE_CLIENT_USER_AGENT
-    : config.PODIUM_USER_AGENT;
+export function probeUserAgent(config: RoutingConfig, streamProfileUserAgent?: string): string {
+  if (config.PODIUM_PROBE_VIA_DISPATCHARR) return config.PODIUM_PROBE_CLIENT_USER_AGENT;
+  return streamProfileUserAgent?.trim() || config.PODIUM_USER_AGENT;
 }
 
 export function soakProxyBase(config: RoutingConfig): string | null {

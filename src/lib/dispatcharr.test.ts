@@ -373,6 +373,45 @@ describe('resource mapping', () => {
     expect(streams[0]).toMatchObject({ id: 1, providerId: 2, streamHash: 'h' });
   });
 
+  it('maps either stream-profile relation shape', async () => {
+    stubFetch(() => ({
+      body: [
+        { id: 1, url: 'http://a', stream_profile: { id: 4 } },
+        { id: 2, url: 'http://b', stream_profile_id: '5' },
+        { id: 3, url: 'http://c', stream_profile: 'not-an-id' },
+      ],
+    }));
+    const streams = await new DispatcharrClient('http://d', { apiKey: 'k' }).streams();
+    expect(streams.map((stream) => stream.streamProfileId)).toEqual([4, 5, null]);
+  });
+
+  it('resolves active profile user agents and ignores unusable relations', async () => {
+    stubFetch((call) => {
+      const path = new URL(call.url).pathname;
+      if (path === '/api/core/streamprofiles/') {
+        return {
+          body: [
+            { id: 1, user_agent: 10 },
+            { id: 2, user_agent: { id: 11 } },
+            { id: 3, user_agent: 12, is_active: false },
+            { id: 4, user_agent: 99 },
+          ],
+        };
+      }
+      return {
+        body: [
+          { id: 10, user_agent: '  Vendor Player/1.0  ' },
+          { id: 11, user_agent: 'Disabled', is_active: false },
+          { id: 12, user_agent: 'Ignored' },
+        ],
+      };
+    });
+    const agents = await new DispatcharrClient('http://d', {
+      apiKey: 'k',
+    }).streamProfileUserAgents();
+    expect([...agents]).toEqual([[1, 'Vendor Player/1.0']]);
+  });
+
   it('caps an unlimited provider rather than trusting 0', async () => {
     // 0/null means "unlimited" in Dispatcharr; an unbounded lane just moves the
     // bottleneck onto the network.
