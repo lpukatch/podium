@@ -406,7 +406,9 @@ describe('resource mapping', () => {
         ],
       };
     });
-    const agents = await new DispatcharrClient('http://d', { apiKey: 'k' }).streamProfileUserAgents();
+    const agents = await new DispatcharrClient('http://d', {
+      apiKey: 'k',
+    }).streamProfileUserAgents();
     expect([...agents]).toEqual([[1, 'Vendor Player/1.0']]);
   });
 

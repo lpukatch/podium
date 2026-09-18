@@ -1320,7 +1320,9 @@ export class Runner {
       const profileUserAgents =
         config.PODIUM_DIRECT_PROFILE_USER_AGENT && !config.PODIUM_PROBE_VIA_DISPATCHARR
           ? await client.streamProfileUserAgents().catch((error) => {
-              log(`could not resolve Dispatcharr stream-profile user agents; using Podium user agent: ${errorText(error)}`);
+              log(
+                `could not resolve Dispatcharr stream-profile user agents; using Podium user agent: ${errorText(error)}`,
+              );
               return new Map<number, string>();
             })
           : new Map<number, string>();
