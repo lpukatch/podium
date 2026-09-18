@@ -17,6 +17,7 @@ import { buildVariants, drawVariant, type ProviderLogin, probeTargetUrl } from '
 const DIRECT = {
   DISPATCHARR_URL: 'http://dispatcharr:9191',
   PODIUM_PROBE_VIA_DISPATCHARR: false,
+  PODIUM_SOAK_VIA_DISPATCHARR: false,
   PODIUM_PROBE_CLIENT_USER_AGENT: 'Podium-Probe/1',
   PODIUM_USER_AGENT: 'VLC/3.0.14',
 };
