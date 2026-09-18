@@ -55,6 +55,8 @@ export const configSchema = z.object({
   PODIUM_USER_AGENT: z.string().default('VLC/3.0.14'),
   /** Route probes through Dispatcharr to measure the viewer playback path. */
   PODIUM_PROBE_VIA_DISPATCHARR: bool(false),
+  /** Apply a stream profile's user agent while still probing its upstream URL directly. */
+  PODIUM_DIRECT_PROFILE_USER_AGENT: bool(false),
   /** Route soaks through Dispatcharr to measure the viewer playback path. */
   PODIUM_SOAK_VIA_DISPATCHARR: bool(false),
   /** Identifies proxy-mode probes so they are not counted as viewers. */

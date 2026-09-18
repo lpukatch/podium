@@ -467,6 +467,14 @@ export const FIELDS: FieldSpec[] = [
     section: 'probing',
   },
   {
+    key: 'PODIUM_DIRECT_PROFILE_USER_AGENT',
+    kind: 'boolean',
+    label: 'Use stream profile user agent for direct probes',
+    help: 'Apply the selected Dispatcharr stream profile user agent while probing the upstream URL directly.',
+    more: 'This mirrors request identity only. It does not run the profile command, proxy mode or any transcode; use proxy probes when those are what you need to measure.',
+    section: 'probing',
+  },
+  {
     key: 'PODIUM_SOAK_VIA_DISPATCHARR',
     kind: 'boolean',
     label: 'Soak through Dispatcharr',

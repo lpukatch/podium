@@ -19,6 +19,7 @@ describe('probe routing', () => {
   it('leaves direct probes and status reads unchanged by default', () => {
     expect(probeProxyBase(direct)).toBeNull();
     expect(probeUserAgent(direct)).toBe('VLC/3.0.14');
+    expect(probeUserAgent(direct, 'Vendor Player/1.0')).toBe('Vendor Player/1.0');
     expect(soakProxyBase(direct)).toBeNull();
     expect(soakUserAgent(direct)).toBe('VLC/3.0.14');
     expect(activityOptions(direct)).toEqual({});
@@ -28,6 +29,7 @@ describe('probe routing', () => {
     const proxied = { ...direct, PODIUM_PROBE_VIA_DISPATCHARR: true };
     expect(probeProxyBase(proxied)).toBe('http://dispatcharr:9191');
     expect(probeUserAgent(proxied)).toBe('Podium-Probe/1');
+    expect(probeUserAgent(proxied, 'Vendor Player/1.0')).toBe('Podium-Probe/1');
     expect(activityOptions(proxied)).toEqual({ ignoreUserAgent: 'Podium-Probe/1' });
   });
 
