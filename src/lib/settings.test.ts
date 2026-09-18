@@ -52,6 +52,12 @@ describe('resolveEnv', () => {
     // schema next.
     expect(loadConfig(resolveEnv({}, { DISPATCHARR_API_KEY: 'k' })).PODIUM_DRY_RUN).toBe(true);
   });
+
+  it('defaults to direct probing when nothing says otherwise', () => {
+    expect(
+      loadConfig(resolveEnv({}, { DISPATCHARR_API_KEY: 'k' })).PODIUM_PROBE_VIA_DISPATCHARR,
+    ).toBe(false);
+  });
 });
 
 describe('describeSettings', () => {
@@ -90,6 +96,7 @@ describe('describeSettings', () => {
     expect(views.find((f) => f.key === 'PODIUM_ANALYZE_SECONDS')?.defaultValue).toBe('6');
     expect(views.find((f) => f.key === 'PODIUM_MAX_AGE_MS')?.defaultValue).toBe('1440');
     expect(views.find((f) => f.key === 'PODIUM_TICK_MS')?.defaultValue).toBe('1');
+    expect(views.find((f) => f.key === 'PODIUM_PROBE_VIA_DISPATCHARR')?.defaultValue).toBe('false');
   });
 });
 

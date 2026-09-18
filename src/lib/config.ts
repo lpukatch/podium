@@ -54,7 +54,7 @@ export const configSchema = z.object({
   PODIUM_PROBE_TIMEOUT_MS: num(20_000),
   PODIUM_USER_AGENT: z.string().default('VLC/3.0.14'),
   /** Route probes through Dispatcharr to measure the viewer playback path. */
-  PODIUM_PROBE_VIA_DISPATCHARR: bool(true),
+  PODIUM_PROBE_VIA_DISPATCHARR: bool(false),
   /** Route soaks through Dispatcharr to measure the viewer playback path. */
   PODIUM_SOAK_VIA_DISPATCHARR: bool(false),
   /** Identifies proxy-mode probes so they are not counted as viewers. */
