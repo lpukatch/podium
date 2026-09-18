@@ -467,6 +467,14 @@ export const FIELDS: FieldSpec[] = [
     section: 'probing',
   },
   {
+    key: 'PODIUM_SOAK_VIA_DISPATCHARR',
+    kind: 'boolean',
+    label: 'Soak through Dispatcharr',
+    help: 'Hold the playback path through Dispatcharr open instead of connecting directly to the provider.',
+    more: 'This uses the stream profile, proxy mode, account user agent and any transcode a viewer receives. It is off by default to preserve direct soak behaviour. Like proxy probes, it becomes a real Dispatcharr client and consumes a provider slot for the full soak.',
+    section: 'probing',
+  },
+  {
     key: 'PODIUM_PROBE_CLIENT_USER_AGENT',
     kind: 'string',
     label: 'Dispatcharr probe user agent',
