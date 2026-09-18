@@ -255,7 +255,7 @@ It needs `PODIUM_PROBE_IDLE_PROVIDERS` on, which in turn needs
 | `PODIUM_ANALYZE_SECONDS` | `6` | biggest lever on run time |
 | `PODIUM_MIN_BITRATE_KBPS` | `500` | below this counts as dead |
 | `PODIUM_DETECT_BLACK` | `true` | black-screen detection |
-| `PODIUM_PROBE_VIA_DISPATCHARR` | `true` | probe through Dispatcharr instead of directly at the provider |
+| `PODIUM_PROBE_VIA_DISPATCHARR` | `false` | probe through Dispatcharr instead of directly at the provider |
 | `PODIUM_SOAK_VIA_DISPATCHARR` | `false` | soak through Dispatcharr instead of directly at the provider |
 | `PODIUM_PROBE_CLIENT_USER_AGENT` | `Podium-Probe/1` | identifies those probes in Dispatcharr activity reads |
 | `PODIUM_STABILITY` | `true` | record how long streams hold |
@@ -269,7 +269,7 @@ It needs `PODIUM_PROBE_IDLE_PROVIDERS` on, which in turn needs
 
 ### Probing and soaking through Dispatcharr
 
-By default Podium probes `/proxy/ts/stream/<stream_hash>` through Dispatcharr, measuring the stream profile, proxy mode, account user agent and any transcode a viewer receives. Set `PODIUM_PROBE_VIA_DISPATCHARR=false` to probe the provider URL directly instead. Set `PODIUM_SOAK_VIA_DISPATCHARR=true` to hold that same playback path open during soaks; it is off by default to preserve direct soak behaviour. Proxy routing is useful when the origin behaves differently from playback or when the transcode is what should be ranked.
+By default the measurement is taken directly at the provider URL. Set `PODIUM_PROBE_VIA_DISPATCHARR=true` to probe `/proxy/ts/stream/<stream_hash>` through Dispatcharr instead, measuring the stream profile, proxy mode, account user agent and any transcode a viewer receives. Set `PODIUM_SOAK_VIA_DISPATCHARR=true` to hold that same playback path open during soaks; it is off by default to preserve direct soak behaviour. Proxy routing is useful when the origin behaves differently from playback or when the transcode is what should be ranked.
 
 Every proxy probe or soak becomes a real Dispatcharr client and holds a provider connection while it runs. Set Dispatcharr's channel shutdown delay to `0` so that connection is released when the connection ends. Streams without a hash continue to connect directly.
 
