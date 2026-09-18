@@ -340,16 +340,6 @@ export function parseStatusPayload(
 
 export class DispatcharrError extends Error {}
 
-/** The proxy endpoint that plays one stream through its Dispatcharr profile. */
-export function proxyStreamUrl(
-  baseUrl: string,
-  streamHash: string | null | undefined,
-): string | null {
-  if (!streamHash || streamHash.trim() === '') return null;
-  const base = normaliseBaseUrl(baseUrl, 'Dispatcharr');
-  return `${base}/proxy/ts/stream/${encodeURIComponent(streamHash.trim())}`;
-}
-
 /**
  * Translate a profile's search pattern into one JS can compile.
  *
@@ -417,6 +407,39 @@ function toJsReplacement(replacePattern: string): string | null {
     i += 1 + whole.length;
   }
   return out;
+}
+
+/**
+ * The Dispatcharr proxy address that plays a stream, for probing through the
+ * server rather than at the provider.
+ *
+ * `/proxy/ts/stream/<id>` resolves its id as a channel UUID first and falls
+ * back to a `stream_hash`, so an individual stream plays through it without
+ * being attached to a channel -- the same endpoint the Dispatcharr UI's
+ * "Preview Stream" action uses on a row in the streams table. What that buys a
+ * probe is the stream *profile*: Dispatcharr picks the M3U profile, applies the
+ * account's user agent, and runs whatever the stream's profile says (a direct
+ * pipe, ffmpeg, streamlink), so what ffprobe measures is what a viewer would
+ * actually receive rather than what the origin hands an anonymous GET.
+ *
+ * Null for a stream Dispatcharr has no hash for, which is the caller's signal
+ * to probe the provider URL directly: a hash is written by the M3U refresh, so
+ * a stream without one is mid-import rather than unplayable.
+ */
+export function proxyStreamUrl(
+  baseUrl: string,
+  streamHash: string | null | undefined,
+): string | null {
+  if (!streamHash || streamHash.trim() === '') return null;
+  // Same refusal as the API base: a base URL carrying a query or fragment
+  // truncates the path appended below it, and this one is settable in the UI.
+  const base = normaliseBaseUrl(baseUrl, 'Dispatcharr');
+  // No trailing slash. Dispatcharr serves the stream at the bare path and does
+  // not redirect a slashed one onto it, so the slash is a 404 rather than a
+  // cosmetic difference -- and a 404 here reads as a dead stream, which is the
+  // worst way for this to fail: every stream on the install ranks as dead and
+  // nothing says why.
+  return `${base}/proxy/ts/stream/${encodeURIComponent(streamHash.trim())}`;
 }
 
 /**

@@ -107,6 +107,15 @@ declares one. Podium reads a few seconds of the stream, which also gives it the
 black-screen check from the same read, so it costs one provider connection
 rather than two.
 
+By default the measurement is taken at the provider, which is the cheapest and
+most direct reading there is. Turning on **Probe through Dispatcharr** takes it
+through Dispatcharr's proxy instead, so each probe arrives via the stream's own
+stream profile and measures what a viewer would actually receive — the account's
+user agent, the proxy mode, the transcode if there is one. Off by default,
+because it makes every probe a real Dispatcharr client holding a provider
+connection; [the trade-offs are
+here](docs/configuration.md#probing-through-dispatcharr).
+
 There is deliberately no loop detection. Catching a loop means watching for at
 least one loop period — around 120s per stream against the ~1s the other checks
 cost — for a failure far rarer than dead, black or throttled.
