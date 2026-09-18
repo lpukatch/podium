@@ -27,7 +27,13 @@ import type { Matcher, StreamIndex } from './matcher';
 import { resolveOrdering, withResolutionFloor } from './ordering';
 import { Pacer, type PacerConfig, viewersByProvider } from './pacer';
 import { type ProbeResult, probe, type SoakResult, soakStream } from './probe';
-import { activityOptions, probeProxyBase, probeUserAgent } from './probe-routing';
+import {
+  activityOptions,
+  probeProxyBase,
+  probeUserAgent,
+  soakProxyBase,
+  soakUserAgent,
+} from './probe-routing';
 import { tierOf } from './quality';
 import { channelResolutionFloor, type MinResolution } from './resolution';
 import { pruneDeletedChannelRules } from './rule-sync';
@@ -2827,6 +2833,7 @@ export class Runner {
     if (abort.aborted) return none;
 
     const store = this.deps.store;
+    const proxyBase = soakProxyBase(config);
     const soakSeconds = Math.max(10, config.PODIUM_SOAK_SECONDS);
     // Slots, not lanes: a login with three free connections runs three soaks at
     // once, and counting it as one would leave two thirds of the window unused.
@@ -2968,7 +2975,7 @@ export class Runner {
           job: {
             streamId,
             channelId: 0,
-            url: variant.url,
+            url: probeTargetUrl(variant, stream.streamHash, proxyBase),
             providerId: stream.providerId,
             profileId: variant.profileId,
             stepOrder: 0,
@@ -3118,7 +3125,7 @@ export class Runner {
           this.emit({ lanes: soakLanes() });
           const result = await soakStream(job.url, {
             seconds: jobSeconds,
-            userAgent: config.PODIUM_USER_AGENT,
+            userAgent: soakUserAgent(config),
             minGapMs: cooldownMs,
             onConnect: (at) => kicks.opened(job.providerId, job.streamId, at),
             // Killed mid-connection rather than left to finish. runLanes stops
