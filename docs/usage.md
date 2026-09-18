@@ -538,12 +538,27 @@ presents them identically in every stat Podium used to publish — both are
 `hevc`, `yuv420p10le`, 3840x2160 — so nothing reading them could tell the two
 apart. Podium now publishes ffprobe's `color_transfer` (`arib-std-b67` for
 HLG, `smpte2084` for HDR10/PQ, `bt709` for SDR) and `color_primaries` (`bt2020`
-or `bt709`) beside `pixel_format`. Live TS streams often omit both, and then the
-keys are `null` rather than an empty string, so "unknown" stays distinguishable
-from a value. **A Teamarr rule cannot use them**: Stream Stats rules compare
-numbers only, so `smpte2084` never matches a threshold, and `is_unknown` fires
-for a string as readily as for `null`. They are there for whatever reads
-`stream_stats` as JSON, not for a `stats_metric` rule.
+or `bt709`) beside `pixel_format`. In practice, UK UHD sport reaches a
+Dispatcharr install as PQ: every HDR stream observed so far reads `smpte2084` +
+`bt2020`. HLG is handled the same way but has not yet been seen on a real
+stream, so that half of the mapping rests on ffmpeg's documented name rather
+than a sample. Live TS streams often omit both fields -- about a third of one
+night's probes, all of them otherwise clean -- and then the keys are `null`
+rather than an empty string, so "unknown" stays distinguishable from a value
+and from a failed probe. **A Teamarr rule cannot use them directly**: Stream Stats rules
+compare numbers only, so `smpte2084` never matches a threshold, and `is_unknown`
+fires for a string as readily as for `null`. For that, Podium also publishes
+`hdr_format`: the same reading as a small number a `stats_metric` rule can
+threshold — `0` for a declared SDR transfer, `1` for HLG, `2` for HDR10/PQ, and
+`null` when ffprobe did not say, so `is_unknown` still means unknown rather than
+SDR. `hdr_format >= 1` is any HDR stream; `== 1` or `== 2` picks a flavour.
+Two things share a value on purpose. `0` covers every declared transfer that is
+not one of the two -- `bt709`, but also `smpte428` or a `bt2020-10` -- since for
+ordering the question is only whether the stream is HDR. And `null` covers a
+Dolby Vision profile 5 stream as well as an undescribed one: DV carries its
+colour in its own metadata rather than the fields ffprobe reads, so `is_unknown`
+catches both, and a DV feed ranks like an unprobed one until someone teaches
+the probe to read it.
 
 Podium can rank on it too, if asked. **Settings → Stream ordering → Advanced**
 has a *Preferred HDR format* of no preference, HLG or HDR10 (PQ), and an *HDR*

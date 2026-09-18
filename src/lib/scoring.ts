@@ -433,6 +433,35 @@ const HDR_TRANSFER: Record<Exclude<HdrPreference, 'none'>, string> = {
 };
 
 /**
+ * The stream's HDR flavour as a small ordinal: `0` SDR, `1` HLG, `2` PQ, and
+ * `null` when ffprobe did not say.
+ *
+ * `color_transfer` already carries this, but as a string, and Teamarr's
+ * `stats_metric` rules cast whatever they read to a float. A string fails
+ * that cast, so every comparator fails and `is_unknown` fires on "bt709" as
+ * readily as on a missing value. This is the same three-way reading as
+ * `hdrScore` -- built from the same names, so the two cannot disagree -- in a
+ * shape a threshold can use: `>= 1` is any HDR, `== 1` HLG, `== 2` PQ.
+ *
+ * Unknown stays `null` rather than a sentinel. A live TS that never declared
+ * a transfer is not SDR, and a `-1` would let a `>= 0` rule match streams
+ * nobody knows anything about; `null` is what `is_unknown` exists for.
+ *
+ * Two collisions are deliberate. `0` is every declared transfer that is not
+ * one of the two, so `bt709` and an unrecognised `smpte428` read the same:
+ * for ordering the only question is whether the stream is HDR. And Dolby
+ * Vision profile 5 lands on `null` beside an undescribed stream, because it
+ * carries its colour in its own RPU rather than the VUI fields ffprobe reads.
+ */
+export function hdrFormat(result: Pick<ProbeResult, 'colorTransfer'>): 0 | 1 | 2 | null {
+  const transfer = (result.colorTransfer ?? '').toLowerCase();
+  if (!transfer) return null;
+  if (transfer === HDR_TRANSFER.hlg) return 1;
+  if (transfer === HDR_TRANSFER.pq) return 2;
+  return 0;
+}
+
+/**
  * How well the stream's HDR flavour matches the preference, in [0, 1].
  *
  * Three answers, not two. The preferred flavour scores 1 and the other HDR
