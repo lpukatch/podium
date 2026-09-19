@@ -164,9 +164,10 @@ export function resolveExcludedGroups(
  * `normalize` lifts those segments into `prefixes` and an unqualified alias
  * ignores them, so one alias claims every region's copy at once.
  *
- * `@AU beIN Sports` requires the segment. `@!Prime ESPN` rejects it. Several
- * may be stacked (`@US @USA Fox Sports 1`), and a multi-word segment can be
- * quoted (`@"US East" ESPN`).
+ * `@AU beIN Sports` requires any matching segment. `@^US ESPN` requires the
+ * first segment, while `@^!Prime ESPN` rejects a first segment. Several may be
+ * stacked (`@^US @^USA Fox Sports 1`), and a multi-word segment can be quoted
+ * (`@"US East" ESPN`).
  *
  * The tokens providers hang off the *end* -- "4K", "H265", "1080p" -- are the
  * same problem at the other end of the name, and take a trailing `~`:
@@ -185,6 +186,10 @@ export interface AliasSpec {
   require: Set<string>;
   /** Prefix keys that disqualify a stream. */
   reject: Set<string>;
+  /** First-prefix keys the stream must carry, any one of. */
+  requireFirst: Set<string>;
+  /** First-prefix keys that disqualify a stream. */
+  rejectFirst: Set<string>;
   /** Tail tokens the stream must carry, all of them. See `tagsSatisfy`. */
   requireTags: Set<string>;
   /** Tail tokens that disqualify a stream. */
@@ -195,7 +200,7 @@ export interface AliasSpec {
  * Trailing whitespace is part of the qualifier on purpose: "@Home" was a real
  * channel, and an alias that is only an `@`-word must stay a name.
  */
-const QUALIFIER = /^@(!?)(?:"([^"]+)"|(\S+))\s+/;
+const QUALIFIER = /^@(\^?)(!?)(?:"([^"]+)"|(\S+))\s+/;
 
 /**
  * The same question at the other end of the name: `CNN ~4K`, `CNN ~!hevc`.
@@ -218,6 +223,8 @@ export function parseAlias(line: string): AliasSpec {
   let text = line.trim();
   const require = new Set<string>();
   const reject = new Set<string>();
+  const requireFirst = new Set<string>();
+  const rejectFirst = new Set<string>();
   const requireTags = new Set<string>();
   const rejectTags = new Set<string>();
 
@@ -226,8 +233,17 @@ export function parseAlias(line: string): AliasSpec {
     if (!match) break;
     // Tolerate "@AU:" or "@AU -" -- the separator is how the prefix reads in the
     // stream name, so people will type it.
-    const key = matchKey((match[2] ?? match[3] ?? '').replace(/[:|–—-]+$/, ''));
-    if (key) (match[1] ? reject : require).add(key);
+    const key = matchKey((match[3] ?? match[4] ?? '').replace(/[:|–—-]+$/, ''));
+    if (key) {
+      const target = match[1]
+        ? match[2]
+          ? rejectFirst
+          : requireFirst
+        : match[2]
+          ? reject
+          : require;
+      target.add(key);
+    }
     text = text.slice(match[0].length);
   }
 
@@ -239,13 +255,15 @@ export function parseAlias(line: string): AliasSpec {
     text = text.slice(0, match.index);
   }
 
-  return { text: text.trim(), require, reject, requireTags, rejectTags };
+  return { text: text.trim(), require, reject, requireFirst, rejectFirst, requireTags, rejectTags };
 }
 
 const UNQUALIFIED: AliasSpec = {
   text: '',
   require: new Set(),
   reject: new Set(),
+  requireFirst: new Set(),
+  rejectFirst: new Set(),
   requireTags: new Set(),
   rejectTags: new Set(),
 };
@@ -259,6 +277,15 @@ const UNQUALIFIED: AliasSpec = {
  * quietly becoming a second way to spell an alias.
  */
 const QUALIFIER_WORDS = 4;
+
+/** Add every leading-word run a qualifier may name. */
+function addQualifierRuns(keys: Set<string>, text: string): void {
+  const words = text.split(/\s+/).filter(Boolean);
+  for (let i = 1; i <= Math.min(words.length, QUALIFIER_WORDS); i++) {
+    const key = matchKey(words.slice(0, i).join(' '));
+    if (key) keys.add(key);
+  }
+}
 
 /**
  * Every key an `@` qualifier can match on a stream.
@@ -284,15 +311,7 @@ function qualifierKeys(norm: NormalizedName): Set<string> {
   if (cached) return cached;
 
   const keys = new Set<string>();
-  const addRuns = (text: string): void => {
-    const words = text.split(/\s+/).filter(Boolean);
-    for (let i = 1; i <= Math.min(words.length, QUALIFIER_WORDS); i++) {
-      const key = matchKey(words.slice(0, i).join(' '));
-      if (key) keys.add(key);
-    }
-  };
-
-  for (const prefix of norm.prefixes) addRuns(prefix);
+  for (const prefix of norm.prefixes) addQualifierRuns(keys, prefix);
   // Market tags lifted off the tail. Without these the only thing telling two
   // feeds apart would be the very text `normalize` just removed, so a channel
   // sold into several markets would be unaddressable.
@@ -300,7 +319,7 @@ function qualifierKeys(norm: NormalizedName): Set<string> {
     const key = matchKey(region);
     if (key) keys.add(key);
   }
-  addRuns(norm.name);
+  addQualifierRuns(keys, norm.name);
 
   qualifierCache.set(norm, keys);
   return keys;
@@ -313,26 +332,36 @@ function qualifierKeys(norm: NormalizedName): Set<string> {
  */
 const qualifierCache = new WeakMap<NormalizedName, Set<string>>();
 
+/** Keys reachable exclusively from the outermost punctuated prefix segment. */
+function firstPrefixKeys(norm: NormalizedName): Set<string> {
+  const cached = firstPrefixCache.get(norm);
+  if (cached) return cached;
+  const keys = new Set<string>();
+  if (norm.prefixes[0]) addQualifierRuns(keys, norm.prefixes[0]);
+  firstPrefixCache.set(norm, keys);
+  return keys;
+}
+
+const firstPrefixCache = new WeakMap<NormalizedName, Set<string>>();
+
 /** Whether a stream's sections satisfy an alias's qualifiers. */
 export function prefixesSatisfy(spec: AliasSpec, norm: NormalizedName): boolean {
-  if (spec.require.size === 0 && spec.reject.size === 0) return true;
+  if (
+    spec.require.size === 0 &&
+    spec.reject.size === 0 &&
+    spec.requireFirst.size === 0 &&
+    spec.rejectFirst.size === 0
+  ) {
+    return true;
+  }
   const keys = qualifierKeys(norm);
   for (const key of keys) if (spec.reject.has(key)) return false;
-  if (spec.require.size === 0) return true;
-  // A US/USA qualifier selects the catalogue's region, not a later section.
-  // Without this, `PL | US | CNN` satisfies `@US CNN` even though it begins
-  // with the Polish region marker. `|` is already normalised as a delimiter.
-  const requiredRegions = [...spec.require].filter((key) => key === 'us' || key === 'usa');
-  if (requiredRegions.length > 0) {
-    const firstPrefix = norm.prefixes[0] ?? '';
-    const firstPrefixKeys = new Set<string>();
-    const words = firstPrefix.split(/\s+/).filter(Boolean);
-    for (let i = 1; i <= Math.min(words.length, QUALIFIER_WORDS); i++) {
-      const key = matchKey(words.slice(0, i).join(' '));
-      if (key) firstPrefixKeys.add(key);
-    }
-    if (!requiredRegions.some((key) => firstPrefixKeys.has(key))) return false;
+  const first = firstPrefixKeys(norm);
+  for (const key of first) if (spec.rejectFirst.has(key)) return false;
+  if (spec.requireFirst.size > 0 && ![...spec.requireFirst].some((key) => first.has(key))) {
+    return false;
   }
+  if (spec.require.size === 0) return true;
   for (const key of spec.require) if (keys.has(key)) return true;
   return false;
 }
@@ -457,7 +486,11 @@ export class Matcher {
     const regions = rule.excludeRegions ?? this.guards.regions;
     const wantsRadio = rule.aliases.some((alias) => {
       const spec = parseAlias(alias);
-      return /^\s*radio\b/i.test(spec.text) || spec.require.has('radio');
+      return (
+        /^\s*radio\b/i.test(spec.text) ||
+        spec.require.has('radio') ||
+        spec.requireFirst.has('radio')
+      );
     });
     if (regions === this.guards.regions && !wantsRadio) return this.guards;
     return { ...this.guards, regions, radio: this.guards.radio && !wantsRadio };
@@ -519,9 +552,10 @@ export class Matcher {
      * named regions are lifted; the rest of the denylist still applies.
      */
     const guardsWith = (spec: AliasSpec): Guards => {
-      if (spec.require.size === 0 || guards.regions.size === 0) return guards;
+      const required = new Set([...spec.require, ...spec.requireFirst]);
+      if (required.size === 0 || guards.regions.size === 0) return guards;
       const regions = new Set(
-        [...guards.regions].filter((region) => !spec.require.has(matchKey(region))),
+        [...guards.regions].filter((region) => !required.has(matchKey(region))),
       );
       return regions.size === guards.regions.size ? guards : { ...guards, regions };
     };

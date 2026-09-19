@@ -108,6 +108,7 @@ Qualify it with `@`:
 @AU Sports Alpha           only streams whose prefix is AU
 @!FAST News Central        any News Central except the FAST: ones
 @US @USA Sports Alpha 1    either prefix
+@^US @^USA Sports Alpha 1  either outermost prefix only
 @"US East" News Central    quote a multi-word prefix
 ```
 
@@ -132,6 +133,12 @@ never punctuated one — which matters because the same section often appears bo
 ways, and only the punctuated one has a separator for `normalize` to lift. A
 qualifier is a section marker, so it stops at four words: `@` is not a second
 spelling of an alias.
+
+Use `@^` when the prefix must be the first segment. This distinguishes
+`US | NCAAF 02: ESPN` from `PL | US | ESPN`; `@^US ESPN` takes only the former.
+`@^!PL ESPN` excludes a stream only when `PL` is its first segment. Ordinary
+`@` continues to match nested sections, so `@MLB` still reaches
+`US | MLB | ...`.
 
 In the UI, **Find streams** lists the prefixes each name appears under with a
 count — `AU ×3` `US ×5` — and clicking one adds the qualified alias. Searching a
