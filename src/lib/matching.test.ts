@@ -1220,6 +1220,18 @@ describe('matcher', () => {
     expect(m.match(m.rules.get(1)!, index).map(([id]) => id)).toEqual([10, 11]);
   });
 
+  it('requires US and USA qualifiers to be the first prefix segment', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['@US @USA Fox Sports 1'] });
+    const index = m.buildIndex([
+      stream(10, 'US | Fox Sports 1'),
+      stream(11, 'USA | Fox Sports 1'),
+      stream(12, 'PL | US | Fox Sports 1'),
+      stream(13, 'AR | USA | Fox Sports 1'),
+      stream(14, 'ES | Fox Sports 1'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index).map(([id]) => id)).toEqual([10, 11]);
+  });
+
   it('ranks a prefixed alias above the unqualified fallback', () => {
     // "Prefer the AU feed, take any other if there is none" is two lines,
     // because alias order is already preference order.

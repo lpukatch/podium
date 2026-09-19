@@ -319,6 +319,20 @@ export function prefixesSatisfy(spec: AliasSpec, norm: NormalizedName): boolean 
   const keys = qualifierKeys(norm);
   for (const key of keys) if (spec.reject.has(key)) return false;
   if (spec.require.size === 0) return true;
+  // A US/USA qualifier selects the catalogue's region, not a later section.
+  // Without this, `PL | US | CNN` satisfies `@US CNN` even though it begins
+  // with the Polish region marker. `|` is already normalised as a delimiter.
+  const requiredRegions = [...spec.require].filter((key) => key === 'us' || key === 'usa');
+  if (requiredRegions.length > 0) {
+    const firstPrefix = norm.prefixes[0] ?? '';
+    const firstPrefixKeys = new Set<string>();
+    const words = firstPrefix.split(/\s+/).filter(Boolean);
+    for (let i = 1; i <= Math.min(words.length, QUALIFIER_WORDS); i++) {
+      const key = matchKey(words.slice(0, i).join(' '));
+      if (key) firstPrefixKeys.add(key);
+    }
+    if (!requiredRegions.some((key) => firstPrefixKeys.has(key))) return false;
+  }
   for (const key of spec.require) if (keys.has(key)) return true;
   return false;
 }
