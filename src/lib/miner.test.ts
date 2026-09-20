@@ -361,4 +361,15 @@ describe('readiness report', () => {
     expect(report.windowDays).toBeCloseTo(2, 0);
     expect(report.durationShortfallDays).toBeCloseTo(5, 0);
   });
+
+  it('handles a large sample history without exceeding call stack limits', () => {
+    const count = 150_000;
+    const base = sample({ streamName: 'Sports 1' });
+    const samples = Array.from({ length: count }, (_, i) => ({
+      ...base,
+      sampledAt: START + (i % 1000) * 1000,
+    }));
+    const report = mineNames(samples, []);
+    expect(report.cells).toBe(1);
+  });
 });

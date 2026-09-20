@@ -1574,7 +1574,7 @@ export class Store {
         if (best) {
           // The newest verdict any login contributed: "when did we last look
           // at this stream through any of its logins".
-          const probedAt = Math.max(...entries.map((e) => e.row.probed_at));
+          const probedAt = entries.reduce((max, e) => Math.max(max, e.row.probed_at), 0);
           out.set(streamId, { probedAt, alive: best.alive, result: best });
         }
       }
@@ -1658,7 +1658,7 @@ export class Store {
       const winner = entries.find((e) => e.parsed === best);
       out.push({
         streamId,
-        probedAt: Math.max(...entries.map((e) => e.probedAt)),
+        probedAt: entries.reduce((max, e) => Math.max(max, e.probedAt), 0),
         deadStreak: winner?.deadStreak ?? 0,
         result: best,
       });

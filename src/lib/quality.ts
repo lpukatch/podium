@@ -722,6 +722,10 @@ function summarise(list: StoredQualitySample[]): Bucket {
   const aliveRate = list.length === 0 ? 0 : alive.length / list.length;
   const blackRate = alive.length === 0 ? 0 : black.length / alive.length;
   const median = Math.round(percentile(rated, 0.5));
+  let lastSampledAt = 0;
+  for (const sample of list) {
+    if (sample.sampledAt > lastSampledAt) lastSampledAt = sample.sampledAt;
+  }
 
   return {
     providerId: list[0]!.providerId,
@@ -738,7 +742,7 @@ function summarise(list: StoredQualitySample[]): Bucket {
     p90BitrateKbps: Math.round(percentile(rated, 0.9)),
     medianHeight: Math.round(percentile(heights, 0.5)),
     effectiveKbps: effectiveKbpsOf(list),
-    lastSampledAt: Math.max(...list.map((sample) => sample.sampledAt)),
+    lastSampledAt,
   };
 }
 
@@ -883,7 +887,10 @@ function fitEffects(buckets: Bucket[]): {
             (byAccount.get(bucket.providerName) ?? 0) + bucket.samples,
           );
         }
-        const top = Math.max(0, ...byAccount.values());
+        let top = 0;
+        for (const count of byAccount.values()) {
+          if (count > top) top = count;
+        }
         return {
           key,
           samples,

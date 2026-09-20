@@ -194,7 +194,10 @@ export function summarizeDead(
     channelsServedFirst: channels.filter((c) => c.servedFirstDead).length,
     channelsAffected: channels.length,
     worstStreak: deadEntries.reduce((worst, e) => Math.max(worst, e.deadStreak), 0),
-    oldestProbedAt: entries.length > 0 ? Math.min(...entries.map((e) => e.probedAt)) : null,
+    oldestProbedAt:
+      entries.length > 0
+        ? entries.reduce((oldest, e) => Math.min(oldest, e.probedAt), entries[0]!.probedAt)
+        : null,
   };
 
   entries.sort((a, b) => b.deadStreak - a.deadStreak || a.probedAt - b.probedAt);

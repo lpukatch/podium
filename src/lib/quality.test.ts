@@ -109,6 +109,13 @@ describe('buildProfile', () => {
     expect(bucket.effectiveKbps).toBe(3333);
   });
 
+  it('handles a large sample history without exceeding call stack limits', () => {
+    const samples = many(150_000);
+    const profile = buildProfile(samples);
+    expect(profile.totalSamples).toBe(150_000);
+    expect(profile.buckets).toHaveLength(1);
+  });
+
   it('ignores declared bitrates and black screens in the median', () => {
     const samples = [
       ...many(10, { bitrateKbps: 5000, measured: true }),
