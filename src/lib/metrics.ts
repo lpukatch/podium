@@ -524,7 +524,7 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
           'podium_provider_verdict_age_seconds',
           'Age of the verdicts this provider is being judged on. A provider whose lane runs at its limit is probed least often, so its numbers are the stalest.',
           'gauge',
-          Math.round(Math.max(...ages) / 1000),
+          Math.round(ages.reduce((max, age) => Math.max(max, age), 0) / 1000),
           { ...labels, stat: 'max' },
         );
       }

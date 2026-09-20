@@ -407,16 +407,18 @@ export function minePassA(
   const settings = resolve(options);
   if (samples.length === 0) return [];
 
+  let windowStart = Number.POSITIVE_INFINITY;
+  let windowEnd = Number.NEGATIVE_INFINITY;
   const cells = new Map<string, StoredQualitySample[]>();
   for (const sample of samples) {
+    if (sample.sampledAt < windowStart) windowStart = sample.sampledAt;
+    if (sample.sampledAt > windowEnd) windowEnd = sample.sampledAt;
     const key = `${sample.providerId} ${sample.groupId ?? ''} ${sample.tier} ${sample.audioOnly}`;
     const list = cells.get(key);
     if (list) list.push(sample);
     else cells.set(key, [sample]);
   }
 
-  const windowStart = Math.min(...samples.map((sample) => sample.sampledAt));
-  const windowEnd = Math.max(...samples.map((sample) => sample.sampledAt));
   const midpoint = (windowStart + windowEnd) / 2;
 
   const contrasts = new Map<string, CellContrast[]>();
@@ -472,12 +474,21 @@ export function minePassA(
       cellContrasts.reduce((sum, cell) => sum + cell.effectKbps * cell.weight, 0) / support,
     );
 
-    const hits = [...(matched.get(token) ?? [])];
-    const spanMs =
-      hits.length === 0
-        ? 0
-        : Math.max(...hits.map((sample) => sample.sampledAt)) -
-          Math.min(...hits.map((sample) => sample.sampledAt));
+    const hits = matched.get(token);
+    let spanMs = 0;
+    const examples: string[] = [];
+    if (hits && hits.size > 0) {
+      let first = Number.POSITIVE_INFINITY;
+      let last = Number.NEGATIVE_INFINITY;
+      for (const sample of hits) {
+        if (sample.sampledAt < first) first = sample.sampledAt;
+        if (sample.sampledAt > last) last = sample.sampledAt;
+        if (examples.length < 3 && !examples.includes(sample.streamName)) {
+          examples.push(sample.streamName);
+        }
+      }
+      spanMs = last - first;
+    }
 
     // Both halves must agree, and a half with no contrast to show has not
     // agreed -- it has abstained. Reading 0 as agreement would let a token seen
@@ -503,7 +514,7 @@ export function minePassA(
       spanDays: Math.round((spanMs / DAY_MS) * 10) / 10,
       stable,
       blockedBy,
-      examples: [...new Set(hits.map((sample) => sample.streamName))].slice(0, 3),
+      examples,
     });
   }
 
@@ -809,17 +820,17 @@ export function mineNames(
   const settings = resolve(options);
   const candidates = minePassA(scoped, options);
 
+  let windowStart = Number.POSITIVE_INFINITY;
+  let windowEnd = Number.NEGATIVE_INFINITY;
   const cells = new Map<string, number>();
   for (const sample of scoped) {
+    if (sample.sampledAt < windowStart) windowStart = sample.sampledAt;
+    if (sample.sampledAt > windowEnd) windowEnd = sample.sampledAt;
     const key = `${sample.providerId} ${sample.groupId ?? ''} ${sample.tier} ${sample.audioOnly}`;
     cells.set(key, (cells.get(key) ?? 0) + 1);
   }
 
-  const span =
-    scoped.length === 0
-      ? 0
-      : Math.max(...scoped.map((sample) => sample.sampledAt)) -
-        Math.min(...scoped.map((sample) => sample.sampledAt));
+  const span = scoped.length === 0 ? 0 : windowEnd - windowStart;
 
   const guardCounts = new Map<MinerGuard, number>();
   for (const candidate of candidates) {
