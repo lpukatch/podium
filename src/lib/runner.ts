@@ -10,6 +10,7 @@
  */
 
 import type { Config } from './config';
+import { DeferralLog } from './deferral-log';
 import { type ActiveSession, type Channel, DispatcharrClient, type Stream } from './dispatcharr';
 import {
   AFTER_EPG_START,
@@ -1038,6 +1039,12 @@ export class Runner {
    * logged when it starts rather than on every pass.
    */
   private ruleSyncRefusal = '';
+  /**
+   * The no-capacity line, once per episode rather than once per pass -- a
+   * provider with viewers stays at capacity for the length of a game, and the
+   * per-pass line buried everything else in the log across a viewing evening.
+   */
+  private readonly deferredLog = new DeferralLog();
   private progress: Omit<Progress, 'updatedAt'> = {
     runId: null,
     phase: 'idle',
@@ -1681,9 +1688,18 @@ export class Runner {
       // sleep past it.
       counters.runnableBacklog = openStreams.size;
       if (counters.deferred > 0) {
-        log(
-          `deferring ${counters.deferred} streams on provider(s) ${[...noCapacity].join(', ')}: no spare capacity`,
+        // Sorted so the same provider set always produces the same key: the
+        // episode is "which providers are at capacity", not what order a Set
+        // happened to iterate them in.
+        const line = this.deferredLog.note(
+          [...noCapacity].sort((a, b) => a - b).join(', '),
+          counters.deferred,
+          Date.now(),
         );
+        if (line) log(line);
+      } else {
+        const line = this.deferredLog.cleared(Date.now());
+        if (line) log(line);
       }
       if (unrunnableStreams.size > 0) {
         log(
