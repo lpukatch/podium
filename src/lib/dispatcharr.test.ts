@@ -184,6 +184,54 @@ describe('paging', () => {
     const client = new DispatcharrClient('http://d', { apiKey: 'k' });
     await expect(client.paged('/api/x')).rejects.toBeInstanceOf(DispatcharrError);
   });
+
+  describe('a listing that shrank mid-read', () => {
+    // An M3U refresh deletes streams while the crawl is between pages: page 1
+    // advertised more pages than now exist, and DRF answers the ones past the
+    // new end with 404 {"detail":"Invalid page."}. Observed failing a whole
+    // live run at page=146 of a 143-page listing.
+    const pageParam = (c: Call) => Number(new URL(c.url).searchParams.get('page'));
+
+    it('ends the read short and the re-read reconciles against the fresh count', async () => {
+      const stale = PAGE_SIZE * 3;
+      const fresh = PAGE_SIZE + 10;
+      let reads = 0;
+      stubFetch((c) => {
+        const page = pageParam(c);
+        if (page === 1) reads += 1;
+        if (reads === 1) {
+          // The stale listing still has a third page; it 404s because the
+          // refresh removed everything it held.
+          if (page === 3) return { status: 404, body: { detail: 'Invalid page.' } };
+          return { body: pageOf(stale, page) };
+        }
+        // The re-read sees the post-refresh count and never asks for page 3.
+        return { body: pageOf(fresh, page) };
+      });
+      const client = new DispatcharrClient('http://d', { apiKey: 'k' });
+      const rows = await client.paged<{ id: number }>('/api/x');
+
+      expect(reads).toBe(2);
+      // Every row the fresh listing promises, exactly once.
+      const seen = new Map<number, number>();
+      for (const row of rows) seen.set(row.id, (seen.get(row.id) ?? 0) + 1);
+      for (let id = 0; id < fresh; id++) expect(seen.get(id)).toBe(1);
+      // The stale first read's rows linger in the merge until the next pass
+      // prunes them -- the documented grace, pinned so it cannot change
+      // silently.
+      expect(rows).toHaveLength(PAGE_SIZE * 2);
+    });
+
+    it('still raises when a 404 is not the invalid-page body', async () => {
+      stubFetch((c) => {
+        const page = pageParam(c);
+        if (page === 2) return { status: 404, body: { detail: 'Not found.' } };
+        return { body: pageOf(PAGE_SIZE * 2, page) };
+      });
+      const client = new DispatcharrClient('http://d', { apiKey: 'k' });
+      await expect(client.paged('/api/x')).rejects.toBeInstanceOf(DispatcharrError);
+    });
+  });
 });
 
 describe('auth', () => {
