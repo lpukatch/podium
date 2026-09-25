@@ -39,6 +39,14 @@ import type { ProbeResult, SoakResult } from './probe';
 import type { Leg, StabilityRecord } from './stability';
 import { pickBestVariant, type VariantVerdict, verdictStatus } from './variants';
 
+/**
+ * How many Teamarr sync attempts the history keeps. A deferral retries within
+ * the hour, so this is a little over a week of an install that never pushes --
+ * enough to see "deferred all week, pushed Saturday night" without keeping a
+ * row per attempt forever.
+ */
+const TEAMARR_SYNC_LOG_ROWS = 200;
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS probe_cache (
     stream_id    INTEGER NOT NULL,
@@ -345,6 +353,24 @@ CREATE TABLE IF NOT EXISTS teamarr_sync (
     id          INTEGER PRIMARY KEY CHECK (id = 1),
     ran_at      INTEGER NOT NULL,
     outcome     TEXT    NOT NULL
+);
+
+-- Every sync attempt the install has made lately, one row each, oldest dropped.
+--
+-- teamarr_sync above keeps only the latest outcome, which answers "what did the
+-- last attempt do" and nothing else. The questions that need history -- when
+-- did a push last actually happen, how often is the thin-coverage guard
+-- deferring, has a scheduled sync been silently failing all week -- are the
+-- ones the metrics answer, and the metrics are derived from the database, so
+-- the database is where the trail has to live. The outcome flags are pulled
+-- out into columns because a GROUP BY over three integers is the whole query.
+CREATE TABLE IF NOT EXISTS teamarr_sync_log (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    ran_at   INTEGER NOT NULL,
+    pushed   INTEGER NOT NULL,
+    deferred INTEGER NOT NULL,
+    failed   INTEGER NOT NULL,
+    outcome  TEXT    NOT NULL
 );
 
 -- One row per *distinct* check result, not per pass that ran one.
@@ -2243,12 +2269,58 @@ export class Store {
     ).run(JSON.stringify(rules), Date.now());
   }
 
-  /** Record the last sync attempt, pushed or not. */
+  /**
+   * Record the last sync attempt, pushed or not.
+   *
+   * Also appends to the retained history (`teamarrSyncLog`), classified into
+   * pushed / deferred / failed so the metrics can aggregate without parsing
+   * JSON. "Failed" is an attempt that never reached a decision -- a thrown
+   * error, saved by the caller's catch -- and everything that completed
+   * without writing and without deferring counts as a refusal, including the
+   * "not configured" non-attempts.
+   */
   saveTeamarrSync(outcome: unknown): void {
+    const o = outcome as { at?: unknown; pushed?: boolean; deferred?: boolean; error?: unknown };
+    // The outcome's own timestamp when it carries one, so the row and the log
+    // can never disagree about when the same attempt ran.
+    const at = typeof o?.at === 'number' ? o.at : Date.now();
     this.sql(
       `INSERT INTO teamarr_sync (id, ran_at, outcome) VALUES (1, ?, ?)
          ON CONFLICT(id) DO UPDATE SET ran_at = excluded.ran_at, outcome = excluded.outcome`,
-    ).run(Date.now(), JSON.stringify(outcome));
+    ).run(at, JSON.stringify(outcome));
+    this.sql(
+      `INSERT INTO teamarr_sync_log (ran_at, pushed, deferred, failed, outcome)
+         VALUES (?, ?, ?, ?, ?)`,
+    ).run(
+      at,
+      o?.pushed === true ? 1 : 0,
+      o?.deferred === true ? 1 : 0,
+      typeof o?.error === 'string' ? 1 : 0,
+      JSON.stringify(outcome),
+    );
+    // Keep the newest TEAMARR_SYNC_LOG_ROWS: the (N+1)th newest id is the
+    // first to go, so the OFFSET is the cap itself, not one under it.
+    this.sql(
+      `DELETE FROM teamarr_sync_log WHERE id <= (
+         SELECT id FROM teamarr_sync_log ORDER BY id DESC LIMIT 1 OFFSET ?
+       )`,
+    ).run(TEAMARR_SYNC_LOG_ROWS);
+  }
+
+  /**
+   * The retained sync history, newest first, for the metrics and any page
+   * that wants to show more than the latest attempt.
+   */
+  teamarrSyncLog(): Array<{ ranAt: number; pushed: boolean; deferred: boolean; failed: boolean }> {
+    const rows = this.sql(
+      'SELECT ran_at, pushed, deferred, failed FROM teamarr_sync_log ORDER BY id DESC',
+    ).all() as Array<{ ran_at: number; pushed: number; deferred: number; failed: number }>;
+    return rows.map((row) => ({
+      ranAt: row.ran_at,
+      pushed: row.pushed === 1,
+      deferred: row.deferred === 1,
+      failed: row.failed === 1,
+    }));
   }
 
   /** The last sync attempt, or null if none has run. */

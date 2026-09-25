@@ -225,6 +225,48 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
     );
   }
 
+  // --- teamarr sync --------------------------------------------------------
+  //
+  // The push is safety-gated (thin coverage defers, a regression refuses), so
+  // "nothing was written" is a normal outcome and the single latest-attempt row
+  // cannot distinguish a healthy always-deferring install from one whose
+  // scheduled sync died on Tuesday. Counted over the retained sync history
+  // rather than process lifetime, like everything else here derived from the
+  // database -- which means the counters step back to zero when the log rolls
+  // over, and rate() treats that as the reset it is.
+  const syncLog = store.teamarrSyncLog();
+  if (syncLog.length > 0) {
+    type Bucket = 'pushed' | 'deferred' | 'refused' | 'failed';
+    const buckets: Record<Bucket, number> = { pushed: 0, deferred: 0, refused: 0, failed: 0 };
+    let lastPush = 0;
+    for (const row of syncLog) {
+      const bucket: Bucket = row.pushed
+        ? 'pushed'
+        : row.deferred
+          ? 'deferred'
+          : row.failed
+            ? 'failed'
+            : 'refused';
+      buckets[bucket] += 1;
+      if (row.pushed && row.ranAt > lastPush) lastPush = row.ranAt;
+    }
+    for (const bucket of Object.keys(buckets) as Bucket[]) {
+      out.add(
+        'podium_teamarr_sync_total',
+        'Teamarr sync attempts in the retained history (oldest dropped at 200), by outcome.',
+        'counter',
+        buckets[bucket],
+        { outcome: bucket },
+      );
+    }
+    out.add(
+      'podium_teamarr_last_push_timestamp_seconds',
+      'Unix time of the most recent push in the retained history; 0 when none was kept.',
+      'gauge',
+      Math.round(lastPush / 1000),
+    );
+  }
+
   // --- stability ledger ----------------------------------------------------
   //
   // Aggregates only, no per-stream series: a catalogue's worth of stream ids is
