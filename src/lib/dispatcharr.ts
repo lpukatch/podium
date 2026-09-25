@@ -340,7 +340,19 @@ export function parseStatusPayload(
   return { rawCount, ignoredCount, channels };
 }
 
-export class DispatcharrError extends Error {}
+export class DispatcharrError extends Error {
+  /**
+   * HTTP status when the error came from a response, for callers that
+   * distinguish failure modes (a page past the end of a listing that shrank
+   * is a 404; a 500 is not). Absent on errors raised before any response.
+   */
+  constructor(
+    message: string,
+    readonly status?: number,
+  ) {
+    super(message);
+  }
+}
 
 /**
  * Translate a profile's search pattern into one JS can compile.
@@ -704,6 +716,7 @@ export class DispatcharrClient {
     if (!resp.ok) {
       throw new DispatcharrError(
         `GET ${path} -> ${resp.status}: ${(await resp.text()).slice(0, 200)}`,
+        resp.status,
       );
     }
     return (await resp.json()) as T;
@@ -712,6 +725,36 @@ export class DispatcharrClient {
   private page<T>(path: string, page: number): Promise<Paged<T> | T[]> {
     const join = path.includes('?') ? '&' : '?';
     return this.getJson<Paged<T> | T[]>(`${path}${join}page=${page}&page_size=${PAGE_SIZE}`);
+  }
+
+  /**
+   * A page past the end of a listing that shrank while it was being read.
+   *
+   * Dispatcharr's M3U refresh deletes streams mid-crawl, and DRF answers the
+   * now-invalid offset with 404 `{"detail":"Invalid page."}` rather than a
+   * short page. Letting that throw failed whole runs over a race the caller
+   * already knows how to repair -- `paged` re-reads against a fresh count --
+   * so it is reported here as an empty page and the reconciliation left to
+   * it. Every other failure keeps raising: a 404 that is not this exact
+   * body (a renamed endpoint, a missing object) and every other status mean
+   * something is wrong that a re-read will not fix.
+   *
+   * Only ever asked for pages >= 2: page 1 is always a valid offset, so a
+   * 404 there is one of those other meanings and must still raise.
+   */
+  private async pageOrEnd<T>(path: string, page: number): Promise<Paged<T> | T[]> {
+    try {
+      return await this.page<T>(path, page);
+    } catch (error) {
+      if (
+        error instanceof DispatcharrError &&
+        error.status === 404 &&
+        error.message.includes('Invalid page')
+      ) {
+        return [];
+      }
+      throw error;
+    }
   }
 
   /**
@@ -732,6 +775,13 @@ export class DispatcharrClient {
    * `count` promised has turned up. A torn read misses different rows each
    * time, so the second read nearly always closes the gap. Rows a later read
    * finds are appended, leaving the first read's order otherwise intact.
+   *
+   * A read can also come back short because the listing *shrank* under it:
+   * an M3U refresh deletes streams mid-crawl and DRF 404s the now-invalid
+   * pages. Those pages read as empty (`pageOrEnd`) and the same re-read
+   * machinery reconciles against the fresh `count`. Rows the first read saw
+   * that the refresh deleted linger in the merge until the next pass prunes
+   * them -- the same grace the torn-read repair already gives.
    */
   async paged<T>(path: string): Promise<T[]> {
     const first = await this.readPages<T>(path);
@@ -787,7 +837,7 @@ export class DispatcharrClient {
       // No count to plan with -- fall back to walking `next` serially.
       let n = 2;
       for (;;) {
-        const body = await this.page<T>(path, n);
+        const body = await this.pageOrEnd<T>(path, n);
         if (Array.isArray(body)) return { rows: [...out, ...body], count: null };
         out.push(...(body.results ?? []));
         if (!body.next) return { rows: out, count: null };
@@ -804,7 +854,7 @@ export class DispatcharrClient {
       for (;;) {
         const n = pending.shift();
         if (n === undefined) return;
-        const body = await this.page<T>(path, n);
+        const body = await this.pageOrEnd<T>(path, n);
         collected.set(n, Array.isArray(body) ? body : (body.results ?? []));
       }
     });
