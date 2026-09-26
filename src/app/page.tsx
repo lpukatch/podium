@@ -18,6 +18,7 @@ import { StreamSearch } from './stream-search';
 
 type Mode = 'always' | 'never' | 'after_epg_start' | 'assigned';
 type Tab = 'groups' | 'all' | 'dead' | 'rules' | 'progress' | 'stats' | 'quality' | 'settings';
+type Area = 'channels' | 'monitoring' | 'quality' | 'settings';
 type SettingsSection = 'general' | 'ordering' | 'stream-groups' | 'name-noise' | 'backup';
 type ChanFilter = 'all' | 'regex' | 'nomatch' | 'dead';
 
@@ -203,7 +204,7 @@ const chip = (on: boolean) =>
 const TAB_LABELS: Record<Tab, string> = {
   groups: 'Groups',
   all: 'All channels',
-  dead: 'Dead',
+  dead: 'Dead streams',
   rules: 'Name rules',
   progress: 'Progress',
   stats: 'Stats',
@@ -211,15 +212,29 @@ const TAB_LABELS: Record<Tab, string> = {
   settings: 'Settings',
 };
 
+const AREAS: Array<{ id: Area; label: string; defaultTab: Tab; views: Tab[] }> = [
+  { id: 'channels', label: 'Channels', defaultTab: 'groups', views: ['groups', 'all', 'rules'] },
+  {
+    id: 'monitoring',
+    label: 'Monitoring',
+    defaultTab: 'progress',
+    views: ['progress', 'dead', 'stats'],
+  },
+  { id: 'quality', label: 'Quality', defaultTab: 'quality', views: ['quality'] },
+  { id: 'settings', label: 'Settings', defaultTab: 'settings', views: ['settings'] },
+];
+
+const areaForTab = (tab: Tab) => AREAS.find((area) => area.views.includes(tab)) ?? AREAS[0]!;
+
 // Five views used to stack down one page, so Backup sat below 8,000 pixels of
 // probe timers -- and the settings form's pinned Save bar let go of the screen
 // halfway down, on a card it did not belong to.
 const SETTINGS_SECTIONS: Array<[SettingsSection, string]> = [
-  ['general', 'General'],
-  ['ordering', 'Ordering'],
+  ['general', 'App settings'],
+  ['ordering', 'Ranking'],
   ['stream-groups', 'Provider groups'],
-  ['name-noise', 'Name noise'],
-  ['backup', 'Backup'],
+  ['name-noise', 'Name cleanup'],
+  ['backup', 'Backup & restore'],
 ];
 
 const isSettingsSection = (s: string | null): s is SettingsSection =>
@@ -260,7 +275,7 @@ export default function Page() {
 
   const [tab, setTab] = useState<Tab>('groups');
   const [section, setSection] = useState<SettingsSection>('general');
-  const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
+  const sectionRefs = useRef<Partial<Record<SettingsSection, HTMLButtonElement | null>>>({});
   const [groupId, setGroupId] = useState<number | null>(null);
   const [channelId, setChannelId] = useState<number | null>(null);
   const [filter, setFilter] = useState('');
@@ -395,11 +410,19 @@ export default function Page() {
     [tab, section, groupId, channelId],
   );
 
-  // On a phone the tab row scrolls sideways, and a deep link to Settings would
-  // otherwise open with the selected tab out of sight.
+  // A deep link to Backup should not leave its selected tab outside the
+  // narrow settings strip. Keep the page's vertical position unchanged.
   useEffect(() => {
-    tabRefs.current[tab]?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-  }, [tab]);
+    if (tab !== 'settings') return;
+    const selected = sectionRefs.current[section];
+    const strip = selected?.parentElement;
+    if (!selected || !strip) return;
+    const start = selected.offsetLeft - strip.offsetLeft;
+    if (start < strip.scrollLeft) strip.scrollLeft = start;
+    else if (start + selected.offsetWidth > strip.scrollLeft + strip.clientWidth) {
+      strip.scrollLeft = start + selected.offsetWidth - strip.clientWidth;
+    }
+  }, [tab, section]);
 
   const group = useMemo(() => groups.find((g) => g.id === groupId) ?? null, [groups, groupId]);
   const channel = useMemo(
@@ -1041,19 +1064,21 @@ export default function Page() {
           {/* Not "Refresh": the Dead tab has its own, which re-reads the probe
               cache, and two identically named buttons a card apart invited
               the question of which did what. */}
-          <button
-            type="button"
-            className={`${btn} flex flex-none items-center gap-2`}
-            disabled={loading}
-            title="Fetch every channel and stream from Dispatcharr again"
-            onClick={() => void load(true)}
-          >
-            {loading && <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />}
-            {loading ? 'Reloading' : 'Reload'}
-            <span className="hidden sm:inline">{loading ? '' : ' from Dispatcharr'}</span>
-          </button>
+          {(areaForTab(tab).id === 'channels' || group) && (
+            <button
+              type="button"
+              className={`${btn} flex flex-none items-center gap-2`}
+              disabled={loading}
+              title="Fetch every channel and stream from Dispatcharr again"
+              onClick={() => void load(true)}
+            >
+              {loading && <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />}
+              {loading ? 'Reloading' : 'Reload'}
+              <span className="hidden sm:inline">{loading ? '' : ' from Dispatcharr'}</span>
+            </button>
+          )}
         </div>
-        {!group && (
+        {!group && areaForTab(tab).id === 'channels' && (
           <p className="mt-1.5 text-sm tabular-nums text-[var(--color-muted)]">
             {totals.managed} managed · {totals.excluded} excluded · {totals.gaps} with no match ·{' '}
             {totals.regex > 0 ? `${totals.regex} on legacy regex · ` : ''}
@@ -1065,28 +1090,36 @@ export default function Page() {
       <main className="flex-1">
         {!group && (
           <>
-            {/* One row that scrolls sideways on a phone. Wrapped, seven tabs
-                and the checkbox made a three-row staircase above the content. */}
-            <div className="flex items-center gap-3 border-b border-[var(--color-line)] bg-[var(--color-panel)] px-5 py-3">
-              <nav className="no-scrollbar -my-1 flex min-w-0 flex-1 gap-2 overflow-x-auto py-1">
-                {(
-                  [
-                    'groups',
-                    'all',
-                    'dead',
-                    'rules',
-                    'progress',
-                    'stats',
-                    'quality',
-                    'settings',
-                  ] as const
-                ).map((t) => (
+            <nav
+              aria-label="Main navigation"
+              className="grid grid-cols-4 border-b border-[var(--color-line)] bg-[var(--color-panel)] px-2 sm:px-5"
+            >
+              {AREAS.map((area) => (
+                <button
+                  type="button"
+                  key={area.id}
+                  aria-current={areaForTab(tab).id === area.id ? 'page' : undefined}
+                  onClick={() => navigate({ tab: area.defaultTab })}
+                  className={`min-w-0 border-b-2 px-1 py-3 text-center text-sm sm:px-3 ${
+                    areaForTab(tab).id === area.id
+                      ? 'border-[var(--color-accent)] font-semibold text-[var(--color-ink)]'
+                      : 'border-transparent text-[var(--color-muted)] hover:text-[var(--color-ink)]'
+                  }`}
+                >
+                  {area.label}
+                </button>
+              ))}
+            </nav>
+            {areaForTab(tab).views.length > 1 && (
+              <nav
+                aria-label={`${areaForTab(tab).label} views`}
+                className="no-scrollbar flex gap-2 overflow-x-auto border-b border-[var(--color-line)] bg-[var(--color-panel)] px-4 py-2 sm:px-5"
+              >
+                {areaForTab(tab).views.map((t) => (
                   <button
                     type="button"
                     key={t}
-                    ref={(el) => {
-                      tabRefs.current[t] = el;
-                    }}
+                    aria-current={tab === t ? 'page' : undefined}
                     onClick={() => navigate({ tab: t })}
                     className={`${chip(tab === t)} flex-none whitespace-nowrap`}
                   >
@@ -1094,18 +1127,7 @@ export default function Page() {
                   </button>
                 ))}
               </nav>
-              {(tab === 'groups' || tab === 'all') && (
-                <label className="flex flex-none cursor-pointer items-center gap-2 text-sm text-[var(--color-muted)]">
-                  <input
-                    type="checkbox"
-                    checked={showDisabled}
-                    onChange={(e) => setShowDisabled(e.target.checked)}
-                    className="h-4 w-4 accent-[var(--color-accent)]"
-                  />
-                  <span className="whitespace-nowrap">Show disabled</span>
-                </label>
-              )}
-            </div>
+            )}
 
             {tab === 'progress' && <ProgressView />}
 
@@ -1117,12 +1139,19 @@ export default function Page() {
 
             {tab === 'settings' && (
               <>
-                <nav className="no-scrollbar flex gap-4 overflow-x-auto border-b border-[var(--color-line)] px-5">
+                <nav
+                  aria-label="Settings pages"
+                  className="no-scrollbar flex gap-4 overflow-x-auto border-b border-[var(--color-line)] px-5"
+                >
                   {SETTINGS_SECTIONS.map(([id, label]) => (
                     <button
                       type="button"
                       key={id}
+                      ref={(el) => {
+                        sectionRefs.current[id] = el;
+                      }}
                       onClick={() => navigate({ section: id })}
+                      aria-current={section === id ? 'page' : undefined}
                       className={`-mb-px flex-none whitespace-nowrap border-b-2 py-2.5 text-sm ${
                         section === id
                           ? 'border-[var(--color-accent)] font-semibold text-[var(--color-ink)]'
@@ -1152,12 +1181,24 @@ export default function Page() {
             {tab === 'groups' && (
               <>
                 <div className="border-b border-[var(--color-line)] bg-[var(--color-panel)] p-4">
-                  <input
-                    value={groupFilter}
-                    onChange={(e) => setGroupFilter(e.target.value)}
-                    placeholder="Filter groups…"
-                    className="w-full rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2 outline-none focus:border-[var(--color-accent)]"
-                  />
+                  <div className="flex flex-wrap items-center gap-3">
+                    <input
+                      value={groupFilter}
+                      onChange={(e) => setGroupFilter(e.target.value)}
+                      aria-label="Filter groups"
+                      placeholder="Filter groups…"
+                      className="min-w-[12rem] flex-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2 outline-none focus:border-[var(--color-accent)]"
+                    />
+                    <label className="flex cursor-pointer items-center gap-2 text-sm text-[var(--color-muted)]">
+                      <input
+                        type="checkbox"
+                        checked={showDisabled}
+                        onChange={(e) => setShowDisabled(e.target.checked)}
+                        className="h-4 w-4 accent-[var(--color-accent)]"
+                      />
+                      Show disabled
+                    </label>
+                  </div>
                   <p className="mt-2 text-sm tabular-nums text-[var(--color-muted)]">
                     {visibleGroups.length} groups
                   </p>
@@ -1352,6 +1393,15 @@ export default function Page() {
                       </button>
                     ))}
                   </div>
+                  <label className="mt-3 flex cursor-pointer items-center gap-2 text-sm text-[var(--color-muted)]">
+                    <input
+                      type="checkbox"
+                      checked={showDisabled}
+                      onChange={(e) => setShowDisabled(e.target.checked)}
+                      className="h-4 w-4 accent-[var(--color-accent)]"
+                    />
+                    Show disabled
+                  </label>
                   <input
                     value={filter}
                     onChange={(e) => setFilter(e.target.value)}
