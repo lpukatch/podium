@@ -39,7 +39,9 @@ export async function POST(request: Request) {
       patterns: existing?.patterns ?? [],
       providers:
         body.providers !== undefined
-          ? parseProviders(body.providers)
+          ? Array.isArray(body.providers)
+            ? new Set(body.providers.map(Number).filter(Number.isFinite))
+            : parseProviders(body.providers)
           : (existing?.providers ?? null),
       stepOrder: existing?.stepOrder ?? 0,
       excludeRegions: existing?.excludeRegions ?? null,

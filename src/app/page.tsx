@@ -503,6 +503,9 @@ export default function Page() {
   const runPreview = useCallback(async () => {
     if (channelId === null) return;
     setPreviewing(true);
+    const allAllowed =
+      selectedProviders === null ||
+      (providersList.length > 0 && selectedProviders.length === providersList.length);
     try {
       const resp = await fetch('/api/preview', {
         method: 'POST',
@@ -512,14 +515,14 @@ export default function Page() {
           aliases: lines(aliases),
           contains: lines(contains),
           exclude: lines(exclude),
-          providers: selectedProviders,
+          providers: allAllowed ? null : selectedProviders,
         }),
       });
       if (resp.ok) setPreview((await resp.json()) as Preview);
     } finally {
       setPreviewing(false);
     }
-  }, [channelId, aliases, contains, exclude, selectedProviders]);
+  }, [channelId, aliases, contains, exclude, selectedProviders, providersList.length]);
 
   useEffect(() => {
     if (channelId === null) return;
@@ -574,6 +577,9 @@ export default function Page() {
 
   const save = async () => {
     if (channelId === null) return;
+    const allAllowed =
+      selectedProviders === null ||
+      (providersList.length > 0 && selectedProviders.length === providersList.length);
     const resp = await fetch(`/api/rules/${channelId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -581,7 +587,7 @@ export default function Page() {
         aliases: lines(aliases),
         contains: lines(contains),
         exclude: lines(exclude),
-        providers: selectedProviders,
+        providers: allAllowed ? null : selectedProviders,
         minResolution,
       }),
     });
@@ -1800,72 +1806,83 @@ export default function Page() {
               <StreamSearch onAdd={addAlias} onAddContains={addContains} />
             </div>
 
-            {providersList.length > 0 && (
-              <div className={`${card} mt-4 p-5`}>
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <h3 className="text-sm font-semibold uppercase tracking-wide text-[var(--color-muted)]">
-                    Stream Sources
-                  </h3>
-                  <span className="text-sm tabular-nums text-[var(--color-muted)]">
-                    {selectedProviders === null ||
-                    selectedProviders.length === 0 ||
-                    selectedProviders.length === providersList.length
-                      ? 'All providers allowed'
-                      : `${selectedProviders.length} of ${providersList.length} providers selected`}
-                  </span>
-                </div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setSelectedProviders(null)}
-                    className={chip(
-                      selectedProviders === null ||
-                        selectedProviders.length === 0 ||
-                        selectedProviders.length === providersList.length,
-                    )}
-                  >
-                    All Providers
-                  </button>
-                  {providersList.map((p) => {
-                    const isSelected =
-                      selectedProviders !== null &&
-                      selectedProviders.length > 0 &&
-                      selectedProviders.length < providersList.length &&
-                      selectedProviders.includes(p.id);
-                    return (
-                      <button
-                        type="button"
-                        key={p.id}
-                        onClick={() => {
-                          if (
-                            selectedProviders === null ||
-                            selectedProviders.length === 0 ||
-                            selectedProviders.length === providersList.length
-                          ) {
-                            setSelectedProviders([p.id]);
-                          } else if (selectedProviders.includes(p.id)) {
-                            const next = selectedProviders.filter((id) => id !== p.id);
-                            setSelectedProviders(next.length === 0 ? null : next);
-                          } else {
-                            const next = [...selectedProviders, p.id];
-                            setSelectedProviders(
-                              next.length === providersList.length ? null : next,
-                            );
-                          }
-                        }}
-                        className={chip(isSelected)}
-                      >
-                        {p.name}
-                      </button>
-                    );
-                  })}
-                </div>
-                <p className="mt-2 text-sm text-[var(--color-muted)]">
-                  Restrict this channel to matching streams from specific providers. Leave set to
-                  “All Providers” to match across every provider account.
-                </p>
-              </div>
-            )}
+            {providersList.length > 0 &&
+              (() => {
+                const allAllowed =
+                  selectedProviders === null || selectedProviders.length === providersList.length;
+                const noneSelected = selectedProviders !== null && selectedProviders.length === 0;
+                return (
+                  <div className={`${card} mt-4 p-5`}>
+                    <div className="flex flex-wrap items-baseline justify-between gap-2">
+                      <h3 className="text-sm font-semibold uppercase tracking-wide text-[var(--color-muted)]">
+                        Stream Sources
+                      </h3>
+                      <span className="text-sm tabular-nums text-[var(--color-muted)]">
+                        {allAllowed
+                          ? 'All providers allowed'
+                          : noneSelected
+                            ? 'No providers selected'
+                            : `${selectedProviders.length} of ${providersList.length} providers selected`}
+                      </span>
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <div className="flex gap-1.5 border-r border-[var(--color-line)] pr-2">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedProviders(null)}
+                          className={chip(allAllowed)}
+                        >
+                          All
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedProviders([])}
+                          className={chip(noneSelected)}
+                        >
+                          None
+                        </button>
+                      </div>
+                      {providersList.map((p) => {
+                        const isSelected = allAllowed || Boolean(selectedProviders?.includes(p.id));
+                        return (
+                          <button
+                            type="button"
+                            key={p.id}
+                            title="Click to toggle. Alt-click to select only this provider."
+                            onClick={(e) => {
+                              if (e.altKey) {
+                                setSelectedProviders([p.id]);
+                                return;
+                              }
+                              if (allAllowed) {
+                                const next = providersList
+                                  .filter((x) => x.id !== p.id)
+                                  .map((x) => x.id);
+                                setSelectedProviders(next);
+                              } else if (selectedProviders?.includes(p.id)) {
+                                const next = selectedProviders.filter((id) => id !== p.id);
+                                setSelectedProviders(next);
+                              } else {
+                                const next = [...(selectedProviders ?? []), p.id];
+                                setSelectedProviders(
+                                  next.length === providersList.length ? null : next,
+                                );
+                              }
+                            }}
+                            className={chip(isSelected)}
+                          >
+                            {p.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="mt-2 text-sm text-[var(--color-muted)]">
+                      Restrict this channel to matching streams from specific providers. Click any
+                      provider to toggle it, or use All / None. (Alt-click solos a provider.)
+                    </p>
+                  </div>
+                );
+              })()}
 
             <div className={`${card} mt-4 p-5`}>
               <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -1961,12 +1978,19 @@ export default function Page() {
             <div className="sticky bottom-0 mt-4 flex items-center gap-4 border-t border-[var(--color-line)] bg-[var(--color-panel)] py-3">
               <button
                 type="button"
-                className={`${btn} border-[var(--color-accent)] bg-[var(--color-accent)] text-white`}
+                disabled={selectedProviders !== null && selectedProviders.length === 0}
+                className={`${btn} border-[var(--color-accent)] bg-[var(--color-accent)] text-white disabled:opacity-50`}
                 onClick={() => void save()}
               >
                 Save
               </button>
-              <span className="text-[var(--color-accent)]">{saved}</span>
+              {selectedProviders !== null && selectedProviders.length === 0 ? (
+                <span className="text-sm text-[var(--color-muted)]">
+                  Select at least one provider (or All) before saving.
+                </span>
+              ) : (
+                <span className="text-[var(--color-accent)]">{saved}</span>
+              )}
             </div>
           </div>
         )}
