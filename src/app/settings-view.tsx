@@ -372,14 +372,16 @@ export function SettingsView() {
           <span
             className={`${pill} ${
               effective.dryRun
-                ? 'bg-[var(--color-warn)] text-white'
+                ? 'bg-[var(--color-warn)] text-[var(--color-on-warn)]'
                 : 'bg-[var(--color-accent-solid)] text-[var(--color-on-accent)]'
             }`}
           >
             {effective.dryRun ? 'dry run — not writing' : 'live — writing to Dispatcharr'}
           </span>
           {!effective.hasCredentials && (
-            <span className={`${pill} bg-[var(--color-bad)] text-white`}>no credentials set</span>
+            <span className={`${pill} bg-[var(--color-bad)] text-[var(--color-on-bad)]`}>
+              no credentials set
+            </span>
           )}
           <span className="text-sm text-[var(--color-muted)] sm:ml-auto">
             Changes apply on the next pass; no restart needed.
@@ -615,7 +617,7 @@ export function SettingsView() {
               {!showResetConfirm ? (
                 <button
                   type="button"
-                  className={`${btn} border-[var(--color-bad)] text-[var(--color-bad)] hover:bg-[var(--color-bad)] hover:text-white hover:border-[var(--color-bad)]`}
+                  className={`${btn} border-[var(--color-bad)] text-[var(--color-bad)] hover:bg-[var(--color-bad)] hover:text-[var(--color-on-bad)] hover:border-[var(--color-bad)]`}
                   disabled={busy}
                   onClick={() => setShowResetConfirm(true)}
                 >
@@ -625,7 +627,7 @@ export function SettingsView() {
                 <>
                   <button
                     type="button"
-                    className={`${btn} border-[var(--color-bad)] bg-[var(--color-bad)] text-white font-medium`}
+                    className={`${btn} !border-[var(--color-bad)] !bg-[var(--color-bad)] !text-[var(--color-on-bad)] font-medium`}
                     disabled={busy}
                     onClick={() => void runReset()}
                   >
@@ -649,7 +651,7 @@ export function SettingsView() {
       <div className="sticky bottom-0 z-10 -mx-4 flex flex-wrap items-center gap-3 border-t border-[var(--color-line)] bg-[var(--color-panel)] px-4 py-3 shadow-[0_-4px_16px_rgb(0_0_0_/_0.05)] sm:-mx-6 sm:px-6">
         <button
           type="button"
-          className={`${btn} border-[var(--color-accent-solid)] bg-[var(--color-accent-solid)] text-[var(--color-on-accent)]`}
+          className={`${btn} !border-[var(--color-accent-solid)] !bg-[var(--color-accent-solid)] !text-[var(--color-on-accent)]`}
           disabled={busy || !dirty}
           onClick={() => void save()}
         >

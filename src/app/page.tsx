@@ -327,9 +327,6 @@ export default function Page() {
   >({});
   const [editingAlias, setEditingAlias] = useState<string | null>(null);
   const [sourceSearch, setSourceSearch] = useState('');
-  const [removeAfterSave, setRemoveAfterSave] = useState(false);
-  const [savedRuleNeedsRemoval, setSavedRuleNeedsRemoval] = useState(false);
-  const [removalIds, setRemovalIds] = useState<number[]>([]);
   const [aliases, setAliases] = useState('');
   const [draftAlias, setDraftAlias] = useState('');
   const [contains, setContains] = useState('');
@@ -506,9 +503,6 @@ export default function Page() {
     setAliasProviders(c.aliasProviders ?? {});
     setAliasProviderGroupFilters(c.aliasProviderGroupFilters ?? {});
     setEditingAlias(null);
-    setRemoveAfterSave(false);
-    setSavedRuleNeedsRemoval(false);
-    setRemovalIds([]);
     setContainsGroupFilters(c.containsGroupFilters ?? {});
     setMinResolution(c.minResolution ?? 'inherit');
     setPreview(null);
@@ -691,8 +685,6 @@ export default function Page() {
 
   const save = async () => {
     if (channelId === null) return;
-    setSavedRuleNeedsRemoval(false);
-    setRemoveAfterSave(false);
     const allAllowed =
       selectedProviders === null ||
       (providersList.length > 0 && selectedProviders.length === providersList.length);
@@ -737,11 +729,9 @@ export default function Page() {
           const next = (await current.json()) as Preview;
           previewRequest.current += 1;
           setPreview(next);
-          setRemovalIds(next.orphaned.map((row) => row.id));
-          setSavedRuleNeedsRemoval(next.orphaned.length > 0);
         }
       } catch {
-        // Saving the rule succeeded; an unavailable preview cannot authorize removal.
+        // Saving succeeded; the next preview will refresh the stream list.
       }
     }
   };
@@ -1110,42 +1100,6 @@ export default function Page() {
     return new Set(preview.orphaned.map((r) => r.id));
   }, [preview, ruleIsEmpty]);
 
-  const newlyExcluded = preview?.orphaned.filter((r) => r.assigned) ?? [];
-  const removeExcluded = async () => {
-    if (!removeAfterSave || !savedRuleNeedsRemoval || !channelId) return;
-    const selected = newlyExcluded.filter((stream) => removalIds.includes(stream.id));
-    try {
-      for (const stream of selected) {
-        const response = await fetch(`/api/unassign/${channelId}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ streamId: stream.id }),
-        });
-        if (!response.ok) {
-          setRemoveNote({
-            text: `Could not remove ${stream.raw}. Earlier removals may have succeeded; remaining streams were left assigned.`,
-            bad: true,
-          });
-          await resync();
-          return;
-        }
-      }
-      setRemoveAfterSave(false);
-      setSavedRuleNeedsRemoval(false);
-      setRemovalIds([]);
-      setRemoveNote({
-        text: `Removed ${selected.length} unmatched streams from Dispatcharr.`,
-        bad: false,
-      });
-      await resync();
-    } catch (error) {
-      setRemoveNote({
-        text: `Removal stopped: ${String(error)}. Refresh before trying again.`,
-        bad: true,
-      });
-      await resync();
-    }
-  };
   const setAlias = (old: string, next: string) => {
     if (!next.trim() || (old !== next && aliases.split('\n').includes(next))) return;
     const aliasesNow = aliases.split('\n');
@@ -1660,7 +1614,11 @@ export default function Page() {
                         </span>
                         <span className="flex flex-none items-center gap-2">
                           {c.groupMode !== 'never' && c.hasRule && c.matched === 0 && (
-                            <span className={`${pill} bg-[var(--color-bad)] text-white`}>0</span>
+                            <span
+                              className={`${pill} bg-[var(--color-bad)] text-[var(--color-on-bad)]`}
+                            >
+                              0
+                            </span>
                           )}
                           {c.regexCount > 0 && (
                             <span className={`${pill} text-[var(--color-warn)]`}>rx</span>
@@ -1949,7 +1907,11 @@ export default function Page() {
                       </span>
                       <span className="flex flex-none items-center gap-2">
                         {c.hasRule && c.matched === 0 && (
-                          <span className={`${pill} bg-[var(--color-bad)] text-white`}>0</span>
+                          <span
+                            className={`${pill} bg-[var(--color-bad)] text-[var(--color-on-bad)]`}
+                          >
+                            0
+                          </span>
                         )}
                         {c.regexCount > 0 && (
                           <span className={`${pill} text-[var(--color-warn)]`}>rx</span>
@@ -2019,7 +1981,7 @@ export default function Page() {
                       >
                         {preview.total}
                       </b>{' '}
-                      matched · {preview.newlyMatched} new · {preview.orphaned.length} unclaimed
+                      matched · {preview.newlyMatched} new · {orphanedIds.size} not in rule
                     </>
                   ) : (
                     '—'
@@ -2282,7 +2244,6 @@ export default function Page() {
                                                     },
                                                   },
                                                 }));
-                                                setRemoveAfterSave(false);
                                               }}
                                             >
                                               <span className="min-w-0 flex-1 truncate">
@@ -2455,7 +2416,7 @@ export default function Page() {
                   hint={
                     ruleIsEmpty
                       ? 'The current order in Dispatcharr.'
-                      : 'The current order in Dispatcharr, then newly matched streams. Streams this rule no longer matches are marked.'
+                      : 'The current order in Dispatcharr, then newly matched streams. “Not in rule” streams stay assigned until you remove them here or change the rule.'
                   }
                   rows={unifiedRows}
                   tone="normal"
@@ -2648,78 +2609,11 @@ export default function Page() {
               </div>
             )}
 
-            {savedRuleNeedsRemoval && newlyExcluded.length > 0 && (
-              <div className={`${card} mt-4 border-[var(--color-warn)] p-4 text-sm`}>
-                <strong>
-                  {newlyExcluded.length} assigned stream{newlyExcluded.length === 1 ? '' : 's'} no
-                  longer match the saved rule.
-                </strong>
-                <p className="mt-1 text-[var(--color-muted)]">
-                  They remain assigned in Dispatcharr until you explicitly remove them. Review the
-                  “not in rule” rows above first. Uncheck anything you want to keep.
-                </p>
-                <div className="scroll-shadow mt-2 max-h-40 overflow-y-auto">
-                  {newlyExcluded.map((stream) => (
-                    <label key={stream.id} className="flex items-center gap-2 py-1">
-                      <input
-                        type="checkbox"
-                        checked={removalIds.includes(stream.id)}
-                        className="contrast-checkbox h-4 w-4 shrink-0"
-                        onChange={() =>
-                          setRemovalIds((current) =>
-                            current.includes(stream.id)
-                              ? current.filter((id) => id !== stream.id)
-                              : [...current, stream.id],
-                          )
-                        }
-                      />
-                      <span className="mono min-w-0 flex-1 truncate" title={stream.raw}>
-                        {stream.raw}
-                      </span>
-                      <span className="text-[var(--color-muted)]">
-                        {stream.provider} · {stream.providerGroup ?? 'ungrouped'}
-                      </span>
-                    </label>
-                  ))}
-                </div>
-                <div className="mt-3 flex flex-wrap items-center gap-3">
-                  <label className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={removeAfterSave}
-                      className="contrast-checkbox h-4 w-4 shrink-0"
-                      onChange={(e) => setRemoveAfterSave(e.target.checked)}
-                    />
-                    Confirm removal of {removalIds.length} selected stream
-                    {removalIds.length === 1 ? '' : 's'}
-                  </label>
-                  <button
-                    type="button"
-                    disabled={!removeAfterSave || removalIds.length === 0}
-                    className={btn}
-                    onClick={() => void removeExcluded()}
-                  >
-                    Remove from Dispatcharr
-                  </button>
-                  <button
-                    type="button"
-                    className={btn}
-                    onClick={() => {
-                      setSavedRuleNeedsRemoval(false);
-                      setRemoveAfterSave(false);
-                    }}
-                  >
-                    Keep assigned
-                  </button>
-                </div>
-              </div>
-            )}
-
-            <div className="sticky bottom-0 mt-4 flex items-center gap-4 border-t border-[var(--color-line)] bg-[var(--color-panel)] py-3">
+            <div className="mt-4 flex items-center gap-4 border-t border-[var(--color-line)] pt-4">
               <button
                 type="button"
                 disabled={selectedProviders !== null && selectedProviders.length === 0}
-                className={`${btn} border-[var(--color-accent-solid)] bg-[var(--color-accent-solid)] text-[var(--color-on-accent)] disabled:opacity-50`}
+                className={`${btn} !border-[var(--color-accent-solid)] !bg-[var(--color-accent-solid)] !text-[var(--color-on-accent)]`}
                 onClick={() => void save()}
               >
                 Save
@@ -2918,7 +2812,7 @@ function StreamList({
                     <span className="text-[var(--color-muted)]">Unassign in Dispatcharr?</span>
                     <button
                       type="button"
-                      className={`${btn} border-[var(--color-bad)] bg-[var(--color-bad)] px-3 py-1.5 text-sm text-white`}
+                      className={`${btn} !border-[var(--color-bad)] !bg-[var(--color-bad)] px-3 py-1.5 text-sm !text-[var(--color-on-bad)]`}
                       onClick={() => {
                         setConfirming(null);
                         onRemove(r.id, r.normalized);

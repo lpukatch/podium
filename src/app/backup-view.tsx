@@ -83,7 +83,7 @@ export function BackupView() {
           <div className="mt-3 flex flex-wrap items-center gap-3">
             <button
               type="button"
-              className={`${btn} border-[var(--color-bad)] bg-[var(--color-bad)] font-medium text-white`}
+              className={`${btn} !border-[var(--color-bad)] !bg-[var(--color-bad)] font-medium !text-[var(--color-on-bad)]`}
               disabled={busy}
               onClick={() => void restore(pending)}
             >

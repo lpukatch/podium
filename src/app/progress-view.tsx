@@ -139,9 +139,9 @@ const PHASES: Record<Progress['phase'], { label: string; tone: string }> = {
     label: 'Soaking',
     tone: 'bg-[var(--color-accent-solid)] text-[var(--color-on-accent)]',
   },
-  paused: { label: 'Paused', tone: 'bg-[var(--color-warn)] text-white' },
+  paused: { label: 'Paused', tone: 'bg-[var(--color-warn)] text-[var(--color-on-warn)]' },
   done: { label: 'Done', tone: 'bg-[var(--color-accent-soft)] text-[var(--color-accent)]' },
-  failed: { label: 'Failed', tone: 'bg-[var(--color-bad)] text-white' },
+  failed: { label: 'Failed', tone: 'bg-[var(--color-bad)] text-[var(--color-on-bad)]' },
 };
 
 /** Phases where the numbers move second by second and a fast poll earns itself. */
