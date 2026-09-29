@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { probeableChannelsForGroup } from './page';
+import { needsCatalogue, probeableChannelsForGroup } from './page';
+
+describe('initial catalogue fetch', () => {
+  it('defers it for independently backed monitoring and settings pages', () => {
+    expect(needsCatalogue('progress')).toBe(false);
+    expect(needsCatalogue('settings')).toBe(false);
+    expect(needsCatalogue('stats')).toBe(false);
+    expect(needsCatalogue('groups')).toBe(true);
+    expect(needsCatalogue('dead')).toBe(true);
+    expect(needsCatalogue('quality')).toBe(true);
+  });
+});
 
 describe('probeableChannelsForGroup', () => {
   const makeChannel = (

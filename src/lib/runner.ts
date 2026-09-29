@@ -2432,6 +2432,10 @@ export class Runner {
     const { matcher, channelFloors } = this.deps.rules.get();
     const index = passedIndex ?? matcher.buildIndex(streams, groupNames);
     const byId = passedById ?? new Map(streams.map((s) => [s.id, s]));
+    // Read matching hash rows in one batch instead of one query per candidate
+    // (including repeated reads when several channels claim a stream). The
+    // catalogue is larger, but SQLite discards non-cached and stale-hash rows.
+    const cachedVariants = store.variantsForStreams(streams);
     // A stream's probe targets: the stored URL, plus a rewritten one per extra
     // login. Absent (a caller with no providers to hand), the stored URL alone
     // -- the one target a stream had before profiles existed.
@@ -2502,7 +2506,7 @@ export class Runner {
             // per-login rows on a cache the sweep has not reached yet. Either
             // way the oldest is the verdict any mark covers.
             let oldest: number | null = null;
-            for (const entry of store.variants(streamId, stream.streamHash).values()) {
+            for (const entry of cachedVariants.get(streamId)?.values() ?? []) {
               if (oldest === null || entry.probedAt < oldest) oldest = entry.probedAt;
             }
             if (oldest !== null) countRetired(channel.groupId, oldest);
@@ -2542,13 +2546,13 @@ export class Runner {
         // still holding per-login rows dates the stream by the oldest of them
         // rather than by whichever came back first.
         const streamVariants = variantsOf(stream);
-        const cachedVariants = store.variants(stream.id, stream.streamHash);
+        const streamCache = cachedVariants.get(stream.id);
         const freshVariants = new Map<number, ProbeResult>();
         // As old as its least-recently-checked login: the honest freshness,
         // and the verdict any re-check mark covers.
         let oldest: number | null = null;
         for (const variant of streamVariants) {
-          const cached = cachedVariants.get(variant.variantId);
+          const cached = streamCache?.get(variant.variantId);
           if (!cached) continue;
           if (oldest === null || cached.probedAt < oldest) oldest = cached.probedAt;
           const ttl = ttlFor(

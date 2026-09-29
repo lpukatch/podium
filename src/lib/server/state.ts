@@ -184,6 +184,11 @@ export async function snapshot(force = false): Promise<Snapshot> {
     ]);
     const snap: Snapshot = { channels, streams, providers, groups, fetchedAt: Date.now() };
     cache.snapshot = snap;
+    // The index contains references to the previous snapshot's streams. Drop it
+    // as soon as a replacement arrives, rather than retaining two catalogues
+    // until the next route happens to request matching.
+    cache.index = null;
+    cache.indexToken = '';
     return snap;
   })();
 
