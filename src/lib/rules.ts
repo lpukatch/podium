@@ -45,6 +45,8 @@ const channelSchema = z.object({
   include_groups: z.array(z.string()).optional(),
   exclude_groups: z.array(z.string()).optional(),
   alias_group_filters: z.record(z.string(), z.unknown()).optional(),
+  alias_providers: z.record(z.string(), z.array(z.number())).optional(),
+  alias_provider_group_filters: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
   contains_group_filters: z.record(z.string(), z.unknown()).optional(),
   providers: z.unknown().optional(),
   exclude_regions: z.array(z.string()).nullish(),
@@ -381,6 +383,17 @@ export function loadRules(raw: unknown): LoadReport {
         Object.entries(entry.alias_group_filters ?? {}).map(([key, value]) => [
           key,
           groupFilter(value),
+        ]),
+      ),
+      aliasProviders: Object.fromEntries(
+        Object.entries(entry.alias_providers ?? {}).map(([alias, ids]) => [alias, new Set(ids)]),
+      ),
+      aliasProviderGroupFilters: Object.fromEntries(
+        Object.entries(entry.alias_provider_group_filters ?? {}).map(([alias, providers]) => [
+          alias,
+          Object.fromEntries(
+            Object.entries(providers).map(([id, filter]) => [id, groupFilter(filter)]),
+          ),
         ]),
       ),
       containsGroupFilters: Object.fromEntries(

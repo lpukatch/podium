@@ -167,7 +167,17 @@ export function pendingChange(
  * Probe this channel now and compare the resulting order with what Dispatcharr
  * already has -- the A/B view against whatever produced the current order.
  */
-export function CheckPanel({ channelId, onApplied }: { channelId: number; onApplied: () => void }) {
+export function CheckPanel({
+  channelId,
+  onApplied,
+  onSoakChannel,
+  soakNote,
+}: {
+  channelId: number;
+  onApplied: () => void;
+  onSoakChannel?: () => void;
+  soakNote?: string | null;
+}) {
   const [result, setResult] = useState<CheckResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [applying, setApplying] = useState(false);
@@ -324,6 +334,17 @@ export function CheckPanel({ channelId, onApplied }: { channelId: number; onAppl
         Probes this channel's streams immediately and shows the order they imply, next to the order
         Dispatcharr has now. Nothing is written until you apply.
       </p>
+      {onSoakChannel && (
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <button type="button" className={btn} onClick={onSoakChannel}>
+            Soak every stream on this channel
+          </button>
+          <span className="min-w-0 flex-1 basis-64 text-sm text-[var(--color-muted)]">
+            Measures how long each stream holds, rather than how it looks in five seconds.
+          </span>
+        </div>
+      )}
+      {soakNote && <p className="mt-2 text-sm text-[var(--color-accent)]">{soakNote}</p>}
 
       {error && <p className="mt-3 text-sm text-[var(--color-bad)]">{error}</p>}
       {note && <p className="mt-3 text-sm text-[var(--color-accent)]">{note}</p>}

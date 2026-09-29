@@ -265,13 +265,15 @@ visible rather than inferred.
 
 For narrower choices, the **channel group** view can select provider stream
 groups for all its channels. A **channel** can inherit that choice or override
-it; the global Settings exclusion still wins. The channel editor also has a
-multi-select exclusion for each alias and `contains` line. It leaves the alias
-syntax unchanged: `ESPN NEWS` with `UK News` excluded still matches that name
-from other provider groups. Another alias, such as `ESPNEWS`, can independently
-claim streams from `UK News`, so exclude it from both lines (or at channel level)
-when the entire channel must avoid that group. The live stream rows show the
-provider group beside each provider.
+it; the global Settings exclusion still wins. In the channel editor each alias
+has its own row. Open **Sources** to see only the providers and provider groups
+carrying that alias, then choose providers and exclude individual groups for
+that provider. `ESPN NEWS` with a UK News group excluded still matches that name
+from other groups; `ESPNEWS` is a different alias and can independently claim UK
+streams. Exclude them from both rows (or at channel level) when the whole
+channel must avoid that group. The live rows show each stream's provider group.
+After saving a narrower rule, Podium offers a separate, explicit selection of
+assigned streams to remove; saving the rule alone does not remove them.
 
 In `rules.json`, the same choice can be written without changing the alias:
 

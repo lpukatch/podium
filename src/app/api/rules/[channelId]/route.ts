@@ -26,6 +26,8 @@ export async function PUT(request: Request, context: { params: Promise<{ channel
     providers?: unknown;
     groupFilter?: { includeGroups?: string[]; excludeGroups?: string[] } | null;
     aliasGroupFilters?: Record<string, { excludeGroups?: string[] }>;
+    aliasProviders?: Record<string, number[]>;
+    aliasProviderGroupFilters?: Record<string, Record<string, { excludeGroups?: string[] }>>;
     containsGroupFilters?: Record<string, { excludeGroups?: string[] }>;
     /**
      * `720p`, `1080p` or `2160p`; `none` to ignore the group's floor; `inherit`
@@ -92,6 +94,33 @@ export async function PUT(request: Request, context: { params: Promise<{ channel
         .filter(([line]) => clean(body.aliases).includes(line))
         .filter(([, filter]) => clean(filter.excludeGroups).length > 0)
         .map(([line, filter]) => [line, { exclude_groups: clean(filter.excludeGroups) }]),
+    );
+  }
+  if (body.aliasProviders !== undefined) {
+    entry.alias_providers = Object.fromEntries(
+      Object.entries(body.aliasProviders)
+        .filter(([alias, ids]) => clean(body.aliases).includes(alias) && Array.isArray(ids))
+        .map(([alias, ids]) => [
+          alias,
+          [...new Set(ids.filter((id) => Number.isInteger(id) && id >= 0))],
+        ]),
+    );
+  }
+  if (body.aliasProviderGroupFilters !== undefined) {
+    entry.alias_provider_group_filters = Object.fromEntries(
+      Object.entries(body.aliasProviderGroupFilters)
+        .filter(([alias]) => clean(body.aliases).includes(alias))
+        .map(([alias, providers]) => [
+          alias,
+          Object.fromEntries(
+            Object.entries(providers)
+              .filter(
+                ([id, filter]) =>
+                  Number.isInteger(Number(id)) && clean(filter.excludeGroups).length > 0,
+              )
+              .map(([id, filter]) => [id, { exclude_groups: clean(filter.excludeGroups) }]),
+          ),
+        ]),
     );
   }
   if (body.containsGroupFilters !== undefined) {

@@ -27,6 +27,8 @@ export async function POST(request: Request) {
       providers?: unknown;
       groupFilter?: unknown;
       aliasGroupFilters?: Record<string, unknown>;
+      aliasProviders?: Record<string, number[]>;
+      aliasProviderGroupFilters?: Record<string, Record<string, unknown>>;
       containsGroupFilters?: Record<string, unknown>;
     };
 
@@ -61,6 +63,23 @@ export async function POST(request: Request) {
           ? existing?.aliasGroupFilters
           : Object.fromEntries(
               Object.entries(body.aliasGroupFilters).map(([k, v]) => [k, groupFilter(v)]),
+            ),
+      aliasProviders:
+        body.aliasProviders === undefined
+          ? existing?.aliasProviders
+          : Object.fromEntries(
+              Object.entries(body.aliasProviders).map(([alias, ids]) => [alias, new Set(ids)]),
+            ),
+      aliasProviderGroupFilters:
+        body.aliasProviderGroupFilters === undefined
+          ? existing?.aliasProviderGroupFilters
+          : Object.fromEntries(
+              Object.entries(body.aliasProviderGroupFilters).map(([alias, providers]) => [
+                alias,
+                Object.fromEntries(
+                  Object.entries(providers).map(([id, filter]) => [id, groupFilter(filter)]),
+                ),
+              ]),
             ),
       containsGroupFilters:
         body.containsGroupFilters === undefined
@@ -142,6 +161,51 @@ export async function POST(request: Request) {
       .map(([id, step]) => describe(id, step))
       .filter(Boolean)
       .slice(0, 300);
+    // Suggestions are scoped to what each alias actually reaches, before its
+    // own provider/group restrictions. Never offer the whole provider catalogue.
+    const aliasSources = Object.fromEntries(
+      rule.aliases.map((alias) => {
+        const unscoped: ChannelRule = {
+          ...rule,
+          aliases: [alias],
+          contains: [],
+          patterns: [],
+          providers: null,
+          groupFilter: {},
+          aliasGroupFilters: {},
+          aliasProviders: {},
+          aliasProviderGroupFilters: {},
+          exclude: [],
+        };
+        const providers = new Map<
+          number,
+          { id: number; name: string; groups: Map<string, number> }
+        >();
+        for (const [streamId] of m.match(unscoped, { ...idx, excludedGroups: new Set<number>() })) {
+          const stream = streamById.get(streamId);
+          if (!stream) continue;
+          const row = providers.get(stream.providerId) ?? {
+            id: stream.providerId,
+            name: providerNames.get(stream.providerId) ?? String(stream.providerId),
+            groups: new Map<string, number>(),
+          };
+          const group =
+            stream.groupId == null
+              ? '(ungrouped)'
+              : (groupNames.get(stream.groupId) ?? String(stream.groupId));
+          row.groups.set(group, (row.groups.get(group) ?? 0) + 1);
+          providers.set(stream.providerId, row);
+        }
+        return [
+          alias,
+          [...providers.values()].map((provider) => ({
+            id: provider.id,
+            name: provider.name,
+            groups: [...provider.groups].map(([name, count]) => ({ name, count })),
+          })),
+        ];
+      }),
+    );
     // Assigned in Dispatcharr but not claimed by this rule -- either the rule
     // regressed, or somebody assigned it by hand.
     const orphaned = [...assigned]
@@ -152,6 +216,7 @@ export async function POST(request: Request) {
     return NextResponse.json({
       total: hits.length,
       matched,
+      aliasSources,
       orphaned,
       assignedCount: assigned.size,
       newlyMatched: hits.filter(([id]) => !assigned.has(id)).length,

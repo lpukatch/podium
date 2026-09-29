@@ -1468,6 +1468,37 @@ describe('matcher', () => {
     expect(m.match(m.rules.get(1)!, index).map(([id]) => id)).toEqual([11]);
   });
 
+  it('limits one alias to a provider without narrowing other aliases', () => {
+    const m = matcherFor({
+      channel_id: 1,
+      aliases: ['CNN', 'CNN NEWS'],
+      alias_providers: { CNN: [1] },
+    });
+    const index = m.buildIndex([
+      { ...stream(10, 'CNN'), providerId: 1 },
+      { ...stream(11, 'CNN'), providerId: 2 },
+      { ...stream(12, 'CNN NEWS'), providerId: 2 },
+    ]);
+    expect(m.match(m.rules.get(1)!, index).map(([id]) => id)).toEqual([10, 12]);
+  });
+
+  it('excludes a matching group only for the selected provider and alias', () => {
+    const m = matcherFor({
+      channel_id: 1,
+      aliases: ['CNN', 'CNN NEWS'],
+      alias_provider_group_filters: { CNN: { '1': { exclude_groups: ['UK | News'] } } },
+    });
+    const index = m.buildIndex(
+      [
+        { ...grouped(10, 'CNN', 5), providerId: 1 },
+        { ...grouped(11, 'CNN', 5), providerId: 2 },
+        { ...grouped(12, 'CNN NEWS', 5), providerId: 1 },
+      ],
+      new Map([[5, 'UK | News']]),
+    );
+    expect(m.match(m.rules.get(1)!, index).map(([id]) => id)).toEqual([11, 12]);
+  });
+
   it('excludes groups by glob, so groups created later are covered', () => {
     // Dispatcharr builds "Auto | ..." groups on its own; naming ids would mean
     // the next one silently comes back into matching.
