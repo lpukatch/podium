@@ -27,8 +27,6 @@ jobs:
   version-bump:
     # This job only needs git + node, both of which the ubuntu-latest image has.
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout

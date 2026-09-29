@@ -33,9 +33,6 @@ jobs:
     # docker CLI, so every buildx step fails on "docker: not found".
     # ubuntu-latest maps to catthehacker/ubuntu:act-22.04, which ships buildx.
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
 
     steps:
       - name: Checkout
