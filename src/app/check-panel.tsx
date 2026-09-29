@@ -533,7 +533,7 @@ export function CheckPanel({
                 type="checkbox"
                 checked={dropUnclaimed}
                 onChange={(e) => setDropUnclaimed(e.target.checked)}
-                className="mt-1 h-4 w-4 accent-[var(--color-accent)]"
+                className="contrast-checkbox mt-1 h-4 w-4 shrink-0"
               />
               <span className="text-[var(--color-warn)]">
                 Remove the {result.unclaimed.length} stream(s) this rule does not claim (

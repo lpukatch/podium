@@ -6,7 +6,7 @@ import type { ProviderGroupFilter } from '@/lib/provider-groups';
 const chip = (active: boolean) =>
   `rounded-lg border px-3 py-1.5 text-sm ${
     active
-      ? 'border-[var(--color-accent)] bg-[var(--color-accent)] text-white'
+      ? 'border-[var(--color-accent-solid)] bg-[var(--color-accent-solid)] text-[var(--color-on-accent)]'
       : 'border-[var(--color-line)] text-[var(--color-muted)] hover:border-[var(--color-accent)]'
   }`;
 

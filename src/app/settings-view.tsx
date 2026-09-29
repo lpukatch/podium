@@ -373,7 +373,7 @@ export function SettingsView() {
             className={`${pill} ${
               effective.dryRun
                 ? 'bg-[var(--color-warn)] text-white'
-                : 'bg-[var(--color-accent)] text-white'
+                : 'bg-[var(--color-accent-solid)] text-[var(--color-on-accent)]'
             }`}
           >
             {effective.dryRun ? 'dry run — not writing' : 'live — writing to Dispatcharr'}
@@ -470,7 +470,7 @@ export function SettingsView() {
                               <span className="mt-2 flex items-start gap-3">
                                 <input
                                   type="checkbox"
-                                  className="mt-1 h-4 w-4 shrink-0 accent-[var(--color-accent)]"
+                                  className="contrast-checkbox mt-1 h-4 w-4 shrink-0"
                                   checked={checkedValue(f)}
                                   onChange={(e) =>
                                     setEdits({
@@ -649,7 +649,7 @@ export function SettingsView() {
       <div className="sticky bottom-0 z-10 -mx-4 flex flex-wrap items-center gap-3 border-t border-[var(--color-line)] bg-[var(--color-panel)] px-4 py-3 shadow-[0_-4px_16px_rgb(0_0_0_/_0.05)] sm:-mx-6 sm:px-6">
         <button
           type="button"
-          className={`${btn} border-[var(--color-accent)] bg-[var(--color-accent)] text-white`}
+          className={`${btn} border-[var(--color-accent-solid)] bg-[var(--color-accent-solid)] text-[var(--color-on-accent)]`}
           disabled={busy || !dirty}
           onClick={() => void save()}
         >
