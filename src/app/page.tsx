@@ -2156,7 +2156,7 @@ export default function Page() {
                                 className="mt-3 w-full rounded-lg border border-[var(--color-line)] bg-[var(--color-panel)] px-3 py-2"
                               />
                             )}
-                            <div className="scroll-shadow mt-2 max-h-48 overflow-y-auto">
+                            <div className="scroll-shadow mt-2 max-h-48 overflow-y-auto pr-4">
                               {Object.entries(providerExclusions).flatMap(([id, filter]) =>
                                 (filter.excludeGroups ?? [])
                                   .filter(
@@ -2211,13 +2211,21 @@ export default function Page() {
                                     <div key={source.id} className="mb-2">
                                       <p className="font-medium">{source.name}</p>
                                       {options.map((g) => (
-                                        <label
+                                        <div
                                           key={`${source.id}:${g.name}`}
                                           className="flex items-center gap-2 py-1 pl-3"
                                         >
-                                          <input
-                                            type="checkbox"
-                                            checked={
+                                          <button
+                                            type="button"
+                                            className={`${chip(
+                                              excluded.includes(g.name) ||
+                                                (
+                                                  providerExclusions[String(source.id)]
+                                                    ?.excludeGroups ?? []
+                                                ).includes(g.name),
+                                            )} min-w-0 truncate text-left`}
+                                            title={`Exclude ${g.name}`}
+                                            aria-pressed={
                                               excluded.includes(g.name) ||
                                               (
                                                 providerExclusions[String(source.id)]
@@ -2225,7 +2233,7 @@ export default function Page() {
                                               ).includes(g.name)
                                             }
                                             disabled={excluded.includes(g.name)}
-                                            onChange={() => {
+                                            onClick={() => {
                                               const current =
                                                 providerExclusions[String(source.id)]
                                                   ?.excludeGroups ?? [];
@@ -2242,14 +2250,13 @@ export default function Page() {
                                               }));
                                               setRemoveAfterSave(false);
                                             }}
-                                          />
-                                          <span className="min-w-0 flex-1 truncate">
+                                          >
                                             Exclude {g.name}
-                                          </span>
-                                          <span className="text-xs tabular-nums text-[var(--color-muted)]">
+                                          </button>
+                                          <span className="ml-auto shrink-0 text-xs tabular-nums text-[var(--color-muted)]">
                                             {g.count}
                                           </span>
-                                        </label>
+                                        </div>
                                       ))}
                                     </div>
                                   ) : null;
@@ -2361,30 +2368,31 @@ export default function Page() {
                     value={sourceSearch}
                     onChange={(e) => setSourceSearch(e.target.value)}
                   />
-                  <div className="scroll-shadow max-h-40 overflow-y-auto">
+                  <div className="scroll-shadow max-h-40 overflow-y-auto pr-3">
                     {providerGroups
                       .filter((g) => g.name.toLowerCase().includes(sourceSearch.toLowerCase()))
                       .map((g) => (
-                        <label key={g.id} className="flex items-center gap-2 py-1">
-                          <input
-                            type="checkbox"
-                            checked={
-                              containsGroupFilters[line]?.excludeGroups?.includes(g.name) ?? false
-                            }
-                            onChange={() => {
-                              const excluded = containsGroupFilters[line]?.excludeGroups ?? [];
-                              setContainsGroupFilters({
-                                ...containsGroupFilters,
-                                [line]: {
-                                  excludeGroups: excluded.includes(g.name)
-                                    ? excluded.filter((x) => x !== g.name)
-                                    : [...excluded, g.name],
-                                },
-                              });
-                            }}
-                          />
+                        <button
+                          key={g.id}
+                          type="button"
+                          className={`${chip(containsGroupFilters[line]?.excludeGroups?.includes(g.name) ?? false)} mr-1.5 mt-1.5`}
+                          aria-pressed={
+                            containsGroupFilters[line]?.excludeGroups?.includes(g.name) ?? false
+                          }
+                          onClick={() => {
+                            const excluded = containsGroupFilters[line]?.excludeGroups ?? [];
+                            setContainsGroupFilters({
+                              ...containsGroupFilters,
+                              [line]: {
+                                excludeGroups: excluded.includes(g.name)
+                                  ? excluded.filter((x) => x !== g.name)
+                                  : [...excluded, g.name],
+                              },
+                            });
+                          }}
+                        >
                           Exclude {g.name}
-                        </label>
+                        </button>
                       ))}
                   </div>
                 </details>
