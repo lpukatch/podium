@@ -322,29 +322,39 @@ export function CheckPanel({
 
   return (
     <div className={`${card} mt-4 p-5`}>
-      <div className="flex flex-wrap items-center gap-3">
-        <h3 className="flex-1 text-sm font-semibold uppercase tracking-wide text-[var(--color-muted)]">
-          Check now
-        </h3>
-        <button type="button" className={btn} disabled={busy} onClick={() => void check()}>
-          {busy ? 'Probing…' : 'Probe this channel'}
-        </button>
-      </div>
-      <p className="mt-2 text-sm text-[var(--color-muted)]">
-        Probes this channel's streams immediately and shows the order they imply, next to the order
-        Dispatcharr has now. Nothing is written until you apply.
-      </p>
-      {onSoakChannel && (
-        <div className="mt-3 flex flex-wrap items-center gap-3">
-          <button type="button" className={btn} onClick={onSoakChannel}>
-            Soak every stream on this channel
+      <h3 className="text-sm font-semibold uppercase tracking-wide text-[var(--color-muted)]">
+        Check now
+      </h3>
+      <div className="mt-2 divide-y divide-[var(--color-line)]">
+        <div className="grid gap-2 py-3 sm:grid-cols-[15rem_minmax(0,1fr)] sm:items-center sm:gap-4">
+          <button
+            type="button"
+            className={`${btn} w-full`}
+            disabled={busy}
+            onClick={() => void check()}
+          >
+            {busy ? 'Probing…' : 'Probe this channel'}
           </button>
-          <span className="min-w-0 flex-1 basis-64 text-sm text-[var(--color-muted)]">
-            Measures how long each stream holds, rather than how it looks in five seconds.
-          </span>
+          <p className="text-sm text-[var(--color-muted)]">
+            Probes this channel's streams immediately and shows the order they imply, next to the
+            order Dispatcharr has now. Nothing is written until you apply.
+          </p>
         </div>
-      )}
-      {soakNote && <p className="mt-2 text-sm text-[var(--color-accent)]">{soakNote}</p>}
+        {onSoakChannel && (
+          <div className="grid gap-2 py-3 sm:grid-cols-[15rem_minmax(0,1fr)] sm:items-center sm:gap-4">
+            <button type="button" className={`${btn} w-full`} onClick={onSoakChannel}>
+              Soak every stream
+            </button>
+            <div>
+              <p className="text-sm text-[var(--color-muted)]">
+                Measures how long each stream on this channel holds, rather than how it looks in
+                five seconds.
+              </p>
+              {soakNote && <p className="mt-1 text-sm text-[var(--color-accent)]">{soakNote}</p>}
+            </div>
+          </div>
+        )}
+      </div>
 
       {error && <p className="mt-3 text-sm text-[var(--color-bad)]">{error}</p>}
       {note && <p className="mt-3 text-sm text-[var(--color-accent)]">{note}</p>}
