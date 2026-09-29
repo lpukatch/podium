@@ -112,6 +112,10 @@ export async function GET(request: Request) {
           providers: rule?.providers ? [...rule.providers] : null,
           groupFilter: rule?.groupFilter ?? null,
           aliasGroupFilters: rule?.aliasGroupFilters ?? {},
+          aliasProviders: Object.fromEntries(
+            Object.entries(rule?.aliasProviders ?? {}).map(([alias, ids]) => [alias, [...ids]]),
+          ),
+          aliasProviderGroupFilters: rule?.aliasProviderGroupFilters ?? {},
           containsGroupFilters: rule?.containsGroupFilters ?? {},
           // Surfaced, not hidden: a channel still carrying a legacy regex looks
           // unmanaged otherwise, and you cannot decide whether an alias has

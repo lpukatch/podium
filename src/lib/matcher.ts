@@ -65,6 +65,10 @@ export interface ChannelRule {
   /** One filter per alias/contains line, keyed by its full text. */
   aliasGroupFilters?: Record<string, ProviderGroupFilter>;
   containsGroupFilters?: Record<string, ProviderGroupFilter>;
+  /** Per-alias provider allowlists; absent means inherit the channel's providers. */
+  aliasProviders?: Record<string, Set<number>>;
+  /** Per-alias provider group exclusions, keyed by provider ID then group name. */
+  aliasProviderGroupFilters?: Record<string, Record<string, ProviderGroupFilter>>;
 }
 
 export interface Guards {
@@ -560,6 +564,11 @@ export class Matcher {
         ) ||
         Object.values(rule.containsGroupFilters ?? {}).some(
           (filter) => filter.includeGroups !== undefined || filter.excludeGroups?.length,
+        ) ||
+        Object.values(rule.aliasProviderGroupFilters ?? {}).some((providers) =>
+          Object.values(providers).some(
+            (filter) => filter.includeGroups !== undefined || filter.excludeGroups?.length,
+          ),
         ))
     ) {
       throw new Error('match needs the group list to apply provider-group filters');
@@ -631,8 +640,16 @@ export class Matcher {
     rule.aliases.forEach((alias, position) => {
       const { key, spec } = this.compileAlias(alias);
       const step = rule.stepOrder + position;
-      for (const stream of index.byKey.get(key) ?? [])
+      const admitAlias = (stream: StreamLike) => {
+        if (rule.aliasProviders?.[alias] && !rule.aliasProviders[alias].has(stream.providerId))
+          return;
+        const groupName =
+          stream.groupId == null ? undefined : index.groupNames?.get(stream.groupId);
+        const providerFilter = rule.aliasProviderGroupFilters?.[alias]?.[String(stream.providerId)];
+        if (providerFilter && !groupAllowed(groupName, providerFilter)) return;
         admit(stream, step, spec, rule.aliasGroupFilters?.[alias]);
+      };
+      for (const stream of index.byKey.get(key) ?? []) admitAlias(stream);
 
       // Then the same alias against names that carry their section inline:
       // "@MLB Chicago Cubs" has to reach "US| MLB CHICAGO CUBS HD".
@@ -642,7 +659,7 @@ export class Matcher {
       // worse, would quietly turn every alias into a suffix match.
       for (const section of spec.require) {
         for (const stream of index.bySection.get(sectionKey(section, key)) ?? []) {
-          admit(stream, step, spec, rule.aliasGroupFilters?.[alias]);
+          admitAlias(stream);
         }
       }
     });

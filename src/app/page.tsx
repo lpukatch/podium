@@ -36,6 +36,8 @@ interface ChannelRow {
   providers?: number[] | null;
   groupFilter?: ProviderGroupFilter | null;
   aliasGroupFilters?: Record<string, ProviderGroupFilter>;
+  aliasProviders?: Record<string, number[]>;
+  aliasProviderGroupFilters?: Record<string, Record<string, ProviderGroupFilter>>;
   containsGroupFilters?: Record<string, ProviderGroupFilter>;
   patterns: string[];
   regexCount: number;
@@ -112,6 +114,10 @@ interface Preview {
   assignedCount: number;
   newlyMatched: number;
   currentOrder: StreamRow[];
+  aliasSources?: Record<
+    string,
+    Array<{ id: number; name: string; groups: Array<{ name: string; count: number }> }>
+  >;
 }
 
 /** "3m ago" / "2h ago" / "never" -- the question is freshness, not the date. */
@@ -311,17 +317,27 @@ export default function Page() {
   const [aliasGroupFilters, setAliasGroupFilters] = useState<Record<string, ProviderGroupFilter>>(
     {},
   );
+  const [aliasProviders, setAliasProviders] = useState<Record<string, number[]>>({});
+  const [aliasProviderGroupFilters, setAliasProviderGroupFilters] = useState<
+    Record<string, Record<string, ProviderGroupFilter>>
+  >({});
   const [containsGroupFilters, setContainsGroupFilters] = useState<
     Record<string, ProviderGroupFilter>
   >({});
-  const [ruleGroupSearch, setRuleGroupSearch] = useState('');
+  const [editingAlias, setEditingAlias] = useState<string | null>(null);
+  const [sourceSearch, setSourceSearch] = useState('');
+  const [removeAfterSave, setRemoveAfterSave] = useState(false);
+  const [savedRuleNeedsRemoval, setSavedRuleNeedsRemoval] = useState(false);
+  const [removalIds, setRemovalIds] = useState<number[]>([]);
   const [aliases, setAliases] = useState('');
+  const [draftAlias, setDraftAlias] = useState('');
   const [contains, setContains] = useState('');
   const [exclude, setExclude] = useState('');
   /** `inherit`, `none`, or a resolution -- what the rule route accepts. */
   const [minResolution, setMinResolution] = useState('inherit');
   const [preview, setPreview] = useState<Preview | null>(null);
   const [previewing, setPreviewing] = useState(false);
+  const previewRequest = useRef(0);
   const [saved, setSaved] = useState('');
   const [removing, setRemoving] = useState<number | null>(null);
   const [removeNote, setRemoveNote] = useState<{ text: string; bad: boolean } | null>(null);
@@ -480,11 +496,18 @@ export default function Page() {
   const seedRules = useCallback((c: ChannelRow) => {
     seededFor.current = c.id;
     setAliases(c.aliases.join('\n'));
+    setDraftAlias('');
     setContains(c.contains.join('\n'));
     setExclude(c.exclude.join('\n'));
     setSelectedProviders(c.providers ? [...c.providers] : null);
     setChannelGroupFilter(c.groupFilter ?? null);
     setAliasGroupFilters(c.aliasGroupFilters ?? {});
+    setAliasProviders(c.aliasProviders ?? {});
+    setAliasProviderGroupFilters(c.aliasProviderGroupFilters ?? {});
+    setEditingAlias(null);
+    setRemoveAfterSave(false);
+    setSavedRuleNeedsRemoval(false);
+    setRemovalIds([]);
     setContainsGroupFilters(c.containsGroupFilters ?? {});
     setMinResolution(c.minResolution ?? 'inherit');
     setPreview(null);
@@ -563,6 +586,7 @@ export default function Page() {
 
   const runPreview = useCallback(async () => {
     if (channelId === null) return;
+    const requestId = ++previewRequest.current;
     setPreviewing(true);
     const allAllowed =
       selectedProviders === null ||
@@ -579,12 +603,25 @@ export default function Page() {
           providers: allAllowed ? null : selectedProviders,
           groupFilter: channelGroupFilter,
           aliasGroupFilters,
+          aliasProviders,
+          aliasProviderGroupFilters,
           containsGroupFilters,
         }),
       });
-      if (resp.ok) setPreview((await resp.json()) as Preview);
+      if (resp.ok) {
+        const body = (await resp.json()) as Preview;
+        if (requestId === previewRequest.current) setPreview(body);
+      } else if (requestId === previewRequest.current) {
+        setRemoveNote({
+          text: 'Could not preview this rule. Nothing has been removed.',
+          bad: true,
+        });
+      }
+    } catch (error) {
+      if (requestId === previewRequest.current)
+        setRemoveNote({ text: `Preview failed: ${String(error)}`, bad: true });
     } finally {
-      setPreviewing(false);
+      if (requestId === previewRequest.current) setPreviewing(false);
     }
   }, [
     channelId,
@@ -595,6 +632,8 @@ export default function Page() {
     providersList.length,
     channelGroupFilter,
     aliasGroupFilters,
+    aliasProviders,
+    aliasProviderGroupFilters,
     containsGroupFilters,
   ]);
 
@@ -651,6 +690,8 @@ export default function Page() {
 
   const save = async () => {
     if (channelId === null) return;
+    setSavedRuleNeedsRemoval(false);
+    setRemoveAfterSave(false);
     const allAllowed =
       selectedProviders === null ||
       (providersList.length > 0 && selectedProviders.length === providersList.length);
@@ -664,13 +705,44 @@ export default function Page() {
         providers: allAllowed ? null : selectedProviders,
         groupFilter: channelGroupFilter,
         aliasGroupFilters,
+        aliasProviders,
+        aliasProviderGroupFilters,
         containsGroupFilters,
         minResolution,
       }),
     });
     setSaved(resp.ok ? 'Saved' : 'Save failed');
     setTimeout(() => setSaved(''), 1800);
-    if (resp.ok) await load();
+    if (resp.ok) {
+      await load();
+      try {
+        const current = await fetch('/api/preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            channelId,
+            aliases: lines(aliases),
+            contains: lines(contains),
+            exclude: lines(exclude),
+            providers: allAllowed ? null : selectedProviders,
+            groupFilter: channelGroupFilter,
+            aliasGroupFilters,
+            aliasProviders,
+            aliasProviderGroupFilters,
+            containsGroupFilters,
+          }),
+        });
+        if (current.ok) {
+          const next = (await current.json()) as Preview;
+          previewRequest.current += 1;
+          setPreview(next);
+          setRemovalIds(next.orphaned.map((row) => row.id));
+          setSavedRuleNeedsRemoval(next.orphaned.length > 0);
+        }
+      } catch {
+        // Saving the rule succeeded; an unavailable preview cannot authorize removal.
+      }
+    }
   };
 
   const dropRegex = async () => {
@@ -944,6 +1016,7 @@ export default function Page() {
     const current = lines(aliases);
     if (!current.some((a) => a.toLowerCase() === name.toLowerCase())) {
       setAliases([...current, name].join('\n'));
+      setEditingAlias(name);
     }
   };
 
@@ -1035,6 +1108,96 @@ export default function Page() {
     if (!preview || ruleIsEmpty) return new Set<number>();
     return new Set(preview.orphaned.map((r) => r.id));
   }, [preview, ruleIsEmpty]);
+
+  const newlyExcluded = preview?.orphaned.filter((r) => r.assigned) ?? [];
+  const removeExcluded = async () => {
+    if (!removeAfterSave || !savedRuleNeedsRemoval || !channelId) return;
+    const selected = newlyExcluded.filter((stream) => removalIds.includes(stream.id));
+    try {
+      for (const stream of selected) {
+        const response = await fetch(`/api/unassign/${channelId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ streamId: stream.id }),
+        });
+        if (!response.ok) {
+          setRemoveNote({
+            text: `Could not remove ${stream.raw}. Earlier removals may have succeeded; remaining streams were left assigned.`,
+            bad: true,
+          });
+          await resync();
+          return;
+        }
+      }
+      setRemoveAfterSave(false);
+      setSavedRuleNeedsRemoval(false);
+      setRemovalIds([]);
+      setRemoveNote({
+        text: `Removed ${selected.length} unmatched streams from Dispatcharr.`,
+        bad: false,
+      });
+      await resync();
+    } catch (error) {
+      setRemoveNote({
+        text: `Removal stopped: ${String(error)}. Refresh before trying again.`,
+        bad: true,
+      });
+      await resync();
+    }
+  };
+  const setAlias = (old: string, next: string) => {
+    if (!next.trim() || (old !== next && aliases.split('\n').includes(next))) return;
+    const aliasesNow = aliases.split('\n');
+    const position = aliasesNow.indexOf(old);
+    if (position < 0) return;
+    aliasesNow[position] = next;
+    setAliases(aliasesNow.join('\n'));
+    if (old !== next && next.trim()) {
+      if (aliasGroupFilters[old]) {
+        const updated = { ...aliasGroupFilters };
+        updated[next] = updated[old]!;
+        delete updated[old];
+        setAliasGroupFilters(updated);
+      }
+      if (aliasProviders[old]) {
+        const updated = { ...aliasProviders };
+        updated[next] = updated[old]!;
+        delete updated[old];
+        setAliasProviders(updated);
+      }
+      if (aliasProviderGroupFilters[old]) {
+        const updated = { ...aliasProviderGroupFilters };
+        updated[next] = updated[old]!;
+        delete updated[old];
+        setAliasProviderGroupFilters(updated);
+      }
+      setEditingAlias(next);
+    }
+  };
+
+  const removeAlias = (alias: string) => {
+    setAliases(
+      lines(aliases)
+        .filter((line) => line !== alias)
+        .join('\n'),
+    );
+    setAliasGroupFilters((previous) => {
+      const next = { ...previous };
+      delete next[alias];
+      return next;
+    });
+    setAliasProviders((previous) => {
+      const next = { ...previous };
+      delete next[alias];
+      return next;
+    });
+    setAliasProviderGroupFilters((previous) => {
+      const next = { ...previous };
+      delete next[alias];
+      return next;
+    });
+    setEditingAlias(null);
+  };
 
   // Every reason this fails is fixed in Settings -- a missing credential, a
   // wrong URL, a Dispatcharr that moved -- so the settings form is part of the
@@ -1732,7 +1895,7 @@ export default function Page() {
                     >
                       Soak every stream here
                     </button>
-                    <span className="text-sm text-[var(--color-muted)]">
+                    <span className="min-w-0 flex-1 basis-64 text-sm text-[var(--color-muted)]">
                       Holds each stream open for a few minutes to find out how long it really lasts
                       — the failure a probe is too short to see. Runs at the provider limits and
                       stops while anyone is watching, so a big group takes several nights.
@@ -1773,6 +1936,12 @@ export default function Page() {
                             (f) => (f.excludeGroups?.length ?? 0) > 0,
                           )
                             ? ' · alias group exclusions'
+                            : ''}
+                          {Object.keys(c.aliasProviders ?? {}).length > 0 ||
+                          Object.values(c.aliasProviderGroupFilters ?? {}).some((providers) =>
+                            Object.values(providers).some((scope) => scope.excludeGroups?.length),
+                          )
+                            ? ' · sources filtered'
                             : ''}
                           {c.assignmentOnly ? ' · assigned only' : !c.hasRule ? ' · no rule' : ''}
                         </span>
@@ -1856,15 +2025,285 @@ export default function Page() {
                   )}
                 </span>
               </div>
-              <textarea
-                value={aliases}
-                onChange={(e) => setAliases(e.target.value)}
-                rows={4}
-                className="mono mt-3 w-full resize-y rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] p-3 outline-none focus:border-[var(--color-accent)]"
-              />
+              <div className="mt-3 space-y-2">
+                {aliases
+                  .split('\n')
+                  .filter((alias) => alias.length > 0)
+                  .map((alias, position) => {
+                    const sources = preview?.aliasSources?.[alias] ?? [];
+                    const permitted = aliasProviders[alias];
+                    const excluded = aliasGroupFilters[alias]?.excludeGroups ?? [];
+                    const providerExclusions = aliasProviderGroupFilters[alias] ?? {};
+                    const excludedCount = Object.values(providerExclusions).reduce(
+                      (n, filter) => n + (filter.excludeGroups?.length ?? 0),
+                      excluded.length,
+                    );
+                    const search = sourceSearch.trim().toLowerCase();
+                    return (
+                      <div
+                        key={alias}
+                        className="rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] p-3"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs tabular-nums text-[var(--color-muted)]">
+                            {position + 1}
+                          </span>
+                          <input
+                            aria-label={`Alias ${position + 1}`}
+                            value={alias}
+                            onChange={(e) => setAlias(alias, e.target.value)}
+                            className="mono min-w-0 flex-1 bg-transparent outline-none focus:text-[var(--color-accent)]"
+                          />
+                          <button
+                            type="button"
+                            className="text-sm text-[var(--color-muted)] hover:text-[var(--color-accent)]"
+                            onClick={() => {
+                              setEditingAlias(editingAlias === alias ? null : alias);
+                              setSourceSearch('');
+                            }}
+                          >
+                            {editingAlias === alias
+                              ? 'Hide sources'
+                              : `Sources${excludedCount ? ` · ${excludedCount} excluded` : ''}${permitted ? ` · ${permitted.length} providers` : ''}`}
+                          </button>
+                          <button
+                            type="button"
+                            aria-label={`Remove alias ${alias}`}
+                            className="text-[var(--color-muted)] hover:text-[var(--color-bad)]"
+                            onClick={() => removeAlias(alias)}
+                          >
+                            ×
+                          </button>
+                        </div>
+                        {editingAlias === alias && (
+                          <div className="mt-3 border-t border-[var(--color-line)] pt-3 text-sm">
+                            <p className="text-[var(--color-muted)]">
+                              Only providers and groups carrying this alias are shown. Choose
+                              providers first, then exclude unwanted groups for each provider. Other
+                              aliases remain independent.
+                            </p>
+                            {excluded.length > 0 && (
+                              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                <span>Shared exclusions:</span>
+                                {excluded.map((name) => (
+                                  <button
+                                    key={name}
+                                    type="button"
+                                    className={`${pill} border border-[var(--color-line)]`}
+                                    title="Remove this older exclusion from every provider"
+                                    onClick={() =>
+                                      setAliasGroupFilters((previous) => ({
+                                        ...previous,
+                                        [alias]: {
+                                          excludeGroups: excluded.filter((group) => group !== name),
+                                        },
+                                      }))
+                                    }
+                                  >
+                                    {name} ×
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                              <button
+                                type="button"
+                                className={chip(permitted === undefined)}
+                                onClick={() =>
+                                  setAliasProviders((previous) => {
+                                    const next = { ...previous };
+                                    delete next[alias];
+                                    return next;
+                                  })
+                                }
+                              >
+                                All providers
+                              </button>
+                              {sources.map((source) => (
+                                <button
+                                  key={source.id}
+                                  type="button"
+                                  className={chip(permitted?.includes(source.id) ?? false)}
+                                  onClick={() =>
+                                    setAliasProviders((previous) => {
+                                      const selected = previous[alias] ?? sources.map((s) => s.id);
+                                      return {
+                                        ...previous,
+                                        [alias]: selected.includes(source.id)
+                                          ? selected.filter((id) => id !== source.id)
+                                          : [...selected, source.id],
+                                      };
+                                    })
+                                  }
+                                >
+                                  {source.name}
+                                </button>
+                              ))}
+                            </div>
+                            {permitted?.length === 0 && (
+                              <p className="mt-2 text-[var(--color-warn)]">
+                                No providers selected for this alias; it cannot match any streams.
+                              </p>
+                            )}
+                            {sources.some(
+                              (source) => permitted === undefined || permitted.includes(source.id),
+                            ) && (
+                              <input
+                                aria-label={`Find groups for ${alias}`}
+                                placeholder="Filter matching groups…"
+                                value={sourceSearch}
+                                onChange={(e) => setSourceSearch(e.target.value)}
+                                className="mt-3 w-full rounded-lg border border-[var(--color-line)] bg-[var(--color-panel)] px-3 py-2"
+                              />
+                            )}
+                            <div className="scroll-shadow mt-2 max-h-48 overflow-y-auto">
+                              {Object.entries(providerExclusions).flatMap(([id, filter]) =>
+                                (filter.excludeGroups ?? [])
+                                  .filter(
+                                    (name) =>
+                                      !sources.some(
+                                        (source) =>
+                                          String(source.id) === id &&
+                                          source.groups.some((group) => group.name === name),
+                                      ),
+                                  )
+                                  .map((name) => (
+                                    <button
+                                      key={`stale-${id}-${name}`}
+                                      type="button"
+                                      className={`${pill} mr-1 border border-[var(--color-line)]`}
+                                      onClick={() =>
+                                        setAliasProviderGroupFilters((previous) => ({
+                                          ...previous,
+                                          [alias]: {
+                                            ...previous[alias],
+                                            [id]: {
+                                              excludeGroups: (
+                                                previous[alias]?.[id]?.excludeGroups ?? []
+                                              ).filter((group) => group !== name),
+                                            },
+                                          },
+                                        }))
+                                      }
+                                    >
+                                      Saved exclusion:{' '}
+                                      {providersList.find((provider) => String(provider.id) === id)
+                                        ?.name ?? id}{' '}
+                                      / {name} ×
+                                    </button>
+                                  )),
+                              )}
+                              {sources
+                                .filter(
+                                  (source) =>
+                                    permitted === undefined || permitted.includes(source.id),
+                                )
+                                .map((source) => {
+                                  const options = source.groups.filter(
+                                    (g) =>
+                                      g.name.toLowerCase().includes(search) ||
+                                      excluded.includes(g.name) ||
+                                      (
+                                        providerExclusions[String(source.id)]?.excludeGroups ?? []
+                                      ).includes(g.name),
+                                  );
+                                  return options.length ? (
+                                    <div key={source.id} className="mb-2">
+                                      <p className="font-medium">{source.name}</p>
+                                      {options.map((g) => (
+                                        <label
+                                          key={`${source.id}:${g.name}`}
+                                          className="flex items-center gap-2 py-1 pl-3"
+                                        >
+                                          <input
+                                            type="checkbox"
+                                            checked={
+                                              excluded.includes(g.name) ||
+                                              (
+                                                providerExclusions[String(source.id)]
+                                                  ?.excludeGroups ?? []
+                                              ).includes(g.name)
+                                            }
+                                            disabled={excluded.includes(g.name)}
+                                            onChange={() => {
+                                              const current =
+                                                providerExclusions[String(source.id)]
+                                                  ?.excludeGroups ?? [];
+                                              setAliasProviderGroupFilters((previous) => ({
+                                                ...previous,
+                                                [alias]: {
+                                                  ...previous[alias],
+                                                  [String(source.id)]: {
+                                                    excludeGroups: current.includes(g.name)
+                                                      ? current.filter((name) => name !== g.name)
+                                                      : [...current, g.name],
+                                                  },
+                                                },
+                                              }));
+                                              setRemoveAfterSave(false);
+                                            }}
+                                          />
+                                          <span className="min-w-0 flex-1 truncate">
+                                            Exclude {g.name}
+                                          </span>
+                                          <span className="text-xs tabular-nums text-[var(--color-muted)]">
+                                            {g.count}
+                                          </span>
+                                        </label>
+                                      ))}
+                                    </div>
+                                  ) : null;
+                                })}
+                            </div>
+                            {sources.length === 0 && (
+                              <p className="text-[var(--color-muted)]">
+                                No matching provider streams for this alias. Group selections saved
+                                in the rule remain in effect even when a provider's catalogue
+                                changes.
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                <div className="flex flex-wrap gap-2">
+                  <input
+                    aria-label="New alias"
+                    placeholder="Name for another alias"
+                    value={draftAlias}
+                    onChange={(e) => setDraftAlias(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        const next = draftAlias.trim();
+                        if (next && !lines(aliases).includes(next)) {
+                          setAliases([...lines(aliases), next].join('\n'));
+                          setEditingAlias(next);
+                          setDraftAlias('');
+                        }
+                      }
+                    }}
+                    className="mono min-w-0 flex-1 rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2"
+                  />
+                  <button
+                    type="button"
+                    className={btn}
+                    disabled={!draftAlias.trim() || lines(aliases).includes(draftAlias.trim())}
+                    onClick={() => {
+                      const next = draftAlias.trim();
+                      setAliases([...lines(aliases), next].join('\n'));
+                      setEditingAlias(next);
+                      setDraftAlias('');
+                    }}
+                  >
+                    + Add alias
+                  </button>
+                </div>
+              </div>
               <p className="mt-2 text-sm text-[var(--color-muted)]">
-                One per line. Casing, accents, “USA:” prefixes and “FHD H265” suffixes are handled
-                for you. Order = preference. Matches update as you type.
+                Each row is one alias, in preference order. Casing, accents, “USA:” prefixes and
+                “FHD H265” suffixes are handled for you. Matches update as you type.
               </p>
               {/* A reference, not an instruction: read once, then in the way of
                   the list it sits above every time after. */}
@@ -1908,67 +2347,48 @@ export default function Page() {
                 value={channelGroupFilter}
                 onChange={setChannelGroupFilter}
               />
-              <p className="mt-3 text-sm text-[var(--color-muted)]">
-                Exclude a provider group from just one matching line below. Other aliases can still
-                use that group.
-              </p>
-              {(
-                [
-                  {
-                    title: 'Alias',
-                    text: aliases,
-                    values: aliasGroupFilters,
-                    update: setAliasGroupFilters,
-                  },
-                  {
-                    title: 'Contains',
-                    text: contains,
-                    values: containsGroupFilters,
-                    update: setContainsGroupFilters,
-                  },
-                ] as const
-              ).map(({ title, text, values, update }) =>
-                lines(text).map((line) => (
-                  <details key={`${title}-${line}`} className="mt-2 text-sm">
-                    <summary className="cursor-pointer mono" title={line}>
-                      {title}: {line}{' '}
-                      {values[line]?.excludeGroups?.length
-                        ? `· ${values[line].excludeGroups!.length} group(s) excluded`
-                        : '· all allowed groups'}
-                    </summary>
-                    <input
-                      className="mt-2 w-full rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2"
-                      placeholder="Filter provider groups…"
-                      value={ruleGroupSearch}
-                      onChange={(e) => setRuleGroupSearch(e.target.value)}
-                    />
-                    <div className="scroll-shadow max-h-40 overflow-y-auto">
-                      {providerGroups
-                        .filter((g) => g.name.toLowerCase().includes(ruleGroupSearch.toLowerCase()))
-                        .map((g) => (
-                          <label key={g.id} className="flex items-center gap-2 py-1">
-                            <input
-                              type="checkbox"
-                              checked={values[line]?.excludeGroups?.includes(g.name) ?? false}
-                              onChange={() => {
-                                const excluded = values[line]?.excludeGroups ?? [];
-                                update({
-                                  ...values,
-                                  [line]: {
-                                    excludeGroups: excluded.includes(g.name)
-                                      ? excluded.filter((x) => x !== g.name)
-                                      : [...excluded, g.name],
-                                  },
-                                });
-                              }}
-                            />
-                            Exclude {g.name}
-                          </label>
-                        ))}
-                    </div>
-                  </details>
-                )),
-              )}
+              {lines(contains).map((line) => (
+                <details key={`contains-${line}`} className="mt-2 text-sm">
+                  <summary className="cursor-pointer mono" title={line}>
+                    Contains: {line}{' '}
+                    {containsGroupFilters[line]?.excludeGroups?.length
+                      ? `· ${containsGroupFilters[line].excludeGroups!.length} group(s) excluded`
+                      : '· all allowed groups'}
+                  </summary>
+                  <input
+                    className="mt-2 w-full rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2"
+                    placeholder="Filter provider groups…"
+                    value={sourceSearch}
+                    onChange={(e) => setSourceSearch(e.target.value)}
+                  />
+                  <div className="scroll-shadow max-h-40 overflow-y-auto">
+                    {providerGroups
+                      .filter((g) => g.name.toLowerCase().includes(sourceSearch.toLowerCase()))
+                      .map((g) => (
+                        <label key={g.id} className="flex items-center gap-2 py-1">
+                          <input
+                            type="checkbox"
+                            checked={
+                              containsGroupFilters[line]?.excludeGroups?.includes(g.name) ?? false
+                            }
+                            onChange={() => {
+                              const excluded = containsGroupFilters[line]?.excludeGroups ?? [];
+                              setContainsGroupFilters({
+                                ...containsGroupFilters,
+                                [line]: {
+                                  excludeGroups: excluded.includes(g.name)
+                                    ? excluded.filter((x) => x !== g.name)
+                                    : [...excluded, g.name],
+                                },
+                              });
+                            }}
+                          />
+                          Exclude {g.name}
+                        </label>
+                      ))}
+                  </div>
+                </details>
+              ))}
               {removeNote && (
                 <p
                   className={`mt-3 text-sm ${
@@ -1997,23 +2417,12 @@ export default function Page() {
               )}
             </div>
 
-            <div className="mt-4 flex flex-wrap items-center gap-3">
-              <button
-                type="button"
-                onClick={() => void queueSoak('channel', channel.id)}
-                className={btn}
-              >
-                Soak every stream on this channel
-              </button>
-              <span className="text-sm text-[var(--color-muted)]">
-                Measures how long each of them holds, rather than how it looks in five seconds.
-              </span>
-            </div>
-            {soakNote?.scope === 'channel' && (
-              <p className="mt-2 text-sm text-[var(--color-accent)]">{soakNote.text}</p>
-            )}
-
-            <CheckPanel channelId={channel.id} onApplied={() => void resync()} />
+            <CheckPanel
+              channelId={channel.id}
+              onApplied={() => void resync()}
+              onSoakChannel={() => void queueSoak('channel', channel.id)}
+              soakNote={soakNote?.scope === 'channel' ? soakNote.text : null}
+            />
 
             <div className="mt-4">
               <StreamSearch onAdd={addAlias} onAddContains={addContains} />
@@ -2185,6 +2594,71 @@ export default function Page() {
                 <button type="button" className={`${btn} mt-3`} onClick={() => void dropRegex()}>
                   Remove regex
                 </button>
+              </div>
+            )}
+
+            {savedRuleNeedsRemoval && newlyExcluded.length > 0 && (
+              <div className={`${card} mt-4 border-[var(--color-warn)] p-4 text-sm`}>
+                <strong>
+                  {newlyExcluded.length} assigned stream{newlyExcluded.length === 1 ? '' : 's'} no
+                  longer match the saved rule.
+                </strong>
+                <p className="mt-1 text-[var(--color-muted)]">
+                  They remain assigned in Dispatcharr until you explicitly remove them. Review the
+                  “not in rule” rows above first. Uncheck anything you want to keep.
+                </p>
+                <div className="scroll-shadow mt-2 max-h-40 overflow-y-auto">
+                  {newlyExcluded.map((stream) => (
+                    <label key={stream.id} className="flex items-center gap-2 py-1">
+                      <input
+                        type="checkbox"
+                        checked={removalIds.includes(stream.id)}
+                        onChange={() =>
+                          setRemovalIds((current) =>
+                            current.includes(stream.id)
+                              ? current.filter((id) => id !== stream.id)
+                              : [...current, stream.id],
+                          )
+                        }
+                      />
+                      <span className="mono min-w-0 flex-1 truncate" title={stream.raw}>
+                        {stream.raw}
+                      </span>
+                      <span className="text-[var(--color-muted)]">
+                        {stream.provider} · {stream.providerGroup ?? 'ungrouped'}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={removeAfterSave}
+                      onChange={(e) => setRemoveAfterSave(e.target.checked)}
+                    />
+                    Confirm removal of {removalIds.length} selected stream
+                    {removalIds.length === 1 ? '' : 's'}
+                  </label>
+                  <button
+                    type="button"
+                    disabled={!removeAfterSave || removalIds.length === 0}
+                    className={btn}
+                    onClick={() => void removeExcluded()}
+                  >
+                    Remove from Dispatcharr
+                  </button>
+                  <button
+                    type="button"
+                    className={btn}
+                    onClick={() => {
+                      setSavedRuleNeedsRemoval(false);
+                      setRemoveAfterSave(false);
+                    }}
+                  >
+                    Keep assigned
+                  </button>
+                </div>
               </div>
             )}
 
