@@ -118,6 +118,7 @@ interface Preview {
     string,
     Array<{ id: number; name: string; groups: Array<{ name: string; count: number }> }>
   >;
+  groupCounts?: Record<string, number>;
 }
 
 /** "3m ago" / "2h ago" / "never" -- the question is freshness, not the date. */
@@ -2148,15 +2149,21 @@ export default function Page() {
                             {sources.some(
                               (source) => permitted === undefined || permitted.includes(source.id),
                             ) && (
-                              <input
-                                aria-label={`Find groups for ${alias}`}
-                                placeholder="Filter matching groups…"
-                                value={sourceSearch}
-                                onChange={(e) => setSourceSearch(e.target.value)}
-                                className="mt-3 w-full rounded-lg border border-[var(--color-line)] bg-[var(--color-panel)] px-3 py-2"
-                              />
+                              <>
+                                <p className="mt-3 text-xs text-[var(--color-muted)]">
+                                  Click a group to exclude its streams from this alias. Counts show
+                                  matching streams before exclusions.
+                                </p>
+                                <input
+                                  aria-label={`Find groups for ${alias}`}
+                                  placeholder="Filter matching groups…"
+                                  value={sourceSearch}
+                                  onChange={(e) => setSourceSearch(e.target.value)}
+                                  className="mt-2 w-full rounded-lg border border-[var(--color-line)] bg-[var(--color-panel)] px-3 py-2"
+                                />
+                              </>
                             )}
-                            <div className="scroll-shadow mt-2 max-h-48 overflow-y-auto pr-4">
+                            <div className="scroll-shadow mt-2 max-h-64 overflow-y-auto pr-4">
                               {Object.entries(providerExclusions).flatMap(([id, filter]) =>
                                 (filter.excludeGroups ?? [])
                                   .filter(
@@ -2171,7 +2178,7 @@ export default function Page() {
                                     <button
                                       key={`stale-${id}-${name}`}
                                       type="button"
-                                      className={`${pill} mr-1 border border-[var(--color-line)]`}
+                                      className="mb-1 flex w-full items-center justify-between rounded-lg border border-[var(--color-line)] bg-[var(--color-accent-soft)] px-3 py-2 text-left hover:border-[var(--color-accent)]"
                                       onClick={() =>
                                         setAliasProviderGroupFilters((previous) => ({
                                           ...previous,
@@ -2186,10 +2193,15 @@ export default function Page() {
                                         }))
                                       }
                                     >
-                                      Saved exclusion:{' '}
-                                      {providersList.find((provider) => String(provider.id) === id)
-                                        ?.name ?? id}{' '}
-                                      / {name} ×
+                                      <span className="min-w-0 truncate">
+                                        {providersList.find(
+                                          (provider) => String(provider.id) === id,
+                                        )?.name ?? id}{' '}
+                                        / {name}
+                                      </span>
+                                      <span className="shrink-0 text-xs text-[var(--color-accent)]">
+                                        Excluded ×
+                                      </span>
                                     </button>
                                   )),
                               )}
@@ -2208,56 +2220,71 @@ export default function Page() {
                                       ).includes(g.name),
                                   );
                                   return options.length ? (
-                                    <div key={source.id} className="mb-2">
-                                      <p className="font-medium">{source.name}</p>
-                                      {options.map((g) => (
-                                        <div
-                                          key={`${source.id}:${g.name}`}
-                                          className="flex items-center gap-2 py-1 pl-3"
-                                        >
-                                          <button
-                                            type="button"
-                                            className={`${chip(
-                                              excluded.includes(g.name) ||
-                                                (
+                                    <div key={source.id} className="mb-3">
+                                      <p className="mb-1 flex items-baseline justify-between font-medium">
+                                        <span>{source.name}</span>
+                                        <span className="text-xs tabular-nums text-[var(--color-muted)]">
+                                          {source.groups.reduce((n, g) => n + g.count, 0)} matches
+                                        </span>
+                                      </p>
+                                      <div className="space-y-1">
+                                        {options.map((g) => {
+                                          const shared = excluded.includes(g.name);
+                                          const isExcluded =
+                                            shared ||
+                                            (
+                                              providerExclusions[String(source.id)]
+                                                ?.excludeGroups ?? []
+                                            ).includes(g.name);
+                                          return (
+                                            <button
+                                              key={`${source.id}:${g.name}`}
+                                              type="button"
+                                              className={`flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left hover:border-[var(--color-accent)] ${
+                                                isExcluded
+                                                  ? 'border-[var(--color-accent)] bg-[var(--color-accent-soft)]'
+                                                  : 'border-[var(--color-line)] bg-[var(--color-canvas)]'
+                                              } disabled:cursor-default disabled:opacity-70`}
+                                              title={
+                                                shared
+                                                  ? 'Remove the shared exclusion above to allow this group'
+                                                  : `${g.name}: ${isExcluded ? 'excluded' : 'allowed'}`
+                                              }
+                                              aria-pressed={isExcluded}
+                                              disabled={shared}
+                                              onClick={() => {
+                                                const current =
                                                   providerExclusions[String(source.id)]
-                                                    ?.excludeGroups ?? []
-                                                ).includes(g.name),
-                                            )} min-w-0 truncate text-left`}
-                                            title={`Exclude ${g.name}`}
-                                            aria-pressed={
-                                              excluded.includes(g.name) ||
-                                              (
-                                                providerExclusions[String(source.id)]
-                                                  ?.excludeGroups ?? []
-                                              ).includes(g.name)
-                                            }
-                                            disabled={excluded.includes(g.name)}
-                                            onClick={() => {
-                                              const current =
-                                                providerExclusions[String(source.id)]
-                                                  ?.excludeGroups ?? [];
-                                              setAliasProviderGroupFilters((previous) => ({
-                                                ...previous,
-                                                [alias]: {
-                                                  ...previous[alias],
-                                                  [String(source.id)]: {
-                                                    excludeGroups: current.includes(g.name)
-                                                      ? current.filter((name) => name !== g.name)
-                                                      : [...current, g.name],
+                                                    ?.excludeGroups ?? [];
+                                                setAliasProviderGroupFilters((previous) => ({
+                                                  ...previous,
+                                                  [alias]: {
+                                                    ...previous[alias],
+                                                    [String(source.id)]: {
+                                                      excludeGroups: current.includes(g.name)
+                                                        ? current.filter((name) => name !== g.name)
+                                                        : [...current, g.name],
+                                                    },
                                                   },
-                                                },
-                                              }));
-                                              setRemoveAfterSave(false);
-                                            }}
-                                          >
-                                            Exclude {g.name}
-                                          </button>
-                                          <span className="ml-auto shrink-0 text-xs tabular-nums text-[var(--color-muted)]">
-                                            {g.count}
-                                          </span>
-                                        </div>
-                                      ))}
+                                                }));
+                                                setRemoveAfterSave(false);
+                                              }}
+                                            >
+                                              <span className="min-w-0 flex-1 truncate">
+                                                {g.name}
+                                              </span>
+                                              <span className="shrink-0 tabular-nums text-[var(--color-muted)]">
+                                                {g.count}
+                                              </span>
+                                              <span
+                                                className={`w-16 shrink-0 text-right text-xs ${isExcluded ? 'text-[var(--color-accent)]' : 'text-[var(--color-muted)]'}`}
+                                              >
+                                                {isExcluded ? 'Excluded' : 'Allowed'}
+                                              </span>
+                                            </button>
+                                          );
+                                        })}
+                                      </div>
                                     </div>
                                   ) : null;
                                 })}
@@ -2353,6 +2380,7 @@ export default function Page() {
                 groups={providerGroups}
                 value={channelGroupFilter}
                 onChange={setChannelGroupFilter}
+                counts={preview?.groupCounts}
               />
               {lines(contains).map((line) => (
                 <details key={`contains-${line}`} className="mt-2 text-sm">

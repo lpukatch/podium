@@ -15,16 +15,20 @@ export function ProviderGroupFilterEditor({
   value,
   onChange,
   inheritLabel = 'Inherit channel group',
+  counts,
 }: {
   groups: Array<{ id: number; name: string }>;
   value: ProviderGroupFilter | null;
   onChange: (value: ProviderGroupFilter | null) => void;
   inheritLabel?: string;
+  counts?: Record<string, number>;
 }) {
   const [query, setQuery] = useState('');
   const included = value?.includeGroups;
   const excluded = value?.excludeGroups ?? [];
-  const options = groups.filter((g) => g.name.toLowerCase().includes(query.trim().toLowerCase()));
+  const options = groups
+    .filter((g) => g.name.toLowerCase().includes(query.trim().toLowerCase()))
+    .sort((a, b) => (counts?.[b.name] ?? 0) - (counts?.[a.name] ?? 0));
   return (
     <div className="mt-3 text-sm">
       <p className="font-medium">Provider stream groups</p>
@@ -64,8 +68,13 @@ export function ProviderGroupFilterEditor({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
-          <div className="scroll-shadow mt-2 max-h-44 overflow-y-auto pr-3">
-            <div className="flex flex-wrap gap-1.5 py-1">
+          <p className="mt-2 text-xs text-[var(--color-muted)]">
+            Click a group to{' '}
+            {included === undefined ? 'exclude or allow it' : 'allow or exclude it'}. Alt-click to
+            keep only that group.
+          </p>
+          <div className="scroll-shadow mt-2 max-h-64 overflow-y-auto pr-4">
+            <div className="space-y-1 py-1">
               {options.map((g) => {
                 const selected =
                   included === undefined
@@ -75,9 +84,13 @@ export function ProviderGroupFilterEditor({
                   <button
                     key={g.id}
                     type="button"
-                    className={chip(selected)}
+                    className={`flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left text-sm hover:border-[var(--color-accent)] ${
+                      selected
+                        ? 'border-[var(--color-line)] bg-[var(--color-canvas)]'
+                        : 'border-[var(--color-accent)] bg-[var(--color-accent-soft)]'
+                    }`}
                     aria-pressed={selected}
-                    title="Click to toggle. Alt-click to select only this group."
+                    title={`${g.name}: ${selected ? 'allowed' : 'excluded'}. Alt-click to select only this group.`}
                     onClick={(e) => {
                       if (e.altKey) {
                         onChange({ includeGroups: [g.name] });
@@ -97,7 +110,17 @@ export function ProviderGroupFilterEditor({
                       }
                     }}
                   >
-                    {g.name}
+                    <span className="min-w-0 flex-1 truncate">{g.name}</span>
+                    {counts && (
+                      <span className="shrink-0 tabular-nums text-[var(--color-muted)]">
+                        {counts[g.name] ?? 0}
+                      </span>
+                    )}
+                    <span
+                      className={`w-16 shrink-0 text-right text-xs ${selected ? 'text-[var(--color-muted)]' : 'text-[var(--color-accent)]'}`}
+                    >
+                      {selected ? 'Allowed' : 'Excluded'}
+                    </span>
                   </button>
                 );
               })}
