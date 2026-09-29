@@ -16,9 +16,13 @@ export function groupFilter(raw: unknown): ProviderGroupFilter {
           .map((x) => x.trim())
           .filter(Boolean)
       : undefined;
+  // Rules on disk use snake_case; the editor sends camelCase to /api/preview.
+  // Both must produce the same filter or the live ordering contradicts a save.
+  const include = row.includeGroups ?? row.include_groups;
+  const exclude = row.excludeGroups ?? row.exclude_groups;
   return {
-    ...(Array.isArray(row.include_groups) ? { includeGroups: list(row.include_groups) } : {}),
-    ...(Array.isArray(row.exclude_groups) ? { excludeGroups: list(row.exclude_groups) } : {}),
+    ...(Array.isArray(include) ? { includeGroups: list(include) } : {}),
+    ...(Array.isArray(exclude) ? { excludeGroups: list(exclude) } : {}),
   };
 }
 
