@@ -144,8 +144,14 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     }
 
     const hits = rule
-      ? m.match(rule, idx)
-      : assignedCandidates(channel, streamById, idx.excludedGroups);
+      ? m.match(rule, idx, groupPolicy.groupFilter)
+      : assignedCandidates(
+          channel,
+          streamById,
+          idx.excludedGroups,
+          idx.groupNames,
+          groupPolicy.groupFilter,
+        );
     if (hits.length === 0) {
       return NextResponse.json(
         {

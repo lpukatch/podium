@@ -263,6 +263,31 @@ A group switched off by a glob is struck through and says which pattern caught
 it, so an `exclude_groups` entry that is quietly claiming more than you meant is
 visible rather than inferred.
 
+For narrower choices, the **channel group** view can select provider stream
+groups for all its channels. A **channel** can inherit that choice or override
+it; the global Settings exclusion still wins. The channel editor also has a
+multi-select exclusion for each alias and `contains` line. It leaves the alias
+syntax unchanged: `ESPN NEWS` with `UK News` excluded still matches that name
+from other provider groups. Another alias, such as `ESPNEWS`, can independently
+claim streams from `UK News`, so exclude it from both lines (or at channel level)
+when the entire channel must avoid that group. The live stream rows show the
+provider group beside each provider.
+
+In `rules.json`, the same choice can be written without changing the alias:
+
+```json
+{
+  "aliases": ["ESPN NEWS", "ESPNEWS"],
+  "alias_group_filters": {
+    "ESPN NEWS": { "exclude_groups": ["UK News", "UK Sports"] }
+  }
+}
+```
+
+Channel entries and channel-group policies also accept `include_groups` and
+`exclude_groups` arrays of provider-group names or `*`/`?` globs. A missing
+`include_groups` means all groups; an empty array explicitly allows none.
+
 ### Channel groups
 
 Policy is per Dispatcharr channel group:

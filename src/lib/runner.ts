@@ -35,6 +35,7 @@ import {
   soakProxyBase,
   soakUserAgent,
 } from './probe-routing';
+import { groupAllowed, type ProviderGroupFilter } from './provider-groups';
 import { tierOf } from './quality';
 import { channelResolutionFloor, type MinResolution } from './resolution';
 import { pruneDeletedChannelRules } from './rule-sync';
@@ -571,6 +572,8 @@ export function assignedCandidates(
   channel: Channel,
   byId: Map<number, Stream>,
   excludedGroups: Set<number>,
+  groupNames?: Map<number, string>,
+  filter?: ProviderGroupFilter,
 ): Array<[number, number]> {
   const out: Array<[number, number]> = [];
   const seen = new Set<number>();
@@ -583,6 +586,11 @@ export function assignedCandidates(
     // guards (region, timeshift, radio) exist to stop a rule *claiming* a
     // stream it was never meant to, and nothing is being claimed here.
     if (stream.groupId != null && excludedGroups.has(stream.groupId)) continue;
+    if (
+      filter &&
+      !groupAllowed(stream.groupId == null ? undefined : groupNames?.get(stream.groupId), filter)
+    )
+      continue;
     seen.add(streamId);
     // Step order 0 for all of them, not the position in the channel's array.
     // Step order is a hard tier above quality in alias mode, so ranking by
@@ -2455,7 +2463,15 @@ export class Runner {
       // Lazily, because matching is the expensive part of the pass and an
       // excluded channel must not pay for it.
       const candidates = (): Array<[number, number]> =>
-        rule ? matcher.match(rule, index) : assignedCandidates(channel, byId, index.excludedGroups);
+        rule
+          ? matcher.match(rule, index, policy.groupFilter)
+          : assignedCandidates(
+              channel,
+              byId,
+              index.excludedGroups,
+              index.groupNames,
+              policy.groupFilter,
+            );
 
       const verdict = eligibility.allows(
         channel.groupId,

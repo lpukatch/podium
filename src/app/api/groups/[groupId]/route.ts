@@ -18,6 +18,7 @@ export async function PUT(request: Request, context: { params: Promise<{ groupId
     windowMinutes?: number;
     audioOnly?: boolean;
     measureOnly?: boolean;
+    groupFilter?: { includeGroups?: string[]; excludeGroups?: string[] } | null;
     /**
      * `720p`, `1080p`, `2160p`, or `none` to pin this group to no floor at all.
      * Absent keeps what is stored; `null` and `""` read as `none`.
@@ -72,8 +73,18 @@ export async function PUT(request: Request, context: { params: Promise<{ groupId
   // `none` is written out, not dropped: that is the value that keeps the entry
   // here at all, and the entry is the override.
   const storedValue = pinnedToNoFloor ? 'none' : minResolution;
+  const filter =
+    body.groupFilter === undefined
+      ? { includeGroups: storedObj?.include_groups, excludeGroups: storedObj?.exclude_groups }
+      : body.groupFilter;
   const isDefault =
-    mode === ALWAYS && !audioOnly && !measureOnly && !minResolution && keptLive === undefined;
+    mode === ALWAYS &&
+    !audioOnly &&
+    !measureOnly &&
+    !minResolution &&
+    keptLive === undefined &&
+    !filter?.includeGroups &&
+    !filter?.excludeGroups;
 
   if (isDefault && !pinnedToNoFloor) {
     // Default mode with no custom settings: clean up entry
@@ -90,6 +101,8 @@ export async function PUT(request: Request, context: { params: Promise<{ groupId
       ...(measureOnly ? { measure_only: true } : {}),
       ...(storedValue ? { min_resolution: storedValue } : {}),
       ...(keptLive === undefined ? {} : { require_live: keptLive }),
+      ...(filter?.includeGroups !== undefined ? { include_groups: filter.includeGroups } : {}),
+      ...(filter?.excludeGroups !== undefined ? { exclude_groups: filter.excludeGroups } : {}),
     };
   }
 

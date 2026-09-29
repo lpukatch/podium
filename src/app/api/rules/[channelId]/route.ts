@@ -24,6 +24,9 @@ export async function PUT(request: Request, context: { params: Promise<{ channel
     contains?: string[];
     exclude?: string[];
     providers?: unknown;
+    groupFilter?: { includeGroups?: string[]; excludeGroups?: string[] } | null;
+    aliasGroupFilters?: Record<string, { excludeGroups?: string[] }>;
+    containsGroupFilters?: Record<string, { excludeGroups?: string[] }>;
     /**
      * `720p`, `1080p` or `2160p`; `none` to ignore the group's floor; `inherit`
      * to take the group's. Absent leaves whatever is stored alone, and `null`
@@ -69,6 +72,35 @@ export async function PUT(request: Request, context: { params: Promise<{ channel
     } else {
       delete entry.providers;
     }
+  }
+  if (body.groupFilter !== undefined) {
+    if (body.groupFilter === null) {
+      delete entry.include_groups;
+      delete entry.exclude_groups;
+    } else {
+      delete entry.include_groups;
+      delete entry.exclude_groups;
+      if (body.groupFilter.includeGroups !== undefined)
+        entry.include_groups = clean(body.groupFilter.includeGroups);
+      if (body.groupFilter.excludeGroups !== undefined)
+        entry.exclude_groups = clean(body.groupFilter.excludeGroups);
+    }
+  }
+  if (body.aliasGroupFilters !== undefined) {
+    entry.alias_group_filters = Object.fromEntries(
+      Object.entries(body.aliasGroupFilters)
+        .filter(([line]) => clean(body.aliases).includes(line))
+        .filter(([, filter]) => clean(filter.excludeGroups).length > 0)
+        .map(([line, filter]) => [line, { exclude_groups: clean(filter.excludeGroups) }]),
+    );
+  }
+  if (body.containsGroupFilters !== undefined) {
+    entry.contains_group_filters = Object.fromEntries(
+      Object.entries(body.containsGroupFilters)
+        .filter(([line]) => clean(body.contains).includes(line))
+        .filter(([, filter]) => clean(filter.excludeGroups).length > 0)
+        .map(([line, filter]) => [line, { exclude_groups: clean(filter.excludeGroups) }]),
+    );
   }
   if (body.minResolution !== undefined) {
     // Stored as `none` rather than omitted: omitting it is how a channel says

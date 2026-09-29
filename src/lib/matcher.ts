@@ -28,6 +28,7 @@ import {
   type StripList,
   tailKeys,
 } from './normalize';
+import { groupAllowed, type ProviderGroupFilter } from './provider-groups';
 
 export interface StreamLike {
   id: number;
@@ -59,6 +60,11 @@ export interface ChannelRule {
    * common case: most legacy patterns carried no region guard whatsoever.
    */
   excludeRegions: Set<string> | null;
+  /** Absent means inherit the channel group's provider-group filter. */
+  groupFilter?: ProviderGroupFilter;
+  /** One filter per alias/contains line, keyed by its full text. */
+  aliasGroupFilters?: Record<string, ProviderGroupFilter>;
+  containsGroupFilters?: Record<string, ProviderGroupFilter>;
 }
 
 export interface Guards {
@@ -119,6 +125,7 @@ export interface StreamIndex {
    * lookup, and the globs only mean anything alongside a group list anyway.
    */
   excludedGroups: Set<number>;
+  groupNames?: Map<number, string>;
 }
 
 /** Key for a name whose leading section words have been split off. */
@@ -533,11 +540,30 @@ export class Matcher {
         if (section && rest) push(bySection, sectionKey(section, rest), stream);
       }
     }
-    return { streams, normalized, byKey, bySection, folded, excludedGroups };
+    return { streams, normalized, byKey, bySection, folded, excludedGroups, groupNames };
   }
 
   /** Return `[streamId, stepOrder]` for every stream this channel claims. */
-  match(rule: ChannelRule, index: StreamIndex): Array<[number, number]> {
+  match(
+    rule: ChannelRule,
+    index: StreamIndex,
+    inheritedGroupFilter: ProviderGroupFilter = {},
+  ): Array<[number, number]> {
+    const scoped = rule.groupFilter ?? inheritedGroupFilter;
+    if (
+      !index.groupNames &&
+      index.streams.some((stream) => stream.groupId != null) &&
+      (scoped.includeGroups !== undefined ||
+        scoped.excludeGroups?.length ||
+        Object.values(rule.aliasGroupFilters ?? {}).some(
+          (filter) => filter.includeGroups !== undefined || filter.excludeGroups?.length,
+        ) ||
+        Object.values(rule.containsGroupFilters ?? {}).some(
+          (filter) => filter.includeGroups !== undefined || filter.excludeGroups?.length,
+        ))
+    ) {
+      throw new Error('match needs the group list to apply provider-group filters');
+    }
     const guards = this.guardsFor(rule);
     const excludes = rule.exclude.map((entry) => this.compileExclude(entry));
     const best = new Map<number, number>();
@@ -560,12 +586,19 @@ export class Matcher {
       return regions.size === guards.regions.size ? guards : { ...guards, regions };
     };
 
-    const admit = (stream: StreamLike, step: number, spec: AliasSpec): void => {
+    const admit = (
+      stream: StreamLike,
+      step: number,
+      spec: AliasSpec,
+      lineFilter: ProviderGroupFilter = {},
+    ): void => {
       if (rule.providers && !rule.providers.has(stream.providerId)) return;
       // Before anything a rule can say: an excluded group is the operator
       // saying these streams are not candidates at all, so no alias, contains
       // or regex reaches them -- including the legacy patterns.
       if (stream.groupId != null && index.excludedGroups.has(stream.groupId)) return;
+      const groupName = stream.groupId == null ? undefined : index.groupNames?.get(stream.groupId);
+      if (!groupAllowed(groupName, scoped) || !groupAllowed(groupName, lineFilter)) return;
       const norm = index.normalized.get(stream.id);
       if (!norm || !prefixesSatisfy(spec, norm) || !tagsSatisfy(spec, norm)) return;
       if (rejectedBy(guardsWith(spec), norm)) return;
@@ -598,7 +631,8 @@ export class Matcher {
     rule.aliases.forEach((alias, position) => {
       const { key, spec } = this.compileAlias(alias);
       const step = rule.stepOrder + position;
-      for (const stream of index.byKey.get(key) ?? []) admit(stream, step, spec);
+      for (const stream of index.byKey.get(key) ?? [])
+        admit(stream, step, spec, rule.aliasGroupFilters?.[alias]);
 
       // Then the same alias against names that carry their section inline:
       // "@MLB Chicago Cubs" has to reach "US| MLB CHICAGO CUBS HD".
@@ -608,7 +642,7 @@ export class Matcher {
       // worse, would quietly turn every alias into a suffix match.
       for (const section of spec.require) {
         for (const stream of index.bySection.get(sectionKey(section, key)) ?? []) {
-          admit(stream, step, spec);
+          admit(stream, step, spec, rule.aliasGroupFilters?.[alias]);
         }
       }
     });
@@ -624,7 +658,7 @@ export class Matcher {
         const matcher = wordBoundaryMatcher(probe);
         for (const stream of index.streams) {
           if (matcher.test(index.folded.get(stream.id) ?? '')) {
-            admit(stream, base + position, spec);
+            admit(stream, base + position, spec, rule.containsGroupFilters?.[needle]);
           }
         }
       });

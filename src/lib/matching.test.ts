@@ -1401,6 +1401,73 @@ describe('matcher', () => {
     expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
   });
 
+  it('scopes a multi-group exclusion to one alias while another alias can still claim its own feed', () => {
+    const m = matcherFor({
+      channel_id: 1,
+      aliases: ['ESPN NEWS', 'ESPNEWS'],
+      alias_group_filters: { 'ESPN NEWS': { exclude_groups: ['UK News', 'UK Sports'] } },
+    });
+    const names = new Map([
+      [1, 'USA News'],
+      [2, 'UK News'],
+      [3, 'UK Sports'],
+    ]);
+    const index = m.buildIndex(
+      [
+        grouped(10, 'ESPN NEWS', 1),
+        grouped(11, 'ESPN NEWS', 2),
+        grouped(12, 'ESPN NEWS', 3),
+        grouped(13, 'ESPNEWS', 2),
+      ],
+      names,
+    );
+    expect(m.match(m.rules.get(1)!, index).map(([id]) => id)).toEqual([10, 13]);
+  });
+
+  it('lets a channel override its group default, but never a global exclusion', () => {
+    const m = matcherFor(
+      { channel_id: 1, aliases: ['CNN'], include_groups: ['UK News'] },
+      { exclude_groups: ['Blocked'] },
+    );
+    const names = new Map([
+      [1, 'USA News'],
+      [2, 'UK News'],
+      [3, 'Blocked'],
+    ]);
+    const index = m.buildIndex(
+      [grouped(10, 'CNN', 1), grouped(11, 'CNN', 2), grouped(12, 'CNN', 3)],
+      names,
+    );
+    expect(
+      m.match(m.rules.get(1)!, index, { includeGroups: ['USA News'] }).map(([id]) => id),
+    ).toEqual([11]);
+  });
+
+  it('does not let a legacy regex bypass a channel group selection', () => {
+    const m = matcherFor({ channel_id: 1, patterns: [{ pattern: 'CNN' }] });
+    const index = m.buildIndex(
+      [grouped(10, 'CNN', 1), grouped(11, 'CNN', 2)],
+      new Map([
+        [1, 'USA News'],
+        [2, 'UK News'],
+      ]),
+    );
+    expect(m.match(m.rules.get(1)!, index, { includeGroups: ['USA News'] })).toEqual([[10, 0]]);
+  });
+
+  it('keeps an alias exclusion attached after aliases are reordered', () => {
+    const m = matcherFor({
+      channel_id: 1,
+      aliases: ['ESPNEWS', 'ESPN NEWS'],
+      alias_group_filters: { 'ESPN NEWS': { exclude_groups: ['UK News'] } },
+    });
+    const index = m.buildIndex(
+      [grouped(10, 'ESPN NEWS', 1), grouped(11, 'ESPNEWS', 1)],
+      new Map([[1, 'UK News']]),
+    );
+    expect(m.match(m.rules.get(1)!, index).map(([id]) => id)).toEqual([11]);
+  });
+
   it('excludes groups by glob, so groups created later are covered', () => {
     // Dispatcharr builds "Auto | ..." groups on its own; naming ids would mean
     // the next one silently comes back into matching.

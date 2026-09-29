@@ -1,8 +1,10 @@
 import { NextResponse } from 'next/server';
-import { compileGlob } from '@/lib/eligibility';
+import { compileGlob, Eligibility } from '@/lib/eligibility';
 import {
+  groupPatterns,
   index,
   matcher,
+  policies,
   readRulesDoc,
   snapshot,
   streamGroups,
@@ -33,8 +35,20 @@ export async function GET() {
     // Claimed *ignoring* the exclusions, so a group already switched off still
     // shows what it would take back if you switched it on again.
     const claimed = new Set<number>();
+    const channelGroups = new Map(snap.channels.map((c) => [c.id, c.groupId]));
+    const groupNames = new Map(snap.groups.map((g) => [g.id, g.name]));
+    const eligibility = new Eligibility(policies(), undefined, groupPatterns());
     for (const rule of m.rules.values()) {
-      for (const [streamId] of m.match(rule, { ...idx, excludedGroups: new Set<number>() })) {
+      const groupId = channelGroups.get(rule.channelId);
+      const filter = eligibility.policyFor(
+        groupId,
+        groupId == null ? undefined : groupNames.get(groupId),
+      ).groupFilter;
+      for (const [streamId] of m.match(
+        rule,
+        { ...idx, excludedGroups: new Set<number>() },
+        filter,
+      )) {
         claimed.add(streamId);
       }
     }

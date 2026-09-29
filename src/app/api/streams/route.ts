@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
+import { Eligibility } from '@/lib/eligibility';
 import { leadingWord, matchKey } from '@/lib/normalize';
-import { index, matcher, snapshot } from '@/lib/server/state';
+import { groupPatterns, index, matcher, policies, snapshot } from '@/lib/server/state';
 
 export const dynamic = 'force-dynamic';
 
@@ -28,11 +29,19 @@ export async function GET(request: Request) {
     const idx = await index();
     const m = matcher();
     const providerNames = new Map(snap.providers.map((p) => [p.id, p.name]));
+    const channelGroups = new Map(snap.channels.map((c) => [c.id, c.groupId]));
+    const groupNames = new Map(snap.groups.map((g) => [g.id, g.name]));
+    const eligibility = new Eligibility(policies(), undefined, groupPatterns());
 
     // Which channel already claims a stream, so the UI can say "taken".
     const claimedBy = new Map<number, string>();
     for (const [channelId, rule] of m.rules) {
-      for (const [streamId] of m.match(rule, idx)) {
+      const groupId = channelGroups.get(channelId);
+      const filter = eligibility.policyFor(
+        groupId,
+        groupId == null ? undefined : groupNames.get(groupId),
+      ).groupFilter;
+      for (const [streamId] of m.match(rule, idx, filter)) {
         if (!claimedBy.has(streamId)) {
           claimedBy.set(streamId, rule.name || String(channelId));
         }
