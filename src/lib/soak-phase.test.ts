@@ -14,7 +14,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from './config';
-import type { SoakResult } from './probe';
+import type { ProbeResult, SoakResult } from './probe';
 import { RulesSource } from './rules-source';
 import { Runner } from './runner';
 import { Store } from './store';
@@ -42,6 +42,22 @@ vi.mock('./probe', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./probe')>();
   return {
     ...actual,
+    probe: async (): Promise<ProbeResult> => ({
+      alive: true,
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      bitrateKbps: 5000,
+      videoCodec: 'h264',
+      audioCodec: 'aac',
+      pixelFormat: 'yuv420p',
+      audioChannels: 2,
+      channelLayout: 'stereo',
+      audioBitrateKbps: 128,
+      audioSampleRate: 48_000,
+      elapsedMs: 100,
+      error: '',
+    }),
     soakStream: (url: string, options: SoakOptions) => script.run(url, options),
   };
 });
@@ -262,5 +278,97 @@ describe('the soak phase', () => {
     expect(store.pendingSoakCount().total).toBe(STREAMS.length);
     expect(store.soakResults(STREAMS)).toEqual(new Map());
     expect(lines.join('\n')).toContain('soaks are being closed as fast as new ones open');
+  });
+
+  it('holds event streams out of automatic and requested soaks until their live kickoff', async () => {
+    store.clearSoaks(STREAMS);
+    store.queueSoaks([{ streamId: 103, channelId: 2 }]);
+    writeFileSync(
+      join(dir, 'rules.json'),
+      JSON.stringify({
+        schema: 2,
+        defaults: {},
+        channels: [],
+        groups: { 1: { mode: 'assigned' } },
+        group_patterns: [{ pattern: 'MLB | Auto', mode: 'after_epg_start', measure_only: true }],
+      }),
+    );
+    const originalStub = globalThis.fetch;
+    let live = false;
+    let kickoffMinutesAgo = 0;
+    globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      const page = (results: unknown[]) => ({ count: results.length, next: null, results });
+      let body: unknown;
+      if (url.includes('/channels/channels/')) {
+        body = page([
+          { id: 1, name: 'Regular', channel_group_id: 1, streams: [101] },
+          {
+            id: 2,
+            name: 'MLB | Red Sox @ Yankees',
+            channel_group_id: 2,
+            tvg_id: 'game',
+            streams: [102, 103],
+          },
+        ]);
+      } else if (url.includes('/channels/groups/')) {
+        body = page([
+          { id: 1, name: 'Regular' },
+          { id: 2, name: 'MLB | Auto' },
+        ]);
+      } else if (url.includes('/epg/grid/')) {
+        const now = Date.now();
+        body = {
+          data: [
+            {
+              id: 1,
+              tvg_id: 'game',
+              start_time: new Date(now - (live ? kickoffMinutesAgo : 10) * 60_000).toISOString(),
+              end_time: new Date(now + 60 * 60_000).toISOString(),
+              title: live ? 'Game' : 'Coming up: Game',
+              is_live: live,
+            },
+          ],
+        };
+      } else {
+        return originalStub(input);
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => body,
+        text: async () => JSON.stringify(body),
+      } as Response;
+    }) as typeof fetch;
+
+    const hour = (offset: number) => {
+      const date = new Date(Date.now() + offset * 60_000);
+      return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+    };
+    const env = {
+      PODIUM_SOAK_WINDOW: `${hour(-30)}-${hour(30)}`,
+      PODIUM_SOAK_COOLDOWN_MS: '0',
+    };
+    const soaked: number[] = [];
+    script.run = async (url) => {
+      soaked.push(Number(url.match(/\/(\d+)\.ts$/)?.[1]));
+      return clean();
+    };
+
+    await runner(env).runOnce();
+    expect(soaked).toEqual([101]);
+    expect(store.pendingSoaks().map((row) => row.streamId)).toEqual([103]);
+    expect(store.soakResults([102, 103]).size).toBe(0);
+
+    live = true;
+    await runner(env).runOnce();
+    expect(soaked).toEqual([101]);
+    expect(store.pendingSoaks().map((row) => row.streamId)).toEqual([103]);
+
+    kickoffMinutesAgo = 10;
+    await runner(env).runOnce();
+    expect(soaked).toEqual(expect.arrayContaining([101, 102, 103]));
+    expect(store.pendingSoaks()).toEqual([]);
+    expect(store.soakResults([102, 103]).size).toBe(2);
   });
 });

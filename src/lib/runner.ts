@@ -2129,6 +2129,10 @@ export class Runner {
             client,
             uuidMap,
             guard,
+            channels,
+            groupNames,
+            eligibility,
+            epgRows,
           },
           config,
         );
@@ -2878,6 +2882,10 @@ export class Runner {
       client: DispatcharrClient;
       uuidMap: Map<string, number>;
       guard: ViewerGuard | undefined;
+      channels: Channel[];
+      groupNames: Map<number, string>;
+      eligibility: Eligibility;
+      epgRows: unknown[];
     },
     config: Config,
   ): Promise<{ soaked: number; drops: number }> {
@@ -2930,6 +2938,30 @@ export class Runner {
     const kicks = makeKickDetector();
     const warned = new Set<number>();
 
+    // The catalogue includes event channels while they are held back from
+    // probing. A soak must not mistake their pregame placeholder (or missing
+    // EPG) for evidence that the actual event feed drops. Re-evaluate at soak
+    // time: probes may have taken long enough for the gate to change.
+    const programmes = currentProgrammes(context.epgRows as never[]);
+    const blocked = new Set<number>();
+    for (const channel of context.channels) {
+      const groupName =
+        channel.groupId === null ? undefined : context.groupNames.get(channel.groupId);
+      if (context.eligibility.policyFor(channel.groupId, groupName).mode !== AFTER_EPG_START)
+        continue;
+      if (
+        !context.eligibility.allows(
+          channel.groupId,
+          channel.tvgId,
+          programmes,
+          new Date(),
+          groupName,
+        ).allowed
+      ) {
+        for (const streamId of channel.streams) blocked.add(streamId);
+      }
+    }
+
     // The rest before each soak comes out of the round, so it is counted in.
     const rounds = generous ? Math.floor(budgetMs / (soakSeconds * 1_000 + cooldownMs)) : 1;
     const quotas = laneQuotas(gentle, rounds);
@@ -2962,14 +2994,17 @@ export class Runner {
         ) + cooldownMs;
     }
 
+    // Keep gated requests in the queue; they can run on a later pass when the
+    // event opens. This applies to manual requests too, including "soak now".
+    const due = requested.filter((row) => !blocked.has(row.streamId));
     const asked = new Set(requested.map((row) => row.streamId));
-    const wanted = requested.map((row) => row.streamId);
+    const wanted = due.map((row) => row.streamId);
     if (windowOpen) {
       try {
         const catalogue = store.catalogue().rows;
         const planned = planSoaks({
           candidates: catalogue
-            .filter((row) => !asked.has(row.streamId))
+            .filter((row) => !asked.has(row.streamId) && !blocked.has(row.streamId))
             .map((row) => ({ streamId: row.streamId, channelId: row.channelId, slot: row.slot })),
           records: store.stabilityRecords(),
           maxPerChannel: Math.max(0, config.PODIUM_SOAK_MAX_PER_CHANNEL),
