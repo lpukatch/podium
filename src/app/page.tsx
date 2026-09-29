@@ -2609,7 +2609,7 @@ export default function Page() {
               </div>
             )}
 
-            <div className="mt-4 flex items-center gap-4 border-t border-[var(--color-line)] pt-4">
+            <div className="sticky bottom-0 z-10 -mx-5 mt-4 flex flex-wrap items-center gap-4 border-t border-[var(--color-line)] bg-[var(--color-panel)] px-5 py-3 shadow-[0_-4px_16px_rgb(0_0_0_/_0.05)]">
               <button
                 type="button"
                 disabled={selectedProviders !== null && selectedProviders.length === 0}
