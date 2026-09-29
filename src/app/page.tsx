@@ -2033,6 +2033,11 @@ export default function Page() {
                   .map((alias, position) => {
                     const sources = preview?.aliasSources?.[alias] ?? [];
                     const permitted = aliasProviders[alias];
+                    const allPermitted =
+                      permitted === undefined ||
+                      (sources.length > 0 &&
+                        permitted.length === sources.length &&
+                        sources.every((source) => permitted.includes(source.id)));
                     const excluded = aliasGroupFilters[alias]?.excludeGroups ?? [];
                     const providerExclusions = aliasProviderGroupFilters[alias] ?? {};
                     const excludedCount = Object.values(providerExclusions).reduce(
@@ -2109,7 +2114,7 @@ export default function Page() {
                             <div className="mt-2 flex flex-wrap gap-1.5">
                               <button
                                 type="button"
-                                className={chip(permitted === undefined)}
+                                className={chip(allPermitted)}
                                 onClick={() =>
                                   setAliasProviders((previous) => {
                                     const next = { ...previous };
@@ -2124,16 +2129,26 @@ export default function Page() {
                                 <button
                                   key={source.id}
                                   type="button"
-                                  className={chip(permitted?.includes(source.id) ?? false)}
-                                  onClick={() =>
+                                  title="Click to toggle. Alt-click to select only this provider."
+                                  className={chip(
+                                    allPermitted || Boolean(permitted?.includes(source.id)),
+                                  )}
+                                  onClick={(e) =>
                                     setAliasProviders((previous) => {
+                                      if (e.altKey) return { ...previous, [alias]: [source.id] };
                                       const selected = previous[alias] ?? sources.map((s) => s.id);
-                                      return {
-                                        ...previous,
-                                        [alias]: selected.includes(source.id)
-                                          ? selected.filter((id) => id !== source.id)
-                                          : [...selected, source.id],
-                                      };
+                                      const nextSelected = selected.includes(source.id)
+                                        ? selected.filter((id) => id !== source.id)
+                                        : [...selected, source.id];
+                                      if (
+                                        nextSelected.length === sources.length &&
+                                        sources.every((s) => nextSelected.includes(s.id))
+                                      ) {
+                                        const next = { ...previous };
+                                        delete next[alias];
+                                        return next;
+                                      }
+                                      return { ...previous, [alias]: nextSelected };
                                     })
                                   }
                                 >
