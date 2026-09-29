@@ -37,6 +37,8 @@ jobs:
           npm run test:run
 
   docker:
+    # Publish builds on main; CI only needs to validate PR images.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
