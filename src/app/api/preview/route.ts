@@ -163,6 +163,26 @@ export async function POST(request: Request) {
       .slice(0, 300);
     // Suggestions are scoped to what each alias actually reaches, before its
     // own provider/group restrictions. Never offer the whole provider catalogue.
+    const unscopedRule: ChannelRule = {
+      ...rule,
+      providers: null,
+      groupFilter: {},
+      aliasGroupFilters: {},
+      containsGroupFilters: {},
+      aliasProviders: {},
+      aliasProviderGroupFilters: {},
+      exclude: [],
+    };
+    const groupCounts = new Map<string, number>();
+    for (const [streamId] of m.match(unscopedRule, { ...idx, excludedGroups: new Set<number>() })) {
+      const stream = streamById.get(streamId);
+      if (!stream) continue;
+      const name =
+        stream.groupId == null
+          ? '(ungrouped)'
+          : (groupNames.get(stream.groupId) ?? String(stream.groupId));
+      groupCounts.set(name, (groupCounts.get(name) ?? 0) + 1);
+    }
     const aliasSources = Object.fromEntries(
       rule.aliases.map((alias) => {
         const unscoped: ChannelRule = {
@@ -217,6 +237,7 @@ export async function POST(request: Request) {
       total: hits.length,
       matched,
       aliasSources,
+      groupCounts: Object.fromEntries(groupCounts),
       orphaned,
       assignedCount: assigned.size,
       newlyMatched: hits.filter(([id]) => !assigned.has(id)).length,
