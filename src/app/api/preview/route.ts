@@ -1,9 +1,11 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
+import { Eligibility } from '@/lib/eligibility';
 import type { ChannelRule } from '@/lib/matcher';
 import type { ProbeResult } from '@/lib/probe';
+import { groupFilter } from '@/lib/provider-groups';
 import { parseProviders } from '@/lib/rules';
-import { index, matcher, snapshot } from '@/lib/server/state';
+import { groupPatterns, index, matcher, policies, snapshot } from '@/lib/server/state';
 import { Store } from '@/lib/store';
 
 export const dynamic = 'force-dynamic';
@@ -23,6 +25,9 @@ export async function POST(request: Request) {
       contains?: string[];
       exclude?: string[];
       providers?: unknown;
+      groupFilter?: unknown;
+      aliasGroupFilters?: Record<string, unknown>;
+      containsGroupFilters?: Record<string, unknown>;
     };
 
     const snap = await snapshot();
@@ -45,11 +50,34 @@ export async function POST(request: Request) {
           : (existing?.providers ?? null),
       stepOrder: existing?.stepOrder ?? 0,
       excludeRegions: existing?.excludeRegions ?? null,
+      groupFilter:
+        body.groupFilter === undefined
+          ? existing?.groupFilter
+          : body.groupFilter === null
+            ? undefined
+            : groupFilter(body.groupFilter),
+      aliasGroupFilters:
+        body.aliasGroupFilters === undefined
+          ? existing?.aliasGroupFilters
+          : Object.fromEntries(
+              Object.entries(body.aliasGroupFilters).map(([k, v]) => [k, groupFilter(v)]),
+            ),
+      containsGroupFilters:
+        body.containsGroupFilters === undefined
+          ? existing?.containsGroupFilters
+          : Object.fromEntries(
+              Object.entries(body.containsGroupFilters).map(([k, v]) => [k, groupFilter(v)]),
+            ),
     };
 
-    const hits = m.match(rule, idx);
-    const matchedIds = new Set(hits.map(([id]) => id));
     const channel = snap.channels.find((c) => c.id === body.channelId);
+    const channelGroupName = snap.groups.find((g) => g.id === channel?.groupId)?.name;
+    const inherited = new Eligibility(policies(), undefined, groupPatterns()).policyFor(
+      channel?.groupId,
+      channelGroupName,
+    ).groupFilter;
+    const hits = m.match(rule, idx, inherited);
+    const matchedIds = new Set(hits.map(([id]) => id));
     const assigned = new Set(channel?.streams ?? []);
     // Dispatcharr's array is ordered; position is what a viewer actually gets.
     const currentOrder = new Map((channel?.streams ?? []).map((id, i) => [id, i + 1]));
@@ -80,6 +108,7 @@ export async function POST(request: Request) {
     }
     const streamById = new Map(snap.streams.map((s) => [s.id, s]));
     const providerNames = new Map(snap.providers.map((p) => [p.id, p.name]));
+    const groupNames = new Map(snap.groups.map((g) => [g.id, g.name]));
 
     const describe = (id: number, step: number | null) => {
       const stream = streamById.get(id);
@@ -92,6 +121,10 @@ export async function POST(request: Request) {
         prefixes: norm.prefixes,
         quality: norm.quality,
         provider: providerNames.get(stream.providerId) ?? String(stream.providerId),
+        providerGroup:
+          stream.groupId == null
+            ? null
+            : (groupNames.get(stream.groupId) ?? String(stream.groupId)),
         step,
         assigned: assigned.has(id),
         matched: matchedIds.has(id),

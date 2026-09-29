@@ -17,6 +17,7 @@ import {
   Matcher,
 } from './matcher';
 import { DEFAULT_ORDERING, type OrderingConfig } from './ordering';
+import { groupFilter } from './provider-groups';
 import { invalidMinResolution, type MinResolution, parseMinResolution } from './resolution';
 import {
   NEW_INSTALL_AUDIO,
@@ -41,6 +42,10 @@ const channelSchema = z.object({
   aliases: z.array(z.string()).optional(),
   contains: z.array(z.string()).optional(),
   exclude: z.array(z.string()).optional(),
+  include_groups: z.array(z.string()).optional(),
+  exclude_groups: z.array(z.string()).optional(),
+  alias_group_filters: z.record(z.string(), z.unknown()).optional(),
+  contains_group_filters: z.record(z.string(), z.unknown()).optional(),
   providers: z.unknown().optional(),
   exclude_regions: z.array(z.string()).nullish(),
   step_order: z.coerce.number().optional(),
@@ -368,6 +373,22 @@ export function loadRules(raw: unknown): LoadReport {
         entry.exclude_regions === null || entry.exclude_regions === undefined
           ? null
           : new Set(entry.exclude_regions.map((x) => x.toUpperCase())),
+      groupFilter:
+        entry.include_groups !== undefined || entry.exclude_groups !== undefined
+          ? groupFilter(entry)
+          : undefined,
+      aliasGroupFilters: Object.fromEntries(
+        Object.entries(entry.alias_group_filters ?? {}).map(([key, value]) => [
+          key,
+          groupFilter(value),
+        ]),
+      ),
+      containsGroupFilters: Object.fromEntries(
+        Object.entries(entry.contains_group_filters ?? {}).map(([key, value]) => [
+          key,
+          groupFilter(value),
+        ]),
+      ),
     };
 
     if (rule.aliases.length === 0 && rule.contains.length === 0 && rule.patterns.length === 0) {

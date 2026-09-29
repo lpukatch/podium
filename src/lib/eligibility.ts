@@ -20,6 +20,7 @@
  * organises by.
  */
 
+import { groupFilter, type ProviderGroupFilter } from './provider-groups';
 import { type MinResolution, parseMinResolution } from './resolution';
 
 export const ALWAYS = 'always';
@@ -113,6 +114,7 @@ export interface GroupPolicy {
    * `none`, which wins over this.
    */
   minResolution?: MinResolution;
+  groupFilter?: ProviderGroupFilter;
 }
 
 /**
@@ -419,6 +421,7 @@ export function parsePolicies(
       // moment a group has one. So `none` is written down (by the group route)
       // to keep the entry alive, and read back as the absence of a floor.
       minResolution: parseMinResolution(extra.min_resolution ?? extra.minResolution) ?? undefined,
+      groupFilter: groupFilter(extra),
     });
   }
   return out;
@@ -450,6 +453,7 @@ export function parseGroupPatterns(
       audioOnly: bool(row.audio_only ?? row.audioOnly, Boolean(DEFAULT_POLICY.audioOnly)),
       measureOnly: bool(row.measure_only ?? row.measureOnly, Boolean(DEFAULT_POLICY.measureOnly)),
       minResolution: parseMinResolution(row.min_resolution ?? row.minResolution) ?? undefined,
+      groupFilter: groupFilter(row),
     });
   }
   return out;

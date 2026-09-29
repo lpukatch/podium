@@ -3,6 +3,7 @@
 import { LoaderCircle } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DeadResponse } from '@/lib/dead';
+import type { ProviderGroupFilter } from '@/lib/provider-groups';
 import { RESOLUTION_CHOICES } from '@/lib/resolution';
 import { BackupView } from './backup-view';
 import { CheckPanel } from './check-panel';
@@ -10,6 +11,7 @@ import { DeadView } from './dead-view';
 import { NameNoiseView } from './name-noise-view';
 import { OrderingView } from './ordering-view';
 import { ProgressView } from './progress-view';
+import { ProviderGroupFilterEditor } from './provider-group-filter';
 import { QualityView } from './quality-view';
 import { SettingsView } from './settings-view';
 import { StatsView } from './stats-view';
@@ -32,6 +34,9 @@ interface ChannelRow {
   contains: string[];
   exclude: string[];
   providers?: number[] | null;
+  groupFilter?: ProviderGroupFilter | null;
+  aliasGroupFilters?: Record<string, ProviderGroupFilter>;
+  containsGroupFilters?: Record<string, ProviderGroupFilter>;
   patterns: string[];
   regexCount: number;
   hasRule: boolean;
@@ -66,6 +71,7 @@ interface GroupRow {
   measureOnly?: boolean;
   /** Resolved, so a floor that comes from a name rule shows here too. */
   minResolution?: string | null;
+  groupFilter?: ProviderGroupFilter;
   channels: number;
   ruled: number;
   matchedChannels: number;
@@ -82,6 +88,7 @@ interface StreamRow {
   prefixes: string[];
   quality: { tier: string; codec: string; fps: number };
   provider: string;
+  providerGroup?: string | null;
   assigned: boolean;
   currentRank: number | null;
   lastProbedAt: number | null;
@@ -290,7 +297,16 @@ export default function Page() {
   const [groupFilter, setGroupFilter] = useState('');
 
   const [providersList, setProvidersList] = useState<Array<{ id: number; name: string }>>([]);
+  const [providerGroups, setProviderGroups] = useState<Array<{ id: number; name: string }>>([]);
   const [selectedProviders, setSelectedProviders] = useState<number[] | null>(null);
+  const [channelGroupFilter, setChannelGroupFilter] = useState<ProviderGroupFilter | null>(null);
+  const [aliasGroupFilters, setAliasGroupFilters] = useState<Record<string, ProviderGroupFilter>>(
+    {},
+  );
+  const [containsGroupFilters, setContainsGroupFilters] = useState<
+    Record<string, ProviderGroupFilter>
+  >({});
+  const [ruleGroupSearch, setRuleGroupSearch] = useState('');
   const [aliases, setAliases] = useState('');
   const [contains, setContains] = useState('');
   const [exclude, setExclude] = useState('');
@@ -338,6 +354,8 @@ export default function Page() {
       if (Array.isArray(body.providers)) {
         setProvidersList(body.providers as Array<{ id: number; name: string }>);
       }
+      if (Array.isArray(body.providerGroups))
+        setProviderGroups(body.providerGroups as Array<{ id: number; name: string }>);
       setStreamCount(body.streamCount as number);
       setRefreshAllAt((body.refreshAllQueuedAt as number | null) ?? null);
     } catch (e) {
@@ -448,6 +466,9 @@ export default function Page() {
     setContains(c.contains.join('\n'));
     setExclude(c.exclude.join('\n'));
     setSelectedProviders(c.providers ? [...c.providers] : null);
+    setChannelGroupFilter(c.groupFilter ?? null);
+    setAliasGroupFilters(c.aliasGroupFilters ?? {});
+    setContainsGroupFilters(c.containsGroupFilters ?? {});
     setMinResolution(c.minResolution ?? 'inherit');
     setPreview(null);
     setRemoveNote(null);
@@ -539,13 +560,26 @@ export default function Page() {
           contains: lines(contains),
           exclude: lines(exclude),
           providers: allAllowed ? null : selectedProviders,
+          groupFilter: channelGroupFilter,
+          aliasGroupFilters,
+          containsGroupFilters,
         }),
       });
       if (resp.ok) setPreview((await resp.json()) as Preview);
     } finally {
       setPreviewing(false);
     }
-  }, [channelId, aliases, contains, exclude, selectedProviders, providersList.length]);
+  }, [
+    channelId,
+    aliases,
+    contains,
+    exclude,
+    selectedProviders,
+    providersList.length,
+    channelGroupFilter,
+    aliasGroupFilters,
+    containsGroupFilters,
+  ]);
 
   useEffect(() => {
     if (channelId === null) return;
@@ -611,6 +645,9 @@ export default function Page() {
         contains: lines(contains),
         exclude: lines(exclude),
         providers: allAllowed ? null : selectedProviders,
+        groupFilter: channelGroupFilter,
+        aliasGroupFilters,
+        containsGroupFilters,
         minResolution,
       }),
     });
@@ -782,6 +819,18 @@ export default function Page() {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ mode }),
+    });
+    await load();
+  };
+  const setGroupStreamFilter = async (
+    id: number,
+    mode: Mode,
+    groupFilter: ProviderGroupFilter | null,
+  ) => {
+    await fetch(`/api/groups/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode, groupFilter }),
     });
     await load();
   };
@@ -1545,6 +1594,18 @@ export default function Page() {
               <p className="mt-2 text-sm text-[var(--color-muted)]">
                 {MODES.find((m) => m.value === group.mode)?.hint}
               </p>
+              <ProviderGroupFilterEditor
+                groups={providerGroups}
+                value={
+                  group.groupFilter &&
+                  (group.groupFilter.includeGroups !== undefined ||
+                    group.groupFilter.excludeGroups !== undefined)
+                    ? group.groupFilter
+                    : null
+                }
+                onChange={(value) => void setGroupStreamFilter(group.id, group.mode, value)}
+                inheritLabel="All groups (default)"
+              />
 
               {group.mode === 'always' && group.ruled === 0 && group.channels > 0 && (
                 <p className="mt-2 text-sm text-[var(--color-warn)]">
@@ -1684,6 +1745,19 @@ export default function Page() {
                         <span className="text-sm tabular-nums text-[var(--color-muted)]">
                           {c.assigned} assigned · {c.matched} matched
                           {c.regexCount > 0 ? ` · ${c.regexCount} regex` : ''}
+                          {c.groupFilter &&
+                          (c.groupFilter.includeGroups !== undefined ||
+                            (c.groupFilter.excludeGroups?.length ?? 0) > 0)
+                            ? ' · provider groups filtered'
+                            : ''}
+                          {Object.values(c.aliasGroupFilters ?? {}).some(
+                            (f) => (f.excludeGroups?.length ?? 0) > 0,
+                          ) ||
+                          Object.values(c.containsGroupFilters ?? {}).some(
+                            (f) => (f.excludeGroups?.length ?? 0) > 0,
+                          )
+                            ? ' · alias group exclusions'
+                            : ''}
                           {c.assignmentOnly ? ' · assigned only' : !c.hasRule ? ' · no rule' : ''}
                         </span>
                       </span>
@@ -1719,6 +1793,13 @@ export default function Page() {
               {channel.tvgId ? ` · ${channel.tvgId}` : ''} · {channel.assigned} assigned in
               Dispatcharr
               {group?.mode === 'never' ? ' · group excluded from checking' : ''}
+              {channelGroupFilter
+                ? ` · channel provider groups: ${channelGroupFilter.includeGroups?.join(', ') ?? 'all'}${channelGroupFilter.excludeGroups?.length ? ` (except ${channelGroupFilter.excludeGroups.join(', ')})` : ''}`
+                : group?.groupFilter &&
+                    (group.groupFilter.includeGroups !== undefined ||
+                      group.groupFilter.excludeGroups?.length)
+                  ? ` · inherits provider groups: ${group.groupFilter.includeGroups?.join(', ') ?? 'all'}${group.groupFilter.excludeGroups?.length ? ` (except ${group.groupFilter.excludeGroups.join(', ')})` : ''}`
+                  : ''}
             </p>
 
             {/* Without this, an alias-less channel in one of these groups looks
@@ -1806,6 +1887,72 @@ export default function Page() {
                   <dd>both ends combine</dd>
                 </dl>
               </details>
+              <ProviderGroupFilterEditor
+                groups={providerGroups}
+                value={channelGroupFilter}
+                onChange={setChannelGroupFilter}
+              />
+              <p className="mt-3 text-sm text-[var(--color-muted)]">
+                Exclude a provider group from just one matching line below. Other aliases can still
+                use that group.
+              </p>
+              {(
+                [
+                  {
+                    title: 'Alias',
+                    text: aliases,
+                    values: aliasGroupFilters,
+                    update: setAliasGroupFilters,
+                  },
+                  {
+                    title: 'Contains',
+                    text: contains,
+                    values: containsGroupFilters,
+                    update: setContainsGroupFilters,
+                  },
+                ] as const
+              ).map(({ title, text, values, update }) =>
+                lines(text).map((line) => (
+                  <details key={`${title}-${line}`} className="mt-2 text-sm">
+                    <summary className="cursor-pointer mono" title={line}>
+                      {title}: {line}{' '}
+                      {values[line]?.excludeGroups?.length
+                        ? `· ${values[line].excludeGroups!.length} group(s) excluded`
+                        : '· all allowed groups'}
+                    </summary>
+                    <input
+                      className="mt-2 w-full rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2"
+                      placeholder="Filter provider groups…"
+                      value={ruleGroupSearch}
+                      onChange={(e) => setRuleGroupSearch(e.target.value)}
+                    />
+                    <div className="scroll-shadow max-h-40 overflow-y-auto">
+                      {providerGroups
+                        .filter((g) => g.name.toLowerCase().includes(ruleGroupSearch.toLowerCase()))
+                        .map((g) => (
+                          <label key={g.id} className="flex items-center gap-2 py-1">
+                            <input
+                              type="checkbox"
+                              checked={values[line]?.excludeGroups?.includes(g.name) ?? false}
+                              onChange={() => {
+                                const excluded = values[line]?.excludeGroups ?? [];
+                                update({
+                                  ...values,
+                                  [line]: {
+                                    excludeGroups: excluded.includes(g.name)
+                                      ? excluded.filter((x) => x !== g.name)
+                                      : [...excluded, g.name],
+                                  },
+                                });
+                              }}
+                            />
+                            Exclude {g.name}
+                          </label>
+                        ))}
+                    </div>
+                  </details>
+                )),
+              )}
               {removeNote && (
                 <p
                   className={`mt-3 text-sm ${
@@ -2137,6 +2284,7 @@ function StreamList({
                       </span>
                     ))}
                     <b className="text-[var(--color-ink)]">{r.normalized}</b> · {r.provider}
+                    {r.providerGroup ? ` · group: ${r.providerGroup}` : ''}
                     {[r.quality.tier?.toUpperCase(), r.quality.codec, r.quality.fps || null]
                       .filter(Boolean)
                       .map((q) => ` · ${q}`)

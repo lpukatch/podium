@@ -20,6 +20,8 @@ interface PatternRow {
   audio_only?: boolean;
   measure_only?: boolean;
   min_resolution?: string;
+  include_groups?: string[];
+  exclude_groups?: string[];
 }
 
 /** Add or replace a name-pattern rule, and report which groups it would hit. */
@@ -38,6 +40,7 @@ export async function PUT(request: Request) {
      * stored; `null` and `""` read as `none`.
      */
     minResolution?: string | null;
+    groupFilter?: { includeGroups?: string[]; excludeGroups?: string[] } | null;
   } | null;
   if (body === null) {
     return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
@@ -84,7 +87,19 @@ export async function PUT(request: Request) {
         ? (parseMinResolution(patterns[existing]?.min_resolution) ?? undefined)
         : undefined;
 
-  if (mode === ALWAYS && !audioOnly && !measureOnly && !minResolution) {
+  const previous = existing >= 0 ? patterns[existing] : undefined;
+  const filter =
+    body.groupFilter === undefined
+      ? { includeGroups: previous?.include_groups, excludeGroups: previous?.exclude_groups }
+      : body.groupFilter;
+  if (
+    mode === ALWAYS &&
+    !audioOnly &&
+    !measureOnly &&
+    !minResolution &&
+    !filter?.includeGroups &&
+    !filter?.excludeGroups
+  ) {
     // `always` with no custom flags is the default; storing it would just be noise.
     if (existing >= 0) patterns.splice(existing, 1);
   } else {
@@ -100,6 +115,8 @@ export async function PUT(request: Request) {
       ...(audioOnly ? { audio_only: true } : {}),
       ...(measureOnly ? { measure_only: true } : {}),
       ...(minResolution ? { min_resolution: minResolution } : {}),
+      ...(filter?.includeGroups !== undefined ? { include_groups: filter.includeGroups } : {}),
+      ...(filter?.excludeGroups !== undefined ? { exclude_groups: filter.excludeGroups } : {}),
     };
     // Carried over rather than reset: `require_live` has no control in this UI,
     // so an operator who turned it off did it by hand in the rules file, and

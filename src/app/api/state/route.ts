@@ -58,6 +58,7 @@ export async function GET(request: Request) {
 
     const providerNames = Object.fromEntries(snap.providers.map((p) => [p.id, p.name]));
     const streamById = new Map(snap.streams.map((s) => [s.id, s]));
+    const streamGroupIds = new Set(snap.streams.map((s) => s.groupId));
 
     const payload = groups.map((group) => {
       const channels = byGroup.get(group.id) ?? [];
@@ -72,7 +73,9 @@ export async function GET(request: Request) {
         (resolved.mode !== ALWAYS ||
           Boolean(resolved.audioOnly) ||
           Boolean(resolved.measureOnly) ||
-          resolved.minResolution != null);
+          resolved.minResolution != null ||
+          resolved.groupFilter?.includeGroups !== undefined ||
+          resolved.groupFilter?.excludeGroups !== undefined);
       let ruled = 0;
       let matchedChannels = 0;
       let links = 0;
@@ -84,9 +87,15 @@ export async function GET(request: Request) {
         // matched" would describe the opposite of what happens to it.
         const assignmentOnly = !rule && assignmentIsRule(mode);
         const hits = rule
-          ? m.match(rule, idx)
+          ? m.match(rule, idx, resolved.groupFilter)
           : assignmentOnly
-            ? assignedCandidates(channel, streamById, idx.excludedGroups)
+            ? assignedCandidates(
+                channel,
+                streamById,
+                idx.excludedGroups,
+                idx.groupNames,
+                resolved.groupFilter,
+              )
             : [];
         if (rule) ruled += 1;
         if (hits.length > 0) matchedChannels += 1;
@@ -101,6 +110,9 @@ export async function GET(request: Request) {
           contains: rule?.contains ?? [],
           exclude: rule?.exclude ?? [],
           providers: rule?.providers ? [...rule.providers] : null,
+          groupFilter: rule?.groupFilter ?? null,
+          aliasGroupFilters: rule?.aliasGroupFilters ?? {},
+          containsGroupFilters: rule?.containsGroupFilters ?? {},
           // Surfaced, not hidden: a channel still carrying a legacy regex looks
           // unmanaged otherwise, and you cannot decide whether an alias has
           // replaced it without seeing what it actually says.
@@ -125,6 +137,7 @@ export async function GET(request: Request) {
         audioOnly: resolved.audioOnly,
         measureOnly: resolved.measureOnly,
         minResolution: resolved.minResolution ?? null,
+        groupFilter: resolved.groupFilter ?? {},
         channels: channels.length,
         ruled,
         matchedChannels,
@@ -141,6 +154,7 @@ export async function GET(request: Request) {
     return NextResponse.json({
       groups: payload,
       providers: snap.providers,
+      providerGroups: snap.groups.filter((g) => streamGroupIds.has(g.id)),
       providerNames,
       patterns,
       streamCount: snap.streams.length,
