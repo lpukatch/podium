@@ -75,7 +75,7 @@ describe('soakStream', () => {
   });
 
   it.runIf(usable)('reports no drops when the connection serves its whole budget', async () => {
-    const result = await soakStream(URL_, { seconds: 2, ffmpegPath: holds });
+    const result = await soakStream(URL_, { seconds: 3, ffmpegPath: holds });
     expect(result.drops).toBe(0);
     expect(result.legs).toHaveLength(1);
     expect(result.legs[0]?.dropped).toBe(false);
@@ -267,7 +267,7 @@ describe('soakStream', () => {
 
   it.runIf(usable)('does not stop when the hook stays false', async () => {
     const result = await soakStream(URL_, {
-      seconds: 2,
+      seconds: 3,
       ffmpegPath: holds,
       stop: () => false,
     });
