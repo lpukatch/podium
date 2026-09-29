@@ -233,6 +233,11 @@ const AREAS: Array<{ id: Area; label: string; defaultTab: Tab; views: Tab[] }> =
 
 const areaForTab = (tab: Tab) => AREAS.find((area) => area.views.includes(tab)) ?? AREAS[0]!;
 
+/** Views backed entirely by their own API need no stream catalogue at mount. */
+export function needsCatalogue(tab: Tab): boolean {
+  return tab !== 'progress' && tab !== 'settings' && tab !== 'stats';
+}
+
 // Five views used to stack down one page, so Backup sat below 8,000 pixels of
 // probe timers -- and the settings form's pinned Save bar let go of the screen
 // halfway down, on a card it did not belong to.
@@ -278,7 +283,10 @@ export default function Page() {
     /** Not configured yet, as opposed to configured and unreachable. */
     needsSetup?: boolean;
   } | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [initialNavigationReady, setInitialNavigationReady] = useState(false);
+  const catalogueRequest = useRef(false);
+  const catalogueLoaded = useRef(false);
 
   const [tab, setTab] = useState<Tab>('groups');
   const [section, setSection] = useState<SettingsSection>('general');
@@ -333,6 +341,8 @@ export default function Page() {
   const probeAbortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(async (refresh = false) => {
+    if (catalogueRequest.current && !refresh) return;
+    catalogueRequest.current = true;
     setLoading(true);
     try {
       const resp = await fetch(`/api/state${refresh ? '?refresh=1' : ''}`);
@@ -358,16 +368,14 @@ export default function Page() {
         setProviderGroups(body.providerGroups as Array<{ id: number; name: string }>);
       setStreamCount(body.streamCount as number);
       setRefreshAllAt((body.refreshAllQueuedAt as number | null) ?? null);
+      catalogueLoaded.current = true;
     } catch (e) {
       setError({ error: 'Podium is not responding', detail: String(e) });
     } finally {
+      catalogueRequest.current = false;
       setLoading(false);
     }
   }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
 
   // Deep links: every view is addressable, and Back does what it should.
   // Written with the History API rather than the router so that typing in the
@@ -395,10 +403,19 @@ export default function Page() {
 
   useEffect(() => {
     applyUrl(new URLSearchParams(window.location.search));
+    // Monitoring and Settings have their own endpoints. Defer the expensive
+    // catalogue request until a catalogue-backed view is actually opened.
+    setInitialNavigationReady(true);
     const onPop = () => applyUrl(new URLSearchParams(window.location.search));
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
   }, [applyUrl]);
+
+  useEffect(() => {
+    if (initialNavigationReady && !catalogueLoaded.current && needsCatalogue(tab)) {
+      void load();
+    }
+  }, [tab, initialNavigationReady, load]);
 
   const navigate = useCallback(
     (next: {
@@ -1048,15 +1065,14 @@ export default function Page() {
     );
   }
 
-  // First load fetches every channel and stream from Dispatcharr, which is
-  // seconds on a real install. Without this the page renders its own empty
-  // state -- "0 managed, 0 groups" -- which reads as a broken install rather
-  // than one that has not finished loading.
+  // Catalogue-backed views fetch every channel and stream from Dispatcharr,
+  // which takes seconds on a real install. Show a loading state rather than
+  // rendering "0 managed, 0 groups" while that request is in flight.
   //
   // Progress and Settings read the database, not Dispatcharr, so they are held
   // up by nothing: making them wait on the channel list meant the page you
   // open to ask "is the worker alive" was the slowest one to appear.
-  if (loading && groups.length === 0 && tab !== 'progress' && tab !== 'settings') {
+  if (loading && groups.length === 0 && needsCatalogue(tab)) {
     return (
       <main className="mx-auto flex min-h-screen max-w-5xl flex-col items-center justify-center gap-4 p-8">
         <LoaderCircle

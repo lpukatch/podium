@@ -1455,6 +1455,50 @@ export class Store {
     return out;
   }
 
+  /** Read matching cache entries in one query for a catalogue of streams. */
+  variantsForStreams(
+    streams: Array<{ id: number; streamHash: string }>,
+  ): Map<number, Map<number, CacheEntry>> {
+    const hashes = new Map(streams.map((stream) => [stream.id, stream.streamHash]));
+    const out = new Map<number, Map<number, CacheEntry>>();
+    if (hashes.size === 0) return out;
+    // A temporary table keeps the query bounded even for catalogues larger
+    // than SQLite's bind-variable limit. Each call replaces its contents.
+    this.db.transaction(() => {
+      this.db.exec(
+        'CREATE TEMP TABLE IF NOT EXISTS _podium_candidates (id INTEGER PRIMARY KEY, hash TEXT NOT NULL)',
+      );
+      this.sql('DELETE FROM _podium_candidates').run();
+      const insert = this.sql('INSERT INTO _podium_candidates (id, hash) VALUES (?, ?)');
+      for (const [id, hash] of hashes) insert.run(id, hash);
+      const rows = this.sql(
+        `SELECT p.stream_id, p.variant_id, p.probed_at, p.alive, p.result, p.dead_streak
+         FROM probe_cache p JOIN _podium_candidates c
+           ON c.id = p.stream_id AND c.hash = p.stream_hash`,
+      ).all() as Array<CacheRow & { stream_id: number; variant_id: number }>;
+      for (const row of rows) {
+        let result: ProbeResult | null = null;
+        try {
+          result = JSON.parse(row.result) as ProbeResult;
+        } catch {
+          // Preserve the timestamp and streak of a malformed verdict.
+        }
+        let variants = out.get(row.stream_id);
+        if (!variants) {
+          variants = new Map();
+          out.set(row.stream_id, variants);
+        }
+        variants.set(row.variant_id, {
+          probedAt: row.probed_at,
+          alive: Boolean(row.alive),
+          deadStreak: row.dead_streak ?? 0,
+          result,
+        });
+      }
+    })();
+    return out;
+  }
+
   /**
    * Record a verdict, maintaining the consecutive-dead count.
    *
