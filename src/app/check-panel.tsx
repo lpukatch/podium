@@ -353,7 +353,7 @@ export function CheckPanel({
         <>
           <div className="mt-4 flex flex-wrap items-center gap-3 text-sm tabular-nums">
             {result.heldBack && (
-              <span className={`${pill} bg-[var(--color-warn)] text-white`}>
+              <span className={`${pill} bg-[var(--color-warn)] text-[var(--color-on-warn)]`}>
                 Group policy: {result.heldBack}
               </span>
             )}
@@ -361,7 +361,9 @@ export function CheckPanel({
               {result.probed} probed
             </span>
             {result.dead > 0 && (
-              <span className={`${pill} bg-[var(--color-bad)] text-white`}>{result.dead} dead</span>
+              <span className={`${pill} bg-[var(--color-bad)] text-[var(--color-on-bad)]`}>
+                {result.dead} dead
+              </span>
             )}
             {nothingToChange ? (
               <span className="text-[var(--color-muted)]">

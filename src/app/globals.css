@@ -12,10 +12,12 @@
   --color-bad: #a33a2e;
   --color-accent-solid: #205837;
   --color-on-accent: #ffffff;
+  --color-on-warn: #ffffff;
+  --color-on-bad: #ffffff;
 }
 
 @media (prefers-color-scheme: dark) {
-  @theme {
+  :root {
     --color-ink: #e8e8e6;
     --color-muted: #9a9a95;
     --color-line: #2e3137;
@@ -27,6 +29,8 @@
     --color-bad: #e0776a;
     --color-accent-solid: #6cc295;
     --color-on-accent: #16171a;
+    --color-on-warn: #16171a;
+    --color-on-bad: #16171a;
   }
 }
 

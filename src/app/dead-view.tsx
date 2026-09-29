@@ -61,7 +61,7 @@ function ChannelChip({ c }: { c: DeadEntry['channels'][number] }) {
     <span
       className={`${pill} max-w-full truncate align-middle ${
         c.rank === 1
-          ? 'bg-[var(--color-bad)] text-white'
+          ? 'bg-[var(--color-bad)] text-[var(--color-on-bad)]'
           : 'border border-[var(--color-line)] text-[var(--color-muted)]'
       }`}
       title={`Serves this ${c.rank === 1 ? 'first' : `#${c.rank}`} on ${c.name}`}
