@@ -211,7 +211,7 @@ const rowCls =
 const chip = (on: boolean) =>
   `rounded-lg border px-3 py-1.5 text-sm ${
     on
-      ? 'border-[var(--color-accent)] bg-[var(--color-accent)] text-white'
+      ? 'border-[var(--color-accent-solid)] bg-[var(--color-accent-solid)] text-[var(--color-on-accent)]'
       : 'border-[var(--color-line)] text-[var(--color-muted)]'
   }`;
 
@@ -1423,7 +1423,7 @@ export default function Page() {
                         type="checkbox"
                         checked={showDisabled}
                         onChange={(e) => setShowDisabled(e.target.checked)}
-                        className="h-4 w-4 accent-[var(--color-accent)]"
+                        className="contrast-checkbox h-4 w-4 shrink-0"
                       />
                       Show disabled
                     </label>
@@ -1627,7 +1627,7 @@ export default function Page() {
                       type="checkbox"
                       checked={showDisabled}
                       onChange={(e) => setShowDisabled(e.target.checked)}
-                      className="h-4 w-4 accent-[var(--color-accent)]"
+                      className="contrast-checkbox h-4 w-4 shrink-0"
                     />
                     Show disabled
                   </label>
@@ -2664,6 +2664,7 @@ export default function Page() {
                       <input
                         type="checkbox"
                         checked={removalIds.includes(stream.id)}
+                        className="contrast-checkbox h-4 w-4 shrink-0"
                         onChange={() =>
                           setRemovalIds((current) =>
                             current.includes(stream.id)
@@ -2686,6 +2687,7 @@ export default function Page() {
                     <input
                       type="checkbox"
                       checked={removeAfterSave}
+                      className="contrast-checkbox h-4 w-4 shrink-0"
                       onChange={(e) => setRemoveAfterSave(e.target.checked)}
                     />
                     Confirm removal of {removalIds.length} selected stream
@@ -2717,7 +2719,7 @@ export default function Page() {
               <button
                 type="button"
                 disabled={selectedProviders !== null && selectedProviders.length === 0}
-                className={`${btn} border-[var(--color-accent)] bg-[var(--color-accent)] text-white disabled:opacity-50`}
+                className={`${btn} border-[var(--color-accent-solid)] bg-[var(--color-accent-solid)] text-[var(--color-on-accent)] disabled:opacity-50`}
                 onClick={() => void save()}
               >
                 Save

@@ -486,7 +486,7 @@ export function QualityView() {
             type="checkbox"
             checked={ungated}
             onChange={(e) => setUngated(e.target.checked)}
-            className="h-4 w-4 accent-[var(--color-accent)]"
+            className="contrast-checkbox h-4 w-4 shrink-0"
           />
           Ignore the scope and show everything measured
         </label>
@@ -541,7 +541,7 @@ export function QualityView() {
                   type="checkbox"
                   checked={ungated}
                   onChange={(e) => setUngated(e.target.checked)}
-                  className="h-4 w-4 accent-[var(--color-accent)]"
+                  className="contrast-checkbox h-4 w-4 shrink-0"
                 />
                 Ignore the scope
               </label>
@@ -630,7 +630,7 @@ export function QualityView() {
                 type="checkbox"
                 checked={showThin}
                 onChange={(e) => setShowThin(e.target.checked)}
-                className="h-4 w-4 accent-[var(--color-accent)]"
+                className="contrast-checkbox h-4 w-4 shrink-0"
               />
               Show below the floor{hidden > 0 && ` (${hidden})`}
             </label>
@@ -639,7 +639,7 @@ export function QualityView() {
                 type="checkbox"
                 checked={showAudio}
                 onChange={(e) => setShowAudio(e.target.checked)}
-                className="h-4 w-4 accent-[var(--color-accent)]"
+                className="contrast-checkbox h-4 w-4 shrink-0"
               />
               Show audio-only
             </label>

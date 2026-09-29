@@ -131,8 +131,14 @@ const PHASES: Record<Progress['phase'], { label: string; tone: string }> = {
   idle: { label: 'Idle', tone: 'bg-[var(--color-line)] text-[var(--color-muted)]' },
   fetching: { label: 'Fetching', tone: 'bg-[var(--color-accent-soft)] text-[var(--color-accent)]' },
   planning: { label: 'Planning', tone: 'bg-[var(--color-accent-soft)] text-[var(--color-accent)]' },
-  probing: { label: 'Probing', tone: 'bg-[var(--color-accent)] text-white' },
-  soaking: { label: 'Soaking', tone: 'bg-[var(--color-accent)] text-white' },
+  probing: {
+    label: 'Probing',
+    tone: 'bg-[var(--color-accent-solid)] text-[var(--color-on-accent)]',
+  },
+  soaking: {
+    label: 'Soaking',
+    tone: 'bg-[var(--color-accent-solid)] text-[var(--color-on-accent)]',
+  },
   paused: { label: 'Paused', tone: 'bg-[var(--color-warn)] text-white' },
   done: { label: 'Done', tone: 'bg-[var(--color-accent-soft)] text-[var(--color-accent)]' },
   failed: { label: 'Failed', tone: 'bg-[var(--color-bad)] text-white' },

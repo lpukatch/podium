@@ -10,6 +10,8 @@
   --color-accent-soft: #e8f2ec;
   --color-warn: #8a5a1b;
   --color-bad: #a33a2e;
+  --color-accent-solid: #205837;
+  --color-on-accent: #ffffff;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -23,6 +25,8 @@
     --color-accent-soft: #1e3129;
     --color-warn: #d9a55a;
     --color-bad: #e0776a;
+    --color-accent-solid: #6cc295;
+    --color-on-accent: #16171a;
   }
 }
 
@@ -56,6 +60,36 @@ code {
 
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.contrast-checkbox {
+  appearance: none;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--color-muted);
+  border-radius: 3px;
+  background: var(--color-panel);
+  cursor: pointer;
+}
+
+.contrast-checkbox:checked {
+  border-color: var(--color-accent-solid);
+  background: var(--color-accent-solid);
+}
+
+.contrast-checkbox:checked::after {
+  content: "";
+  width: 5px;
+  height: 9px;
+  margin-top: -2px;
+  border-right: 2px solid var(--color-on-accent);
+  border-bottom: 2px solid var(--color-on-accent);
+  transform: rotate(45deg);
+}
+
+.contrast-checkbox:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
 }
 
 /* A shadow at whichever edge of a scrolling list has more beyond it, so a row
