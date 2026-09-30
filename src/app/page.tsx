@@ -2009,7 +2009,7 @@ export default function Page() {
                     const search = sourceSearch.trim().toLowerCase();
                     return (
                       <div
-                        key={alias}
+                        key={position}
                         className="rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] p-3"
                       >
                         <div className="flex items-center gap-2">
