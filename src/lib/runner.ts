@@ -1908,10 +1908,17 @@ export class Runner {
             }
           }
           if (config.PODIUM_WRITE_STATS && !config.PODIUM_DRY_RUN) {
-            // Best-effort: publishing stats must never fail a probe.
-            client.setStreamStats(streamId, statsPayload(best, strategy.weights)).catch((err) => {
-              log(`stats publish failed for stream ${streamId}: ${String(err)}`);
-            });
+            // Best-effort: publishing stats must never fail a probe. The same
+            // ledger view the ranking below scores against, so the published
+            // score and the order it explains cannot disagree.
+            client
+              .setStreamStats(
+                streamId,
+                statsPayload(best, strategy.weights, stability.get(streamId)),
+              )
+              .catch((err) => {
+                log(`stats publish failed for stream ${streamId}: ${String(err)}`);
+              });
           }
         },
       });
@@ -2765,6 +2772,9 @@ export class Runner {
     if (!stored) return;
 
     const verdicts = store.verdicts([...new Set(channels.flatMap((c) => c.streams))]);
+    // The ledger in the same one read, so the stats each rule is scored
+    // against carry the same stability view a publish would write.
+    const stability = store.stabilityRecords();
     const inputs: ChannelInput[] = [];
     for (const channel of channels) {
       if (channel.hidden_from_output) continue;
@@ -2787,6 +2797,7 @@ export class Runner {
             },
             verdict.result,
             strategy,
+            stability.get(streamId),
           ),
           stepOrder: position,
         });

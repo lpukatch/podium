@@ -24,6 +24,7 @@ import { withResolutionFloor } from './ordering';
 import type { ProbeResult } from './probe';
 import type { MinResolution } from './resolution';
 import { type RankEntry, type RankStrategy, rank } from './scoring';
+import type { StabilityRecord } from './stability';
 import { statsPayload } from './stats';
 import type { StreamMatch } from './teamarr-match';
 
@@ -499,7 +500,14 @@ export function checkRules(
   };
 }
 
-/** Build the facts a rule is evaluated against, from what a probe returned. */
+/**
+ * Build the facts a rule is evaluated against, from what a probe returned.
+ *
+ * `stability` is the ledger's current view of the stream, when the caller has
+ * one -- the same view a publish would write, so the `quality_score` a rule is
+ * simulated against cannot diverge from the one Dispatcharr holds for reasons
+ * the operator cannot see.
+ */
 export function factsFor(
   stream: {
     id: number;
@@ -510,13 +518,14 @@ export function factsFor(
   },
   result: ProbeResult,
   strategy: RankStrategy,
+  stability?: StabilityRecord,
 ): StreamFacts {
   return {
     streamId: stream.id,
     name: stream.name,
     providerName: stream.providerName,
     groupName: stream.groupName,
-    stats: statsPayload(result, strategy.weights) as unknown as Record<string, unknown>,
+    stats: statsPayload(result, strategy.weights, stability) as unknown as Record<string, unknown>,
     match: stream.match,
     result,
   };
