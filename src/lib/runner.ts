@@ -275,6 +275,56 @@ export function composeOrder(
 }
 
 /**
+ * The streams a composition dropped because their provider was over its
+ * per-provider ceiling: on the baseline, ranked, eligible to assign, and left
+ * out of the order. Nothing else removes that population -- unmatched removal
+ * takes unranked ids, dead removal takes ineligible ones -- so membership is
+ * exact, and it is how a prune gets named in the pass log and echoed to an
+ * apply rather than passing silently.
+ */
+export function prunedByProvider(
+  baseline: number[],
+  order: number[],
+  ranked: number[],
+  eligible: Set<number> | undefined,
+): number[] {
+  if (!eligible) return [];
+  const kept = new Set(order);
+  const rankedSet = new Set(ranked);
+  return baseline.filter((id) => !kept.has(id) && rankedSet.has(id) && eligible.has(id));
+}
+
+/**
+ * The stream order the apply route writes, from the order a caller handed it
+ * and what the channel carries live.
+ *
+ * `allowAssign` says the caller composed the order itself -- the check panel
+ * sends what the check composed, assignments included -- so re-composing here
+ * would strip every addition back out again, since composeOrder keeps only
+ * what the channel already carries. The tail is still worth restoring: a
+ * stream assigned to the channel between the check and the apply is in
+ * `previous` and not in `order`, and writing `order` verbatim would unassign
+ * it without anyone asking. That is what composeOrder's tail does, and it is
+ * skipped only when the caller has explicitly asked to drop whatever the
+ * order leaves out.
+ *
+ * `pruned` is the check's per-provider prune: the streams its composition
+ * deliberately left out. The apply has no verdicts, so on its own it cannot
+ * tell one of those from a stream somebody added in the meantime, and
+ * restoring it would put straight back what the operator just took off.
+ */
+export function composeApplyOrder(
+  order: number[],
+  previous: number[],
+  opts: { allowAssign: boolean; removeUnmatched: boolean; pruned?: Set<number> },
+): number[] {
+  if (!opts.allowAssign) return composeOrder(order, previous, opts.removeUnmatched);
+  if (opts.removeUnmatched) return order;
+  const sent = new Set(order);
+  return [...order, ...previous.filter((id) => !sent.has(id) && !opts.pruned?.has(id))];
+}
+
+/**
  * The streams on a channel that removal must not take on this pass.
  *
  * Two populations, and only the second one is a matter of timing.
@@ -3674,17 +3724,10 @@ export class Runner {
       const before = new Set(baseline);
       return order.filter((id) => !before.has(id));
     };
-    // What the per-provider prune took: baseline streams this composition
-    // dropped that are ranked and eligible. Nothing else removes that
-    // population -- unmatched removal takes unranked ids, dead removal takes
-    // ineligible ones -- so membership here is exact, and it is how a prune
-    // gets named in the log rather than passing silently.
-    const prunedPerProvider = (baseline: number[], order: number[]): number[] => {
-      if (!assign) return [];
-      const kept = new Set(order);
-      const rankedSet = new Set(ranked);
-      return baseline.filter((id) => !kept.has(id) && rankedSet.has(id) && assign.eligible.has(id));
-    };
+    // What the per-provider prune took -- see `prunedByProvider`, which both
+    // names the removal here and feeds the check's echo to an apply.
+    const prunedPerProvider = (baseline: number[], order: number[]): number[] =>
+      prunedByProvider(baseline, order, ranked, assign?.eligible);
 
     if (config.PODIUM_DRY_RUN) {
       // Auto-assign's rehearsal: turning it on with dry run still set is the

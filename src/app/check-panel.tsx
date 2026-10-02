@@ -96,6 +96,9 @@ interface CheckResult {
   kept: number[];
   dropOrder: number[];
   workerOrder?: number[];
+  /** Streams the check's per-provider prune left out; an apply skips these
+   * when restoring its tail, so applying does not put them straight back. */
+  pruned?: number[];
   truncated?: boolean;
   totalHits?: number;
   probeLimit?: number;
@@ -229,6 +232,7 @@ export function CheckPanel({
           removeUnmatched: dropUnclaimed,
           force: result.allowed === false,
           allowAssign: true,
+          pruned: result.pruned ?? [],
         }),
       });
       const body = await resp.json();

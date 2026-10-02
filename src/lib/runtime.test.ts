@@ -29,7 +29,7 @@ import {
 import { type Activity, Pacer, viewersByProvider } from './pacer';
 import type { ProbeResult } from './probe';
 import { RulesSource } from './rules-source';
-import { composeOrder, Runner, type RunSummary, sameOrder } from './runner';
+import { composeOrder, prunedByProvider, Runner, type RunSummary, sameOrder } from './runner';
 import { DEFAULT_STRATEGY, type RankEntry, type RankStrategy } from './scoring';
 import { type CacheEntry, RUN_HISTORY_MS, Store, ttlFor } from './store';
 
@@ -1069,6 +1069,24 @@ describe('composeOrder', () => {
       expect(
         composeOrder([10, 20], [10, 20], false, assign([10], { perProvider: 1, prune: true })),
       ).toEqual([10, 20]);
+    });
+  });
+
+  describe('prunedByProvider', () => {
+    it('names exactly what a prune-shaped removal is', () => {
+      // On the baseline, ranked, eligible, and left out of the order: pruned.
+      expect(prunedByProvider([1, 2, 3, 4], [1, 2], [2, 3, 4], new Set([2, 3, 4]))).toEqual([3, 4]);
+    });
+
+    it('does not claim unmatched or dead removals as prunes', () => {
+      // 30 is on the channel but unranked (remove-unmatched's population) and
+      // 20 is ranked but ineligible (dead removal's): neither is a prune, and
+      // saying so would make the check's echo tell the apply to drop them.
+      expect(prunedByProvider([1, 2, 20, 30], [1], [2, 20], new Set([2, 3]))).toEqual([2]);
+    });
+
+    it('is empty when there is no assignment policy', () => {
+      expect(prunedByProvider([1, 2], [], [1, 2], undefined)).toEqual([]);
     });
   });
 });

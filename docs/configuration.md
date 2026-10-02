@@ -538,11 +538,13 @@ What it will and will not do:
   provider over it loses its worst-ranked usable streams, down to the ceiling
   and never below it, and the room that releases is filled from other providers
   on the same pass. Removals it causes are named in the log and counted like
-  dead ones. Two things to know first: applying an order by hand from the check
-  panel re-appends what a prune removed (the panel cannot tell a prune from a
-  concurrent addition; the next pass takes it off again), and a provider
-  sitting at its ceiling can slowly trade members as verdicts flap between
-  probes — read the log before pointing the prune at a busy channel.
+  dead ones. Two things to know first: the check panel carries the prune
+  forward when it applies (the check sends the pruned ids along with the
+  order), but an order applied by any other path — a curl, a script —
+  re-appends what a prune removed, since such a caller restores everything its
+  order leaves out and the next pass takes the excess off again. And a
+  provider sitting at its ceiling can slowly trade members as verdicts flap
+  between probes — read the log before pointing the prune at a busy channel.
 - **Never removes anything else.** The channel cap limits additions only;
   lowering it will not unassign streams a channel already has. Dropping
   unmatched or dead streams remains `PODIUM_REMOVE_UNMATCHED`'s and

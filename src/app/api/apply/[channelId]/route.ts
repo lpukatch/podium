@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { requireCredentials } from '@/lib/config';
 import { DispatcharrClient } from '@/lib/dispatcharr';
 import { currentProgrammes, describeVerdict, Eligibility } from '@/lib/eligibility';
-import { catalogueRows, composeOrder } from '@/lib/runner';
+import { catalogueRows, composeApplyOrder } from '@/lib/runner';
 import {
   groupPatterns,
   noteStreamOrder,
@@ -36,10 +36,17 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       removeUnmatched?: boolean;
       force?: boolean;
       allowAssign?: boolean;
+      pruned?: number[];
     };
     const order = body.order ?? [];
     if (order.length === 0 || order.some((n) => !Number.isInteger(n))) {
       return NextResponse.json({ error: 'order must be a non-empty list of ids' }, { status: 400 });
+    }
+    // The check's per-provider prune, sent so the tail restore below can tell
+    // it from a stream somebody added between the check and the apply.
+    const pruned = body.pruned ?? [];
+    if (pruned.some((n) => !Number.isInteger(n))) {
+      return NextResponse.json({ error: 'pruned must be a list of ids' }, { status: 400 });
     }
 
     const config = serverConfig();
@@ -93,19 +100,16 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     // `allowAssign` says the caller composed this order itself -- the check
     // panel sends what the check composed, assignments included -- so
     // re-composing here would strip every addition back out again, since
-    // composeOrder keeps only what the channel already carries.
-    //
-    // The tail is still worth restoring. A stream assigned to the channel
-    // between the check and the apply is in `previous` and not in `order`, and
-    // writing `order` verbatim would unassign it without anyone asking. That is
-    // what composeOrder's tail does, and it is skipped only when the caller has
-    // explicitly asked to drop whatever the order leaves out.
-    const sent = new Set(order);
-    const targetOrder = body.allowAssign
-      ? removeUnmatched
-        ? order
-        : [...order, ...previous.filter((id) => !sent.has(id))]
-      : composeOrder(order, previous, removeUnmatched);
+    // composeOrder keeps only what the channel already carries. The tail is
+    // still restored -- a stream added between the check and the apply comes
+    // back rather than being silently unassigned -- except the ids the check
+    // pruned, which it sends along because this route has no verdicts of its
+    // own. See `composeApplyOrder`.
+    const targetOrder = composeApplyOrder(order, previous, {
+      allowAssign: body.allowAssign ?? false,
+      removeUnmatched,
+      pruned: new Set(pruned),
+    });
 
     if (targetOrder.length === 0) {
       return NextResponse.json({ error: 'composed order is empty' }, { status: 400 });

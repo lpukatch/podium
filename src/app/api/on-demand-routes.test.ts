@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Eligibility } from '@/lib/eligibility';
 import { Matcher } from '@/lib/matcher';
 import { parseProviders } from '@/lib/rules';
-import { composeOrder, splitAssigned, withoutStream } from '@/lib/runner';
+import { composeApplyOrder, composeOrder, splitAssigned, withoutStream } from '@/lib/runner';
 
 describe('composeOrder safety (Finding 02 & Acceptance Criteria)', () => {
   it('does not unassign unmatched streams when removeUnmatched is false', () => {
@@ -181,5 +181,53 @@ describe('Channel provider restrictions in matcher', () => {
     const unrestrictedRule = { ...rule, providers: null };
     const allMatches = matcher.match(unrestrictedRule, index);
     expect(allMatches.map(([id]) => id)).toEqual([101, 102]);
+  });
+});
+
+describe('the order an apply writes (per-provider prune echo)', () => {
+  // The check sends what it composed plus the ids its per-provider prune left
+  // out; the apply restores the tail of everything else. Both halves have to
+  // hold, or applying by hand would undo the prune the operator just read
+  // about in the check.
+  it('restores a stream added between the check and the apply', () => {
+    expect(
+      composeApplyOrder([901, 1], [901, 1, 30], { allowAssign: true, removeUnmatched: false }),
+    ).toEqual([901, 1, 30]);
+  });
+
+  it('does not restore what the check pruned', () => {
+    expect(
+      composeApplyOrder([901, 1], [901, 1, 2, 30], {
+        allowAssign: true,
+        removeUnmatched: false,
+        pruned: new Set([2]),
+      }),
+    ).toEqual([901, 1, 30]);
+  });
+
+  it('restores the pruned id when no prune was sent', () => {
+    // An older caller, or a curl: the tail restore is the default and the
+    // echo is the exception, not the other way round.
+    expect(
+      composeApplyOrder([901, 1], [901, 1, 2], { allowAssign: true, removeUnmatched: false }),
+    ).toEqual([901, 1, 2]);
+  });
+
+  it('writes the handed order verbatim when the caller asked to drop the rest', () => {
+    expect(
+      composeApplyOrder([901, 1], [901, 1, 30], {
+        allowAssign: true,
+        removeUnmatched: true,
+        pruned: new Set([30]),
+      }),
+    ).toEqual([901, 1]);
+  });
+
+  it('composes rather than trusts an order no caller composed', () => {
+    // allowAssign off is the raw-order path: composeOrder intersects with
+    // what the channel carries, and the prune echo has nothing to say.
+    expect(
+      composeApplyOrder([901, 10], [10, 20, 30], { allowAssign: false, removeUnmatched: false }),
+    ).toEqual([10, 20, 30]);
   });
 });

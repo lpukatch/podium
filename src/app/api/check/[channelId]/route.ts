@@ -19,6 +19,7 @@ import {
   deadRemovalPlan,
   dropDeadStreams,
   protectedFromRemoval,
+  prunedByProvider,
   splitAssigned,
   statsPayload,
 } from '@/lib/runner';
@@ -189,6 +190,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         proposed: [],
         kept: current,
         workerOrder,
+        pruned: [],
         // No rows were ranked, so there is nothing for these to explain -- but
         // they are the floors the ranking would have used, not a second opinion
         // read out of the environment beside it.
@@ -483,6 +485,11 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       deadRemoval,
       deadRemoval ? store.deadStreaks(workerComposed) : new Map(),
     ).order;
+    // What the worker composition pruned, so the panel can hand it to the
+    // apply: the apply restores the tail of everything its order leaves out,
+    // and without this list it cannot tell a prune from a stream somebody
+    // added since the check, so it would restore both.
+    const pruned = prunedByProvider(current, workerOrder, ranked, assign?.eligible);
     const kept = composeOrder(ranked, current, false, assign);
     // What the panel's drop tick asks for, composed here rather than left to
     // the apply. `proposed` below is the raw ranking -- every stream the rule
@@ -580,6 +587,9 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       proposed,
       kept,
       workerOrder,
+      // Sent so an apply skips these when restoring its tail; empty whenever
+      // the prune is off, for the same reason the runner's prune log line is.
+      pruned,
       dropOrder,
       // Surfaced rather than silent: a capped check has probed only part of what
       // the rule claims, so the ranking below is partial even though the
