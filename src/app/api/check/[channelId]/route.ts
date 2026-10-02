@@ -355,23 +355,12 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     // check waits rather than stacking provider slots on top of this one.
     await onDemand.run(() => runLanes<ProbeResult>(jobs, probeOptions));
 
-    const results = new Map<number, ProbeResult>();
-    for (const [streamId, verdicts] of variantResults) {
-      const best = pickBestVariant(verdicts, strategy.weights, audioOnly);
-      if (!best) continue;
-      results.set(streamId, best);
-      // Published once per stream from the combined verdict, after the run --
-      // per-probe publishing would have each login's stats overwrite the last,
-      // and leave an arbitrary login's numbers standing.
-      if (config.PODIUM_WRITE_STATS && !config.PODIUM_DRY_RUN) {
-        client.setStreamStats(streamId, statsPayload(best, strategy.weights)).catch(() => {});
-      }
-    }
-
-    // What the ledger has on these streams, read once. The panel is where an
-    // operator goes to ask why a stream sank, so a demotion this term caused
-    // has to be legible on the row that moved -- a score that dropped for
-    // reasons the table does not show is worse than no term at all.
+    // What the ledger has on these streams, read once -- before the publish
+    // loop, so the stats written to Dispatcharr carry the same view of it the
+    // ranking below scores against. The panel is where an operator goes to ask
+    // why a stream sank, so a demotion this term caused has to be legible on
+    // the row that moved -- a score that dropped for reasons the table does
+    // not show is worse than no term at all.
     let stability = new Map<number, StabilityRecord>();
     try {
       const store = new Store(config.dbPath);
@@ -383,6 +372,21 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     } catch {
       // As the runner does: an unreadable ledger ranks as no evidence rather
       // than failing the check.
+    }
+
+    const results = new Map<number, ProbeResult>();
+    for (const [streamId, verdicts] of variantResults) {
+      const best = pickBestVariant(verdicts, strategy.weights, audioOnly);
+      if (!best) continue;
+      results.set(streamId, best);
+      // Published once per stream from the combined verdict, after the run --
+      // per-probe publishing would have each login's stats overwrite the last,
+      // and leave an arbitrary login's numbers standing.
+      if (config.PODIUM_WRITE_STATS && !config.PODIUM_DRY_RUN) {
+        client
+          .setStreamStats(streamId, statsPayload(best, strategy.weights, stability.get(streamId)))
+          .catch(() => {});
+      }
     }
 
     const jobMeta = new Map(jobs.map((job) => [job.streamId, job]));

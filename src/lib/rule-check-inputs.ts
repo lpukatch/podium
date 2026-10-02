@@ -52,8 +52,11 @@ export function checkInputs(snap: Snapshot, store: Store): CheckInputs {
   const streamById = new Map(snap.streams.map((s) => [s.id, s]));
 
   // Every verdict in one read rather than per channel: a stream on several
-  // channels is one row, and the chunking already lives in the store.
+  // channels is one row, and the chunking already lives in the store. The
+  // ledger read beside it for the same reason -- the stats each row is scored
+  // against must carry the same stability view a publish would write.
   const verdicts = store.verdicts([...new Set(snap.channels.flatMap((c) => c.streams))]);
+  const stability = store.stabilityRecords();
 
   const channels: ChannelInput[] = [];
   for (const channel of snap.channels) {
@@ -76,6 +79,7 @@ export function checkInputs(snap: Snapshot, store: Store): CheckInputs {
           },
           verdict.result,
           strategy,
+          stability.get(streamId),
         ),
         stepOrder: position,
       });

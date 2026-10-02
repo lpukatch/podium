@@ -5,11 +5,21 @@
  * itself: the pass that publishes these numbers, and the rule check that scores
  * a Teamarr `stats_metric` rule against them. A second reading of the same
  * `ProbeResult` would be a second opinion, and the check would then be able to
- * agree with the probe while disagreeing with what Teamarr actually reads.
+ * agree with the probe while disagreeing with what Teamarr actually reads. The
+ * stability record is part of that contract too: the score and the stability
+ * keys below read it, so every caller passes the ledger's current view of a
+ * stream or nothing at all -- never two different views of the same one.
  */
 
 import { isInterlaced, type ProbeResult } from './probe';
 import { DEFAULT_WEIGHTS, frameRate, hdrFormat, score, type Weights } from './scoring';
+import {
+  describeStability,
+  dropsPerHour,
+  type StabilityRecord,
+  stabilityScore,
+  tooUnstable,
+} from './stability';
 
 /**
  * The shape published to Dispatcharr's `stream_stats`.
@@ -25,6 +35,7 @@ import { DEFAULT_WEIGHTS, frameRate, hdrFormat, score, type Weights } from './sc
 export function statsPayload(
   result: ProbeResult,
   weights: Weights = DEFAULT_WEIGHTS,
+  stability?: StabilityRecord,
 ): Record<string, unknown> {
   return {
     width: result.width,
@@ -97,7 +108,41 @@ export function statsPayload(
     bitrate_measured: Boolean(result.bitrateMeasured),
     blank_detected: Boolean(result.black),
     blank_seconds: result.blackSeconds ?? 0,
-    quality_score: score(result, weights),
+    /**
+     * What the passive ledger has on this stream, in the same sentence the
+     * check panel shows. The majority answer is "never observed playing",
+     * which is itself the fact worth seeing: it says the stability score
+     * beside it is an assumption, not a measurement.
+     */
+    stability: describeStability(stability),
+    /**
+     * The [0, 1] value the `stability` weight multiplies -- the one number a
+     * reader needs to see how the term moved the score. 1 when the ledger
+     * holds nothing, because the scoring reads absence as full marks rather
+     * than as a gap; the sentence above is what separates an unmeasured 1
+     * from an earned one.
+     */
+    stability_score: Math.round(stabilityScore(stability) * 10_000) / 10_000,
+    /**
+     * Failures per hour of observed watching. `null`, not 0, when the ledger
+     * holds nothing: a stream nobody has watched must not read as a measured
+     * zero, and a Teamarr `stats_metric` rule can tell the difference.
+     */
+    drops_per_hour: stability ? Math.round(dropsPerHour(stability) * 10) / 10 : null,
+    /**
+     * The `maxDropsPerHour` health check -- the cliff beside the weight. A
+     * stream this flags has been sunk below every usable peer whatever its
+     * picture looks like, and a reader wondering why a 4K feed sits under a
+     * 720p one finds the answer here rather than in the score.
+     */
+    unstable: tooUnstable(stability, weights.maxDropsPerHour),
+    /**
+     * Includes the stability term: the same number `rank` computes, so the
+     * score an operator reads is the score the ordering used. At the default
+     * stability weight of 0 the term is inert and this is unchanged to the
+     * last digit.
+     */
+    quality_score: score(result, weights, false, stability),
     alive: result.alive,
     quality_reason: !result.alive ? result.error || 'dead' : result.black ? 'black screen' : 'ok',
     probed_by: 'podium',

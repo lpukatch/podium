@@ -1096,6 +1096,16 @@ its priors and nothing else — the right answer when nobody has looked at it. A
 positive rule would instead push every unprobed stream below every probed one,
 and at kickoff the unprobed streams are most of them.
 
+The stability ledger is published as numbers a rule can read the same way:
+`stability_score` (0 to 1 — the value the ordering's own stability weight
+multiplies), `drops_per_hour` (`null` on a stream nobody has watched, so a rule
+can tell unmeasured from measured-zero) and `unstable` (the
+`max_drops_per_hour` health check's verdict). A demotion like
+`drops_per_hour|>=|5  -20` is therefore expressible. `quality_score` includes
+the stability term, so at a non-zero stability weight it is the same number the
+ordering ranked by — at the default weight of 0 it is unchanged to the last
+digit.
+
 The **bitrate ladder is read off your own catalogue**, at the median, upper
 quartile and top decile of your watchable streams. Hand-picked thresholds go
 stale invisibly: a rule set found in the field carried rungs at 10000 and 15000
