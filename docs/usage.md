@@ -464,8 +464,9 @@ Falling below the floor is not the same as being broken:
 - streams below the floor keep their quality order among themselves, so a
   channel where nothing clears it ranks exactly as it would without one;
 - it is never auto-assigned, and it does not count against
-  `PODIUM_AUTO_ASSIGN_MAX`, so a capped channel carrying nothing but sub-floor
-  streams still has room to be given one that clears it;
+  `PODIUM_AUTO_ASSIGN_MAX` or `PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER`, so a
+  capped channel carrying nothing but sub-floor streams still has room to be
+  given one that clears it;
 - it is never removed. The floor decides order and what gets added, not what a
   channel already carries.
 

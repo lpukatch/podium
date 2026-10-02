@@ -172,6 +172,35 @@ export const configSchema = z.object({
    * setting's job.
    */
   PODIUM_AUTO_ASSIGN_MAX: num(0),
+  /**
+   * Ceiling on how many matched streams one provider may contribute to a
+   * channel, subdividing PODIUM_AUTO_ASSIGN_MAX. 0 removes it.
+   *
+   * A provider is a Dispatcharr M3U account -- the same upstream added twice
+   * as two accounts counts as two, because this is all the cap can see. Like
+   * the channel cap it counts usable sources rather than stream links, so a
+   * provider whose candidates are all dead or sub-floor neither holds a slot
+   * shut nor earns one: the ceiling is diversity among sources a viewer can
+   * actually be failed over to, not spread for its own sake. A provider with
+   * nothing usable simply contributes nothing.
+   *
+   * The channel cap stays the outer bound: 6 with 1 per provider fills from
+   * up to six providers, in rank order.
+   */
+  PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER: num(0),
+  /**
+   * Whether the per-provider ceiling also unassigns: a provider over it loses
+   * its worst-ranked usable streams, down to the ceiling and never below it,
+   * and the room that releases is filled from other providers on the same
+   * pass.
+   *
+   * Off by default because it is the one auto-assign behaviour that removes a
+   * stream nothing is wrong with -- it is only redundant with a better sibling
+   * from the same account. Removals it causes are named in the log, like dead
+   * ones are. Does nothing without the ceiling above or without
+   * PODIUM_AUTO_ASSIGN.
+   */
+  PODIUM_AUTO_ASSIGN_PRUNE_PER_PROVIDER: bool(false),
 
   /** Cache TTLs. Dead streams are rechecked far more often than live ones. */
   PODIUM_LIVE_TTL_MS: num(24 * 3_600_000),

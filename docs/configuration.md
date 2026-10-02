@@ -374,6 +374,8 @@ Why the gate exists at all, and how to read what it dropped, is in
 | `PODIUM_REMOVE_DEAD_AFTER_CHECKS` | `0` | unassign a stream after this many consecutive dead checks; `0` is off, [see below](#removing-dead-streams) |
 | `PODIUM_AUTO_ASSIGN` | `true` | lets a pass put matched streams onto channels that do not carry them; `false` is reorder-only |
 | `PODIUM_AUTO_ASSIGN_MAX` | `0` | ceiling on how many matched streams a channel may gain this way; `0` removes the cap |
+| `PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER` | `0` | ceiling on how many of those each provider (M3U account) may contribute; `0` removes it |
+| `PODIUM_AUTO_ASSIGN_PRUNE_PER_PROVIDER` | `false` | also unassign the worst-ranked streams a provider holds beyond that ceiling |
 
 ### Rules for deleted channels
 
@@ -523,9 +525,31 @@ What it will and will not do:
   sink) but are never added.
 - **Only up to the cap.** `PODIUM_AUTO_ASSIGN_MAX` counts the matched streams a
   channel ends up carrying (`0` removes the cap). A channel already at or over it gains nothing.
-- **Never removes anything.** The cap limits additions only; lowering it will
-  not unassign streams a channel already has. Dropping streams remains
-  `PODIUM_REMOVE_UNMATCHED`'s job.
+- **Only up to the per-provider ceiling.** `PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER`
+  subdivides the cap by provider — a Dispatcharr M3U account; the same upstream
+  added twice as two accounts counts as two, because an account is all the cap
+  can see. Each provider contributes at most that many usable streams, so a
+  channel cap of 6 with 1 per provider fills from up to six providers, best
+  first. A provider with nothing usable contributes nothing rather than filling
+  its slots with junk: the ceiling spreads sources a viewer can actually be
+  failed over to. Like the channel cap, it limits additions only.
+- **Prunes same-provider excess only when asked.**
+  `PODIUM_AUTO_ASSIGN_PRUNE_PER_PROVIDER` makes the ceiling also unassign: a
+  provider over it loses its worst-ranked usable streams, down to the ceiling
+  and never below it, and the room that releases is filled from other providers
+  on the same pass. Removals it causes are named in the log and counted like
+  dead ones. Two things to know first: the check panel carries the prune
+  forward when it applies (the check sends the pruned ids along with the
+  order), but an order applied by any other path — a curl, a script —
+  re-appends what a prune removed, since such a caller restores everything its
+  order leaves out and the next pass takes the excess off again. And a
+  provider sitting at its ceiling can slowly trade members as verdicts flap
+  between probes — read the log before pointing the prune at a busy channel.
+- **Never removes anything else.** The channel cap limits additions only;
+  lowering it will not unassign streams a channel already has. Dropping
+  unmatched or dead streams remains `PODIUM_REMOVE_UNMATCHED`'s and
+  `PODIUM_REMOVE_DEAD_AFTER_CHECKS`'s job; the per-provider prune above is the
+  one deliberate exception.
 - **Never resurrects a manual removal.** Taking a stream off a channel through
   the unassign endpoint records the decision, and no later pass assigns it back
   to that channel. Without that the button would be useless with this on.

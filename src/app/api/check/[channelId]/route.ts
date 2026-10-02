@@ -13,11 +13,13 @@ import { isInterlaced, type ProbeResult, probe } from '@/lib/probe';
 import { activityOptions, probeProxyBase, probeUserAgent } from '@/lib/probe-routing';
 import { channelResolutionFloor } from '@/lib/resolution';
 import {
+  type AssignOptions,
   assignedCandidates,
   composeOrder,
   deadRemovalPlan,
   dropDeadStreams,
   protectedFromRemoval,
+  prunedByProvider,
   splitAssigned,
   statsPayload,
 } from '@/lib/runner';
@@ -188,6 +190,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         proposed: [],
         kept: current,
         workerOrder,
+        pruned: [],
         // No rows were ranked, so there is nothing for these to explain -- but
         // they are the floors the ranking would have used, not a second opinion
         // read out of the environment beside it.
@@ -425,7 +428,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     // the same bargain the worker strikes when it refuses to reorder a channel
     // it has not got a verdict for every stream on.
     const removeUnmatched = config.PODIUM_REMOVE_UNMATCHED && unprobedIds.length === 0;
-    let assign: { eligible: Set<number>; max: number } | undefined;
+    let assign: AssignOptions | undefined;
     if (config.PODIUM_AUTO_ASSIGN) {
       const blocked = store.assignBlocks(id);
       assign = {
@@ -437,6 +440,14 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         ),
         max: config.PODIUM_AUTO_ASSIGN_MAX,
       };
+      // Mirrored from the runner's reorder so this preview says what a pass
+      // would actually write, per-provider ceiling and prune included: the
+      // drop composition below shares this object and inherits both.
+      if (config.PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER > 0) {
+        assign.providerOf = new Map(entries.map((entry) => [entry.streamId, entry.providerId]));
+        assign.maxPerProvider = config.PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER;
+        assign.prunePerProvider = config.PODIUM_AUTO_ASSIGN_PRUNE_PER_PROVIDER;
+      }
     }
     // Read, never advanced: previewing a channel must not start anybody's
     // grace period. See `Store.unmatchedSince`.
@@ -478,6 +489,11 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       deadRemoval,
       deadRemoval ? store.deadStreaks(workerComposed) : new Map(),
     ).order;
+    // What the worker composition pruned, so the panel can hand it to the
+    // apply: the apply restores the tail of everything its order leaves out,
+    // and without this list it cannot tell a prune from a stream somebody
+    // added since the check, so it would restore both.
+    const pruned = prunedByProvider(current, workerOrder, ranked, assign?.eligible);
     const kept = composeOrder(ranked, current, false, assign);
     // What the panel's drop tick asks for, composed here rather than left to
     // the apply. `proposed` below is the raw ranking -- every stream the rule
@@ -575,6 +591,9 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       proposed,
       kept,
       workerOrder,
+      // Sent so an apply skips these when restoring its tail; empty whenever
+      // the prune is off, for the same reason the runner's prune log line is.
+      pruned,
       dropOrder,
       // Surfaced rather than silent: a capped check has probed only part of what
       // the rule claims, so the ranking below is partial even though the

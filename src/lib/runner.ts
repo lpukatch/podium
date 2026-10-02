@@ -96,6 +96,29 @@ export function sameOrder(a: number[], b: number[]): boolean {
 }
 
 /**
+ * The assignment policy `composeOrder` enforces. See PODIUM_AUTO_ASSIGN and
+ * PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER.
+ */
+export interface AssignOptions {
+  /** Streams this pass would be willing to put on the channel. */
+  eligible: Set<number>;
+  /** Per-channel ceiling on matched streams. 0 or less removes it. */
+  max: number;
+  /**
+   * streamId -> provider (a Dispatcharr M3U account), for the per-provider
+   * ceiling. Streams it cannot name are not per-provider capped.
+   */
+  providerOf?: Map<number, number>;
+  /** Ceiling on how many matched streams each provider may contribute. */
+  maxPerProvider?: number;
+  /**
+   * Also unassign the worst-ranked usable streams a provider holds beyond its
+   * ceiling, rather than only stemming new additions from it.
+   */
+  prunePerProvider?: boolean;
+}
+
+/**
  * The stream ids to write back to a channel, from a ranked list and the streams
  * it currently carries.
  *
@@ -125,6 +148,26 @@ export function sameOrder(a: number[], b: number[]): boolean {
  * whatever fell off the end, and nothing here is allowed to remove a stream
  * that Dispatcharr, or a person, deliberately put on a channel.
  *
+ * `maxPerProvider` subdivides that ceiling per provider -- a Dispatcharr M3U
+ * account; the same upstream added twice as two accounts counts as two, because
+ * an account is all the cap can see. It counts the same usable sources the
+ * channel cap counts, so a provider whose candidates are all dead or sub-floor
+ * holds no slot shut and earns none either: the ceiling is diversity among
+ * sources a viewer can actually be failed over to, not spread for its own
+ * sake. `max` stays the outer bound, and rank order still decides who gets the
+ * room -- 6 with 1 per provider fills from up to six providers, best first.
+ *
+ * `prunePerProvider` opts the per-provider ceiling into removing what it would
+ * otherwise only stem: a provider over it loses its worst-ranked usable
+ * streams, down to the ceiling and never below it, and the room that releases
+ * is budget other providers can fill on the same pass. It is the one
+ * auto-assign behaviour that takes a stream off while nothing is wrong with it
+ * -- it is only redundant with a better sibling from the same account -- which
+ * is why it is off unless asked for, and why the removals it causes are named
+ * in the pass log like dead ones are. Pruned ids are kept out of the stray
+ * tails below, or the very composition that dropped them would append them
+ * straight back.
+ *
  * Streams on the channel the rule did not match are strays. Unless
  * `removeUnmatched` is set they are kept, after the ranked ones, so a reorder
  * never silently unassigns anything either.
@@ -141,11 +184,12 @@ export function composeOrder(
   ranked: number[],
   assigned: number[] = [],
   removeUnmatched = false,
-  assign?: { eligible: Set<number>; max: number },
+  assign?: AssignOptions,
   protectedIds?: Set<number>,
 ): number[] {
   const onChannel = new Set(assigned);
   let keep = (id: number): boolean => onChannel.has(id);
+  const pruned = new Set<number>();
 
   if (assign) {
     // Budget is measured against what the channel already carries from this
@@ -162,26 +206,122 @@ export function composeOrder(
     // would actually satisfy the floor is never added and the setting does
     // nothing but reorder what was already there. The same arithmetic stranded
     // a channel full of dead streams.
-    const held = ranked.filter((id) => onChannel.has(id) && assign.eligible.has(id)).length;
+    const capPerProvider = Math.floor(assign.maxPerProvider ?? 0);
+    const providerOf = capPerProvider > 0 ? assign.providerOf : undefined;
+    // How many usable streams each provider already has on the channel, the
+    // per-provider form of the `held` count below.
+    const heldBy = new Map<number, number>();
+    if (providerOf) {
+      for (const id of ranked) {
+        if (!onChannel.has(id) || !assign.eligible.has(id)) continue;
+        const provider = providerOf.get(id);
+        if (provider === undefined) continue;
+        heldBy.set(provider, (heldBy.get(provider) ?? 0) + 1);
+      }
+      // The prune pass runs worst-first (`ranked` is best-first), so the
+      // streams a provider loses are its worst, and it stops at the ceiling:
+      // N is a floor here, not a target to dig past. Ineligible streams are
+      // never taken -- their removal is the dead/unmatched settings' job, not
+      // this one's, and they never counted toward the ceiling either.
+      if (assign.prunePerProvider) {
+        for (const id of [...ranked].reverse()) {
+          if (!onChannel.has(id) || !assign.eligible.has(id)) continue;
+          const provider = providerOf.get(id);
+          if (provider === undefined) continue;
+          if ((heldBy.get(provider) ?? 0) <= capPerProvider) continue;
+          pruned.add(id);
+          heldBy.set(provider, (heldBy.get(provider) ?? 0) - 1);
+        }
+      }
+    }
+    // Pruned streams release their hold on the channel cap too, so a provider
+    // sitting over its ceiling does not keep the channel full while the prune
+    // empties it -- the room is the point.
+    const held = ranked.filter(
+      (id) => onChannel.has(id) && assign.eligible.has(id) && !pruned.has(id),
+    ).length;
     let budget = assign.max <= 0 ? Number.POSITIVE_INFINITY : Math.max(0, assign.max - held);
     const adding = new Set<number>();
-    // `ranked` is best-first, so the budget buys the best candidates.
+    // `ranked` is best-first, so the budget buys the best candidates. A
+    // provider at its ceiling is skipped rather than priced into the budget:
+    // the global cap may be off (Infinity never reaches 0), and the pass then
+    // walks on to the best candidate from a provider that still has room.
     for (const id of ranked) {
       if (budget === 0) break;
       if (onChannel.has(id) || !assign.eligible.has(id)) continue;
+      if (providerOf) {
+        const provider = providerOf.get(id);
+        if (provider !== undefined) {
+          if ((heldBy.get(provider) ?? 0) >= capPerProvider) continue;
+          heldBy.set(provider, (heldBy.get(provider) ?? 0) + 1);
+        }
+      }
       adding.add(id);
       budget -= 1;
     }
-    keep = (id: number): boolean => onChannel.has(id) || adding.has(id);
+    keep = (id: number): boolean => (onChannel.has(id) && !pruned.has(id)) || adding.has(id);
   }
 
   const matched = ranked.filter(keep);
   const matchedSet = new Set(matched);
   if (removeUnmatched) {
     if (!protectedIds || protectedIds.size === 0) return matched;
-    return [...matched, ...assigned.filter((id) => !matchedSet.has(id) && protectedIds.has(id))];
+    return [
+      ...matched,
+      ...assigned.filter((id) => !matchedSet.has(id) && protectedIds.has(id) && !pruned.has(id)),
+    ];
   }
-  return [...matched, ...assigned.filter((id) => !matchedSet.has(id))];
+  return [...matched, ...assigned.filter((id) => !matchedSet.has(id) && !pruned.has(id))];
+}
+
+/**
+ * The streams a composition dropped because their provider was over its
+ * per-provider ceiling: on the baseline, ranked, eligible to assign, and left
+ * out of the order. Nothing else removes that population -- unmatched removal
+ * takes unranked ids, dead removal takes ineligible ones -- so membership is
+ * exact, and it is how a prune gets named in the pass log and echoed to an
+ * apply rather than passing silently.
+ */
+export function prunedByProvider(
+  baseline: number[],
+  order: number[],
+  ranked: number[],
+  eligible: Set<number> | undefined,
+): number[] {
+  if (!eligible) return [];
+  const kept = new Set(order);
+  const rankedSet = new Set(ranked);
+  return baseline.filter((id) => !kept.has(id) && rankedSet.has(id) && eligible.has(id));
+}
+
+/**
+ * The stream order the apply route writes, from the order a caller handed it
+ * and what the channel carries live.
+ *
+ * `allowAssign` says the caller composed the order itself -- the check panel
+ * sends what the check composed, assignments included -- so re-composing here
+ * would strip every addition back out again, since composeOrder keeps only
+ * what the channel already carries. The tail is still worth restoring: a
+ * stream assigned to the channel between the check and the apply is in
+ * `previous` and not in `order`, and writing `order` verbatim would unassign
+ * it without anyone asking. That is what composeOrder's tail does, and it is
+ * skipped only when the caller has explicitly asked to drop whatever the
+ * order leaves out.
+ *
+ * `pruned` is the check's per-provider prune: the streams its composition
+ * deliberately left out. The apply has no verdicts, so on its own it cannot
+ * tell one of those from a stream somebody added in the meantime, and
+ * restoring it would put straight back what the operator just took off.
+ */
+export function composeApplyOrder(
+  order: number[],
+  previous: number[],
+  opts: { allowAssign: boolean; removeUnmatched: boolean; pruned?: Set<number> },
+): number[] {
+  if (!opts.allowAssign) return composeOrder(order, previous, opts.removeUnmatched);
+  if (opts.removeUnmatched) return order;
+  const sent = new Set(order);
+  return [...order, ...previous.filter((id) => !sent.has(id) && !opts.pruned?.has(id))];
 }
 
 /**
@@ -3492,7 +3632,7 @@ export class Runner {
     // it has to be, or it could never sink past the streams above it -- but
     // assigning one would add a source nobody can play, so eligibility is
     // decided here, on the verdicts, rather than inside composeOrder.
-    let assign: { eligible: Set<number>; max: number } | undefined;
+    let assign: AssignOptions | undefined;
     if (config.PODIUM_AUTO_ASSIGN) {
       // A stream someone took off this channel by hand stays off it. It is
       // still matched and still healthy, so nothing else here would stop the
@@ -3508,6 +3648,14 @@ export class Runner {
         ),
         max: config.PODIUM_AUTO_ASSIGN_MAX,
       };
+      // The per-provider ceiling, only when configured, so an install that
+      // never sets it hands composeOrder the exact object it always did. Every
+      // entry carries its provider, so the map is the ranking's own data.
+      if (config.PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER > 0) {
+        assign.providerOf = new Map(entries.map((entry) => [entry.streamId, entry.providerId]));
+        assign.maxPerProvider = config.PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER;
+        assign.prunePerProvider = config.PODIUM_AUTO_ASSIGN_PRUNE_PER_PROVIDER;
+      }
     }
     // What removal is not allowed to take. Computed per candidate order,
     // because the live re-read below may carry streams the pass-start snapshot
@@ -3587,16 +3735,24 @@ export class Runner {
       const before = new Set(baseline);
       return order.filter((id) => !before.has(id));
     };
+    // What the per-provider prune took -- see `prunedByProvider`, which both
+    // names the removal here and feeds the check's echo to an apply.
+    const prunedPerProvider = (baseline: number[], order: number[]): number[] =>
+      prunedByProvider(baseline, order, ranked, assign?.eligible);
 
     if (config.PODIUM_DRY_RUN) {
       // Auto-assign's rehearsal: turning it on with dry run still set is the
       // only way to see what it would put on a channel before it does, so the
       // preview has to name the additions and not just print the new order.
       const would = additions(assigned, ordered);
+      const wouldPrune = prunedPerProvider(assigned, ordered);
       const wouldDrop = deadDropped.filter((id) => assigned.includes(id));
       log(
         `[dry-run] channel ${channelId} (${snapshot.channelName}) -> ${ordered.join(',')}` +
           (would.length > 0 ? ` (would assign ${would.length}: ${describe(would)})` : '') +
+          (wouldPrune.length > 0
+            ? ` (would remove ${wouldPrune.length} over the per-provider cap: ${describe(wouldPrune)})`
+            : '') +
           (wouldDrop.length > 0
             ? ` (would remove ${wouldDrop.length} long-dead: ${describe(wouldDrop)})`
             : ''),
@@ -3652,13 +3808,20 @@ export class Runner {
           `channel ${channelId} (${snapshot.channelName}): assigning ${added.length} stream(s) ${describe(added)}`,
         );
       }
-      // Named for the same reason, and more so: this is the only write here
-      // that takes something away, and nothing puts it back by itself.
+      // Named for the same reason, and more so: these are the only writes here
+      // that take something away, and nothing puts them back by itself.
       const removedDead = deadDropped.filter((id) => baseline.includes(id));
       if (removedDead.length > 0) {
         log(
           `channel ${channelId} (${snapshot.channelName}): removing ${removedDead.length} stream(s) ` +
             `dead for ${snapshot.removal?.after ?? 0}+ checks ${describe(removedDead)}`,
+        );
+      }
+      const removedPruned = prunedPerProvider(baseline, writeOrder);
+      if (removedPruned.length > 0) {
+        log(
+          `channel ${channelId} (${snapshot.channelName}): removing ${removedPruned.length} stream(s) ` +
+            `over the per-provider cap of ${config.PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER} ${describe(removedPruned)}`,
         );
       }
       await client.setStreamOrder(channelId, writeOrder);
@@ -3675,7 +3838,7 @@ export class Runner {
       );
       counters.reordered += 1;
       counters.assigned += added.length;
-      counters.removed += removedDead.length;
+      counters.removed += removedDead.length + removedPruned.length;
       // The snapshot taken at pass start still shows the fetched order; patch
       // this channel now so slot 0 is what was just decided, not what the pass
       // began with hours ago. Built from `writeOrder` -- the live-reconciled

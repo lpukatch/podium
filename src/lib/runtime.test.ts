@@ -29,7 +29,7 @@ import {
 import { type Activity, Pacer, viewersByProvider } from './pacer';
 import type { ProbeResult } from './probe';
 import { RulesSource } from './rules-source';
-import { composeOrder, Runner, type RunSummary, sameOrder } from './runner';
+import { composeOrder, prunedByProvider, Runner, type RunSummary, sameOrder } from './runner';
 import { DEFAULT_STRATEGY, type RankEntry, type RankStrategy } from './scoring';
 import { type CacheEntry, RUN_HISTORY_MS, Store, ttlFor } from './store';
 
@@ -898,6 +898,197 @@ describe('composeOrder', () => {
       ]);
     });
   });
+
+  describe('per-provider cap', () => {
+    // Providers: 90x and 10/20/30 are provider 5, 80x and 40 are provider 6.
+    // The channel cap defaults to 0 (unlimited) so each case isolates the
+    // per-provider ceiling.
+    const assign = (
+      eligible: number[],
+      opts: { max?: number; perProvider?: number; prune?: boolean } = {},
+    ) => ({
+      eligible: new Set(eligible),
+      max: opts.max ?? 0,
+      providerOf: new Map<number, number>([
+        [901, 5],
+        [902, 5],
+        [903, 5],
+        [801, 6],
+        [802, 6],
+        [10, 5],
+        [20, 5],
+        [30, 5],
+        [40, 6],
+      ]),
+      maxPerProvider: opts.perProvider ?? 0,
+      prunePerProvider: opts.prune ?? false,
+    });
+
+    it('caps additions per provider, best first', () => {
+      // Provider 5 offers three against a ceiling of two: the pass buys its
+      // two best and walks on to provider 6's candidate rather than stopping,
+      // which is the diversity the ceiling exists for.
+      expect(
+        composeOrder(
+          [901, 902, 903, 801],
+          [],
+          false,
+          assign([901, 902, 903, 801], { perProvider: 2 }),
+        ),
+      ).toEqual([901, 902, 801]);
+    });
+
+    it('counts what the channel already carries against the provider cap', () => {
+      // Provider 5 already has two on the channel, so its better candidates
+      // wait while provider 6 still fills -- held is per provider, not global.
+      expect(
+        composeOrder(
+          [901, 902, 10, 20, 801],
+          [10, 20],
+          false,
+          assign([901, 902, 10, 20, 801], { perProvider: 2 }),
+        ),
+      ).toEqual([10, 20, 801]);
+    });
+
+    it('keeps a provider over its ceiling when prune is off', () => {
+      // The ceiling only stems additions unless asked to remove: provider 5
+      // carries three against 2 and loses none of them.
+      expect(
+        composeOrder(
+          [10, 20, 30, 40],
+          [10, 20, 30, 40],
+          false,
+          assign([10, 20, 30, 40], { perProvider: 2 }),
+        ),
+      ).toEqual([10, 20, 30, 40]);
+    });
+
+    it('prunes the worst-ranked excess when asked, and only from the provider over its ceiling', () => {
+      // Provider 5's third-best (30) comes off; provider 6's 40 is under its
+      // own ceiling and stays. Prune off is the case above; this is the opt-in.
+      expect(
+        composeOrder(
+          [10, 20, 30, 40],
+          [10, 20, 30, 40],
+          false,
+          assign([10, 20, 30, 40], { perProvider: 2, prune: true }),
+        ),
+      ).toEqual([10, 20, 40]);
+    });
+
+    it('prunes down to the ceiling, keeping the best, and never past it', () => {
+      // Five of provider 5's streams on the channel, ceiling 2: the three
+      // worst come off and the two best stay -- N is where the prune stops.
+      expect(
+        composeOrder(
+          [901, 902, 10, 20, 30],
+          [901, 902, 10, 20, 30],
+          false,
+          assign([901, 902, 10, 20, 30], { perProvider: 2, prune: true }),
+        ),
+      ).toEqual([901, 902]);
+    });
+
+    it('appends strays but not what the prune just took', () => {
+      // 50 is on the channel and unranked: a stray, kept after the ranked
+      // ones. 20 and 30 are on the channel, ranked, and pruned -- appending
+      // them as well would mean the composition that dropped them put them
+      // straight back on the next line.
+      expect(
+        composeOrder(
+          [10, 20, 30],
+          [10, 20, 30, 50],
+          false,
+          assign([10, 20, 30], { perProvider: 1, prune: true }),
+        ),
+      ).toEqual([10, 50]);
+    });
+
+    it('does not let protectedIds resurrect what the prune took', () => {
+      // The protection list is for streams the catalogue cannot rank, so a
+      // ranked-and-pruned id has no business being on it -- but a caller
+      // could put one there, and the prune must still win.
+      expect(
+        composeOrder(
+          [10, 20, 30],
+          [10, 20, 30],
+          true,
+          assign([10, 20, 30], { perProvider: 1, prune: true }),
+          new Set([30]),
+        ),
+      ).toEqual([10]);
+    });
+
+    it('gives the room a prune releases to other providers', () => {
+      // Provider 5 holds two against a ceiling of 1 and a channel cap of 3.
+      // Its worse stream comes off, and the room goes to provider 6 -- the
+      // whole point of pairing the prune with the ceiling.
+      expect(
+        composeOrder(
+          [901, 902, 10, 20, 801, 802],
+          [10, 20],
+          false,
+          assign([901, 902, 10, 20, 801, 802], { max: 3, perProvider: 1, prune: true }),
+        ),
+      ).toEqual([10, 801]);
+    });
+
+    it('leaves streams it cannot attribute to a provider uncapped', () => {
+      // 999 matched nothing's account in providerOf -- there is nothing to
+      // key a ceiling on, so only the channel cap applies to it.
+      expect(
+        composeOrder([999, 901, 902], [], false, assign([999, 901, 902], { perProvider: 1 })),
+      ).toEqual([999, 901]);
+    });
+
+    it('is exactly the old behaviour when the per-provider cap is off', () => {
+      // 0 is off, and the prune flag must not do anything without it.
+      expect(
+        composeOrder([901, 902, 903], [], false, assign([901, 902, 903], { prune: true })),
+      ).toEqual([901, 902, 903]);
+      expect(
+        composeOrder([10, 20, 30], [10, 20, 30], false, assign([10, 20, 30], { prune: true })),
+      ).toEqual([10, 20, 30]);
+    });
+
+    it('lets the channel cap bind first when the provider ceiling is looser', () => {
+      expect(
+        composeOrder(
+          [901, 902, 801],
+          [],
+          false,
+          assign([901, 902, 801], { max: 2, perProvider: 5 }),
+        ),
+      ).toEqual([901, 902]);
+    });
+
+    it('never counts an ineligible stream toward a provider, nor prunes it', () => {
+      // 20 is dead or under a floor: it holds no slot open, occupies none,
+      // and its removal is the dead-stream settings' job, not the ceiling's.
+      expect(
+        composeOrder([10, 20], [10, 20], false, assign([10], { perProvider: 1, prune: true })),
+      ).toEqual([10, 20]);
+    });
+  });
+
+  describe('prunedByProvider', () => {
+    it('names exactly what a prune-shaped removal is', () => {
+      // On the baseline, ranked, eligible, and left out of the order: pruned.
+      expect(prunedByProvider([1, 2, 3, 4], [1, 2], [2, 3, 4], new Set([2, 3, 4]))).toEqual([3, 4]);
+    });
+
+    it('does not claim unmatched or dead removals as prunes', () => {
+      // 30 is on the channel but unranked (remove-unmatched's population) and
+      // 20 is ranked but ineligible (dead removal's): neither is a prune, and
+      // saying so would make the check's echo tell the apply to drop them.
+      expect(prunedByProvider([1, 2, 20, 30], [1], [2, 20], new Set([2, 3]))).toEqual([2]);
+    });
+
+    it('is empty when there is no assignment policy', () => {
+      expect(prunedByProvider([1, 2], [], [1, 2], undefined)).toEqual([]);
+    });
+  });
 });
 
 describe('config', () => {
@@ -1754,7 +1945,10 @@ describe('reorder live re-fetch', () => {
   // catalogue update at the end of `reorder` throws inside the try, the write
   // has already happened, and the assertions below pass over a swallowed error.
   const byId = new Map(
-    [1, 2, 3, 30, 901, 902, 903].map((id) => [id, { id, providerId: 5 } as unknown as Stream]),
+    [1, 2, 3, 30, 901, 902, 903, 801, 802].map((id) => [
+      id,
+      { id, providerId: id === 801 || id === 802 ? 6 : 5 } as unknown as Stream,
+    ]),
   );
   type ReorderSnapshot = {
     channelName: string;
@@ -1764,7 +1958,10 @@ describe('reorder live re-fetch', () => {
   const snapshot: ReorderSnapshot = {
     channelName: 'ESPN',
     byId,
-    providerNames: new Map([[5, 'Provider A']]),
+    providerNames: new Map([
+      [5, 'Provider A'],
+      [6, 'Provider B'],
+    ]),
   };
 
   const reorder = (
@@ -1775,7 +1972,7 @@ describe('reorder live re-fetch', () => {
     sink?: (m: string) => void,
   ): Promise<{
     written: number[][];
-    counters: { reordered: number; unchanged: number; assigned: number };
+    counters: { reordered: number; unchanged: number; assigned: number; removed: number };
     failures: string[];
   }> => {
     const written: number[][] = [];
@@ -1789,14 +1986,14 @@ describe('reorder live re-fetch', () => {
         written.push(order);
       },
     } as unknown as DispatcharrClient;
-    const counters = { reordered: 0, unchanged: 0, assigned: 0 };
+    const counters = { reordered: 0, unchanged: 0, assigned: 0, removed: 0 };
     return (
       runnerOverride as unknown as {
         reorder: (
           client: DispatcharrClient,
           channelId: number,
           entries: RankEntry[],
-          counters: { reordered: number; unchanged: number; assigned: number },
+          counters: { reordered: number; unchanged: number; assigned: number; removed: number },
           log: (m: string) => void,
           assigned: number[],
           strategy: RankStrategy,
@@ -1863,10 +2060,10 @@ describe('reorder live re-fetch', () => {
 
     // A new provider's stream: matched by the alias, probed, healthy, and on no
     // channel. This is the case the whole setting exists for.
-    const newProvider = (id: number, height = 2160): RankEntry => ({
+    const newProvider = (id: number, height = 2160, providerId = 5): RankEntry => ({
       streamId: id,
       stepOrder: 0,
-      providerId: 5,
+      providerId,
       result: result({ height }),
     });
 
@@ -1912,6 +2109,90 @@ describe('reorder live re-fetch', () => {
       // Cap 2, one slot already held by stream 1, so exactly one is added.
       expect(written).toEqual([[901, 1]]);
       expect(counters.assigned).toBe(1);
+    });
+
+    describe('with PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER on', () => {
+      it('keeps the best per provider across a pass', async () => {
+        // Three candidates, two from provider A and one from provider B, with
+        // room for one of each: A's 4K stream and B's only stream land, A's
+        // second does not -- diversity without twenty redundant ESPNs.
+        const { written, counters, failures } = await reorder(
+          [],
+          [],
+          [newProvider(901, 2160, 5), newProvider(902, 1440, 5), newProvider(801, 1080, 6)],
+          assigning({ PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER: '1' }),
+        );
+        expect(failures).toEqual([]);
+        expect(written).toEqual([[901, 801]]);
+        expect(counters.assigned).toBe(2);
+      });
+
+      it('prunes a provider over its ceiling and names the removal', async () => {
+        // All three on the channel are provider A's, ceiling 2: the worst
+        // comes off, the removal is counted and named like a dead one, and a
+        // later pass can put it back when a slot opens (no block is recorded).
+        const lines: string[] = [];
+        const { written, counters } = await reorder(
+          [901, 902, 1],
+          [901, 902, 1],
+          [newProvider(901, 2160, 5), newProvider(902, 1440, 5), entries[0]!],
+          assigning({
+            PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER: '2',
+            PODIUM_AUTO_ASSIGN_PRUNE_PER_PROVIDER: 'true',
+          }),
+          (m) => lines.push(m),
+        );
+        expect(written).toEqual([[901, 902]]);
+        expect(counters.removed).toBe(1);
+        expect(lines.join('\n')).toContain(
+          'removing 1 stream(s) over the per-provider cap of 2 1[Provider A]',
+        );
+      });
+
+      it('says what the prune would remove under dry run, and writes nothing', async () => {
+        const lines: string[] = [];
+        const runnerDry = new Runner({
+          config: () =>
+            loadConfig({
+              DISPATCHARR_API_KEY: 'k',
+              PODIUM_DRY_RUN: 'true',
+              PODIUM_AUTO_ASSIGN: 'true',
+              PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER: '2',
+              PODIUM_AUTO_ASSIGN_PRUNE_PER_PROVIDER: 'true',
+            }),
+          store,
+          rules: new RulesSource(join(dir, 'rules.json')),
+          log: (m) => lines.push(m),
+        });
+        const { written } = await reorder(
+          [901, 902, 1],
+          [901, 902, 1],
+          [newProvider(901, 2160, 5), newProvider(902, 1440, 5), entries[0]!],
+          runnerDry,
+          (m) => lines.push(m),
+        );
+        expect(written).toEqual([]);
+        expect(lines.join('\n')).toContain(
+          'would remove 1 over the per-provider cap: 1[Provider A]',
+        );
+      });
+
+      it('never prunes a stream the pass cannot rank', async () => {
+        // Stream 30 is on the channel but absent from the ranking -- the same
+        // "cannot rank, cannot touch" bargain the unmatched-grace rules make.
+        // The ranked excess still comes off, against the live order.
+        const { written, counters } = await reorder(
+          [901, 902, 1, 30],
+          [901, 902, 1, 30],
+          [newProvider(901, 2160, 5), newProvider(902, 1440, 5), entries[0]!],
+          assigning({
+            PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER: '2',
+            PODIUM_AUTO_ASSIGN_PRUNE_PER_PROVIDER: 'true',
+          }),
+        );
+        expect(written).toEqual([[901, 902, 30]]);
+        expect(counters.removed).toBe(1);
+      });
     });
 
     it('assigns nothing when the setting is off', async () => {
