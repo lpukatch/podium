@@ -195,7 +195,7 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
   );
   out.add(
     'podium_streams_removed_total',
-    'Streams taken off a channel for being dead too long, all runs. Zero unless PODIUM_REMOVE_DEAD_AFTER_CHECKS is set.',
+    'Streams taken off a channel, all runs: for being dead too long (PODIUM_REMOVE_DEAD_AFTER_CHECKS) or over the per-provider cap (PODIUM_AUTO_ASSIGN_PRUNE_PER_PROVIDER). Zero unless one of those is set.',
     'counter',
     totals.removed,
   );

@@ -334,6 +334,40 @@ describe('settings persistence', () => {
     ]);
   });
 
+  it('exposes and validates the per-provider cap fields', () => {
+    // Same whole-path check as auto-assign: a key missing from FIELDS never
+    // reaches the page, and a bad value must error rather than clamp.
+    expect(FIELD_KEYS).toContain('PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER');
+    expect(FIELD_KEYS).toContain('PODIUM_AUTO_ASSIGN_PRUNE_PER_PROVIDER');
+
+    expect(validateSettings({ PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER: '0' }).errors).toEqual([]);
+    expect(validateSettings({ PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER: '-1' }).errors).toHaveLength(1);
+    expect(validateSettings({ PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER: '0.5' }).errors).toHaveLength(1);
+    expect(validateSettings({ PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER: '999' }).errors).toHaveLength(1);
+
+    const behaviour = describeSettings({ DISPATCHARR_API_KEY: 'k' }, store.settings())
+      .filter((f) => f.section === 'behaviour')
+      .map((f) => f.key);
+    expect(behaviour).toContain('PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER');
+    expect(behaviour).toContain('PODIUM_AUTO_ASSIGN_PRUNE_PER_PROVIDER');
+  });
+
+  it('applies the per-provider cap through the stored value, and defaults it off', () => {
+    // Off until an operator says otherwise, on without a redeploy once they do.
+    const env = { DISPATCHARR_API_KEY: 'k' };
+    const defaults = loadConfig(resolveEnv(env, store.settings()));
+    expect(defaults.PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER).toBe(0);
+    expect(defaults.PODIUM_AUTO_ASSIGN_PRUNE_PER_PROVIDER).toBe(false);
+
+    store.setSettings({
+      PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER: '2',
+      PODIUM_AUTO_ASSIGN_PRUNE_PER_PROVIDER: 'true',
+    });
+    const config = loadConfig(resolveEnv(env, store.settings()));
+    expect(config.PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER).toBe(2);
+    expect(config.PODIUM_AUTO_ASSIGN_PRUNE_PER_PROVIDER).toBe(true);
+  });
+
   it('shows both auto-assign fields on the settings page', () => {
     const keys = describeSettings({ DISPATCHARR_API_KEY: 'k' }, store.settings())
       .filter((f) => f.section === 'behaviour')
