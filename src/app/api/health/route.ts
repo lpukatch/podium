@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
 import { STALE_LOCK_MS, Store } from '@/lib/store';
+import { VERSION } from '@/lib/version';
 
 export const dynamic = 'force-dynamic';
 
@@ -37,6 +38,7 @@ export function GET() {
     // Never a 503: the web process answered, which is what the probe asks.
     return NextResponse.json({
       status: 'ok',
+      version: VERSION,
       worker: !workerEnabled
         ? 'disabled'
         : heartbeatAge === null
@@ -49,7 +51,7 @@ export function GET() {
   } catch {
     // No database yet, or it is unreadable. The web process is still up, and a
     // fresh install must be able to reach the settings page to fix exactly this.
-    return NextResponse.json({ status: 'ok', worker: 'unknown' });
+    return NextResponse.json({ status: 'ok', version: VERSION, worker: 'unknown' });
   } finally {
     store?.close();
   }

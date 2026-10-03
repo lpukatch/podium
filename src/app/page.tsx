@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DeadResponse } from '@/lib/dead';
 import type { ProviderGroupFilter } from '@/lib/provider-groups';
 import { RESOLUTION_CHOICES } from '@/lib/resolution';
+import { VERSION } from '@/lib/version';
 import { BackupView } from './backup-view';
 import { CheckPanel } from './check-panel';
 import { DeadView } from './dead-view';
@@ -1260,6 +1261,12 @@ export default function Page() {
               <span className="hidden sm:inline">{loading ? '' : ' from Dispatcharr'}</span>
             </button>
           )}
+          {/* Always visible, on every tab -- the totals line below only renders
+              on the channels root, and a version you can only find on one tab
+              is a version nobody finds. */}
+          <span className="flex-none text-xs tabular-nums text-[var(--color-muted)]">
+            v{VERSION}
+          </span>
         </div>
         {!group && areaForTab(tab).id === 'channels' && (
           <p className="mt-1.5 text-sm tabular-nums text-[var(--color-muted)]">
