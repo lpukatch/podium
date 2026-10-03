@@ -47,7 +47,9 @@ describe('statsPayload stability keys', () => {
   it('publishes an unmeasured stream as unmeasured, not as a measured zero', () => {
     const stats = statsPayload(result());
     expect(stats.stability).toBe('never observed playing');
-    expect(stats.stability_score).toBe(1);
+    // Null, not 1: an unwatched stream has no stability verdict to report,
+    // and quality_score below carries no stability term for it either.
+    expect(stats.stability_score).toBeNull();
     expect(stats.drops_per_hour).toBeNull();
     expect(stats.unstable).toBe(false);
   });
@@ -81,13 +83,24 @@ describe('statsPayload stability keys', () => {
     expect(withRecord).toBe(without);
   });
 
+  it('excludes the term for an unmeasured stream, whatever the weight', () => {
+    const weighted = { ...DEFAULT_WEIGHTS, stability: 1 } satisfies Weights;
+    // However high the weight, a stream nobody has watched scores on its
+    // measured terms alone -- numerically the score it had at weight 0.
+    expect(statsPayload(result(), weighted).quality_score).toBe(
+      statsPayload(result(), DEFAULT_WEIGHTS).quality_score,
+    );
+  });
+
   it('moves quality_score with the term once the weight is raised', () => {
     const weighted = { ...DEFAULT_WEIGHTS, stability: 1 } satisfies Weights;
     const flapping = record({ breaks: 2, legs: 2, watchedMs: 2 * 3_600_000 });
     const withRecord = statsPayload(result(), weighted, flapping).quality_score as number;
     const without = statsPayload(result(), weighted).quality_score as number;
-    // An unmeasured stream keeps full marks on the term, so the flapping one
-    // must now score below it -- the whole point of raising the weight.
+    // The flapping one carries a half-marks term; the unmeasured one carries
+    // none. So it scores below the unmeasured stream on numbers alone --
+    // which is why `rank` sinks the unmeasured below the measured outright
+    // rather than leaving the comparison to the score.
     expect(withRecord).toBeLessThan(without);
   });
 });

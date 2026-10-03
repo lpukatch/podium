@@ -48,16 +48,25 @@
  * demotion has no undo short of an operator noticing, and the same argument
  * keeps `isInterlaced` from reading `unknown` as interlaced.
  *
- * ## Why it cannot promote anything
+ * ## Why an unmeasured stream is not a stable one
  *
- * `stabilityScore` returns 1.0 -- full marks -- for a stream with no evidence
- * against it, which is every stream nobody has ever watched. The term is a
- * penalty on demonstrated instability, never a reward for being observed.
- * Any other shape ranks streams by how popular their channel is: the feed
- * behind a channel somebody leaves on all evening would accumulate "proven
- * good" while an identical feed on a channel nobody tunes could not, and the
- * ranking would drift towards whatever happened to be watched. Podium ranks
- * streams it has never seen play, and it has to stay able to.
+ * The ledger's silence is a gap, not a verdict. A stream that has played and
+ * held has earned full marks; a stream nobody has ever watched has earned
+ * nothing at all -- not even the claim that it serves video. Callers
+ * therefore treat never-observed as N/A rather than as full marks: the
+ * published `stability_score` is null, the weight's term is dropped from the
+ * quality score (from the normaliser as well as the numerator, so an
+ * unmeasured stream is scored on the terms that were measured), and the
+ * ranking sinks it below every measured stream once the stability weight is
+ * on -- the same argument `bitrateUnknown` makes about bitrates.
+ *
+ * The drift that shape once guarded against is real, but it belonged to the
+ * score, not the bucket. Being watched decides *whether* a stream is
+ * measured, never how it scores: two clean streams -- one watched for two
+ * minutes, one for twenty hours -- get the same term, and an unmeasured one
+ * is not ranked by anything at all until `planSoaks` gets to it, which it
+ * does first, deliberately, so a stream rises out of the unmeasured bucket
+ * by being measured rather than by its channel happening to be popular.
  */
 
 /** One poll of one live channel. */
@@ -371,8 +380,10 @@ export function dropsPerHour(record: StabilityRecord): number {
  * above without ever reaching it -- so even a catastrophic stream keeps an
  * ordering among its peers rather than collapsing into a tie at the bottom.
  *
- * Full marks for a stream with nothing against it, which is the majority of
- * them. See the note on promotion at the top of this file.
+ * Full marks for a record with nothing against it. An *absent* record is not
+ * full marks but nothing to say -- callers branch on `observedPlaying` before
+ * asking, so an unmeasured stream's value here never decides anything. See
+ * the note on unmeasured streams at the top of this file.
  */
 export function stabilityScore(
   record: StabilityRecord | undefined,
@@ -493,9 +504,23 @@ export function channelStability(
   };
 }
 
+/**
+ * Whether the ledger has ever seen this stream play -- the line between
+ * "unmeasured" and "measured, with nothing against it".
+ *
+ * The same test `describeStability` applies when it chooses the
+ * "never observed playing" sentence, kept as a boolean so the score and the
+ * sentence beside it can never disagree about which side a stream is on.
+ */
+export function observedPlaying(
+  record: StabilityRecord | undefined,
+): record is StabilityRecord {
+  return Boolean(record && record.legs > 0);
+}
+
 /** One line for the UI: what the ledger has on this stream. */
 export function describeStability(record: StabilityRecord | undefined): string {
-  if (!record || record.legs === 0) return 'never observed playing';
+  if (!observedPlaying(record)) return 'never observed playing';
   const minutes = record.watchedMs / 60_000;
   const watched = minutes >= 60 ? `${(minutes / 60).toFixed(1)}h` : `${Math.round(minutes)}m`;
   const failures = record.breaks + record.stalls;
