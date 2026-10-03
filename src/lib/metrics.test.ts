@@ -7,6 +7,7 @@ import { renderMetrics } from './metrics';
 import type { ProbeResult } from './probe';
 import { score } from './scoring';
 import { Store } from './store';
+import { VERSION } from './version';
 
 const NOW = 1_800_000_000_000;
 const alive = (over: Partial<ProbeResult> = {}): ProbeResult => ({
@@ -59,6 +60,11 @@ describe('renderMetrics', () => {
     const types = text.split('\n').filter((l) => l.startsWith('# TYPE podium_up'));
     expect(types).toHaveLength(1);
     expect(text.endsWith('\n')).toBe(true);
+  });
+
+  it('labels the running build on podium_build_info', () => {
+    const m = parse(renderMetrics(store, { maxAgeMs: 3600_000, now: NOW }));
+    expect(m.get(`podium_build_info{version="${VERSION}"}`)).toBe(1);
   });
 
   it('reports the worker as not running when no lock is held', () => {

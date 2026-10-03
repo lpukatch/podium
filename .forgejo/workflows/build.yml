@@ -70,6 +70,20 @@ jobs:
             org.opencontainers.image.title=podium
             org.opencontainers.image.description=Provider-aware stream checker and reorderer for Dispatcharr
 
+      # What the app itself reports as its version. A tag build gets the
+      # released number; everything else (main pushes, PRs) gets that number
+      # plus the short commit sha, because package.json only moves at release
+      # time and an edge image reporting the previous release's number with a
+      # straight face is worse than no version at all.
+      - name: App build version
+        run: |
+          v="$(node -p "require('./package.json').version")"
+          case "$GITHUB_REF" in
+            refs/tags/*) ;;
+            *) v="${v}+g$(git rev-parse --short HEAD)" ;;
+          esac
+          echo "PODIUM_BUILD_VERSION=${v}" >> "$GITHUB_ENV"
+
       - name: Build and Push Image
         uses: docker/build-push-action@v7
         with:
@@ -79,6 +93,7 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: PODIUM_BUILD_VERSION=${{ env.PODIUM_BUILD_VERSION }}
           provenance: false
           cache-from: type=registry,ref=${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}:buildcache
           # Gated exactly like `push:` above, and for the same reason: a PR build

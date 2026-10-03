@@ -59,6 +59,18 @@ jobs:
             org.opencontainers.image.title=podium
             org.opencontainers.image.description=Provider-aware stream checker and reorderer for Dispatcharr
 
+      # What the app itself reports as its version; must match the Forgejo
+      # build workflow. A tag build gets the released number, a :main edge
+      # build gets that number plus the short commit sha.
+      - name: App build version
+        run: |
+          v="$(node -p "require('./package.json').version")"
+          case "$GITHUB_REF" in
+            refs/tags/*) ;;
+            *) v="${v}+g$(git rev-parse --short HEAD)" ;;
+          esac
+          echo "PODIUM_BUILD_VERSION=${v}" >> "$GITHUB_ENV"
+
       - name: Build and push
         uses: docker/build-push-action@v7
         with:
@@ -69,6 +81,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: PODIUM_BUILD_VERSION=${{ env.PODIUM_BUILD_VERSION }}
           # Skips the attestation manifest, which otherwise shows up on the
           # packages page as an "unknown/unknown" platform entry.
           provenance: false
