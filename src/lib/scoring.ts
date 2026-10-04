@@ -7,7 +7,12 @@
  */
 
 import { isInterlaced, type ProbeResult } from './probe';
-import { MAX_RESOLUTIONS, type MaxResolution, MIN_RESOLUTIONS, type MinResolution } from './resolution';
+import {
+  MAX_RESOLUTIONS,
+  type MaxResolution,
+  MIN_RESOLUTIONS,
+  type MinResolution,
+} from './resolution';
 import { observedPlaying, type StabilityRecord, stabilityScore, tooUnstable } from './stability';
 
 /** Normalisation ceilings. Anything at or above these scores 1.0 for that term. */
