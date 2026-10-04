@@ -11,7 +11,7 @@
  * stream or nothing at all -- never two different views of the same one.
  */
 
-import { isInterlaced, type ProbeResult } from './probe';
+import { deadDetail, deadReason, isInterlaced, type ProbeResult } from './probe';
 import { DEFAULT_WEIGHTS, frameRate, hdrFormat, score, type Weights } from './scoring';
 import {
   describeStability,
@@ -150,7 +150,27 @@ export function statsPayload(
      */
     quality_score: score(result, weights, false, stability),
     alive: result.alive,
-    quality_reason: !result.alive ? result.error || 'dead' : result.black ? 'black screen' : 'ok',
+    /**
+     * Why a dead verdict is dead, in the ten buckets `deadReason` folds
+     * ffmpeg's stderr into -- the same vocabulary the dead-streams metric
+     * counts, so a downstream reader can group or filter on it the way the
+     * Prometheus labels already do. `null` while the stream is alive: absence
+     * is a gap, not a bucket.
+     */
+    dead_reason: result.alive ? null : deadReason(result.error),
+    /**
+     * The failure in words, for the reader who wants the sentence rather than
+     * the bucket: ffmpeg's message with the stream URL and any credential it
+     * carried removed -- see `deadDetail`. The URL is redundant in a row that
+     * already names the stream, and publishing it put provider logins in
+     * Dispatcharr's database. `'dead'` when the probe had nothing to say, and
+     * always a string: `'ok'` and `'black screen'` for the living.
+     */
+    quality_reason: !result.alive
+      ? deadDetail(result.error) || 'dead'
+      : result.black
+        ? 'black screen'
+        : 'ok',
     probed_by: 'podium',
     probed_at: new Date().toISOString(),
   };

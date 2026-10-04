@@ -14,6 +14,7 @@ import { basename, join } from 'path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   DEAD_REASONS,
+  deadDetail,
   deadReason,
   parseSampleStderr,
   probe,
@@ -388,5 +389,47 @@ describe('deadReason', () => {
   it('is what `rejectUrl` refusals classify as', () => {
     expect(deadReason(rejectUrl(''))).toBe('rejected');
     expect(deadReason(rejectUrl('-report'))).toBe('rejected');
+  });
+});
+
+describe('deadDetail', () => {
+  // The shapes are the live instance's, with the credentials swapped for
+  // placeholders: every one of these was a real stored `quality_reason`.
+  it('keeps the message and drops the address ffmpeg prefixed', () => {
+    expect(
+      deadDetail('http://prov.tv/live/user/pass/48935.ts: Server returned 400 Bad Request'),
+    ).toBe('Server returned 400 Bad Request');
+    // A port in the URL is not the message separator.
+    expect(deadDetail('rtsp://user:secret@cam.local:8554/live: Connection refused')).toBe(
+      'Connection refused',
+    );
+  });
+
+  it('keeps the words around a URL named in passing', () => {
+    expect(deadDetail('Connection to tcp://10.0.0.9:8000 failed: Connection timed out')).toBe(
+      'Connection to failed: Connection timed out',
+    );
+  });
+
+  it('redacts a credential that rode in a query string', () => {
+    // No scheme for the strip above to catch, so the redaction is what saves it.
+    expect(deadDetail('9191/proxy/ts/stream/652c?token=secret: refused')).toBe(
+      '9191/proxy/ts/stream/652c?token=...: refused',
+    );
+  });
+
+  it('leaves probe-written and scheme-less text alone', () => {
+    expect(deadDetail('timeout')).toBe('timeout');
+    expect(deadDetail('Invalid data found when processing input')).toBe(
+      'Invalid data found when processing input',
+    );
+    expect(deadDetail('spawn failed: ffprobe not found')).toBe('spawn failed: ffprobe not found');
+    // Dispatcharr's own proxy path, which arrived with the host stripped by an
+    // earlier rewrite: no scheme, so nothing to drop -- it stays as it was.
+    expect(deadDetail('9191/proxy/ts/stream/652c8472')).toBe('9191/proxy/ts/stream/652c8472');
+  });
+
+  it('stays bounded', () => {
+    expect(deadDetail(`x ${'y'.repeat(500)}`).length).toBeLessThanOrEqual(200);
   });
 });

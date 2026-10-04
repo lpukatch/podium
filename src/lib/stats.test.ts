@@ -104,3 +104,38 @@ describe('statsPayload stability keys', () => {
     expect(withRecord).toBeLessThan(without);
   });
 });
+
+describe('statsPayload dead keys', () => {
+  it('publishes the failure without the stream it came from', () => {
+    // The shape of a real stored error, credential placeholdered: the URL was
+    // the part that made every dead stream unique and carried the provider
+    // login into Dispatcharr's database. The message is the part that says why.
+    const stats = statsPayload(
+      result({
+        alive: false,
+        width: 0,
+        height: 0,
+        error: 'http://prov.tv/live/user/pass/48935.ts: Server returned 400 Bad Request',
+      }),
+    );
+    expect(stats.quality_reason).toBe('Server returned 400 Bad Request');
+    expect(stats.dead_reason).toBe('client_error');
+    // Nothing the probe had to say was lost to the reader who wants it all.
+    expect(stats.alive).toBe(false);
+  });
+
+  it('keeps a bounded word when the probe had nothing to say', () => {
+    const stats = statsPayload(result({ alive: false, error: '' }));
+    expect(stats.quality_reason).toBe('dead');
+    expect(stats.dead_reason).toBe('other');
+  });
+
+  it('is a bucket and null rather than a string for the living', () => {
+    const ok = statsPayload(result());
+    expect(ok.quality_reason).toBe('ok');
+    expect(ok.dead_reason).toBeNull();
+    const black = statsPayload(result({ black: true, blackSeconds: 4 }));
+    expect(black.quality_reason).toBe('black screen');
+    expect(black.dead_reason).toBeNull();
+  });
+});
