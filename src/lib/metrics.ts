@@ -14,6 +14,7 @@ import { DEAD_REASONS, type DeadReason, deadReason, type ProbeResult } from './p
 import { DEFAULT_WEIGHTS, isUsable, score } from './scoring';
 import { channelStability, dropsPerHour, MIN_FAILURES } from './stability';
 import { type Progress, STALE_LOCK_MS, type Store } from './store';
+import { VERSION } from './version';
 
 type Labels = Record<string, string>;
 
@@ -92,6 +93,17 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
   const out = new Exposition();
 
   out.add('podium_up', 'Always 1; presence of this series means the API answered.', 'gauge', 1);
+
+  // The label is the point, not the value: `count by (version)
+  // (podium_build_info)` answers "which builds are actually running", the
+  // Prometheus idiom for the question this settles in one scrape.
+  out.add(
+    'podium_build_info',
+    'Always 1; the version label carries the running build.',
+    'gauge',
+    1,
+    { version: VERSION },
+  );
 
   // --- worker liveness -----------------------------------------------------
   // The question this whole endpoint exists to answer: is anything still

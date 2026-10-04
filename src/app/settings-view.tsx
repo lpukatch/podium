@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { VERSION } from '@/lib/version';
 
 interface Field {
   key: string;
@@ -364,7 +365,12 @@ export function SettingsView() {
   return (
     <div className="p-4 sm:p-6">
       <div className="mb-5">
-        <h2 className="text-xl font-semibold tracking-tight">How Podium runs</h2>
+        <h2 className="text-xl font-semibold tracking-tight">
+          How Podium runs
+          <span className="ml-2 align-middle text-sm font-normal tabular-nums text-[var(--color-muted)]">
+            v{VERSION}
+          </span>
+        </h2>
         <p className="mt-1 text-sm text-[var(--color-muted)]">
           Connect services, choose what changes automatically, and tune how streams are measured.
         </p>

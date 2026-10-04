@@ -15,6 +15,7 @@
 
 import { loadConfig } from './lib/config';
 import { ensureRulesFile } from './lib/rules';
+import { VERSION } from './lib/version';
 import { startWorker } from './worker/loop';
 
 const log = (message: string): void => {
@@ -22,6 +23,11 @@ const log = (message: string): void => {
 };
 
 async function main(): Promise<void> {
+  // First line of a cold start. It is the one fact an operator reading the
+  // logs after an update most wants, and until now the only way to read it
+  // off a running container was to recognise the framework versions around it.
+  log(`podium v${VERSION}`);
+
   const config = loadConfig();
 
   // Do this before either half starts: both read the rules file, and a fresh

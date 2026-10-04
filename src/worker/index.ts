@@ -7,6 +7,7 @@
 
 import { loadConfig } from '../lib/config';
 import { ensureRulesFile } from '../lib/rules';
+import { VERSION } from '../lib/version';
 import { buildRunner, startWorker } from './loop';
 
 const log = (message: string): void => {
@@ -14,6 +15,8 @@ const log = (message: string): void => {
 };
 
 async function main(): Promise<number> {
+  log(`podium v${VERSION}`);
+
   let config: ReturnType<typeof loadConfig>;
   try {
     config = loadConfig();

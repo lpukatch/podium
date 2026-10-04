@@ -16,7 +16,13 @@ FROM node:24-bookworm-slim AS build
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-ENV NEXT_TELEMETRY_DISABLED=1
+# The version baked into both bundles. CI passes the released version on a tag
+# build and version+short-sha on a :main edge build, so two edge images are
+# never the same "version". Unset (a local `docker build`) falls back to the
+# package.json version read by the build itself.
+ARG PODIUM_BUILD_VERSION=""
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    PODIUM_BUILD_VERSION=${PODIUM_BUILD_VERSION}
 RUN npm run build
 
 
