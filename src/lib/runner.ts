@@ -25,7 +25,7 @@ import {
 import { EpgCache } from './epg-cache';
 import { errorText } from './error-text';
 import type { Matcher, StreamIndex } from './matcher';
-import { resolveOrdering, withResolutionFloor } from './ordering';
+import { resolveOrdering, withResolutionCeiling, withResolutionFloor } from './ordering';
 import { Pacer, type PacerConfig, viewersByProvider } from './pacer';
 import { type ProbeResult, probe, type SoakResult, soakStream } from './probe';
 import {
@@ -37,7 +37,12 @@ import {
 } from './probe-routing';
 import { groupAllowed, type ProviderGroupFilter } from './provider-groups';
 import { tierOf } from './quality';
-import { channelResolutionFloor, type MinResolution } from './resolution';
+import {
+  channelResolutionCeiling,
+  channelResolutionFloor,
+  type MaxResolution,
+  type MinResolution,
+} from './resolution';
 import { pruneDeletedChannelRules } from './rule-sync';
 import type { RulesSource } from './rules-source';
 import { AbortFlag, laneKey, type ProbeJob, runLanes } from './scheduler';
@@ -786,6 +791,8 @@ export interface PlannedChannel {
    * group's. Resolved in `plan` for the same reason as `measureOnly`.
    */
   minResolution?: MinResolution;
+  /** The ceiling this channel ranks under, resolved alongside the floor. */
+  maxResolution?: MaxResolution;
 }
 
 export interface OpenJobItem {
@@ -2196,7 +2203,10 @@ export class Runner {
               probedVariants.set(job.streamId, variants);
             }
 
-            const channelStrategy = withResolutionFloor(strategy, entry.minResolution);
+            const channelStrategy = withResolutionCeiling(
+              withResolutionFloor(strategy, entry.minResolution),
+              entry.maxResolution,
+            );
             const entries: RankEntry[] = [];
             let complete = true;
             for (const [streamId, stepOrder] of entry.hits) {
@@ -2317,6 +2327,12 @@ export class Runner {
               this.deps.rules.get().channelFloors,
               channelId,
               eligibility.policyFor(groupId, groupName).minResolution,
+            ),
+          maxResolution: (channelId, groupId, groupName) =>
+            channelResolutionCeiling(
+              this.deps.rules.get().channelCeilings,
+              channelId,
+              eligibility.policyFor(groupId, groupName).maxResolution,
             ),
           // Teamarr orders the channels it creates, which are the ones an
           // operator has marked measure-only or ranked off their own
@@ -2580,7 +2596,7 @@ export class Runner {
         groupId === null || groupId === undefined ? undefined : outstandingMarks.get(groupId);
       if (group && probedAt <= group.forcedAt) group.remaining += 1;
     };
-    const { matcher, channelFloors } = this.deps.rules.get();
+    const { matcher, channelFloors, channelCeilings } = this.deps.rules.get();
     const index = passedIndex ?? matcher.buildIndex(streams, groupNames);
     const byId = passedById ?? new Map(streams.map((s) => [s.id, s]));
     // Read matching hash rows in one batch instead of one query per candidate
@@ -2812,6 +2828,11 @@ export class Runner {
           audioOnly: policy.audioOnly,
           measureOnly: policy.measureOnly,
           minResolution: channelResolutionFloor(channelFloors, channel.id, policy.minResolution),
+          maxResolution: channelResolutionCeiling(
+            channelCeilings,
+            channel.id,
+            policy.maxResolution,
+          ),
         });
       }
     }
@@ -2905,6 +2926,12 @@ export class Runner {
         groupId: number | null,
         groupName?: string,
       ) => MinResolution | undefined;
+      /** The ceiling the channel ranks under, as `plan` resolves it. */
+      maxResolution: (
+        channelId: number,
+        groupId: number | null,
+        groupName?: string,
+      ) => MaxResolution | undefined;
     },
   ): void {
     const { store } = this.deps;
@@ -2949,6 +2976,7 @@ export class Runner {
         audioOnly: policy.audioOnly(channel.groupId, groupName),
         managed: policy.managed(channel.groupId, groupName),
         minResolution: policy.minResolution(channel.id, channel.groupId, groupName),
+        maxResolution: policy.maxResolution(channel.id, channel.groupId, groupName),
         streams,
       });
     }
@@ -3568,7 +3596,10 @@ export class Runner {
         counters.measured += 1;
         continue;
       }
-      const channelStrategy = withResolutionFloor(strategy, entry.minResolution);
+      const channelStrategy = withResolutionCeiling(
+        withResolutionFloor(strategy, entry.minResolution),
+        entry.maxResolution,
+      );
       const entries: RankEntry[] = [];
       for (const [streamId, stepOrder] of hits) {
         const verdicts = fresh.get(streamId);

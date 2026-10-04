@@ -7,7 +7,12 @@
  */
 
 import { isInterlaced, type ProbeResult } from './probe';
-import { MIN_RESOLUTIONS, type MinResolution } from './resolution';
+import {
+  MAX_RESOLUTIONS,
+  type MaxResolution,
+  MIN_RESOLUTIONS,
+  type MinResolution,
+} from './resolution';
 import { type StabilityRecord, stabilityScore, tooUnstable } from './stability';
 
 /** Normalisation ceilings. Anything at or above these scores 1.0 for that term. */
@@ -193,6 +198,26 @@ export interface Weights {
    * quality order rather than collapsing to stream id.
    */
   minResolution?: MinResolution;
+  /**
+   * The largest picture a stream may carry and still be offered.
+   *
+   * The floor's mirror, resolved the same way -- per channel, from the
+   * channel's rule or else its group's policy, laid onto the pass's weights by
+   * `withResolutionCeiling`. Absent means no cap, which is every channel
+   * nobody has set one on.
+   *
+   * The reason to want one: a provider that carries the same channel in 1080p
+   * and 4K presents both as equals, and everything else in this file will
+   * prefer the 4K one -- more lines, more bitrate. An operator capping a
+   * channel at 1080p is saying their client, their bandwidth or their eyes
+   * stop there, and would otherwise be maintaining aliases purely to keep the
+   * 4K feed out.
+   *
+   * A preference like the floor, not a health check: a stream over it sinks
+   * with the unusable ones and is never auto-assigned, but keeps its score
+   * and ranks ahead of every stream that is actually broken.
+   */
+  maxResolution?: MaxResolution;
 }
 
 export const DEFAULT_WEIGHTS: Weights = {
@@ -387,15 +412,44 @@ export function meetsResolutionFloor(
 }
 
 /**
- * True when a stream is worth offering: healthy, and clearing the channel's
- * resolution floor if it has one. What ranking sinks on and auto-assign admits.
+ * Whether a stream's picture sits under `weights.maxResolution`.
+ *
+ * The floor's mirror, including the anamorphic tolerance: over the cap only
+ * when *both* dimensions are, so a 2.39:1 letterbox at 1920x800 does not
+ * breach a 1080p cap while a 2560x1440 breaches it both ways. A stream with
+ * no picture at all is under every cap -- the floor asks "at least", where
+ * absence fails it; the cap asks "at most", where absence is trivially true.
+ *
+ * Over the cap is survivable in the same way under the floor is: the stream
+ * keeps its score and stays ahead of everything actually broken.
+ *
+ * An audio-only channel has no picture to judge and is exempt outright.
+ */
+export function meetsResolutionCeiling(
+  result: ProbeResult,
+  weights: Weights = DEFAULT_WEIGHTS,
+  audioOnly = false,
+): boolean {
+  const ceiling = weights.maxResolution ? MAX_RESOLUTIONS[weights.maxResolution] : undefined;
+  if (!ceiling || audioOnly) return true;
+  return (result.height || 0) <= ceiling.height || (result.width || 0) <= ceiling.width;
+}
+
+/**
+ * True when a stream is worth offering: healthy, clearing the channel's
+ * resolution floor if it has one, and under its ceiling. What ranking sinks on
+ * and auto-assign admits.
  */
 export function isUsable(
   result: ProbeResult,
   weights: Weights = DEFAULT_WEIGHTS,
   audioOnly = false,
 ): boolean {
-  return isHealthy(result, weights, audioOnly) && meetsResolutionFloor(result, weights, audioOnly);
+  return (
+    isHealthy(result, weights, audioOnly) &&
+    meetsResolutionFloor(result, weights, audioOnly) &&
+    meetsResolutionCeiling(result, weights, audioOnly)
+  );
 }
 
 /**

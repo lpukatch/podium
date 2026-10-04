@@ -6,7 +6,7 @@ import {
   VALID_MODES,
   validGraceMinutes,
 } from '@/lib/eligibility';
-import { parseMinResolution } from '@/lib/resolution';
+import { parseMaxResolution, parseMinResolution, RESOLUTION_CHOICES } from '@/lib/resolution';
 import { readRulesDoc, snapshot, userGroups, writeRulesDoc } from '@/lib/server/state';
 
 export const dynamic = 'force-dynamic';
@@ -20,6 +20,7 @@ interface PatternRow {
   audio_only?: boolean;
   measure_only?: boolean;
   min_resolution?: string;
+  max_resolution?: string;
   include_groups?: string[];
   exclude_groups?: string[];
 }
@@ -40,6 +41,8 @@ export async function PUT(request: Request) {
      * stored; `null` and `""` read as `none`.
      */
     minResolution?: string | null;
+    /** The ceiling twin of `minResolution`, same readings. */
+    maxResolution?: string | null;
     groupFilter?: { includeGroups?: string[]; excludeGroups?: string[] } | null;
   } | null;
   if (body === null) {
@@ -68,6 +71,14 @@ export async function PUT(request: Request) {
       { status: 400 },
     );
   }
+  const clearedCap = body.maxResolution === null || body.maxResolution === '';
+  const requestedCeiling = clearedCap ? null : parseMaxResolution(body.maxResolution);
+  if (body.maxResolution !== undefined && !clearedCap && requestedCeiling === undefined) {
+    return NextResponse.json(
+      { error: `unknown resolution ${body.maxResolution}` },
+      { status: 400 },
+    );
+  }
 
   const doc = readRulesDoc();
   const patterns = (doc.group_patterns ?? []) as PatternRow[];
@@ -86,6 +97,24 @@ export async function PUT(request: Request) {
       : existing >= 0
         ? (parseMinResolution(patterns[existing]?.min_resolution) ?? undefined)
         : undefined;
+  const maxResolution =
+    body.maxResolution !== undefined
+      ? (requestedCeiling ?? undefined)
+      : existing >= 0
+        ? (parseMaxResolution(patterns[existing]?.max_resolution) ?? undefined)
+        : undefined;
+
+  // As in the group route: a floor above a ceiling would leave every group the
+  // pattern matches with nothing usable.
+  if (minResolution && maxResolution) {
+    const tiers = RESOLUTION_CHOICES as string[];
+    if (tiers.indexOf(maxResolution) < tiers.indexOf(minResolution)) {
+      return NextResponse.json(
+        { error: `ceiling ${maxResolution} is below floor ${minResolution}` },
+        { status: 400 },
+      );
+    }
+  }
 
   const previous = existing >= 0 ? patterns[existing] : undefined;
   const filter =
@@ -97,6 +126,7 @@ export async function PUT(request: Request) {
     !audioOnly &&
     !measureOnly &&
     !minResolution &&
+    !maxResolution &&
     !filter?.includeGroups &&
     !filter?.excludeGroups
   ) {
@@ -115,6 +145,7 @@ export async function PUT(request: Request) {
       ...(audioOnly ? { audio_only: true } : {}),
       ...(measureOnly ? { measure_only: true } : {}),
       ...(minResolution ? { min_resolution: minResolution } : {}),
+      ...(maxResolution ? { max_resolution: maxResolution } : {}),
       ...(filter?.includeGroups !== undefined ? { include_groups: filter.includeGroups } : {}),
       ...(filter?.excludeGroups !== undefined ? { exclude_groups: filter.excludeGroups } : {}),
     };

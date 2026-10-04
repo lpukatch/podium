@@ -11,9 +11,16 @@
 import { loadConfig } from './config';
 import { assignmentIsRule, Eligibility } from './eligibility';
 import { resolveOrdering } from './ordering';
-import { channelResolutionFloor } from './resolution';
+import { channelResolutionCeiling, channelResolutionFloor } from './resolution';
 import type { RankStrategy } from './scoring';
-import { channelFloors, groupPatterns, ordering, policies, type Snapshot } from './server/state';
+import {
+  channelCeilings,
+  channelFloors,
+  groupPatterns,
+  ordering,
+  policies,
+  type Snapshot,
+} from './server/state';
 import { resolveEnv } from './settings';
 import type { Store } from './store';
 import { type ChannelInput, factsFor, type StreamFacts } from './teamarr';
@@ -49,6 +56,7 @@ export function checkInputs(snap: Snapshot, store: Store): CheckInputs {
   // every radio channel as a disagreement with itself.
   const eligibility = new Eligibility(policies(), undefined, groupPatterns());
   const floors = channelFloors();
+  const ceilings = channelCeilings();
   const streamById = new Map(snap.streams.map((s) => [s.id, s]));
 
   // Every verdict in one read rather than per channel: a stream on several
@@ -94,6 +102,7 @@ export function checkInputs(snap: Snapshot, store: Store): CheckInputs {
       // ranked off their own assignment. Its rules reach nothing else.
       managed: Boolean(policy.measureOnly) || assignmentIsRule(policy.mode),
       minResolution: channelResolutionFloor(floors, channel.id, policy.minResolution),
+      maxResolution: channelResolutionCeiling(ceilings, channel.id, policy.maxResolution),
       streams,
     });
   }

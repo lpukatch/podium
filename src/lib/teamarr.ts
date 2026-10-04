@@ -20,9 +20,9 @@
  * scored as though those rules were absent.
  */
 
-import { withResolutionFloor } from './ordering';
+import { withResolutionCeiling, withResolutionFloor } from './ordering';
 import type { ProbeResult } from './probe';
-import type { MinResolution } from './resolution';
+import type { MaxResolution, MinResolution } from './resolution';
 import { type RankEntry, type RankStrategy, rank } from './scoring';
 import type { StabilityRecord } from './stability';
 import { statsPayload } from './stats';
@@ -364,6 +364,8 @@ export interface ChannelInput {
   managed?: boolean;
   /** The channel's resolution floor, so Podium's side ranks it as a pass would. */
   minResolution?: MinResolution;
+  /** The channel's resolution ceiling, resolved the same way. */
+  maxResolution?: MaxResolution;
   streams: Array<{ facts: StreamFacts; stepOrder: number }>;
 }
 
@@ -417,7 +419,10 @@ export function checkRules(
     }));
     const measured = rank(
       entries,
-      withResolutionFloor(strategy, channel.minResolution),
+      withResolutionCeiling(
+        withResolutionFloor(strategy, channel.minResolution),
+        channel.maxResolution,
+      ),
       channel.audioOnly,
     );
 

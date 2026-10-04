@@ -10,6 +10,8 @@ interface Row {
   usable: boolean;
   /** Plays at all. True while `usable` is false means below the resolution floor. */
   healthy?: boolean;
+  /** ...unless this is set, which means over the resolution ceiling instead. */
+  overResolution?: boolean;
   black: boolean;
   height: number;
   /** Beside `height` so a row can tell "no picture" from "a small one". */
@@ -105,6 +107,8 @@ interface CheckResult {
   minBitrateKbps: number;
   /** The channel's resolution floor, from its rule or its group; null for none. */
   minResolution?: string | null;
+  /** The channel's resolution ceiling, resolved the same way. */
+  maxResolution?: string | null;
   /** The channel taken as a whole -- see `channelStability`. */
   channelStability?: {
     total: number;
@@ -490,11 +494,17 @@ export function CheckPanel({
                             (under {result.minBitrateKbps}kbps — treated as dead)
                           </span>
                         )}
-                        {row.alive && !row.usable && row.healthy && (
+                        {row.alive && !row.usable && row.healthy && !row.overResolution && (
                           <span className="ml-1 text-[var(--color-warn)]">
                             {row.height <= 0 && row.width <= 0
                               ? `(no picture measured — cannot clear the ${result.minResolution} floor, so it ranks after every stream that does and is never auto-assigned)`
                               : `(below the ${result.minResolution} floor — ranked after every stream that meets it, and never auto-assigned)`}
+                          </span>
+                        )}
+                        {row.alive && !row.usable && row.healthy && row.overResolution && (
+                          <span className="ml-1 text-[var(--color-warn)]">
+                            (over the {result.maxResolution} cap — ranked after every stream under
+                            it, and never auto-assigned)
                           </span>
                         )}
                         {row.alive && row.usable && !row.black && row.bitrateKbps <= 0 && (

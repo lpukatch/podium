@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { parseMinResolution } from '@/lib/resolution';
+import { parseMaxResolution, parseMinResolution, RESOLUTION_CHOICES } from '@/lib/resolution';
 import { readRulesDoc, writeRulesDoc } from '@/lib/server/state';
 
 export const dynamic = 'force-dynamic';
@@ -36,6 +36,8 @@ export async function PUT(request: Request, context: { params: Promise<{ channel
      * those, and rejecting them would make "clear this" an error.
      */
     minResolution?: string | null;
+    /** The ceiling twin of `minResolution`, same readings. */
+    maxResolution?: string | null;
   } | null;
   if (body === null) {
     return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
@@ -49,6 +51,16 @@ export async function PUT(request: Request, context: { params: Promise<{ channel
   if (body.minResolution !== undefined && !inherits && floor === undefined) {
     return NextResponse.json(
       { error: `unknown resolution ${body.minResolution}` },
+      { status: 400 },
+    );
+  }
+
+  const inheritsCeiling =
+    body.maxResolution === null || body.maxResolution === '' || body.maxResolution === 'inherit';
+  const ceiling = inheritsCeiling ? undefined : parseMaxResolution(body.maxResolution);
+  if (body.maxResolution !== undefined && !inheritsCeiling && ceiling === undefined) {
+    return NextResponse.json(
+      { error: `unknown resolution ${body.maxResolution}` },
       { status: 400 },
     );
   }
@@ -136,6 +148,25 @@ export async function PUT(request: Request, context: { params: Promise<{ channel
     // "use my group's floor", which is the opposite.
     if (floor === undefined) delete entry.min_resolution;
     else entry.min_resolution = floor ?? 'none';
+  }
+  if (body.maxResolution !== undefined) {
+    if (ceiling === undefined) delete entry.max_resolution;
+    else entry.max_resolution = ceiling ?? 'none';
+  }
+
+  // A floor above the ceiling leaves nothing usable, and an operator who sets
+  // both that way has mistyped one of them. Read off the entry as it now
+  // stands, so saving one half is checked against the other.
+  const heldFloor = parseMinResolution(entry.min_resolution);
+  const heldCeiling = parseMaxResolution(entry.max_resolution);
+  if (heldFloor && heldCeiling) {
+    const tiers = RESOLUTION_CHOICES as string[];
+    if (tiers.indexOf(heldCeiling) < tiers.indexOf(heldFloor)) {
+      return NextResponse.json(
+        { error: `ceiling ${heldCeiling} is below floor ${heldFloor}` },
+        { status: 400 },
+      );
+    }
   }
 
   writeRulesDoc(doc);

@@ -16,7 +16,7 @@ import { statSync } from 'fs';
 import { Eligibility, type GroupPolicy, parseGroupPatterns, parsePolicies } from './eligibility';
 import type { Matcher } from './matcher';
 import type { OrderingConfig } from './ordering';
-import type { MinResolution } from './resolution';
+import type { MaxResolution, MinResolution } from './resolution';
 import { loadRules, readRulesFile } from './rules';
 
 export type Log = (message: string) => void;
@@ -29,6 +29,8 @@ export interface Rules {
   ordering: OrderingConfig;
   /** Per-channel resolution floors -- see `LoadReport.channelFloors`. */
   channelFloors: Map<number, MinResolution | null>;
+  /** Per-channel resolution ceilings -- see `LoadReport.channelCeilings`. */
+  channelCeilings: Map<number, MaxResolution | null>;
   loadedAt: number;
   /** Whether the file existed when this was loaded. */
   present: boolean;
@@ -111,6 +113,7 @@ export class RulesSource {
       policies,
       ordering: report.ordering,
       channelFloors: report.channelFloors,
+      channelCeilings: report.channelCeilings,
       loadedAt: Date.now(),
       present: !missing,
     };

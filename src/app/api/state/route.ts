@@ -3,6 +3,7 @@ import { loadConfig } from '@/lib/config';
 import { ALWAYS, assignmentIsRule, Eligibility, type GroupPolicy } from '@/lib/eligibility';
 import { assignedCandidates } from '@/lib/runner';
 import {
+  channelCeilings,
   channelFloors,
   config,
   groupPatterns,
@@ -29,6 +30,7 @@ export async function GET(request: Request) {
     const policy = policies();
     const patterns = groupPatterns();
     const floors = channelFloors();
+    const ceilings = channelCeilings();
     // Resolve through Eligibility so the UI shows exactly what the worker will
     // do, including policies that come from a name pattern rather than an id.
     const resolver = new Eligibility(policy, undefined, patterns);
@@ -74,6 +76,7 @@ export async function GET(request: Request) {
           Boolean(resolved.audioOnly) ||
           Boolean(resolved.measureOnly) ||
           resolved.minResolution != null ||
+          resolved.maxResolution != null ||
           resolved.groupFilter?.includeGroups !== undefined ||
           resolved.groupFilter?.excludeGroups !== undefined);
       let ruled = 0;
@@ -127,6 +130,8 @@ export async function GET(request: Request) {
           // The channel's own floor as written: `null` takes the group's, and
           // `none` is an explicit opt-out of it.
           minResolution: floors.has(channel.id) ? (floors.get(channel.id) ?? 'none') : null,
+          // The channel's own ceiling, same readings as the floor.
+          maxResolution: ceilings.has(channel.id) ? (ceilings.get(channel.id) ?? 'none') : null,
         };
       });
       rows.sort((a, b) => a.name.localeCompare(b.name));
@@ -141,6 +146,7 @@ export async function GET(request: Request) {
         audioOnly: resolved.audioOnly,
         measureOnly: resolved.measureOnly,
         minResolution: resolved.minResolution ?? null,
+        maxResolution: resolved.maxResolution ?? null,
         groupFilter: resolved.groupFilter ?? {},
         channels: channels.length,
         ruled,
