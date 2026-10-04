@@ -202,7 +202,14 @@ export function compileRules(
         value,
         points,
         test: (facts) => {
-          const actual = Number(facts.stats[metric]);
+          // `null` is a measured absence -- never observed playing, unknown
+          // colour transfer. `Number(null)` is 0, which would make
+          // `drops_per_hour|<=|1` match every stream nobody has watched, the
+          // exact confusion the null is there to prevent. Absent stats do not
+          // fire; a null stat is the same absence, not a zero.
+          const raw = facts.stats[metric];
+          if (raw === null || raw === undefined) return false;
+          const actual = Number(raw);
           return Number.isFinite(actual) && compare(actual, target);
         },
       });

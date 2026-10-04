@@ -123,6 +123,36 @@ describe('compileRules', () => {
     expect(skipped).toHaveLength(0);
   });
 
+  it('does not fire a numeric rule on a null stat, only on a measured zero', () => {
+    // `Number(null)` is 0: without this guard a `drops_per_hour|<=|1` rule
+    // scores every stream nobody has watched, reading the ledger's silence
+    // as a measured zero. A null key is an absence, like an absent one.
+    const { compiled } = compileRules([
+      { type: 'stats_metric', value: 'drops_per_hour|<=|1', mode: 'score', points: 5 },
+    ]);
+
+    const measured = factsFor(
+      { id: 1, name: 'Stream 1', providerName: 'Provider C', groupName: 'Sports | EPL' },
+      result(),
+      DEFAULT_STRATEGY,
+      {
+        streamId: 1,
+        legs: 2,
+        breaks: 0,
+        stalls: 0,
+        watchedMs: 2 * 3_600_000,
+        stalledMs: 0,
+        lastSeenAt: 0,
+      },
+    );
+    expect(measured.stats.drops_per_hour).toBe(0);
+    expect(scoreStream(measured, compiled).points).toBe(5);
+
+    const unmeasured = facts(2);
+    expect(unmeasured.stats.drops_per_hour).toBeNull();
+    expect(scoreStream(unmeasured, compiled).points).toBe(0);
+  });
+
   it('scores epg_match on the one field Teamarr compares', () => {
     const { compiled } = compileRules(
       [{ type: 'epg_match', value: '', mode: 'score', points: 10 }],
