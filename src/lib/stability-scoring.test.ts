@@ -200,10 +200,10 @@ describe('the unmeasured sink', () => {
 
   it('keeps score order among the never-observed themselves', () => {
     const order = rank(
-      entries([probe({ height: 480, width: 640, bitrateKbps: 1200 }), undefined], [
-        probe(),
-        undefined,
-      ]),
+      entries(
+        [probe({ height: 480, width: 640, bitrateKbps: 1200 }), undefined],
+        [probe(), undefined],
+      ),
       { mode: 'quality', weights: seeded, providerRank: new Map() },
     );
     expect(order).toEqual([2, 1]);
@@ -217,7 +217,14 @@ describe('the unmeasured sink', () => {
         { streamId: 1, stepOrder: 0, providerId: 1, result: probe(), stability: undefined },
         { streamId: 2, stepOrder: 0, providerId: 2, result: probe(), stability: SOLID },
       ],
-      { mode: 'provider', weights: seeded, providerRank: new Map([[1, 0], [2, 1]]) },
+      {
+        mode: 'provider',
+        weights: seeded,
+        providerRank: new Map([
+          [1, 0],
+          [2, 1],
+        ]),
+      },
     );
     expect(order).toEqual([1, 2]);
   });
@@ -296,7 +303,9 @@ describe('the stability term on an audio-only channel', () => {
   it('scores a measured-clean radio feed above an unmeasured one', () => {
     // The same reversal as the video branch: the term excludes rather than
     // credits the unmeasured, so a feed that has held earns its place.
-    expect(score(radio, seeded, true, SOLID)).toBeGreaterThan(score(radio, seeded, true, undefined));
+    expect(score(radio, seeded, true, SOLID)).toBeGreaterThan(
+      score(radio, seeded, true, undefined),
+    );
   });
 
   it('lets a steady feed overtake a flapping one of the same quality', () => {

@@ -8,12 +8,7 @@
 
 import { isInterlaced, type ProbeResult } from './probe';
 import { MIN_RESOLUTIONS, type MinResolution } from './resolution';
-import {
-  observedPlaying,
-  type StabilityRecord,
-  stabilityScore,
-  tooUnstable,
-} from './stability';
+import { observedPlaying, type StabilityRecord, stabilityScore, tooUnstable } from './stability';
 
 /** Normalisation ceilings. Anything at or above these scores 1.0 for that term. */
 const MAX_HEIGHT = 2160;

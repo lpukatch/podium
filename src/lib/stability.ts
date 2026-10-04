@@ -512,9 +512,7 @@ export function channelStability(
  * "never observed playing" sentence, kept as a boolean so the score and the
  * sentence beside it can never disagree about which side a stream is on.
  */
-export function observedPlaying(
-  record: StabilityRecord | undefined,
-): record is StabilityRecord {
+export function observedPlaying(record: StabilityRecord | undefined): record is StabilityRecord {
   return Boolean(record && record.legs > 0);
 }
 
