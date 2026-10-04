@@ -16,6 +16,7 @@ import { DEFAULT_WEIGHTS, frameRate, hdrFormat, score, type Weights } from './sc
 import {
   describeStability,
   dropsPerHour,
+  observedPlaying,
   type StabilityRecord,
   stabilityScore,
   tooUnstable,
@@ -117,12 +118,14 @@ export function statsPayload(
     stability: describeStability(stability),
     /**
      * The [0, 1] value the `stability` weight multiplies -- the one number a
-     * reader needs to see how the term moved the score. 1 when the ledger
-     * holds nothing, because the scoring reads absence as full marks rather
-     * than as a gap; the sentence above is what separates an unmeasured 1
-     * from an earned one.
+     * reader needs to see how the term moved the score. `null` on a stream
+     * the ledger has never seen play: absence is a gap, not full marks, and
+     * `quality_score` below carries no stability term there. The sentence
+     * above says the same thing in words.
      */
-    stability_score: Math.round(stabilityScore(stability) * 10_000) / 10_000,
+    stability_score: observedPlaying(stability)
+      ? Math.round(stabilityScore(stability) * 10_000) / 10_000
+      : null,
     /**
      * Failures per hour of observed watching. `null`, not 0, when the ledger
      * holds nothing: a stream nobody has watched must not read as a measured
@@ -138,9 +141,12 @@ export function statsPayload(
     unstable: tooUnstable(stability, weights.maxDropsPerHour),
     /**
      * Includes the stability term: the same number `rank` computes, so the
-     * score an operator reads is the score the ordering used. At the default
-     * stability weight of 0 the term is inert and this is unchanged to the
-     * last digit.
+     * score an operator reads is the score the ordering used. On a stream
+     * never observed playing the term is excluded rather than counted as full
+     * marks; the ordering sinks such a stream below the measured whatever
+     * their scores, the way it already sank the bitrate-unmeasured. At the
+     * default stability weight of 0 the term is inert and this is unchanged
+     * to the last digit.
      */
     quality_score: score(result, weights, false, stability),
     alive: result.alive,

@@ -8,7 +8,7 @@
 
 import { isInterlaced, type ProbeResult } from './probe';
 import { MIN_RESOLUTIONS, type MinResolution } from './resolution';
-import { type StabilityRecord, stabilityScore, tooUnstable } from './stability';
+import { observedPlaying, type StabilityRecord, stabilityScore, tooUnstable } from './stability';
 
 /** Normalisation ceilings. Anything at or above these scores 1.0 for that term. */
 const MAX_HEIGHT = 2160;
@@ -150,9 +150,11 @@ export interface Weights {
    * it exists to demote is usually the best-looking one on the channel -- that
    * is how it got to slot 0.
    *
-   * It can only ever subtract: a stream with no evidence against it scores full
-   * marks on this term, so raising the weight cannot promote a stream for
-   * having been watched. See the note on promotion in `stability.ts`.
+   * It only ever subtracts within the measured. A measured stream with nothing
+   * against it keeps full marks on the term; a stream the ledger has never
+   * seen play gets no term at all -- see the note on unmeasured streams in
+   * `stability.ts` -- and once this weight is on, `rank` sinks such a stream
+   * below every measured one outright.
    *
    * Defaults to 0 -- inert -- for the reason every term added since the first
    * release does: an existing rules file cannot mention a term that did not
@@ -241,6 +243,7 @@ export const NEW_INSTALL_AUDIO = 0.1;
  *     clean                      0.5449
  *     two drops in six hours     0.5123   (-0.033)
  *     two drops in 110 seconds   0.4165   (-0.128)
+ *     never observed             0.4767   no term at all -- see below
  *
  * and the streams it then has to place against:
  *
@@ -254,6 +257,15 @@ export const NEW_INSTALL_AUDIO = 0.1;
  * better than between drops. The occasional dropper gives up 0.033 and moves
  * nowhere, which is the other half: an evening with a hiccup in it must not
  * reshuffle a channel.
+ *
+ * The never-observed row is the one no weight can argue with: an unmeasured
+ * 4K feed outscores every stream in this table (0.8750) on its remaining
+ * terms, and no value here punishes that, because the term excludes the
+ * unmeasured rather than scoring them. That is why `rank`'s unmeasured sink
+ * is keyed to this weight being on -- sinking never-observed streams below
+ * every measured one whatever their scores -- and why `planSoaks` takes
+ * never-observed streams first: the only way out of that bucket is to be
+ * measured.
  *
  * `maxDropsPerHour` is deliberately *not* seeded alongside it. The weight
  * degrades gracefully and shows its work in the score column; the health check
@@ -514,7 +526,9 @@ export function score(
     // the ranking then ignored. The four audio terms above sum to 1, so this
     // is normalised the same way the video branch is: at weight 0 the result
     // is unchanged to the last digit, which is what keeps an upgrade still.
-    const w = Math.max(0, weights.stability);
+    // A feed nobody has ever heard gets no term -- the video branch below
+    // explains why the weight zeroes rather than the score.
+    const w = observedPlaying(stability) ? Math.max(0, weights.stability) : 0;
     const total = (quality + stabilityScore(stability) * w) / (1 + w);
     return Math.round(total * 10_000) / 10_000;
   }
@@ -556,6 +570,14 @@ export function score(
   // 1.0, which is where a ranking loses the ability to tell them apart. An
   // install that had already tuned its weights to some other total keeps its
   // order too: dividing by a constant cannot reorder anything.
+  //
+  // The stability weight drops out entirely for a stream the ledger has never
+  // seen play -- not zero marks, which would read absence as the worst
+  // record, and not full marks, which would read it as the best. Dropped from
+  // the numerator and the normaliser both, an unmeasured stream's score is
+  // the weighted mean of the terms that were measured. At weight 0 this is
+  // bit-identical to before: the term was inert either way.
+  const stabilityWeight = observedPlaying(stability) ? weights.stability : 0;
   const sum =
     weights.resolution +
     weights.bitrate +
@@ -563,7 +585,7 @@ export function score(
     weights.codec +
     weights.audio +
     weights.hdr +
-    weights.stability;
+    stabilityWeight;
   if (sum <= 0) return 0;
 
   const total =
@@ -573,7 +595,7 @@ export function score(
       codec * weights.codec +
       audioScore(result) * weights.audio +
       hdrScore(result, weights) * weights.hdr +
-      stabilityScore(stability) * weights.stability) /
+      stabilityScore(stability) * stabilityWeight) /
     sum;
 
   return Math.round(Math.min(total, 1) * 10_000) / 10_000;
@@ -587,10 +609,11 @@ export interface RankEntry {
   /**
    * What the passive ledger has on this stream, when anything.
    *
-   * Optional because most streams have none: nobody has watched them, and the
-   * scoring reads absence as full marks rather than as a gap. Supplied by the
-   * caller from `Store.stabilityRecords` so that ranking stays a pure function
-   * of what it is handed.
+   * Optional because most streams have none: nobody has watched them, and
+   * absence is the "never observed playing" state -- no stability term in the
+   * score, and a sink below the measured once the stability weight is on.
+   * Supplied by the caller from `Store.stabilityRecords` so that ranking
+   * stays a pure function of what it is handed.
    */
   stability?: StabilityRecord;
 }
@@ -626,8 +649,9 @@ export const DEFAULT_STRATEGY: RankStrategy = {
  * bitrate floor, or under the channel's resolution floor -- and among them a
  * stream that only misses the resolution floor goes ahead of one that does not
  * play at all. The mode then picks the primary key, streams whose bitrate was
- * never measured sink within it, quality score breaks ties after that, and a
- * stable stream-id sort is the last resort:
+ * never measured sink within it, and so -- once the stability weight is on --
+ * do streams the ledger has never seen play. Quality score breaks ties after
+ * that, and a stable stream-id sort is the last resort:
  *
  * - `quality` (default): score, then streamId. The best source wins outright.
  * - `provider`: preferred providers first (by `providerRank`), then score
@@ -687,6 +711,21 @@ export function rank(
       // beats unknown outright.
       const measured = (bitrateUnknown(a.result) ? 1 : 0) - (bitrateUnknown(b.result) ? 1 : 0);
       if (measured !== 0) return measured;
+
+      // The same argument one term over, gated by the weight it belongs to: a
+      // stream the ledger has never seen play is not a stable stream. With the
+      // term excluded in `score` an unmeasured stream can still out-score a
+      // measured one that drops -- a 4K feed nobody has watched against a
+      // flapping 1080p one that has at least proved it serves video -- on the
+      // strength of its remaining terms alone. Inert at weight 0, like the
+      // cliff above, so an install that has not opted into the term keeps its
+      // order however unwatched its streams. Soaks close the gap from above:
+      // `planSoaks` takes never-observed streams first.
+      const seen =
+        weights.stability > 0
+          ? (observedPlaying(a.stability) ? 0 : 1) - (observedPlaying(b.stability) ? 0 : 1)
+          : 0;
+      if (seen !== 0) return seen;
 
       const scoreDelta =
         score(b.result, weights, audioOnly, b.stability) -

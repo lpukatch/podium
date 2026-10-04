@@ -88,17 +88,22 @@ describe('the stability term', () => {
     );
   });
 
-  it('does not mark up a stream merely for having been watched', () => {
-    // The asymmetry the whole design rests on: proven-good and never-observed
-    // score identically, so a popular channel's feed gains nothing over an
-    // identical one nobody has tuned.
-    expect(score(probe(), seeded, false, SOLID)).toBe(score(probe(), seeded, false, undefined));
+  it('scores a measured-clean stream above an identical unmeasured one', () => {
+    // The reversal of the old asymmetry, and deliberate: a feed that has
+    // played and held has evidence an unwatched one lacks, and the unwatched
+    // one gets no term rather than a matching one. Being watched longer
+    // earns nothing further -- SOLID here is one hour, and a twenty-hour
+    // clean record scores identically.
+    expect(score(probe(), seeded, false, SOLID)).toBeGreaterThan(
+      score(probe(), seeded, false, undefined),
+    );
   });
 
   it('is calibrated where NEW_INSTALL_STABILITY says it is', () => {
     // The numbers the weight was chosen from, pinned so a change to any other
-    // term cannot quietly move them. See NEW_INSTALL_STABILITY.
-    expect(score(probe(), seeded, false, undefined)).toBeCloseTo(0.5449, 4);
+    // term cannot quietly move them. See NEW_INSTALL_STABILITY. The
+    // never-observed row is the term excluded, not the term at full marks.
+    expect(score(probe(), seeded, false, undefined)).toBeCloseTo(0.4767, 4);
     expect(score(probe(), seeded, false, FLAPPING)).toBeCloseTo(0.4165, 4);
     expect(
       score(probe(), seeded, false, record({ breaks: 2, watchedMs: 6 * 3_600_000 })),
@@ -107,14 +112,16 @@ describe('the stability term', () => {
 
   it('loses slot 0 to any comparable stream that holds, but not to a poor one', () => {
     const flapping = score(probe(), seeded, false, FLAPPING);
-    // A third of the bitrate, same picture -- and it plays.
-    expect(score(probe({ bitrateKbps: 2000 }), seeded, false, undefined)).toBeGreaterThan(flapping);
+    // The ones that hold are *measured* clean -- an unmeasured stream is not
+    // a stream that holds, it is a stream nobody knows about, and the sink
+    // below places it on that side of the line.
+    expect(score(probe({ bitrateKbps: 2000 }), seeded, false, SOLID)).toBeGreaterThan(flapping);
     expect(
-      score(probe({ height: 720, width: 1280, bitrateKbps: 3000 }), seeded, false, undefined),
+      score(probe({ height: 720, width: 1280, bitrateKbps: 3000 }), seeded, false, SOLID),
     ).toBeGreaterThan(flapping);
     // But a flapping 1080p feed is still better than 480p between the drops.
     expect(
-      score(probe({ height: 480, width: 640, bitrateKbps: 1200 }), seeded, false, undefined),
+      score(probe({ height: 480, width: 640, bitrateKbps: 1200 }), seeded, false, SOLID),
     ).toBeLessThan(flapping);
   });
 
@@ -148,7 +155,8 @@ describe('ranking on stability', () => {
 
   it('still prefers a genuinely better stream over a marginally steadier one', () => {
     // The weight is a tilt, not a veto: 4K against a record of two drops in an
-    // evening should not change hands.
+    // evening should not change hands. (The 720p challenger being unmeasured
+    // only reinforces this now -- the sink below puts it last regardless.)
     const occasional = record({ breaks: 2, watchedMs: 6 * 3_600_000 });
     const order = rank(
       entries(
@@ -156,6 +164,67 @@ describe('ranking on stability', () => {
         [probe({ height: 720, width: 1280, bitrateKbps: 2500 }), undefined],
       ),
       { mode: 'quality', weights: seeded, providerRank: new Map() },
+    );
+    expect(order).toEqual([1, 2]);
+  });
+});
+
+describe('the unmeasured sink', () => {
+  it('sinks a never-observed stream below a measured one that drops', () => {
+    // The reported case, exactly: an unwatched 4K feed against a flapping
+    // 1080p one that has at least proved it serves video. On score alone the
+    // 4K feed wins; the ledger has no verdict on it, and no verdict is not a
+    // clean one.
+    const order = rank(
+      entries(
+        [probe({ height: 2160, width: 3840, bitrateKbps: 12_000 }), undefined],
+        [probe(), FLAPPING],
+      ),
+      { mode: 'quality', weights: seeded, providerRank: new Map() },
+    );
+    expect(order).toEqual([2, 1]);
+  });
+
+  it('is inert while the stability weight is zero', () => {
+    // The upgrade guarantee: an install that has not asked for the term keeps
+    // the order it had, however unwatched its streams.
+    const order = rank(
+      entries(
+        [probe({ height: 2160, width: 3840, bitrateKbps: 12_000 }), undefined],
+        [probe(), FLAPPING],
+      ),
+      { mode: 'quality', weights: DEFAULT_WEIGHTS, providerRank: new Map() },
+    );
+    expect(order).toEqual([1, 2]);
+  });
+
+  it('keeps score order among the never-observed themselves', () => {
+    const order = rank(
+      entries(
+        [probe({ height: 480, width: 640, bitrateKbps: 1200 }), undefined],
+        [probe(), undefined],
+      ),
+      { mode: 'quality', weights: seeded, providerRank: new Map() },
+    );
+    expect(order).toEqual([2, 1]);
+  });
+
+  it('does not overrule a curated provider order, like a missing bitrate', () => {
+    // Provider preference is the operator's explicit curation; a missing
+    // measurement is not grounds to overrule it.
+    const order = rank(
+      [
+        { streamId: 1, stepOrder: 0, providerId: 1, result: probe(), stability: undefined },
+        { streamId: 2, stepOrder: 0, providerId: 2, result: probe(), stability: SOLID },
+      ],
+      {
+        mode: 'provider',
+        weights: seeded,
+        providerRank: new Map([
+          [1, 0],
+          [2, 1],
+        ]),
+      },
     );
     expect(order).toEqual([1, 2]);
   });
@@ -231,8 +300,12 @@ describe('the stability term on an audio-only channel', () => {
     );
   });
 
-  it('does not mark up a radio feed merely for having been measured', () => {
-    expect(score(radio, seeded, true, SOLID)).toBe(score(radio, seeded, true, undefined));
+  it('scores a measured-clean radio feed above an unmeasured one', () => {
+    // The same reversal as the video branch: the term excludes rather than
+    // credits the unmeasured, so a feed that has held earns its place.
+    expect(score(radio, seeded, true, SOLID)).toBeGreaterThan(
+      score(radio, seeded, true, undefined),
+    );
   });
 
   it('lets a steady feed overtake a flapping one of the same quality', () => {

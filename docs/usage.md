@@ -642,11 +642,16 @@ somebody switched over to the news, and there is no field that separates them.
 So it counts as clean watched time and no failure — which under-counts real
 failures and never invents one.
 
-**It can only ever subtract.** A stream with nothing recorded against it — which
-is most of them, since most streams sit behind slot 0 and have never served
-anybody — scores full marks on this term. Turning the weight up cannot promote a
-stream for having been watched, or the ranking would drift towards whatever
-happens to be popular.
+**It only ever subtracts within the measured.** A stream with a clean record
+scores full marks on this term; a stream nobody has ever watched gets no term
+at all — `null` where the score is published, and excluded from
+`quality_score` rather than counted as full marks. Turning the weight up cannot
+make a stream outrank an identical one by having been watched more, and an
+unwatched stream cannot out-score its way past a measured one either: once the
+weight is on, the ordering sinks never-observed streams below every measured
+one, the same "unmeasured is not better" rule it already applied to unmeasured
+bitrates. The way out of that bucket is a measurement — the soak sweep takes
+never-observed streams first.
 
 The weight is seeded at 0.15 on new installs and 0 on existing ones, like every
 other term added since the first release. On the H.264 1080p feed it was
@@ -657,6 +662,7 @@ measured against:
 | clean | 0.5449 |
 | two drops in six hours | 0.5123 |
 | two drops in 110 seconds | 0.4165 |
+| never observed | 0.4767 — no term, and sunk below all three by the ordering |
 
 and the streams it then has to place against: a clean 1080p at 2 Mbps scores
 0.4493 and a clean 720p at 3 Mbps scores 0.4275, so both beat the flapping
@@ -1099,13 +1105,17 @@ and at kickoff the unprobed streams are most of them.
 
 The stability ledger is published as numbers a rule can read the same way:
 `stability_score` (0 to 1 — the value the ordering's own stability weight
-multiplies), `drops_per_hour` (`null` on a stream nobody has watched, so a rule
-can tell unmeasured from measured-zero) and `unstable` (the
-`max_drops_per_hour` health check's verdict). A demotion like
-`drops_per_hour|>=|5  -20` is therefore expressible. `quality_score` includes
-the stability term, so at a non-zero stability weight it is the same number the
-ordering ranked by — at the default weight of 0 it is unchanged to the last
-digit.
+multiplies; `null` on a stream nobody has watched, unmeasured rather than
+perfect), `drops_per_hour` (`null` likewise, so a rule can tell unmeasured from
+measured-zero) and `unstable` (the `max_drops_per_hour` health check's verdict).
+A demotion like `drops_per_hour|>=|5  -20` is therefore expressible, and a
+`null` key never fires a numeric rule at all — a measured absence is no match,
+the same as an absent stat, never a zero. `quality_score` includes the
+stability term when there is one; on a never-observed stream the term is
+excluded rather than counted as full marks, and at a non-zero stability weight
+the ordering also sinks such a stream below every measured one, the same
+"unmeasured is not better" rule it already applied to unmeasured bitrates. At
+the default weight of 0 none of this moves anything.
 
 The **bitrate ladder is read off your own catalogue**, at the median, upper
 quartile and top decile of your watchable streams. Hand-picked thresholds go
