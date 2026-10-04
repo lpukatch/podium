@@ -1123,6 +1123,7 @@ export default function Page() {
   // no rule for those streams to have fallen out of, so nothing is flagged.
   const ruleIsEmpty =
     lines(aliases).length === 0 && lines(contains).length === 0 && !channel?.regexCount;
+  const firstRuleDraft = !channel?.hasRule && !ruleIsEmpty;
   const orphanedIds = useMemo(() => {
     if (!preview || ruleIsEmpty) return new Set<number>();
     return new Set(preview.orphaned.map((r) => r.id));
@@ -2022,8 +2023,8 @@ export default function Page() {
             {!channel.hasRule && group && RANKS_ASSIGNED.has(group.mode) && (
               <p className="mb-4 text-sm text-[var(--color-muted)]">
                 This group ranks channels with no rule off the streams they already carry, so this
-                one is being checked without an alias. Adding one narrows it to the streams the
-                alias matches.
+                one is being checked without an alias. Saving a rule switches Podium to matching
+                streams by that rule; streams it does not match stay assigned until you remove them.
               </p>
             )}
 
@@ -2477,18 +2478,45 @@ export default function Page() {
                   {removeNote.text}
                 </p>
               )}
+              {firstRuleDraft && preview && !previewing && (
+                <div className="mt-3 rounded-lg border border-[var(--color-warn)] p-3 text-sm">
+                  <p className="font-medium">Before saving this first rule</p>
+                  <p className="mt-1 text-[var(--color-muted)]">
+                    {preview.assignedCount - preview.orphaned.length} of {preview.assignedCount}{' '}
+                    assigned streams match. {preview.orphaned.length} will remain assigned in
+                    Dispatcharr but will not be claimed by this rule. Podium will rank the matching
+                    streams instead of using the channel’s assignment as its candidates. Nothing is
+                    unassigned just by saving.
+                  </p>
+                  {preview.orphaned.length > 0 && (
+                    <ul className="mt-2 max-h-32 list-inside list-disc overflow-y-auto text-[var(--color-muted)]">
+                      {preview.orphaned.map((stream) => (
+                        <li key={stream.id} className="break-all">
+                          {stream.raw}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+              {firstRuleDraft && previewing && (
+                <p className="mt-3 text-sm text-[var(--color-muted)]">
+                  Checking which assigned streams this rule would claim…
+                </p>
+              )}
               {preview && unifiedRows.length > 0 && (
                 <StreamList
                   title={`Live ordering & Matched (${unifiedRows.length})`}
                   hint={
                     ruleIsEmpty
-                      ? 'The current order in Dispatcharr.'
+                      ? 'The current order in Dispatcharr. Use + alias to start a rule from an assigned stream.'
                       : 'The current order in Dispatcharr, then newly matched streams. “Not in rule” streams stay assigned until you remove them here or change the rule.'
                   }
                   rows={unifiedRows}
                   tone="normal"
                   flush
                   orphanedIds={orphanedIds}
+                  offerAssignedAliases={!channel.hasRule && ruleIsEmpty}
                   onAdd={addAlias}
                   onRemove={removeStream}
                   removing={removing}
@@ -2788,6 +2816,7 @@ function StreamList({
   removing,
   flush,
   orphanedIds,
+  offerAssignedAliases,
 }: {
   title: string;
   hint?: string;
@@ -2799,6 +2828,8 @@ function StreamList({
   removing?: number | null;
   flush?: boolean;
   orphanedIds?: Set<number>;
+  /** A ruleless channel has no orphans, but its assigned streams can seed a rule. */
+  offerAssignedAliases?: boolean;
 }) {
   // Removing is a write to Dispatcharr with no undo, so it takes a second click
   // on the same row -- in place, rather than a browser dialog.
@@ -2902,7 +2933,7 @@ function StreamList({
                     )}
                   </span>
                 </span>
-                {onAdd && orphaned && (
+                {onAdd && (orphaned || (offerAssignedAliases && r.assigned)) && (
                   <button
                     type="button"
                     className={`${btn} flex-none px-3 py-1.5 text-sm`}
