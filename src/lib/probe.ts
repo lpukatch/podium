@@ -755,6 +755,34 @@ export function deadReason(error: string): DeadReason {
   return 'other';
 }
 
+/**
+ * The failure text a downstream reader gets, without the stream it came from.
+ *
+ * ffmpeg's last stderr line is conventionally `<input URL>: <message>`, and the
+ * message is the only part that says why the probe failed. The URL is worse
+ * than noise in a published stat: the reader is looking at the row for that
+ * stream already, it is what makes every dead stream carry its own unique
+ * string -- 393 distinct `quality_reason` values across 725 streams on the
+ * live instance, collapsing to 10 once the prefix goes -- and provider URLs
+ * routinely carry the account credential in their path or query, which this
+ * would publish into Dispatcharr's `stream_stats` for every user to read. So
+ * the address goes: a leading `<URL>: ` is dropped outright, a URL named in
+ * passing loses the address but keeps the words around it, and a
+ * credential-shaped query parameter on whatever survives is folded to `...`.
+ *
+ * The raw text still exists -- the probe ledger keeps it, and `deadReason`
+ * reads it -- so nothing diagnostic is lost. This is the publishing shape.
+ */
+export function deadDetail(error: string): string {
+  return error
+    .replace(/^[a-z][a-z0-9+.-]*:\/\/\S+?:(?:\s+|$)/i, '')
+    .replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, '')
+    .replace(/((?:username|password|token|auth|key|session)=)[^&\s:]+/gi, '$1...')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 200);
+}
+
 /** What one ffmpeg leg of a soak did. */
 /**
  * The shortest a connection can last and still count as having served.
