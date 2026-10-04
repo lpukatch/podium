@@ -15,7 +15,7 @@ import type { GroupPattern, GroupPolicy } from '../eligibility';
 import { parseGroupPatterns } from '../eligibility';
 import type { Matcher, StreamIndex } from '../matcher';
 import type { OrderingConfig } from '../ordering';
-import type { MinResolution } from '../resolution';
+import type { MaxResolution, MinResolution } from '../resolution';
 import { readRulesFile } from '../rules';
 import { RulesSource } from '../rules-source';
 import { resolveEnv } from '../settings';
@@ -163,6 +163,11 @@ export function ordering(): OrderingConfig {
 /** Resolution floors set on individual channels (reloaded on mtime). */
 export function channelFloors(): Map<number, MinResolution | null> {
   return source().get().channelFloors;
+}
+
+/** Resolution ceilings set on individual channels (reloaded on mtime). */
+export function channelCeilings(): Map<number, MaxResolution | null> {
+  return source().get().channelCeilings;
 }
 
 export async function snapshot(force = false): Promise<Snapshot> {

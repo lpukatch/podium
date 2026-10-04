@@ -18,7 +18,14 @@ import {
 } from './matcher';
 import { DEFAULT_ORDERING, type OrderingConfig } from './ordering';
 import { groupFilter } from './provider-groups';
-import { invalidMinResolution, type MinResolution, parseMinResolution } from './resolution';
+import {
+  invalidMaxResolution,
+  invalidMinResolution,
+  type MaxResolution,
+  type MinResolution,
+  parseMaxResolution,
+  parseMinResolution,
+} from './resolution';
 import {
   NEW_INSTALL_AUDIO,
   NEW_INSTALL_HDR,
@@ -54,6 +61,8 @@ const channelSchema = z.object({
   patterns: z.array(patternSchema).nullish(),
   /** `720p`, `1080p`, `2160p`, or `none` to ignore the group's. See `parseMinResolution`. */
   min_resolution: z.unknown().optional(),
+  /** The cap a channel ranks under, same readings as `min_resolution`. */
+  max_resolution: z.unknown().optional(),
 });
 
 const defaultsSchema = z
@@ -126,12 +135,15 @@ export interface LoadReport {
    * are exactly the channels most likely to want it.
    */
   channelFloors: Map<number, MinResolution | null>;
+  /** Resolution ceilings set on individual channels, same shape as the floors. */
+  channelCeilings: Map<number, MaxResolution | null>;
   /**
-   * Floors written in the file that could not be read, as `where: text`.
+   * Floors or ceilings written in the file that could not be read, as
+   * `where: text`.
    *
-   * An unreadable floor is ignored rather than fatal -- one typo must not cost
+   * An unreadable bound is ignored rather than fatal -- one typo must not cost
    * every channel its matching -- but ignoring it in silence is how an operator
-   * ends up certain they set a floor, watching a channel ranked without one.
+   * ends up certain they set one, watching a channel ranked without it.
    * Reported like `skippedPatterns`, and for the same reason.
    */
   invalidFloors: string[];
@@ -326,24 +338,34 @@ export function loadRules(raw: unknown): LoadReport {
   const rules = new Map<number, ChannelRule>();
   const skippedPatterns: string[] = [];
   const channelFloors = new Map<number, MinResolution | null>();
+  const channelCeilings = new Map<number, MaxResolution | null>();
   const invalidFloors: string[] = [];
 
-  // Groups are read for their floors only; `parsePolicies` owns the rest. A
+  // Groups are read for their bounds only; `parsePolicies` owns the rest. A
   // typo here is as silent as one on a channel, and as worth saying out loud.
   for (const [groupId, raw] of Object.entries(doc.groups ?? {})) {
-    const written = invalidMinResolution((raw as { min_resolution?: unknown })?.min_resolution);
-    if (written) invalidFloors.push(`group ${groupId}: min_resolution "${written}"`);
+    const extra = raw as { min_resolution?: unknown; max_resolution?: unknown };
+    const badFloor = invalidMinResolution(extra.min_resolution);
+    if (badFloor) invalidFloors.push(`group ${groupId}: min_resolution "${badFloor}"`);
+    const badCeiling = invalidMaxResolution(extra.max_resolution);
+    if (badCeiling) invalidFloors.push(`group ${groupId}: max_resolution "${badCeiling}"`);
   }
 
   for (const entry of doc.channels) {
     if (entry.enabled === false) continue;
     // Read before the no-matchers bail-out below, which would otherwise throw
-    // away the floor on every assignment-only channel.
+    // away the bounds on every assignment-only channel.
     const floor = parseMinResolution(entry.min_resolution);
     if (floor !== undefined) channelFloors.set(entry.channel_id, floor);
-    const written = invalidMinResolution(entry.min_resolution);
-    if (written) {
-      invalidFloors.push(`channel ${entry.channel_id}: min_resolution "${written}"`);
+    const badFloor = invalidMinResolution(entry.min_resolution);
+    if (badFloor) {
+      invalidFloors.push(`channel ${entry.channel_id}: min_resolution "${badFloor}"`);
+    }
+    const ceiling = parseMaxResolution(entry.max_resolution);
+    if (ceiling !== undefined) channelCeilings.set(entry.channel_id, ceiling);
+    const badCeiling = invalidMaxResolution(entry.max_resolution);
+    if (badCeiling) {
+      invalidFloors.push(`channel ${entry.channel_id}: max_resolution "${badCeiling}"`);
     }
 
     const patterns: CompiledPattern[] = [];
@@ -423,6 +445,7 @@ export function loadRules(raw: unknown): LoadReport {
     skippedPatterns,
     ordering,
     channelFloors,
+    channelCeilings,
     invalidFloors,
   };
 }

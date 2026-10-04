@@ -287,6 +287,26 @@ describe('checkRules', () => {
     expect(floored.channels[0]?.podium.streamId).toBe(2);
   });
 
+  it("ranks Podium's side under the channel's resolution ceiling", () => {
+    // Same promise as the floor above, from the other end: a capped channel's
+    // column must not lead with the 4K feed a pass would have sunk.
+    const streams = [
+      { facts: facts(1, {}, { width: 3840, height: 2160, bitrateKbps: 20_000 }), stepOrder: 0 },
+      { facts: facts(2, {}, { width: 1920, height: 1080, bitrateKbps: 3000 }), stepOrder: 1 },
+    ];
+
+    expect(checkRules([channel(streams)], [], DEFAULT_STRATEGY).channels[0]?.podium.streamId).toBe(
+      1,
+    );
+
+    const capped = checkRules(
+      [{ ...channel(streams), maxResolution: '1080p' as const }],
+      [],
+      DEFAULT_STRATEGY,
+    );
+    expect(capped.channels[0]?.podium.streamId).toBe(2);
+  });
+
   it('agrees when the rules and the measurements point the same way', () => {
     const check = checkRules(
       [

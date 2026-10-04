@@ -9,7 +9,7 @@
  * the one object the comparator needs, once per pass.
  */
 
-import type { MinResolution } from './resolution';
+import type { MaxResolution, MinResolution } from './resolution';
 import { DEFAULT_WEIGHTS, type RankStrategy, type Weights } from './scoring';
 
 export type { OrderingMode } from './scoring';
@@ -83,4 +83,13 @@ export function withResolutionFloor(
 ): RankStrategy {
   if (strategy.weights.minResolution === floor) return strategy;
   return { ...strategy, weights: { ...strategy.weights, minResolution: floor } };
+}
+
+/** The same hand-off for a ceiling, for the same reasons -- see above. */
+export function withResolutionCeiling(
+  strategy: RankStrategy,
+  ceiling: MaxResolution | undefined,
+): RankStrategy {
+  if (strategy.weights.maxResolution === ceiling) return strategy;
+  return { ...strategy, weights: { ...strategy.weights, maxResolution: ceiling } };
 }

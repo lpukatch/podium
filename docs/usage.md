@@ -475,6 +475,47 @@ chips, a name rule's is the menu on its row, and a channel's is **Minimum
 resolution** in its editor, saved with the rule. **Check now** says when a
 stream sank because of it.
 
+#### Maximum resolution
+
+The floor's mirror, for the provider that carries the same channel in 1080p
+*and* 4K: everything in the ranking prefers the bigger picture, so the 4K feed
+takes slot 0 on merit. A cap says where a channel should stop — an operator
+whose client, bandwidth or panel tops out at 1080p would otherwise be
+maintaining an alias purely to keep the bigger feed out. Set it the same three
+ways:
+
+```json
+"groups": { "3618": { "mode": "always", "max_resolution": "1080p" } }
+```
+
+```json
+{ "channel_id": 812, "aliases": ["Sky Sports Main Event"], "max_resolution": "1080p" }
+```
+
+The choices, readings and override chain are the floor's exactly: `720p`,
+`1080p` and `2160p`; `1080i` reads as `1080p`; an unreadable value is ignored
+and logged; a channel overrides its group, a group a name rule, and `none` opts
+out. A cap at or above a floor is fine; a cap *below* one — at the same level,
+where both are set — is refused on save, because it leaves a channel where
+nothing can be usable and is always a mistype. Set across levels (a channel
+floor against a group cap) it is not checked, and simply leaves nothing
+usable, which the check panel shows plainly.
+
+A stream breaches the cap only when its height *and* width are both over it, so
+the same letterbox and anamorphic tolerances apply: 1920×800 and 1440×1080 sit
+under a 1080p cap, 2560×1440 and 3840×1608 do not. A stream with no picture at
+all sits under every cap — "at most" cannot be breached by nothing.
+
+Being over the cap is treated exactly like being under the floor: the stream
+sinks below every stream inside the bounds, keeps its score and its order among
+the other over-cap streams, ranks ahead of anything actually broken, is never
+auto-assigned, never counts against the assign caps, and is never removed.
+
+In the UI the controls sit beside the floor's at all three levels — **Max
+resolution** on a group, the second menu on a name rule's row, **Maximum
+resolution** in the channel editor — and **Check now** says `(over the 1080p
+cap)` when a stream sank because of it.
+
 ## Re-checking on demand
 
 The freshness target is a floor, not a schedule. "Nothing older than 24 hours"

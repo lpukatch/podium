@@ -47,6 +47,8 @@ interface ChannelRow {
   assignmentOnly?: boolean;
   /** This channel's own floor: `null` takes the group's, `none` opts out of it. */
   minResolution?: string | null;
+  /** This channel's own ceiling, same readings as the floor. */
+  maxResolution?: string | null;
 }
 
 interface PatternRule {
@@ -60,6 +62,7 @@ interface PatternRule {
   audioOnly?: boolean;
   measureOnly?: boolean;
   minResolution?: string;
+  maxResolution?: string;
   graceMinutes?: number;
 }
 
@@ -74,6 +77,8 @@ interface GroupRow {
   measureOnly?: boolean;
   /** Resolved, so a floor that comes from a name rule shows here too. */
   minResolution?: string | null;
+  /** The ceiling, resolved the same way. */
+  maxResolution?: string | null;
   groupFilter?: ProviderGroupFilter;
   channels: number;
   ruled: number;
@@ -334,6 +339,7 @@ export default function Page() {
   const [exclude, setExclude] = useState('');
   /** `inherit`, `none`, or a resolution -- what the rule route accepts. */
   const [minResolution, setMinResolution] = useState('inherit');
+  const [maxResolution, setMaxResolution] = useState('inherit');
   const [preview, setPreview] = useState<Preview | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const previewRequest = useRef(0);
@@ -506,6 +512,7 @@ export default function Page() {
     setEditingAlias(null);
     setContainsGroupFilters(c.containsGroupFilters ?? {});
     setMinResolution(c.minResolution ?? 'inherit');
+    setMaxResolution(c.maxResolution ?? 'inherit');
     setPreview(null);
     setRemoveNote(null);
   }, []);
@@ -703,6 +710,7 @@ export default function Page() {
         aliasProviderGroupFilters,
         containsGroupFilters,
         minResolution,
+        maxResolution,
       }),
     });
     setSaved(resp.ok ? 'Saved' : 'Save failed');
@@ -959,6 +967,16 @@ export default function Page() {
     await load();
   };
 
+  /** Set a group's resolution ceiling; an empty choice clears it. */
+  const setGroupCap = async (id: number, mode: Mode, cap: string) => {
+    await fetch(`/api/groups/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode, maxResolution: cap || 'none' }),
+    });
+    await load();
+  };
+
   const setGroupGrace = async (id: number, mode: Mode, minutes: number) => {
     await fetch(`/api/groups/${id}`, {
       method: 'PUT',
@@ -982,6 +1000,15 @@ export default function Page() {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pattern, mode, minResolution: floor || 'none' }),
+    });
+    await load();
+  };
+
+  const setPatternCap = async (pattern: string, mode: Mode, cap: string) => {
+    await fetch('/api/group-patterns', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pattern, mode, maxResolution: cap || 'none' }),
     });
     await load();
   };
@@ -1522,6 +1549,21 @@ export default function Page() {
                           </option>
                         ))}
                       </select>
+                      <select
+                        aria-label={`Maximum resolution for ${p.pattern}`}
+                        value={p.maxResolution ?? ''}
+                        onChange={(e) =>
+                          void setPatternCap(p.pattern, p.mode as Mode, e.target.value)
+                        }
+                        className="rounded-lg border border-[var(--color-line)] bg-[var(--color-panel)] px-2 py-1.5 text-sm"
+                      >
+                        <option value="">No cap</option>
+                        {RESOLUTION_CHOICES.map((r) => (
+                          <option key={r} value={r}>
+                            {r} and under
+                          </option>
+                        ))}
+                      </select>
                       <button
                         type="button"
                         className={`${btn} px-3 py-1.5 text-sm`}
@@ -1704,6 +1746,24 @@ export default function Page() {
                   <select
                     value={group.minResolution ?? ''}
                     onChange={(e) => void setGroupFloor(group.id, group.mode, e.target.value)}
+                    className="rounded-lg border border-[var(--color-line)] bg-[var(--color-panel)] px-2 py-1.5 text-sm"
+                  >
+                    <option value="">Any</option>
+                    {RESOLUTION_CHOICES.map((r) => (
+                      <option key={r} value={r}>
+                        {r}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label
+                  className="flex items-center gap-2 text-sm text-[var(--color-muted)]"
+                  title="Streams over this sink under every stream under it and are never auto-assigned -- for a group whose provider also offers 4K. A channel's own setting wins over this."
+                >
+                  Max resolution
+                  <select
+                    value={group.maxResolution ?? ''}
+                    onChange={(e) => void setGroupCap(group.id, group.mode, e.target.value)}
                     className="rounded-lg border border-[var(--color-line)] bg-[var(--color-panel)] px-2 py-1.5 text-sm"
                   >
                     <option value="">Any</option>
@@ -2572,6 +2632,57 @@ export default function Page() {
                 Streams below it sink under every stream that meets it and are never auto-assigned,
                 but keep their order among themselves and ahead of anything dead. Saved with the
                 rule.
+              </p>
+            </div>
+
+            <div className={`${card} mt-4 p-5`}>
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h3 className="text-sm font-semibold uppercase tracking-wide text-[var(--color-muted)]">
+                  Maximum resolution
+                </h3>
+                <span className="text-sm text-[var(--color-muted)]">
+                  {(() => {
+                    const effective =
+                      maxResolution === 'inherit'
+                        ? (group?.maxResolution ?? null)
+                        : maxResolution === 'none'
+                          ? null
+                          : maxResolution;
+                    return effective ? `Capped at ${effective}` : 'No cap';
+                  })()}
+                </span>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => setMaxResolution('inherit')}
+                  className={chip(maxResolution === 'inherit')}
+                >
+                  Group default ({group?.maxResolution ?? 'any'})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMaxResolution('none')}
+                  className={chip(maxResolution === 'none')}
+                >
+                  Any
+                </button>
+                {RESOLUTION_CHOICES.map((r) => (
+                  <button
+                    type="button"
+                    key={r}
+                    onClick={() => setMaxResolution(r)}
+                    className={chip(maxResolution === r)}
+                  >
+                    {r}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-2 text-sm text-[var(--color-muted)]">
+                For a channel whose provider also offers it in 4K: capping it keeps the bigger feed
+                out without maintaining an alias purely to exclude it. Streams over the cap sink
+                under every stream under it and are never auto-assigned, but keep their order among
+                themselves and ahead of anything dead. Saved with the rule.
               </p>
             </div>
 

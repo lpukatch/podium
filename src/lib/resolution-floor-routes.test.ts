@@ -153,6 +153,115 @@ describe('PUT /api/groups/[groupId]', () => {
   });
 });
 
+describe('the ceiling write paths', () => {
+  it('writes a cap, and writes `none` down rather than omitting it', async () => {
+    const { PUT } = await import('../app/api/rules/[channelId]/route');
+
+    await put(PUT, { aliases: ['BBC One'], maxResolution: '1080p' }, { channelId: '812' });
+    expect(doc().channels[0]!.max_resolution).toBe('1080p');
+    expect(loadRules(doc()).channelCeilings.get(812)).toBe('1080p');
+
+    await put(PUT, { aliases: ['BBC One'], maxResolution: 'none' }, { channelId: '812' });
+    expect(doc().channels[0]!.max_resolution).toBe('none');
+    expect(loadRules(doc()).channelCeilings.get(812)).toBeNull();
+  });
+
+  it('treats null, "" and "inherit" alike, as a reset rather than an error', async () => {
+    const { PUT } = await import('../app/api/rules/[channelId]/route');
+
+    for (const value of [null, '', 'inherit']) {
+      await put(PUT, { aliases: ['A'], maxResolution: '1080p' }, { channelId: '5' });
+      const response = await put(PUT, { aliases: ['A'], maxResolution: value }, { channelId: '5' });
+      expect(response.status).toBe(200);
+      expect(doc().channels[0]!.max_resolution).toBeUndefined();
+      expect(loadRules(doc()).channelCeilings.has(5)).toBe(false);
+    }
+  });
+
+  it('still refuses a cap it cannot read', async () => {
+    const { PUT } = await import('../app/api/rules/[channelId]/route');
+    const response = await put(PUT, { aliases: ['A'], maxResolution: '1440p' }, { channelId: '5' });
+    expect(response.status).toBe(400);
+  });
+
+  it('refuses a cap below the floor, in the same request or against what is stored', async () => {
+    const { PUT } = await import('../app/api/rules/[channelId]/route');
+
+    // Both in one request.
+    const together = await put(
+      PUT,
+      { aliases: ['A'], minResolution: '1080p', maxResolution: '720p' },
+      { channelId: '5' },
+    );
+    expect(together.status).toBe(400);
+
+    // And the cap alone, against a floor already stored.
+    await put(PUT, { aliases: ['A'], minResolution: '1080p' }, { channelId: '5' });
+    const againstStored = await put(
+      PUT,
+      { aliases: ['A'], maxResolution: '720p' },
+      { channelId: '5' },
+    );
+    expect(againstStored.status).toBe(400);
+    // Refused means refused: the stored floor is not quietly rewritten.
+    expect(doc().channels[0]!.min_resolution).toBe('1080p');
+
+    // The legal combination -- a cap at the floor -- is fine.
+    const equal = await put(
+      PUT,
+      { aliases: ['A'], minResolution: '1080p', maxResolution: '1080p' },
+      { channelId: '5' },
+    );
+    expect(equal.status).toBe(200);
+  });
+
+  it('keeps the entry alive when a group pins itself to no cap', async () => {
+    const { PUT } = await import('../app/api/groups/[groupId]/route');
+    write({
+      schema: 2,
+      channels: [],
+      groups: {},
+      group_patterns: [{ pattern: 'Sports *', mode: ALWAYS, max_resolution: '1080p' }],
+    });
+
+    await put(PUT, { mode: ALWAYS, maxResolution: 'none' }, { groupId: '42' });
+
+    expect(doc().groups['42']!.max_resolution).toBe('none');
+    const elig = new Eligibility(
+      parsePolicies(doc().groups),
+      undefined,
+      parseGroupPatterns(doc().group_patterns),
+    );
+    expect(elig.policyFor(42, 'Sports UHD').maxResolution).toBeUndefined();
+  });
+
+  it('does not drop a hand-set cap when a chip changes something else', async () => {
+    const { PUT } = await import('../app/api/groups/[groupId]/route');
+    write({
+      schema: 2,
+      channels: [],
+      groups: { '42': { mode: ALWAYS, max_resolution: '1080p' } },
+    });
+
+    await put(PUT, { mode: ALWAYS, minResolution: '720p' }, { groupId: '42' });
+
+    const group = doc().groups['42']!;
+    expect(group.max_resolution).toBe('1080p');
+    expect(group.min_resolution).toBe('720p');
+  });
+
+  it('refuses a group cap below its floor', async () => {
+    const { PUT } = await import('../app/api/groups/[groupId]/route');
+
+    const response = await put(
+      PUT,
+      { mode: ALWAYS, minResolution: '1080p', maxResolution: '720p' },
+      { groupId: '42' },
+    );
+    expect(response.status).toBe(400);
+  });
+});
+
 // The group-pattern route is not driven here: it answers with the groups the
 // pattern would hit, which means a Dispatcharr snapshot and credentials. Its
 // floor handling is the same `cleared`/`requestedFloor` pair the group route

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { ALWAYS, MAX_GRACE_MINUTES, VALID_MODES, validGraceMinutes } from '@/lib/eligibility';
-import { parseMinResolution } from '@/lib/resolution';
+import { parseMaxResolution, parseMinResolution, RESOLUTION_CHOICES } from '@/lib/resolution';
 import { readRulesDoc, writeRulesDoc } from '@/lib/server/state';
 
 export const dynamic = 'force-dynamic';
@@ -24,6 +24,8 @@ export async function PUT(request: Request, context: { params: Promise<{ groupId
      * Absent keeps what is stored; `null` and `""` read as `none`.
      */
     minResolution?: string | null;
+    /** The ceiling twin of `minResolution`, same readings. */
+    maxResolution?: string | null;
   } | null;
   if (body === null) {
     return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
@@ -48,6 +50,14 @@ export async function PUT(request: Request, context: { params: Promise<{ groupId
       { status: 400 },
     );
   }
+  const clearedCap = body.maxResolution === null || body.maxResolution === '';
+  const requestedCeiling = clearedCap ? null : parseMaxResolution(body.maxResolution);
+  if (body.maxResolution !== undefined && !clearedCap && requestedCeiling === undefined) {
+    return NextResponse.json(
+      { error: `unknown resolution ${body.maxResolution}` },
+      { status: 400 },
+    );
+  }
 
   const doc = readRulesDoc();
   const groups = (doc.groups ?? {}) as Record<string, unknown>;
@@ -63,16 +73,35 @@ export async function PUT(request: Request, context: { params: Promise<{ groupId
   const storedFloor = parseMinResolution(storedObj?.min_resolution);
   const minResolution =
     body.minResolution !== undefined ? requestedFloor : (storedFloor ?? undefined);
+  const storedCeiling = parseMaxResolution(storedObj?.max_resolution);
+  const maxResolution =
+    body.maxResolution !== undefined ? requestedCeiling : (storedCeiling ?? undefined);
+
+  // A floor above a ceiling leaves nothing usable on any channel that inherits
+  // both from this group; checked here rather than left to render as an empty
+  // channel.
+  if (minResolution && maxResolution) {
+    const tiers = RESOLUTION_CHOICES as string[];
+    if (tiers.indexOf(maxResolution) < tiers.indexOf(minResolution)) {
+      return NextResponse.json(
+        { error: `ceiling ${maxResolution} is below floor ${minResolution}` },
+        { status: 400 },
+      );
+    }
+  }
 
   // A group's "no floor" has to be written down, not inferred from an absent
   // entry. `Eligibility.policyFor` consults the name patterns only when a group
   // has no entry of its own, so deleting the entry is the one thing that hands
   // the group straight back to the pattern floor it was just told to ignore --
-  // the menu would snap back to the pattern's answer and stay there.
+  // the menu would snap back to the pattern's answer and stay there. The same
+  // holds for a cap, for the same reason.
   const pinnedToNoFloor = minResolution === null;
+  const pinnedToNoCap = maxResolution === null;
   // `none` is written out, not dropped: that is the value that keeps the entry
   // here at all, and the entry is the override.
   const storedValue = pinnedToNoFloor ? 'none' : minResolution;
+  const storedCapValue = pinnedToNoCap ? 'none' : maxResolution;
   const filter =
     body.groupFilter === undefined
       ? { includeGroups: storedObj?.include_groups, excludeGroups: storedObj?.exclude_groups }
@@ -82,11 +111,12 @@ export async function PUT(request: Request, context: { params: Promise<{ groupId
     !audioOnly &&
     !measureOnly &&
     !minResolution &&
+    !maxResolution &&
     keptLive === undefined &&
     !filter?.includeGroups &&
     !filter?.excludeGroups;
 
-  if (isDefault && !pinnedToNoFloor) {
+  if (isDefault && !pinnedToNoFloor && !pinnedToNoCap) {
     // Default mode with no custom settings: clean up entry
     delete groups[String(id)];
   } else {
@@ -100,6 +130,7 @@ export async function PUT(request: Request, context: { params: Promise<{ groupId
       ...(audioOnly ? { audio_only: true } : {}),
       ...(measureOnly ? { measure_only: true } : {}),
       ...(storedValue ? { min_resolution: storedValue } : {}),
+      ...(storedCapValue ? { max_resolution: storedCapValue } : {}),
       ...(keptLive === undefined ? {} : { require_live: keptLive }),
       ...(filter?.includeGroups !== undefined ? { include_groups: filter.includeGroups } : {}),
       ...(filter?.excludeGroups !== undefined ? { exclude_groups: filter.excludeGroups } : {}),
@@ -114,5 +145,6 @@ export async function PUT(request: Request, context: { params: Promise<{ groupId
     audioOnly,
     measureOnly,
     minResolution: minResolution ?? null,
+    maxResolution: maxResolution ?? null,
   });
 }

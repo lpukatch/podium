@@ -108,3 +108,80 @@ export function channelResolutionFloor(
 ): MinResolution | undefined {
   return resolveResolutionFloor(floors.get(channelId), group);
 }
+
+/**
+ * What it takes to sit under each ceiling: the height *and* the width over it.
+ *
+ * The floor's mirror, argument for argument. To clear a floor, one dimension
+ * is enough -- height alone would sink every letterboxed feed, width alone
+ * every anamorphic one. To breach a ceiling, both must be over: a 2.39:1
+ * film at 1920x800 is not over a 1080p cap (height within), and an anamorphic
+ * 1440x1080 is not either (width within), while a 2560x1440 is over both
+ * ways. These cuts sit a little *over* the nominal figure so an encode a few
+ * lines past its label (1936x1088) is still the resolution it says it is --
+ * the same tolerance the floor takes in the other direction.
+ */
+export const MAX_RESOLUTIONS = {
+  '720p': { height: 736, width: 1280 },
+  '1080p': { height: 1104, width: 1920 },
+  '2160p': { height: 2208, width: 3840 },
+} as const;
+
+export type MaxResolution = keyof typeof MAX_RESOLUTIONS;
+
+/**
+ * Read a ceiling from a rules file or a request body.
+ *
+ * The same three answers for the same reasons -- `undefined` is "not set
+ * here", `null` is "set here, to no cap" -- and the same readings: `1080i` is
+ * the same cap as `1080p`, `4K` and `UHD` name the 2160p one, and anything
+ * unreadable is unset, with `invalidMaxResolution` to say so.
+ */
+export function parseMaxResolution(raw: unknown): MaxResolution | null | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const text = String(raw).trim().toLowerCase();
+  if (text === '' || text === 'inherit') return undefined;
+  if (text === 'none' || text === 'any') return null;
+  if (text === '4k' || text === 'uhd') return '2160p';
+  const key = `${text.replace(/[ip]$/, '')}p` as MaxResolution;
+  return (Object.keys(MAX_RESOLUTIONS) as MaxResolution[]).includes(key) ? key : undefined;
+}
+
+/** The text of a ceiling that could not be read, or `''` when there was not one. */
+export function invalidMaxResolution(raw: unknown): string {
+  if (raw === undefined || raw === null) return '';
+  const text = String(raw).trim();
+  if (text === '') return '';
+  return parseMaxResolution(raw) === undefined ? text : '';
+}
+
+/**
+ * The ceiling a channel ranks under: its own, else its group's.
+ *
+ * Resolved exactly as the floor is, because the two are independent
+ * instructions -- one says what the channel must not lead with, the other
+ * what it must not be capped above, and either can be set without the other.
+ */
+export function resolveResolutionCeiling(
+  channel: MaxResolution | null | undefined,
+  group: MaxResolution | null | undefined,
+): MaxResolution | undefined {
+  if (channel === null) return undefined;
+  return channel ?? group ?? undefined;
+}
+
+/**
+ * The ceiling for one channel, given every channel's and its group's.
+ *
+ * The same single lookup `channelResolutionFloor` exists for: the pass, the
+ * Teamarr comparison, the rule-check inputs and the check panel must all rank
+ * a channel under the same ceiling or the panel's preview stops promising to
+ * match what the worker writes.
+ */
+export function channelResolutionCeiling(
+  ceilings: Map<number, MaxResolution | null>,
+  channelId: number,
+  group: MaxResolution | null | undefined,
+): MaxResolution | undefined {
+  return resolveResolutionCeiling(ceilings.get(channelId), group);
+}

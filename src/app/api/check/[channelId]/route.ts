@@ -8,10 +8,10 @@ import {
   Eligibility,
 } from '@/lib/eligibility';
 import { Mutex } from '@/lib/mutex';
-import { resolveOrdering, withResolutionFloor } from '@/lib/ordering';
+import { resolveOrdering, withResolutionCeiling, withResolutionFloor } from '@/lib/ordering';
 import { isInterlaced, type ProbeResult, probe } from '@/lib/probe';
 import { activityOptions, probeProxyBase, probeUserAgent } from '@/lib/probe-routing';
-import { channelResolutionFloor } from '@/lib/resolution';
+import { channelResolutionCeiling, channelResolutionFloor } from '@/lib/resolution';
 import {
   type AssignOptions,
   assignedCandidates,
@@ -24,8 +24,18 @@ import {
   statsPayload,
 } from '@/lib/runner';
 import { laneKey, type ProbeJob, runLanes } from '@/lib/scheduler';
-import { frameRate, isHealthy, isUsable, type RankEntry, rank, score } from '@/lib/scoring';
 import {
+  frameRate,
+  isHealthy,
+  isUsable,
+  meetsResolutionCeiling,
+  meetsResolutionFloor,
+  type RankEntry,
+  rank,
+  score,
+} from '@/lib/scoring';
+import {
+  channelCeilings,
   channelFloors,
   groupPatterns,
   index,
@@ -198,6 +208,8 @@ export async function POST(request: Request, context: { params: Promise<{ channe
           .weights.minBitrateKbps,
         minResolution:
           channelResolutionFloor(channelFloors(), id, groupPolicy.minResolution) ?? null,
+        maxResolution:
+          channelResolutionCeiling(channelCeilings(), id, groupPolicy.maxResolution) ?? null,
         rows: [],
         unclaimed: [],
         unprobed: [],
@@ -213,10 +225,13 @@ export async function POST(request: Request, context: { params: Promise<{ channe
 
     const providerNames = new Map(snap.providers.map((p) => [p.id, p.name]));
     // Same strategy the worker resolves, so the preview matches what it writes --
-    // down to this channel's own resolution floor.
-    const strategy = withResolutionFloor(
-      resolveOrdering(ordering(), providerNames, config.PODIUM_MIN_BITRATE_KBPS),
-      channelResolutionFloor(channelFloors(), id, groupPolicy.minResolution),
+    // down to this channel's own resolution floor and ceiling.
+    const strategy = withResolutionCeiling(
+      withResolutionFloor(
+        resolveOrdering(ordering(), providerNames, config.PODIUM_MIN_BITRATE_KBPS),
+        channelResolutionFloor(channelFloors(), id, groupPolicy.minResolution),
+      ),
+      channelResolutionCeiling(channelCeilings(), id, groupPolicy.maxResolution),
     );
 
     // The courtesy reserve, on the same rule the worker uses (Pacer.laneLimits):
@@ -548,6 +563,13 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         // Separates "below the resolution floor" from "does not play", which
         // the panel explains differently and the ranking treats differently.
         healthy: result ? isHealthy(result, strategy.weights, audioOnly) : false,
+        // And "over the resolution ceiling" from both: the third way a healthy
+        // stream can be unusable, explained with its own bound.
+        overResolution:
+          result &&
+          result.height > 0 &&
+          meetsResolutionFloor(result, strategy.weights, audioOnly) &&
+          !meetsResolutionCeiling(result, strategy.weights, audioOnly),
         black: result?.black ?? false,
         currentRank: current.indexOf(streamId) >= 0 ? current.indexOf(streamId) + 1 : null,
         proposedRank: proposed.indexOf(streamId) >= 0 ? proposed.indexOf(streamId) + 1 : null,
@@ -607,6 +629,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       // ranking whenever the rules file overrode it.
       minBitrateKbps: strategy.weights.minBitrateKbps,
       minResolution: strategy.weights.minResolution ?? null,
+      maxResolution: strategy.weights.maxResolution ?? null,
       channelStability: channelVerdict,
       rows,
       unclaimed,
