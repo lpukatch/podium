@@ -582,8 +582,9 @@ export function score(
     // is unchanged to the last digit, which is what keeps an upgrade still.
     // A feed nobody has ever heard gets no term -- the video branch below
     // explains why the weight zeroes rather than the score.
-    const w = observedPlaying(stability) ? Math.max(0, weights.stability) : 0;
-    const total = (quality + stabilityScore(stability) * w) / (1 + w);
+    const observed = observedPlaying(stability);
+    const w = observed ? Math.max(0, weights.stability) : 0;
+    const total = (quality + (observed ? stabilityScore(stability) * w : 0)) / (1 + w);
     return Math.round(total * 10_000) / 10_000;
   }
 
@@ -631,7 +632,8 @@ export function score(
   // the numerator and the normaliser both, an unmeasured stream's score is
   // the weighted mean of the terms that were measured. At weight 0 this is
   // bit-identical to before: the term was inert either way.
-  const stabilityWeight = observedPlaying(stability) ? weights.stability : 0;
+  const observed = observedPlaying(stability);
+  const stabilityWeight = observed ? weights.stability : 0;
   const sum =
     weights.resolution +
     weights.bitrate +
@@ -649,7 +651,10 @@ export function score(
       codec * weights.codec +
       audioScore(result) * weights.audio +
       hdrScore(result, weights) * weights.hdr +
-      stabilityScore(stability) * stabilityWeight) /
+      // The same `observedPlaying` the weight asked, so the record is known
+      // to exist here -- `stabilityScore` takes a record, not a maybe, and
+      // that is deliberate: see its note on absent records.
+      (observed ? stabilityScore(stability) * stabilityWeight : 0)) /
     sum;
 
   return Math.round(Math.min(total, 1) * 10_000) / 10_000;
