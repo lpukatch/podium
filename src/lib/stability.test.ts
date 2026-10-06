@@ -212,9 +212,18 @@ describe('summarise', () => {
 });
 
 describe('stabilityScore', () => {
-  it('gives full marks to a stream nothing has been observed about', () => {
-    expect(stabilityScore(undefined)).toBe(1);
+  it('gives full marks to a stream watched with nothing against it', () => {
     expect(stabilityScore(record())).toBe(1);
+    expect(stabilityScore(record({ legs: 3 }))).toBe(1);
+  });
+
+  it('refuses to score an absent record', () => {
+    // An unmeasured stream has no stability verdict, and the type says so:
+    // passing `undefined` is a compile error, not a silent perfect 1 -- which
+    // is how unwatched streams once reached Dispatcharr scored as stable.
+    // Callers gate on `observedPlaying` first; the published score is null.
+    const absent = undefined as unknown as StabilityRecord;
+    expect(() => stabilityScore(absent)).toThrow();
   });
 
   it('gives full marks to a stream watched for hours with no drops', () => {

@@ -380,16 +380,18 @@ export function dropsPerHour(record: StabilityRecord): number {
  * above without ever reaching it -- so even a catastrophic stream keeps an
  * ordering among its peers rather than collapsing into a tie at the bottom.
  *
- * Full marks for a record with nothing against it. An *absent* record is not
- * full marks but nothing to say -- callers branch on `observedPlaying` before
- * asking, so an unmeasured stream's value here never decides anything. See
- * the note on unmeasured streams at the top of this file.
+ * Full marks for a record with nothing against it. It takes a record, not a
+ * maybe: an *absent* record is not full marks but nothing to say, and while
+ * the parameter allowed `undefined` the function answered that question with
+ * a perfect 1 -- which is how unwatched streams once reached Dispatcharr
+ * scored as perfectly stable. `observedPlaying` is the gate and the guard:
+ * branch on it first, and it narrows the record for the call. See the note on
+ * unmeasured streams at the top of this file.
  */
 export function stabilityScore(
-  record: StabilityRecord | undefined,
+  record: StabilityRecord,
   toleratedPerHour = TOLERATED_DROPS_PER_HOUR,
 ): number {
-  if (!record) return 1;
   if (record.breaks + record.stalls < MIN_FAILURES) return 1;
   const rate = dropsPerHour(record);
   if (rate <= 0) return 1;
