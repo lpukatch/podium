@@ -2532,7 +2532,7 @@ export default function Page() {
             />
 
             <div className="mt-4">
-              <StreamSearch onAdd={addAlias} onAddContains={addContains} />
+              <StreamSearch channelId={channel.id} onAdd={addAlias} onAddContains={addContains} />
             </div>
 
             {providersList.length > 0 &&
