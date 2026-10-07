@@ -35,6 +35,7 @@ export async function GET(request: Request) {
 
     // Which channel already claims a stream, so the UI can say "taken".
     const claimedBy = new Map<number, string>();
+    const claimedByChannelIds = new Map<number, Set<number>>();
     for (const [channelId, rule] of m.rules) {
       const groupId = channelGroups.get(channelId);
       const filter = eligibility.policyFor(
@@ -42,6 +43,12 @@ export async function GET(request: Request) {
         groupId == null ? undefined : groupNames.get(groupId),
       ).groupFilter;
       for (const [streamId] of m.match(rule, idx, filter)) {
+        let owners = claimedByChannelIds.get(streamId);
+        if (!owners) {
+          owners = new Set();
+          claimedByChannelIds.set(streamId, owners);
+        }
+        owners.add(channelId);
         if (!claimedBy.has(streamId)) {
           claimedBy.set(streamId, rule.name || String(channelId));
         }
@@ -58,6 +65,7 @@ export async function GET(request: Request) {
       samples: string[];
       count: number;
       claimedBy: string | null;
+      claimedByChannelIds: Set<number>;
       /** Distinct leading segments this name appears under, and how often. */
       prefixes: Map<string, number>;
       /**
@@ -88,6 +96,7 @@ export async function GET(request: Request) {
           samples: [],
           count: 0,
           claimedBy: null,
+          claimedByChannelIds: new Set(),
           prefixes: new Map(),
           sections: new Map(),
         };
@@ -97,6 +106,9 @@ export async function GET(request: Request) {
       bucket.providers.add(providerNames.get(stream.providerId) ?? String(stream.providerId));
       if (bucket.samples.length < 3) bucket.samples.push(stream.name);
       bucket.claimedBy ??= claimedBy.get(stream.id) ?? null;
+      for (const channelId of claimedByChannelIds.get(stream.id) ?? []) {
+        bucket.claimedByChannelIds.add(channelId);
+      }
       for (const prefix of norm.prefixes) {
         bucket.prefixes.set(prefix, (bucket.prefixes.get(prefix) ?? 0) + 1);
       }
@@ -118,6 +130,7 @@ export async function GET(request: Request) {
         providers: [...b.providers].sort(),
         samples: b.samples,
         claimedBy: b.claimedBy,
+        claimedByChannelIds: [...b.claimedByChannelIds],
         // Commonest first: the choice being offered is "which of these feeds
         // do I mean", and the long tail of one-off prefixes is noise.
         prefixes: [...b.prefixes]

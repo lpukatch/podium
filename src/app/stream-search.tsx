@@ -8,6 +8,7 @@ interface Hit {
   providers: string[];
   samples: string[];
   claimedBy: string | null;
+  claimedByChannelIds: number[];
   prefixes: Array<{ name: string; count: number }>;
   sections: Array<{ name: string; count: number }>;
 }
@@ -51,9 +52,11 @@ const pill = 'inline-block rounded-full px-2 py-0.5 text-xs whitespace-nowrap';
  * another channel already owns is how you quietly steal its streams.
  */
 export function StreamSearch({
+  channelId,
   onAdd,
   onAddContains,
 }: {
+  channelId: number;
   onAdd: (name: string) => void;
   onAddContains?: (needle: string) => void;
 }) {
@@ -118,8 +121,9 @@ export function StreamSearch({
       {hits.length > 0 && (
         <ul className="scroll-shadow mt-3 max-h-[360px] overflow-y-auto">
           {hits.map((h) => {
+            const claimedHere = h.claimedByChannelIds.includes(channelId);
             const fragment = Boolean(onAddContains) && isFragment(query, h.normalized);
-            const canNarrow = fragment || h.prefixes.length > 1;
+            const canNarrow = fragment || (!claimedHere && h.prefixes.length > 1);
             const open = narrowing === h.normalized;
             return (
               <li
@@ -133,7 +137,9 @@ export function StreamSearch({
                     {h.claimedBy && (
                       <>
                         {' · '}
-                        <span className="text-[var(--color-warn)]">claimed by {h.claimedBy}</span>
+                        <span className={claimedHere ? '' : 'text-[var(--color-warn)]'}>
+                          {claimedHere ? 'claimed by this channel' : `claimed by ${h.claimedBy}`}
+                        </span>
                       </>
                     )}
                   </span>
@@ -183,7 +189,7 @@ export function StreamSearch({
                   )}
                   {/* Only when there is a decision to make. One prefix, or none,
                     means the plain alias already says everything. */}
-                  {open && h.prefixes.length > 1 && (
+                  {open && !claimedHere && h.prefixes.length > 1 && (
                     <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
                       <span className="text-xs text-[var(--color-muted)]">
                         Alias for one region:
@@ -207,9 +213,11 @@ export function StreamSearch({
                 <button
                   type="button"
                   className={`${btn} flex-none px-3 py-1.5 text-sm`}
+                  disabled={claimedHere}
+                  title={claimedHere ? 'This channel already claims these streams' : undefined}
                   onClick={() => onAdd(h.normalized)}
                 >
-                  + alias
+                  {claimedHere ? 'Already claimed' : '+ alias'}
                 </button>
               </li>
             );
