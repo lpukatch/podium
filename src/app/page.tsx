@@ -1285,8 +1285,10 @@ export default function Page() {
               onClick={() => void load(true)}
             >
               {loading && <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />}
-              {loading ? 'Reloading' : 'Reload'}
-              <span className="hidden sm:inline">{loading ? '' : ' from Dispatcharr'}</span>
+              <span>
+                {loading ? 'Reloading' : 'Reload'}
+                {!loading && <span className="hidden sm:inline"> from Dispatcharr</span>}
+              </span>
             </button>
           )}
           {/* Always visible, on every tab -- the totals line below only renders
