@@ -35,6 +35,7 @@ import Database from 'better-sqlite3';
 import { createHash } from 'crypto';
 import { mkdirSync } from 'fs';
 import { dirname } from 'path';
+import type { ConnectEventName } from './connect-events';
 import type { ProbeResult, SoakResult } from './probe';
 import type { Leg, StabilityRecord } from './stability';
 import { pickBestVariant, type VariantVerdict, verdictStatus } from './variants';
@@ -535,6 +536,35 @@ CREATE TABLE IF NOT EXISTS soak_results (
 CREATE INDEX IF NOT EXISTS soak_results_completed_at ON soak_results (completed_at);
 CREATE INDEX IF NOT EXISTS stream_legs_ended_at ON stream_legs (ended_at);
 
+-- Dispatcharr's own account of a stream failure, between webhook and ledger.
+--
+-- Connect deliveries land here from the web half, which has no tracker to fold
+-- them into -- the stability tracker lives in the worker, and both halves share
+-- this database and nothing else. The worker drains the table on the same
+-- ten-second timer that samples /proxy/ts/status, folds each row into the
+-- tracker, and the row is deleted in the same transaction: a message, not a
+-- record. The leg the event produced is the durable thing, in stream_legs.
+--
+-- One row per delivery rather than upserting per channel: two switches can
+-- land between drains (A->B->C), and folding them in arrival order is what
+-- keeps the intermediate leg chargeable at all.
+CREATE TABLE IF NOT EXISTS connect_events (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- 'stream_switch' | 'channel_error' -- the two event types the ledger
+    -- reads. See connect-events.ts for why the rest are not subscribed to.
+    event              TEXT    NOT NULL,
+    -- The channel uuid, spelled as /proxy/ts/status spells its keys, so the
+    -- worker's tracker finds the open leg without a catalogue.
+    channel_key        TEXT    NOT NULL,
+    stream_id          INTEGER,
+    previous_stream_id INTEGER,
+    -- The switch reason verbatim ('buffering_timeout', 'manual', ...); '' when
+    -- the event carries none, as channel_error does not.
+    reason             TEXT    NOT NULL DEFAULT '',
+    received_at        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS connect_events_received ON connect_events (received_at);
+
 CREATE INDEX IF NOT EXISTS quality_samples_bucket
     ON quality_samples (provider_id, tier, sampled_at);
 `;
@@ -596,6 +626,16 @@ export interface StoredSoakResult {
   drops: number;
   failedDials: number;
   unreachable: boolean;
+}
+
+/** One queued Connect delivery, between the webhook route and the ledger. */
+export interface ConnectEventRow {
+  event: ConnectEventName;
+  channelKey: string;
+  streamId: number | null;
+  previousStreamId: number | null;
+  reason: string;
+  receivedAt: number;
 }
 
 /**
@@ -2668,6 +2708,78 @@ export class Store {
           leg.ended,
         );
       }
+    })();
+  }
+
+  /**
+   * Queue a Connect delivery for the worker's ledger.
+   *
+   * Called from the webhook route, one insert per delivery, in the route's own
+   * connection: the worker may be mid-drain of the same table, and SQLite's
+   * write lock serialises them. Nothing here interprets the event -- parsing
+   * happened at the door, and folding happens at the drain; this is the
+   * hand-off between two processes that share a database and nothing else.
+   */
+  recordConnectEvents(events: ConnectEventRow[]): void {
+    if (events.length === 0) return;
+    this.db.transaction(() => {
+      const insert = this.sql(
+        `INSERT INTO connect_events
+           (event, channel_key, stream_id, previous_stream_id, reason, received_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      );
+      for (const event of events) {
+        insert.run(
+          event.event,
+          event.channelKey,
+          event.streamId,
+          event.previousStreamId,
+          event.reason,
+          event.receivedAt,
+        );
+      }
+    })();
+  }
+
+  /**
+   * Take every queued delivery, in arrival order, and empty the table.
+   *
+   * Consuming rather than peeking is the whole design: an event folded twice
+   * is a failure charged twice, and there is no acknowledgement protocol
+   * between halves to prevent one -- the transaction is it. Rows older than
+   * `maxAgeMs` are deleted without being returned: a delivery that sat out a
+   * worker restart describes a switch the tracker's open legs have long since
+   * moved past, and folding it late would close a leg that is serving fine
+   * now. The failures it names are lost to the ledger, which is the same
+   * undercount a poll that couldn't read the channel makes, and never an
+   * invented one.
+   */
+  takeConnectEvents(maxAgeMs: number): ConnectEventRow[] {
+    const now = Date.now();
+    return this.db.transaction(() => {
+      this.sql('DELETE FROM connect_events WHERE received_at < ?').run(now - maxAgeMs);
+      const rows = this.sql(
+        `SELECT id, event, channel_key, stream_id, previous_stream_id, reason, received_at
+           FROM connect_events
+          ORDER BY id`,
+      ).all() as Array<{
+        id: number;
+        event: string;
+        channel_key: string;
+        stream_id: number | null;
+        previous_stream_id: number | null;
+        reason: string;
+        received_at: number;
+      }>;
+      if (rows.length > 0) this.sql('DELETE FROM connect_events').run();
+      return rows.map((row) => ({
+        event: row.event as ConnectEventName,
+        channelKey: row.channel_key,
+        streamId: row.stream_id,
+        previousStreamId: row.previous_stream_id,
+        reason: row.reason,
+        receivedAt: row.received_at,
+      }));
     })();
   }
 

@@ -168,6 +168,29 @@ interface OpenLeg {
   stalling: boolean;
 }
 
+/**
+ * One Dispatcharr live-stream event, in the tracker's terms.
+ *
+ * The shape the webhook receiver's rows map onto -- see `connect-events.ts`
+ * for why only `stream_switch` and `channel_error` are subscribed to. The
+ * tracker stays ignorant of the wire spelling: what it needs to know is that
+ * the stream serving a channel changed (`switch`) or that a stall had nowhere
+ * left to switch to (`error`).
+ */
+export interface StreamEvent {
+  /** When the delivery arrived, in milliseconds. Leg timestamps come from this. */
+  at: number;
+  /** The channel uuid, matching a poll sample's `channelKey`. */
+  channelKey: string;
+  kind: 'switch' | 'error';
+  /** The stream the event is about; null when Dispatcharr did not say. */
+  streamId: number | null;
+  /** What a switch switched away from, when Dispatcharr knew. */
+  previousStreamId: number | null;
+  /** True when the switch was made by an operator rather than by a failing feed. */
+  manual: boolean;
+}
+
 export interface StabilityTracker {
   /**
    * Fold one poll in, returning the legs it completed.
@@ -178,6 +201,30 @@ export interface StabilityTracker {
    * loop took.
    */
   observe(samples: SessionSample[], at: number): Leg[];
+  /**
+   * Fold Dispatcharr's own account of a failure in, returning the legs it
+   * completed.
+   *
+   * The events say what a poll can only infer: a switch names the stream it
+   * left and why, so the leg closes at the instant it happened rather than at
+   * the next poll, and an operator's manual switch closes a leg `retune`
+   * instead of billing the old stream for a feed failure it did not have. An
+   * `error` is a stall Dispatcharr has given up on switching away from -- the
+   * event charges the episode to the stalled stream, which is the one case a
+   * vanished channel would otherwise escape uncharged.
+   *
+   * Deliberately *not* a replacement for `observe`: events are instants, and
+   * legs need watched time, which only sampling provides. Absence of an event
+   * also proves nothing, so this never runs the gone-sweep `observe` runs --
+   * only a poll that no longer sees a channel may close its leg as `gone`.
+   *
+   * A switch already reflected in the open leg -- the new stream matches --
+   * is ignored, which is what keeps the two sources from billing one real
+   * switch twice: whichever of the poll diff or the event arrives second
+   * finds its work already done. Same for an error against a stream no open
+   * leg is serving: unchargeable now, and the poller may still see it.
+   */
+  observeEvents(events: StreamEvent[]): Leg[];
   /**
    * Close every open leg, for a worker that is stopping or has lost the lock.
    *
@@ -230,6 +277,56 @@ export function makeStabilityTracker(): StabilityTracker {
   });
 
   return {
+    observeEvents(events: StreamEvent[]): Leg[] {
+      const done: Leg[] = [];
+      for (const event of events) {
+        const leg = open.get(event.channelKey);
+        if (!leg) continue;
+        if (event.kind === 'error') {
+          // Charge the stream that stalled, not whichever stream the channel
+          // has since moved to: an event that arrives late, after a switch,
+          // names the dead stream and must not bill its replacement.
+          if (event.streamId !== null && event.streamId !== leg.streamId) continue;
+          leg.stalls += 1;
+          // The next poll's flat gap is this same episode, not a second one.
+          leg.stalling = true;
+          continue;
+        }
+        // A switch whose new stream is already the open leg's stream is one
+        // real switch seen by both sources -- the poll diff or an earlier
+        // delivery got here first.
+        if (event.streamId !== null && event.streamId === leg.streamId) continue;
+        done.push(close(event.channelKey, leg, event.at, event.manual ? 'retune' : 'failover'));
+        // Nothing to open a leg on yet: the next poll (or a later event with
+        // an id) will. A leg opened here carries no session key and no byte
+        // counter -- unknown, not zero -- so the first gap after it cannot be
+        // judged flat, which is the safe direction for both.
+        if (event.streamId !== null) {
+          open.set(
+            event.channelKey,
+            start(
+              {
+                at: event.at,
+                channelKey: event.channelKey,
+                channelId: null,
+                sessionKey: null,
+                streamId: event.streamId,
+                state: '',
+                healthy: null,
+                totalBytes: null,
+                clientCount: 0,
+              },
+              event.at,
+              event.streamId,
+            ),
+          );
+        } else {
+          open.delete(event.channelKey);
+        }
+      }
+      return done;
+    },
+
     observe(samples: SessionSample[], at: number): Leg[] {
       const done: Leg[] = [];
       const seen = new Set<string>();

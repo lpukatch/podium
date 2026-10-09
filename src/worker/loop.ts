@@ -14,6 +14,8 @@
 import { randomUUID } from 'crypto';
 import { hostname } from 'os';
 import { type Config, loadConfig } from '../lib/config';
+import { ensureConnectToken, provisionConnectEvents } from '../lib/connect';
+import { MAX_CONNECT_EVENT_AGE_MS, toLedgerEvents } from '../lib/connect-events';
 import { DispatcharrClient } from '../lib/dispatcharr';
 import { errorText } from '../lib/error-text';
 import { activityOptions } from '../lib/probe-routing';
@@ -270,6 +272,91 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
     return client;
   };
 
+  /**
+   * Deliveries queued by the web half, taken even when there is nothing to
+   * fold them into.
+   *
+   * The events feature can be off while the table still fills -- turned off
+   * after Dispatcharr was already subscribed, or on an install whose ledger
+   * is off entirely. Either way the webhook keeps writing, so the poller
+   * keeps consuming: one delete per poll is the whole cost, where a table
+   * left to grow is a slow leak with no reader.
+   */
+  const takeAndDropConnectEvents = (): void => {
+    try {
+      store.takeConnectEvents(MAX_CONNECT_EVENT_AGE_MS);
+    } catch (error) {
+      log(`could not drop connect events: ${errorText(error)}`);
+    }
+  };
+
+  /**
+   * Make Dispatcharr's event subscriptions match the settings, when they can.
+   *
+   * Converging rather than create-once -- see `provisionConnectEvents` -- but
+   * throttled, because the check costs one listing against Dispatcharr and
+   * the answer only changes when the settings or the token do. Five minutes
+   * bounds how long a subscription somebody broke in Dispatcharr's UI stays
+   * broken, which is the drift this exists to repair.
+   *
+   * Failures log and retry on the next window: a Dispatcharr that is briefly
+   * unreachable costs the ledger nothing -- the poller keeps scoring -- and
+   * is not worth a crash or a faster retry loop.
+   */
+  let provisionedSignature = '';
+  let lastProvisionAttempt = 0;
+  const PROVISION_RETRY_MS = 5 * 60_000;
+  const maybeProvisionConnect = async (): Promise<void> => {
+    if (stopping) return;
+    const live = currentConfig();
+    if (
+      !live.PODIUM_CONNECT_EVENTS ||
+      live.PODIUM_CONNECT_URL.trim() === '' ||
+      !live.DISPATCHARR_URL.trim()
+    ) {
+      return;
+    }
+    let token: string;
+    try {
+      const stored = (store.settings().PODIUM_CONNECT_TOKEN ?? '').trim();
+      token = ensureConnectToken(stored);
+      if (token !== stored) {
+        // A generated token lands in the settings table -- the same place the
+        // UI-entered Dispatcharr credential lives, and the one place the
+        // receiver route can read it. This write bumps settingsVersion, which
+        // the web half notices on its next read.
+        store.setSettings({ PODIUM_CONNECT_TOKEN: token });
+      }
+    } catch (error) {
+      log(`connect events: could not read the settings: ${errorText(error)}`);
+      return;
+    }
+    const signature = JSON.stringify([
+      live.DISPATCHARR_URL,
+      live.PODIUM_CONNECT_URL,
+      token,
+      process.env.PODIUM_AUTH_TOKEN ?? '',
+    ]);
+    const now = Date.now();
+    if (signature === provisionedSignature && now - lastProvisionAttempt < PROVISION_RETRY_MS) {
+      return;
+    }
+    lastProvisionAttempt = now;
+    try {
+      const poller = await sessionClient(live);
+      const result = await provisionConnectEvents(poller, {
+        podiumUrl: live.PODIUM_CONNECT_URL,
+        token,
+        authToken: process.env.PODIUM_AUTH_TOKEN,
+      });
+      provisionedSignature = signature;
+      const touched = [...result.created, ...result.updated, ...result.removed];
+      if (touched.length > 0) log(`connect events: ${touched.join(', ')}`);
+    } catch (error) {
+      log(`connect events provisioning failed: ${errorText(error)}`);
+    }
+  };
+
   const tick = async (): Promise<void> => {
     // `holding` as well as `stopping`: a pass that was in flight when the lock
     // was lost still runs to the end, and must not book a successor.
@@ -465,12 +552,27 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
     if (!live.PODIUM_STABILITY || !live.DISPATCHARR_URL.trim()) {
       // Turned off mid-session: close what is open rather than leaving legs
       // to be silently abandoned, and do it once -- `drain` empties the
-      // tracker, so the next poll finds nothing to do.
+      // tracker, so the next poll finds nothing to do. Deliveries are taken
+      // and dropped too: with no tracker to fold them into, leaving them
+      // queued would only grow the table for a ledger that is off.
       flushLegs(tracker.drain(Date.now()));
+      takeAndDropConnectEvents();
       return;
     }
     polling = true;
     try {
+      // Converge Dispatcharr's subscriptions first: a delivery that only
+      // starts flowing after this poll is one sample later than it had to be,
+      // where a subscription left broken is a ledger that never hears about
+      // failures at all.
+      await maybeProvisionConnect();
+      // Dispatcharr's own account of what just broke, folded in ahead of the
+      // poll's samples. An event is an instant and a sample is a later one,
+      // so events first keeps leg time running forward; drained underneath
+      // the same lock the poll holds, or two workers would each take half the
+      // deliveries and fold half a failure each.
+      const events = store.takeConnectEvents(MAX_CONNECT_EVENT_AGE_MS);
+      if (events.length > 0) flushLegs(tracker.observeEvents(toLedgerEvents(events)));
       const poller = await sessionClient(live);
       const at = Date.now();
       const channels = await poller.liveChannels(undefined, activityOptions(live));

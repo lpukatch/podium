@@ -408,6 +408,22 @@ export const FIELDS: FieldSpec[] = [
     max: 300,
   },
   {
+    key: 'PODIUM_CONNECT_EVENTS',
+    kind: 'boolean',
+    label: "Use Dispatcharr's live stream events",
+    help: 'Let Dispatcharr report stream failures as they happen instead of inferring them from samples.',
+    more: "Needs a Dispatcharr new enough to put the stream id on its Connect events, and the address below. What changes: a failover closes its leg the instant it happens and an operator's manual switch is no longer billed as a failure — and, the reason this exists, a stream Dispatcharr gives up on is charged to the stream that died, which sampling cannot see because the channel simply vanishes. Sampling stays on underneath; events say when, samples say how long. Off keeps the old behaviour.",
+    section: 'probing',
+  },
+  {
+    key: 'PODIUM_CONNECT_URL',
+    kind: 'string',
+    label: 'Podium address for Dispatcharr to call',
+    help: 'The base URL Dispatcharr reaches this install at, e.g. “http://podium:3456”. Empty turns the events off.',
+    more: 'Podium subscribes itself — two webhooks under this address, one for stream switches and one for a channel giving up on a stream — and repairs that subscription whenever it drifts. The address must be one Dispatcharr can resolve; inside Kubernetes that is usually the service DNS or a pod address, not the name you type into a browser.',
+    section: 'probing',
+  },
+  {
     key: 'PODIUM_SOAK_WINDOW',
     kind: 'string',
     label: 'Soak during these hours',
