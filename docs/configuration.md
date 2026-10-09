@@ -340,8 +340,9 @@ the setting on, the worker subscribes itself — one webhook per event, named
 subscription whenever it drifts, including re-enabling one that was disabled by
 hand and removing ones left over from an older shape of this feature.
 Integrations in Dispatcharr's Connections list that are *not* Podium-named are
-never touched. Each webhook carries a token Podium generates into its own
-settings; a delivery without it is refused.
+never touched. Turning the setting off (or clearing the address) takes Podium's
+webhooks back down, so the switch is the whole contract. Each webhook carries a
+token Podium generates into its own settings; a delivery without it is refused.
 
 Deliveries are consumed, not stored — an event folded twice would charge a
 failure twice — and one queued longer than a minute is dropped: by then it

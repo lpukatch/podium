@@ -98,7 +98,12 @@ function eventNumber(val: unknown): number | null {
 }
 
 function firstString(val: unknown): string {
-  return typeof val === 'string' ? val : '';
+  // Form bodies carry every value as a string; a JSON spelling carries real
+  // types, and a channel id that arrived as a number is still a channel id --
+  // refusing it would bar the very JSON builds this parser prepares for.
+  if (typeof val === 'string') return val;
+  if (typeof val === 'number' && Number.isFinite(val)) return String(val);
+  return '';
 }
 
 /**

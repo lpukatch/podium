@@ -69,6 +69,19 @@ describe('parseConnectEvent', () => {
     expect(event?.channelId).toBe(35200);
   });
 
+  it('reads a JSON delivery whose channel id arrived as a number', () => {
+    // The JSON spelling carries real types, so a numeric channel id is a
+    // number here rather than the string the form spelling always sends.
+    // Refusing it would bar the very JSON builds the parser prepares for.
+    const event = parseConnectEvent(
+      'channel_error',
+      'application/json',
+      JSON.stringify({ channel_id: 35200, stream_id: 77013 }),
+      4_500,
+    );
+    expect(event).toMatchObject({ channelKey: '35200', channelId: 35200, streamId: 77013 });
+  });
+
   it('refuses a delivery that cannot name a channel', () => {
     expect(
       parseConnectEvent('channel_error', FORM, form({ stream_id: '77013' }), 5_000),

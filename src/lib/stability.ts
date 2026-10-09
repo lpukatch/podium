@@ -283,10 +283,13 @@ export function makeStabilityTracker(): StabilityTracker {
         const leg = open.get(event.channelKey);
         if (!leg) continue;
         if (event.kind === 'error') {
-          // Charge the stream that stalled, not whichever stream the channel
+          // Charge the stream that stalled, never whichever stream the channel
           // has since moved to: an event that arrives late, after a switch,
-          // names the dead stream and must not bill its replacement.
-          if (event.streamId !== null && event.streamId !== leg.streamId) continue;
+          // names the dead stream, and one whose stream id was stripped names
+          // no stream at all. Either way there is nothing to honestly bill --
+          // charging the open leg on a guess would invent a failure, which the
+          // ledger never does (see `connect-events.ts` on the stripped case).
+          if (event.streamId === null || event.streamId !== leg.streamId) continue;
           leg.stalls += 1;
           // The next poll's flat gap is this same episode, not a second one.
           leg.stalling = true;
@@ -308,7 +311,10 @@ export function makeStabilityTracker(): StabilityTracker {
               {
                 at: event.at,
                 channelKey: event.channelKey,
-                channelId: null,
+                // The channel has not changed, only its stream: the id the
+                // closing leg already knew is the new leg's too, carried over
+                // rather than waiting for a poll to restore it.
+                channelId: leg.channelId,
                 sessionKey: null,
                 streamId: event.streamId,
                 state: '',

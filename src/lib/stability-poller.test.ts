@@ -287,6 +287,77 @@ describe('the session poller', () => {
     expect(log).toEqual([]);
   });
 
+  it('takes the subscription down once the setting is off, when a token is stored', async () => {
+    const log: string[] = [];
+    stubWithConnect(log);
+    vi.useFakeTimers();
+    const cfg = config();
+    storeSettings(cfg, { PODIUM_STABILITY: 'true', PODIUM_STABILITY_POLL_MS: '10000' });
+    // A token in the settings is the evidence a previous run provisioned; the
+    // webhook may still be delivering against it.
+    storeSettings(cfg, { PODIUM_CONNECT_TOKEN: 'a'.repeat(48) });
+    stop = await startWorker(cfg, () => {});
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    // One listing to see what is left, and nothing to remove.
+    expect(log).toEqual(['list']);
+    const store = new Store(cfg.dbPath);
+    try {
+      // The take-down is complete (there was nothing left), so the evidence
+      // that once provisioned is cleared -- which is what keeps every later
+      // tick of this install off the Connect API entirely.
+      expect(store.settings().PODIUM_CONNECT_TOKEN ?? '').toBe('');
+    } finally {
+      store.close();
+    }
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(log).toEqual(['list']);
+  });
+
+  it('drops queued events rather than folding them while the setting is off', async () => {
+    vi.useFakeTimers();
+    const cfg = config();
+    storeSettings(cfg, { PODIUM_STABILITY: 'true', PODIUM_STABILITY_POLL_MS: '10000' });
+    stop = await startWorker(cfg, () => {});
+    // Two polls so the leg has watched time on it -- a leg only one poll ever
+    // saw closes zero-length, and recordLegs drops those.
+    await vi.advanceTimersByTimeAsync(10_000);
+    status = [live({ total_bytes: 5_000_000 })];
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    // A give-up error for the stream the open leg is serving -- the event the
+    // ledger would charge a stall for, were the setting on.
+    const writer = new Store(cfg.dbPath);
+    try {
+      writer.recordConnectEvents([
+        {
+          event: 'channel_error',
+          channelKey: '09bbd059-1a49-47ee-a525-c1444e1c6bd7',
+          streamId: 77013,
+          previousStreamId: null,
+          reason: 'buffering_timeout',
+          receivedAt: Date.now(),
+        },
+      ]);
+    } finally {
+      writer.close();
+    }
+    // The channel vanishes, as one Dispatcharr gave up on does.
+    status = [];
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    const store = new Store(cfg.dbPath);
+    try {
+      const legs = store.stabilityLegs(77013);
+      expect(legs).toHaveLength(1);
+      // Closed by the gone-sweep with no stall charged: the delivery was
+      // dropped with the setting off, not folded.
+      expect(legs[0]).toMatchObject({ ended: 'gone', stalls: 0 });
+    } finally {
+      store.close();
+    }
+  });
+
   it('mints a token before polling on a username/password install', async () => {
     // The regression: `headers()` sends an empty API key until a token exists,
     // and `request` only *refreshes* a token -- it never mints the first one.

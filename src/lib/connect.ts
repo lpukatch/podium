@@ -131,6 +131,9 @@ export async function provisionConnectEvents(
 
   const result: ProvisionResult = { created: [], updated: [], removed: [] };
   const managedIds = new Set<number>();
+  // Already deleted by the duplicate collapse below, so the namespace sweep at
+  // the end must not reach for them a second time.
+  const goneIds = new Set<number>();
 
   for (const event of CONNECT_EVENTS) {
     const name = connectIntegrationName(event);
@@ -143,6 +146,7 @@ export async function provisionConnectEvents(
     const drop = mine.slice(1);
     for (const row of drop) {
       await client.deleteConnectIntegration(row.id);
+      goneIds.add(row.id);
       result.removed.push(name);
     }
     if (keep === undefined) {
@@ -176,13 +180,34 @@ export async function provisionConnectEvents(
   // Dispatcharr's UI produces a fresh managed integration rather than a
   // silently un-updated URL.
   for (const row of existing) {
-    if (managedIds.has(row.id)) continue;
+    if (managedIds.has(row.id) || goneIds.has(row.id)) continue;
     if (!row.name.startsWith('Podium:')) continue;
     await client.deleteConnectIntegration(row.id);
     result.removed.push(row.name);
   }
 
   return result;
+}
+
+/**
+ * Take down everything `provisionConnectEvents` could have left: the off side
+ * of the same convergence.
+ *
+ * A subscription that kept delivering after the operator turned the setting
+ * off would keep the ledger charging from events nobody asked for, and nothing
+ * else ever removes it -- the receiver cannot see the setting, and Dispatcharr
+ * has no expiry. The namespace rule is provisioning's own: everything
+ * `Podium:`-prefixed goes, integrations an operator named anything else stay.
+ */
+export async function deprovisionConnectEvents(client: DispatcharrClient): Promise<string[]> {
+  const existing = await client.connectIntegrations();
+  const removed: string[] = [];
+  for (const row of existing) {
+    if (!row.name.startsWith('Podium:')) continue;
+    await client.deleteConnectIntegration(row.id);
+    removed.push(row.name);
+  }
+  return removed;
 }
 
 /** True when the delivery carried the token the settings expect. */

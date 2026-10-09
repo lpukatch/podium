@@ -11,6 +11,7 @@ import {
   connectEventPath,
   connectIntegrationName,
   connectTokenMatches,
+  deprovisionConnectEvents,
   ensureConnectToken,
   provisionConnectEvents,
 } from './connect';
@@ -217,7 +218,10 @@ describe('provisionConnectEvents', () => {
       },
     ]);
     const result = await provisionConnectEvents(fake.client, INPUT);
-    expect(result.removed).toContain(STREAM_SWITCH);
+    // Once for the collapse, and the namespace sweep must not reach for the
+    // same row again: one delete, one entry in the report.
+    expect(result.removed).toEqual([STREAM_SWITCH]);
+    expect(fake.calls.filter((call) => call.startsWith('delete'))).toEqual(['delete 5']);
     expect(fake.state.filter((row) => row.name === STREAM_SWITCH)).toHaveLength(1);
     // Whatever survived is pointing at the current URL.
     expect(fake.state.find((row) => row.name === STREAM_SWITCH)?.config.url).toBe(
@@ -239,6 +243,42 @@ describe('provisionConnectEvents', () => {
     const result = await provisionConnectEvents(fake.client, { podiumUrl: '  ', token: 'tok' });
     expect(result).toEqual({ created: [], updated: [], removed: [] });
     expect(fake.state).toEqual([]);
+  });
+});
+
+describe('deprovisionConnectEvents', () => {
+  it('removes every Podium-named integration and nothing else', async () => {
+    const fake = fakeDispatcharr([
+      {
+        id: 3,
+        name: 'notify on recording',
+        type: 'webhook',
+        enabled: true,
+        config: { url: 'http://elsewhere:8080/hook', headers: {} },
+        subscriptions: [{ event: 'recording_start', enabled: true }],
+      },
+      {
+        id: 8,
+        name: STREAM_SWITCH,
+        type: 'webhook',
+        enabled: true,
+        config: { url: `http://podium:3456${connectEventPath('stream_switch')}`, headers: {} },
+        subscriptions: [{ event: 'stream_switch', enabled: true }],
+      },
+      {
+        id: 9,
+        name: 'Podium: channel failover',
+        type: 'webhook',
+        enabled: true,
+        config: { url: 'http://podium:3456/api/connect/events/channel_failover', headers: {} },
+        subscriptions: [{ event: 'channel_failover', enabled: true }],
+      },
+    ]);
+    const removed = await deprovisionConnectEvents(fake.client);
+    // The managed names and the older shape's litter go; an integration an
+    // operator named anything else is theirs.
+    expect(removed).toEqual([STREAM_SWITCH, 'Podium: channel failover']);
+    expect(fake.state.map((row) => row.name)).toEqual(['notify on recording']);
   });
 });
 

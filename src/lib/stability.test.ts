@@ -398,16 +398,22 @@ describe('makeStabilityTracker.observeEvents', () => {
     open(tracker);
     tracker.observeEvents([switch_({ at: 4_000 })]);
     // Two further polls of the new stream: one to hand the sample to the leg
-    // the event opened, one more to show it is still the same session.
-    tracker.observe([sample({ at: 2 * TICK, streamId: 77177, totalBytes: 1_000 })], 2 * TICK);
+    // the event opened, one more to show it is still the same session. Both
+    // are pinned: the first poll must absorb into the event-opened leg rather
+    // than close it as a retune -- no session key, so nothing reads it as one.
+    expect(
+      tracker.observe([sample({ at: 2 * TICK, streamId: 77177, totalBytes: 1_000 })], 2 * TICK),
+    ).toEqual([]);
     const legs = tracker.observe(
       [sample({ at: 3 * TICK, streamId: 77177, totalBytes: 2_000 })],
       3 * TICK,
     );
     expect(legs).toEqual([]);
-    // The event-opened leg survives contact with the poll: no session key,
-    // so nothing reads it as a retune.
     expect(tracker.openLegs()).toBe(1);
+    // The channel did not change, only its stream: the new leg keeps the id
+    // the closing leg knew rather than waiting for a poll to restore it.
+    const closed = tracker.drain(4 * TICK);
+    expect(closed[0]).toMatchObject({ streamId: 77177, channelId: 35200 });
   });
 
   it('bills an operator switch as a retune', () => {
@@ -491,6 +497,27 @@ describe('makeStabilityTracker.observeEvents', () => {
         channelKey: 'ch-wjla',
         kind: 'error',
         streamId: 99999,
+        previousStreamId: null,
+        manual: false,
+      },
+    ]);
+    const closed = tracker.drain(2 * TICK);
+    expect(closed[0]?.stalls).toBe(0);
+  });
+
+  it('leaves the charge off an error whose stream id was stripped', () => {
+    const tracker = makeStabilityTracker();
+    open(tracker);
+    // Dispatcharr strips the stream fields when the Redis state behind them
+    // has cleared: the delivery says a channel errored but not on what. The
+    // open leg is only a guess at the stream that died -- and if the error is
+    // late, after a switch, it is the wrong guess, so nothing is billed.
+    tracker.observeEvents([
+      {
+        at: 4_000,
+        channelKey: 'ch-wjla',
+        kind: 'error',
+        streamId: null,
         previousStreamId: null,
         manual: false,
       },
