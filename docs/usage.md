@@ -683,6 +683,13 @@ somebody switched over to the news, and there is no field that separates them.
 So it counts as clean watched time and no failure — which under-counts real
 failures and never invents one.
 
+Dispatcharr builds whose Connect events carry a stream id can say which it was,
+and [Podium will listen](configuration.md#dispatcharrs-live-stream-events):
+the switch that failed over closes its leg at the instant it happened, an
+operator's manual switch stops being billed as a failure, and — the reason to
+turn it on — a stream Dispatcharr gave up on is charged to the stream that died
+instead of escaping as clean watched time.
+
 **It only ever subtracts within the measured.** A stream with a clean record
 scores full marks on this term; a stream nobody has ever watched gets no term
 at all — `null` where the score is published, and excluded from

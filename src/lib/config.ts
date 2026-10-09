@@ -372,6 +372,34 @@ export const configSchema = z.object({
    * interval is never seen; see the note on undercounting in stability.ts.
    */
   PODIUM_STABILITY_POLL_MS: num(10_000),
+  /**
+   * Subscribe to Dispatcharr's live stream events, and let them charge the
+   * ledger directly.
+   *
+   * Off by default because it is not self-contained: it needs a Dispatcharr
+   * new enough to put `stream_id` on its Connect events (#1564), and a
+   * `PODIUM_CONNECT_URL` Dispatcharr can reach. On the events it changes two
+   * verdicts: a switch closes its leg at the instant it happened and names the
+   * stream it left, and -- the reason the feature earns its complexity -- a
+   * stream Dispatcharr gave up on stops escaping the ledger uncharged, which
+   * is the one undercount the poller cannot fix from outside.
+   *
+   * The poller stays on underneath this. Events are instants and legs need
+   * watched time, so sampling remains the backbone; a Dispatcharr without the
+   * feature simply keeps the behaviour it had. Turning it off takes the
+   * subscriptions back down again, so the switch is the whole contract.
+   */
+  PODIUM_CONNECT_EVENTS: bool(false),
+  /**
+   * The address Dispatcharr should call Podium back on.
+   *
+   * Not derivable from inside: the address Podium reaches Dispatcharr at says
+   * nothing about the reverse path, and behind a proxy or a service DNS the
+   * two do not even look related. Empty turns the feature off outright --
+   * provisioning stops, and any subscription it left behind is taken down,
+   * since a subscription with nowhere to deliver is ceremony.
+   */
+  PODIUM_CONNECT_URL: z.string().default(''),
 
   /**
    * Hours the automatic soak sweep may run, as `HH:MM-HH:MM`. Empty is off.

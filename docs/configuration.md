@@ -260,6 +260,8 @@ It needs `PODIUM_PROBE_IDLE_PROVIDERS` on, which in turn needs
 | `PODIUM_PROBE_CLIENT_USER_AGENT` | `Podium-Probe/1` | identifies those probes in Dispatcharr activity reads |
 | `PODIUM_STABILITY` | `true` | record how long streams hold |
 | `PODIUM_STABILITY_POLL_MS` | `10000` | how often live sessions are sampled |
+| `PODIUM_CONNECT_EVENTS` | `false` | subscribe to Dispatcharr's live stream events and let them charge the ledger |
+| `PODIUM_CONNECT_URL` | *(empty)* | the base address Dispatcharr should call Podium back on; empty is off |
 | `PODIUM_SOAK_WINDOW` | *(empty)* | hours the automatic soak sweep may run, `HH:MM-HH:MM`; empty is off |
 | `PODIUM_SOAK_SECONDS` | `180` | how long each soak holds its stream |
 | `PODIUM_SOAK_MAX_PER_CHANNEL` | `3` | how deep into each channel's order the sweep measures; `0` for all |
@@ -302,6 +304,51 @@ Reading that endpoint makes Dispatcharr sweep its own stale client entries as a
 side effect. That is cleanup it does anyway and its own stats page polls the
 same endpoint continuously, so a ten-second poll is well inside normal use — but
 it is why this is a switch rather than an unconditional behaviour.
+
+### Dispatcharr's live stream events
+
+`PODIUM_CONNECT_EVENTS` adds a second, better-informed witness to the same
+ledger. Dispatcharr's Connect webhooks can report stream failures as they
+happen, and on builds with the richer live-stream events (#1564) those events
+name the stream involved. Two are worth hearing about:
+
+- **`stream_switch`** — which stream the channel moved off, which one it moved
+  to, and why. Podium closes the leg at the instant of the switch instead of at
+  the next sample, and an operator's own switch (`reason: manual`) is recorded
+  as a retune rather than billed to the stream it left as a failure.
+- **`channel_error`** — the stall Dispatcharr could not switch away from. This
+  is the one failure the poller structurally misses: when Dispatcharr gives up,
+  the channel vanishes from `/proxy/ts/status`, and a vanished channel is
+  charged to nobody because a viewer turning the TV off looks the same. The
+  event names the stream that died, so the charge lands after all.
+
+The other live-proxy events are deliberately not subscribed to. `channel_failover`
+says less about the same instant `stream_switch` does, and `channel_buffering`
+and `channel_reconnect` describe the stall the byte counter already catches on
+the next sample — subscribing would count those episodes twice.
+
+The sampling above stays on underneath. Events say *when*; only the samples say
+*how long* — a delivery carries no watch time, so the poller remains what turns
+viewing into minutes. A Dispatcharr without the events simply keeps the
+inferred behaviour.
+
+Setting it up needs one address: `PODIUM_CONNECT_URL`, the base URL Dispatcharr
+can reach this install at (`http://podium:3456` between containers; inside
+Kubernetes that is usually the service DNS, not the name a browser uses). With
+the setting on, the worker subscribes itself — one webhook per event, named
+`Podium: stream switch` and `Podium: channel error` — and repairs that
+subscription whenever it drifts, including re-enabling one that was disabled by
+hand and removing ones left over from an older shape of this feature.
+Integrations in Dispatcharr's Connections list that are *not* Podium-named are
+never touched. Turning the setting off (or clearing the address) takes Podium's
+webhooks back down, so the switch is the whole contract. Each webhook carries a
+token Podium generates into its own settings; a delivery without it is refused.
+
+Deliveries are consumed, not stored — an event folded twice would charge a
+failure twice — and one queued longer than a minute is dropped: by then it
+describes a channel whose legs have moved on, and folding it late would close a
+leg that is serving fine now. The failures it named are lost to the ledger,
+which is the same undercount a sample that could not read the channel makes.
 
 ## Quality priors
 

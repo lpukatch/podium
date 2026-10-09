@@ -12,6 +12,8 @@
  *                                       and profiles, the account's extra logins
  *     POST  /api/epg/current-programs/  real programmes airing now (skips dummy EPG)
  *     GET   /proxy/ts/status            {channels: [...], count} -- who is watching
+ *     GET   /api/connect/integrations/  Connect webhooks -- how Podium subscribes
+ *                                       to Dispatcharr's live stream events
  *     PATCH /api/channels/channels/{id}/  reorder by writing `streams`
  */
 
@@ -1180,6 +1182,124 @@ export class DispatcharrClient {
     if (!resp.ok) {
       throw new DispatcharrError(
         `PATCH channel ${channelId} -> ${resp.status}: ${(await resp.text()).slice(0, 200)}`,
+      );
+    }
+  }
+
+  /**
+   * Dispatcharr's Connect integrations -- the webhooks side of its event
+   * system. One webhook integration per event type is how Podium tells
+   * deliveries apart: a real delivery's body carries no `event` field (only
+   * the connection's own test payload does), so the routing has to live in
+   * the URL. See `connect-events.ts`.
+   *
+   * The list is unpaged and short -- Dispatcharr clutters it with nothing,
+   * and integrations an operator made by hand are visible here too, which is
+   * why matching by name happens in the caller rather than by id.
+   */
+  async connectIntegrations(): Promise<
+    Array<{
+      id: number;
+      name: string;
+      type: string;
+      enabled: boolean;
+      config: Record<string, unknown>;
+      subscriptions: Array<{ event: string; enabled: boolean }>;
+    }>
+  > {
+    type Row = {
+      id: number;
+      name?: string;
+      type?: string;
+      enabled?: boolean;
+      config?: unknown;
+      subscriptions?: Array<{ event?: string; enabled?: boolean }> | null;
+    };
+    const body = await this.getJson<Row[] | { results?: Row[] }>('/api/connect/integrations/');
+    const rows = Array.isArray(body) ? body : (body.results ?? []);
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name ?? String(row.id),
+      type: row.type ?? '',
+      enabled: row.enabled !== false,
+      config: (row.config ?? {}) as Record<string, unknown>,
+      subscriptions: (row.subscriptions ?? []).map((sub) => ({
+        event: sub.event ?? '',
+        enabled: sub.enabled !== false,
+      })),
+    }));
+  }
+
+  /** Create a webhook integration. Dispatcharr validates the url is present. */
+  async createConnectIntegration(
+    name: string,
+    webhookUrl: string,
+    headers: Record<string, string>,
+  ): Promise<{ id: number }> {
+    const resp = await this.request('POST', '/api/connect/integrations/', {
+      name,
+      type: 'webhook',
+      enabled: true,
+      config: { url: webhookUrl, headers },
+    });
+    if (!resp.ok) {
+      throw new DispatcharrError(
+        `POST /api/connect/integrations/ -> ${resp.status}: ${(await resp.text()).slice(0, 200)}`,
+      );
+    }
+    const body = (await resp.json()) as { id?: number };
+    if (typeof body.id !== 'number') throw new DispatcharrError('created integration had no id');
+    return { id: body.id };
+  }
+
+  /** Rewrite a webhook integration's URL, headers and enabled flag. */
+  async updateConnectIntegration(
+    id: number,
+    patch: { webhookUrl?: string; headers?: Record<string, string>; enabled?: boolean },
+  ): Promise<void> {
+    const existing = await this.getJson<{ config?: Record<string, unknown> }>(
+      `/api/connect/integrations/${id}/`,
+    );
+    const config = { ...(existing.config ?? {}) };
+    if (patch.webhookUrl !== undefined) config.url = patch.webhookUrl;
+    if (patch.headers !== undefined) config.headers = patch.headers;
+    const body: Record<string, unknown> = { config };
+    if (patch.enabled !== undefined) body.enabled = patch.enabled;
+    const resp = await this.request('PATCH', `/api/connect/integrations/${id}/`, body);
+    if (!resp.ok) {
+      throw new DispatcharrError(
+        `PATCH /api/connect/integrations/${id}/ -> ${resp.status}: ${(await resp.text()).slice(0, 200)}`,
+      );
+    }
+  }
+
+  async deleteConnectIntegration(id: number): Promise<void> {
+    const resp = await this.request('DELETE', `/api/connect/integrations/${id}/`);
+    if (!resp.ok && resp.status !== 404) {
+      throw new DispatcharrError(`DELETE /api/connect/integrations/${id}/ -> ${resp.status}`);
+    }
+  }
+
+  /**
+   * Replace an integration's event subscriptions.
+   *
+   * The endpoint is replace-all, which is what makes provisioning idempotent:
+   * the same PUT sent twice lands on the same subscription set, and a
+   * subscription an operator disabled by hand is re-enabled by it -- a state
+   * Podium cannot see and they asked for this exact event by turning the
+   * setting on, so re-enabling is the honest reading.
+   */
+  async setConnectSubscriptions(integrationId: number, events: string[]): Promise<void> {
+    const resp = await this.request(
+      'PUT',
+      `/api/connect/integrations/${integrationId}/subscriptions/set/`,
+      events.map((event) => ({ event, enabled: true })),
+    );
+    if (!resp.ok) {
+      throw new DispatcharrError(
+        `PUT /api/connect/integrations/${integrationId}/subscriptions/set/ -> ${resp.status}: ${(
+          await resp.text()
+        ).slice(0, 200)}`,
       );
     }
   }

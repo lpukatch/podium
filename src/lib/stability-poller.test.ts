@@ -150,6 +150,214 @@ describe('the session poller', () => {
     }
   });
 
+  /**
+   * A fetch stub that also answers the Connect API, so the provisioner can
+   * converge and the event drain can be observed end to end.
+   */
+  const stubWithConnect = (log: string[]): void => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes('/proxy/ts/status')) {
+          return new Response(JSON.stringify({ channels: status, count: status.length }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (url.endsWith('/api/connect/integrations/')) {
+          if (init?.method === 'POST') {
+            log.push('create');
+            return new Response(JSON.stringify({ id: 1 }), {
+              status: 201,
+              headers: { 'Content-Type': 'application/json' },
+            });
+          }
+          log.push('list');
+          return new Response(JSON.stringify([]), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (url.includes('/subscriptions/set/')) {
+          log.push(`subscribe: ${String(init?.body)}`);
+          return new Response('[]', {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ count: 0, results: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }),
+    );
+  };
+
+  it('folds a queued switch into the ledger at the instant the delivery arrived', async () => {
+    stubWithConnect([]);
+    vi.useFakeTimers();
+    const cfg = config();
+    storeSettings(cfg, {
+      PODIUM_STABILITY: 'true',
+      PODIUM_STABILITY_POLL_MS: '10000',
+      PODIUM_CONNECT_EVENTS: 'true',
+      PODIUM_CONNECT_URL: 'http://podium:3456',
+    });
+    stop = await startWorker(cfg, () => {});
+
+    // First poll opens a leg on 77013. Then Dispatcharr reports the switch
+    // itself, before the next poll would have inferred it.
+    await vi.advanceTimersByTimeAsync(10_000);
+    const writer = new Store(cfg.dbPath);
+    try {
+      writer.recordConnectEvents([
+        {
+          event: 'stream_switch',
+          channelKey: '09bbd059-1a49-47ee-a525-c1444e1c6bd7',
+          streamId: 77177,
+          previousStreamId: 77013,
+          reason: 'buffering_timeout',
+          // Mid-gap, as a delivery between polls arrives. Exactly at the
+          // first poll's instant would make the leg zero-length, which
+          // recordLegs drops -- an unmeasurable failure must not become an
+          // infinitely bad one.
+          receivedAt: Date.now() + 5_000,
+        },
+      ]);
+    } finally {
+      writer.close();
+    }
+    status = [live({ stream_id: 77177, total_bytes: 100 })];
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    const store = new Store(cfg.dbPath);
+    try {
+      const legs = store.stabilityLegs(77013);
+      expect(legs).toHaveLength(1);
+      expect(legs[0]?.ended).toBe('failover');
+      // Closed at the delivery's instant, not at the poll that would have
+      // found it: the whole point of hearing it from Dispatcharr.
+      expect(legs[0]?.watchedMs).toBeGreaterThan(0);
+      expect(legs[0]?.watchedMs).toBeLessThan(10_000);
+      // Consumed, not peeked: a second fold would charge the failure twice.
+      const drain = store.takeConnectEvents(60_000);
+      expect(drain).toEqual([]);
+      // And the new stream's leg is open, extending across polls.
+      expect(store.stabilityRecords().get(77177)?.legs ?? 0).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('provisions Dispatcharr once the setting names an address', async () => {
+    const log: string[] = [];
+    stubWithConnect(log);
+    vi.useFakeTimers();
+    const cfg = config();
+    storeSettings(cfg, {
+      PODIUM_STABILITY: 'true',
+      PODIUM_STABILITY_POLL_MS: '10000',
+      PODIUM_CONNECT_EVENTS: 'true',
+      PODIUM_CONNECT_URL: 'http://podium:3456',
+    });
+    stop = await startWorker(cfg, () => {});
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(log.filter((entry) => entry === 'create')).toHaveLength(2);
+    expect(log.filter((entry) => entry.startsWith('subscribe'))).toHaveLength(2);
+    // The token provisioning generated landed in the settings, where the
+    // receiver route -- a different process in the split deployment -- reads it.
+    const store = new Store(cfg.dbPath);
+    try {
+      expect(store.settings().PODIUM_CONNECT_TOKEN).toMatch(/^[0-9a-f]{48}$/);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('does not provision when the setting is off', async () => {
+    const log: string[] = [];
+    stubWithConnect(log);
+    vi.useFakeTimers();
+    const cfg = config();
+    storeSettings(cfg, { PODIUM_STABILITY: 'true', PODIUM_STABILITY_POLL_MS: '10000' });
+    stop = await startWorker(cfg, () => {});
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(log).toEqual([]);
+  });
+
+  it('takes the subscription down once the setting is off, when a token is stored', async () => {
+    const log: string[] = [];
+    stubWithConnect(log);
+    vi.useFakeTimers();
+    const cfg = config();
+    storeSettings(cfg, { PODIUM_STABILITY: 'true', PODIUM_STABILITY_POLL_MS: '10000' });
+    // A token in the settings is the evidence a previous run provisioned; the
+    // webhook may still be delivering against it.
+    storeSettings(cfg, { PODIUM_CONNECT_TOKEN: 'a'.repeat(48) });
+    stop = await startWorker(cfg, () => {});
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    // One listing to see what is left, and nothing to remove.
+    expect(log).toEqual(['list']);
+    const store = new Store(cfg.dbPath);
+    try {
+      // The take-down is complete (there was nothing left), so the evidence
+      // that once provisioned is cleared -- which is what keeps every later
+      // tick of this install off the Connect API entirely.
+      expect(store.settings().PODIUM_CONNECT_TOKEN ?? '').toBe('');
+    } finally {
+      store.close();
+    }
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(log).toEqual(['list']);
+  });
+
+  it('drops queued events rather than folding them while the setting is off', async () => {
+    vi.useFakeTimers();
+    const cfg = config();
+    storeSettings(cfg, { PODIUM_STABILITY: 'true', PODIUM_STABILITY_POLL_MS: '10000' });
+    stop = await startWorker(cfg, () => {});
+    // Two polls so the leg has watched time on it -- a leg only one poll ever
+    // saw closes zero-length, and recordLegs drops those.
+    await vi.advanceTimersByTimeAsync(10_000);
+    status = [live({ total_bytes: 5_000_000 })];
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    // A give-up error for the stream the open leg is serving -- the event the
+    // ledger would charge a stall for, were the setting on.
+    const writer = new Store(cfg.dbPath);
+    try {
+      writer.recordConnectEvents([
+        {
+          event: 'channel_error',
+          channelKey: '09bbd059-1a49-47ee-a525-c1444e1c6bd7',
+          streamId: 77013,
+          previousStreamId: null,
+          reason: 'buffering_timeout',
+          receivedAt: Date.now(),
+        },
+      ]);
+    } finally {
+      writer.close();
+    }
+    // The channel vanishes, as one Dispatcharr gave up on does.
+    status = [];
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    const store = new Store(cfg.dbPath);
+    try {
+      const legs = store.stabilityLegs(77013);
+      expect(legs).toHaveLength(1);
+      // Closed by the gone-sweep with no stall charged: the delivery was
+      // dropped with the setting off, not folded.
+      expect(legs[0]).toMatchObject({ ended: 'gone', stalls: 0 });
+    } finally {
+      store.close();
+    }
+  });
+
   it('mints a token before polling on a username/password install', async () => {
     // The regression: `headers()` sends an empty API key until a token exists,
     // and `request` only *refreshes* a token -- it never mints the first one.

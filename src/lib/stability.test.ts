@@ -13,6 +13,7 @@ import {
   makeStabilityTracker,
   type SessionSample,
   type StabilityRecord,
+  type StreamEvent,
   stabilityScore,
   summarise,
   tooUnstable,
@@ -373,5 +374,180 @@ describe('channelStability', () => {
 
   it('is empty for a channel with no streams', () => {
     expect(channelStability([], new Map(), 1).allBad).toBe(false);
+  });
+});
+
+describe('makeStabilityTracker.observeEvents', () => {
+  /** An open leg, from one poll. */
+  function open(tracker: ReturnType<typeof makeStabilityTracker>, at = 0): void {
+    tracker.observe([sample({ at })], at);
+  }
+
+  const switch_ = (over: Partial<StreamEvent> = {}): StreamEvent => ({
+    at: TICK,
+    channelKey: 'ch-wjla',
+    kind: 'switch',
+    streamId: 77177,
+    previousStreamId: 77013,
+    manual: false,
+    ...over,
+  });
+
+  it('closes the leg at the instant of the switch, not at the next poll', () => {
+    const tracker = makeStabilityTracker();
+    open(tracker);
+    const legs = tracker.observeEvents([switch_({ at: 4_000 })]);
+    expect(legs).toHaveLength(1);
+    expect(legs[0]).toMatchObject({ streamId: 77013, ended: 'failover', endedAt: 4_000 });
+    expect(tracker.openLegs()).toBe(1);
+  });
+
+  it('opens the new leg on the stream the event names, which the next poll extends', () => {
+    const tracker = makeStabilityTracker();
+    open(tracker);
+    tracker.observeEvents([switch_({ at: 4_000 })]);
+    // Two further polls of the new stream: one to hand the sample to the leg
+    // the event opened, one more to show it is still the same session. Both
+    // are pinned: the first poll must absorb into the event-opened leg rather
+    // than close it as a retune -- no session key, so nothing reads it as one.
+    expect(
+      tracker.observe([sample({ at: 2 * TICK, streamId: 77177, totalBytes: 1_000 })], 2 * TICK),
+    ).toEqual([]);
+    const legs = tracker.observe(
+      [sample({ at: 3 * TICK, streamId: 77177, totalBytes: 2_000 })],
+      3 * TICK,
+    );
+    expect(legs).toEqual([]);
+    expect(tracker.openLegs()).toBe(1);
+    // The channel did not change, only its stream: the new leg keeps the id
+    // the closing leg knew rather than waiting for a poll to restore it.
+    const closed = tracker.drain(4 * TICK);
+    expect(closed[0]).toMatchObject({ streamId: 77177, channelId: 35200 });
+  });
+
+  it('bills an operator switch as a retune', () => {
+    const tracker = makeStabilityTracker();
+    open(tracker);
+    const legs = tracker.observeEvents([switch_({ manual: true })]);
+    expect(legs[0]?.ended).toBe('retune');
+  });
+
+  it('ignores a switch whose new stream is already the open leg', () => {
+    const tracker = makeStabilityTracker();
+    open(tracker);
+    // A poll diff beat the delivery to it, or the delivery is a duplicate:
+    // the event names the stream the leg is already on.
+    const legs = tracker.observeEvents([switch_({ streamId: 77013 })]);
+    expect(legs).toEqual([]);
+    expect(tracker.openLegs()).toBe(1);
+  });
+
+  it('charges a switch away from a stream the tracker never saw serving', () => {
+    const tracker = makeStabilityTracker();
+    // The leg says 77013; the event says the switch was 77012 -> 77177. One
+    // of the two switches in between was missed, and the leg the tracker can
+    // charge is the one it was watching.
+    open(tracker);
+    const legs = tracker.observeEvents([switch_({ previousStreamId: 77012 })]);
+    expect(legs[0]).toMatchObject({ streamId: 77013, ended: 'failover' });
+    expect(tracker.openLegs()).toBe(1);
+  });
+
+  it('ignores a switch for a channel no leg is open on', () => {
+    const tracker = makeStabilityTracker();
+    expect(tracker.observeEvents([switch_({ channelKey: 'ch-other' })])).toEqual([]);
+  });
+
+  it('charges a give-up error to the stalled stream without ending the leg', () => {
+    const tracker = makeStabilityTracker();
+    open(tracker);
+    const legs = tracker.observeEvents([
+      {
+        at: 4_000,
+        channelKey: 'ch-wjla',
+        kind: 'error',
+        streamId: 77013,
+        previousStreamId: null,
+        manual: false,
+      },
+    ]);
+    expect(legs).toEqual([]);
+    // The charge lands when the poller eventually closes the leg.
+    const closed = tracker.drain(5 * TICK);
+    expect(closed[0]).toMatchObject({ streamId: 77013, stalls: 1, ended: 'drain' });
+  });
+
+  it('does not recount the episode when the next poll sees the same flat gap', () => {
+    const tracker = makeStabilityTracker();
+    open(tracker);
+    tracker.observeEvents([
+      {
+        at: 4_000,
+        channelKey: 'ch-wjla',
+        kind: 'error',
+        streamId: 77013,
+        previousStreamId: null,
+        manual: false,
+      },
+    ]);
+    // The poll after the error, still stalled: same episode.
+    tracker.observe([sample({ at: TICK, totalBytes: 0 })], TICK);
+    const closed = tracker.drain(2 * TICK);
+    expect(closed[0]?.stalls).toBe(1);
+  });
+
+  it('leaves the charge off when the error names a stream the channel has left', () => {
+    const tracker = makeStabilityTracker();
+    open(tracker);
+    // A late delivery: the channel failed over before the drain reached it.
+    tracker.observeEvents([
+      {
+        at: 4_000,
+        channelKey: 'ch-wjla',
+        kind: 'error',
+        streamId: 99999,
+        previousStreamId: null,
+        manual: false,
+      },
+    ]);
+    const closed = tracker.drain(2 * TICK);
+    expect(closed[0]?.stalls).toBe(0);
+  });
+
+  it('leaves the charge off an error whose stream id was stripped', () => {
+    const tracker = makeStabilityTracker();
+    open(tracker);
+    // Dispatcharr strips the stream fields when the Redis state behind them
+    // has cleared: the delivery says a channel errored but not on what. The
+    // open leg is only a guess at the stream that died -- and if the error is
+    // late, after a switch, it is the wrong guess, so nothing is billed.
+    tracker.observeEvents([
+      {
+        at: 4_000,
+        channelKey: 'ch-wjla',
+        kind: 'error',
+        streamId: null,
+        previousStreamId: null,
+        manual: false,
+      },
+    ]);
+    const closed = tracker.drain(2 * TICK);
+    expect(closed[0]?.stalls).toBe(0);
+  });
+
+  it('never runs the gone-sweep: only a poll may close a leg as gone', () => {
+    const tracker = makeStabilityTracker();
+    open(tracker);
+    tracker.observeEvents([
+      {
+        at: 4_000,
+        channelKey: 'ch-somewhere-else',
+        kind: 'switch',
+        streamId: 1,
+        previousStreamId: 2,
+        manual: false,
+      },
+    ]);
+    expect(tracker.openLegs()).toBe(1);
   });
 });
