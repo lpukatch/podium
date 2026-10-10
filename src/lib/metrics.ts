@@ -6,8 +6,8 @@
  * in-process counter would silently report zeros in a split deployment.
  *
  * Hand-rolled rather than pulling in a client library: the text format is a
- * dozen lines, and everything here is a gauge computed at scrape time, so a
- * registry buys nothing.
+ * dozen lines, mostly gauges computed at scrape time plus durable SQLite
+ * counters, so an in-process registry buys nothing.
  */
 
 import { DEAD_REASONS, type DeadReason, deadReason, type ProbeResult } from './probe';
@@ -277,6 +277,45 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
       'gauge',
       Math.round(lastPush / 1000),
     );
+  }
+
+  // Receiver totals are durable, not the length of the consumed event queue.
+  try {
+    const { summary, pending } = store.connectActivity();
+    out.add(
+      'podium_connect_deliveries_total',
+      'Deliveries accepted by the Connect receiver since tracking began.',
+      'counter',
+      summary.accepted,
+    );
+    out.add(
+      'podium_connect_receiver_errors_total',
+      'Deliveries refused or failed at the Connect receiver.',
+      'counter',
+      summary.rejected,
+    );
+    out.add(
+      'podium_connect_sync_errors_total',
+      'Failed Connect subscription reconciliations.',
+      'counter',
+      summary.syncErrors,
+    );
+    out.add(
+      'podium_connect_pending_events',
+      'Connect deliveries waiting in the processing queue.',
+      'gauge',
+      pending,
+    );
+    if (summary.lastReceivedAt !== null) {
+      out.add(
+        'podium_connect_last_received_timestamp_seconds',
+        'Time of the last accepted Connect delivery.',
+        'gauge',
+        summary.lastReceivedAt / 1000,
+      );
+    }
+  } catch {
+    // An unreadable activity table must not suppress unrelated metrics.
   }
 
   // --- stability ledger ----------------------------------------------------

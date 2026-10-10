@@ -62,6 +62,35 @@ describe('renderMetrics', () => {
     expect(text.endsWith('\n')).toBe(true);
   });
 
+  it('exposes durable Connect counters and timestamps independently of queue depth', () => {
+    const at = Date.now();
+    store.recordConnectEvents([
+      {
+        event: 'channel_error',
+        channelKey: 'abc',
+        streamId: 1,
+        previousStreamId: null,
+        reason: '',
+        receivedAt: at,
+      },
+    ]);
+    store.recordConnectRejection('stream_switch', 401, 'Missing or wrong Connect token');
+    store.recordConnectSync(
+      { wanted: true, podiumUrl: 'http://podium:3456', dispatcharrUrl: 'http://dispatcharr:9191' },
+      'Failed',
+    );
+    store.takeConnectEvents(60_000);
+    const text = renderMetrics(store, { maxAgeMs: 3600_000 });
+    const values = parse(text);
+    expect(values.get('podium_connect_deliveries_total')).toBe(1);
+    expect(values.get('podium_connect_receiver_errors_total')).toBe(1);
+    expect(values.get('podium_connect_sync_errors_total')).toBe(1);
+    expect(values.get('podium_connect_pending_events')).toBe(0);
+    expect(values.get('podium_connect_last_received_timestamp_seconds')).toBe(at / 1000);
+    expect(text).toContain('# TYPE podium_connect_deliveries_total counter');
+    expect(text).not.toContain('channel_key');
+  });
+
   it('labels the running build on podium_build_info', () => {
     const m = parse(renderMetrics(store, { maxAgeMs: 3600_000, now: NOW }));
     expect(m.get(`podium_build_info{version="${VERSION}"}`)).toBe(1);

@@ -56,6 +56,7 @@ export async function POST(
     if (
       !connectTokenMatches(request.headers.get(TOKEN_HEADER) ?? '', settings.PODIUM_CONNECT_TOKEN)
     ) {
+      store.recordConnectRejection(event, 401, 'Missing or wrong Connect token');
       return NextResponse.json({ error: 'missing or wrong token' }, { status: 401 });
     }
 
@@ -69,11 +70,25 @@ export async function POST(
       // A delivery without a channel cannot name a leg. Storing it would only
       // move the refusal to the drain; 400 says so in Dispatcharr's
       // DeliveryLog instead of failing there.
+      store.recordConnectRejection(
+        event,
+        400,
+        'Invalid delivery: missing channel_id or malformed body',
+      );
       return NextResponse.json({ error: 'delivery had no channel_id' }, { status: 400 });
     }
     store.recordConnectEvents([parsed]);
     return new Response(null, { status: 204 });
   } catch (error) {
+    try {
+      store?.recordConnectRejection(
+        event,
+        500,
+        'Receiver could not store the delivery; check server logs',
+      );
+    } catch {
+      // Observability must not mask the original failure if SQLite is unavailable.
+    }
     return NextResponse.json({ error: errorText(error).slice(0, 300) }, { status: 500 });
   } finally {
     store?.close();

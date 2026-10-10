@@ -344,11 +344,35 @@ never touched. Turning the setting off (or clearing the address) takes Podium's
 webhooks back down, so the switch is the whole contract. Each webhook carries a
 token Podium generates into its own settings; a delivery without it is refused.
 
-Deliveries are consumed, not stored — an event folded twice would charge a
+Queued deliveries are consumed — an event folded twice would charge a
 failure twice — and one queued longer than a minute is dropped: by then it
 describes a channel whose legs have moved on, and folding it late would close a
 leg that is serving fine now. The failures it named are lost to the ledger,
 which is the same undercount a sample that could not read the channel makes.
+
+**Settings → Measure streams → Dispatcharr live event activity** shows the
+subscription check status, last accepted event, accepted delivery and receiver
+error totals, subscription sync errors, and pending queue size. It refreshes
+every ten seconds. A configured subscription is not proof of delivery; quiet
+playback can legitimately produce no events.
+
+The recent-deliveries table is separate from the processing queue, so emptying
+the queue does not erase visibility. It shows the latest 25 deliveries from a
+history bounded to 500 rows and 14 days, including the event, channel name (when
+provided) or identifier, stream ids, switch reason/error type and receiver result.
+Accepted means queued, not
+necessarily attributed to a leg: missing stream ids and stale events may be
+unusable. No raw bodies, authentication headers or tokens are retained in this
+history. Receiver refusals carry fixed diagnostics, not untrusted body fields.
+
+Totals persist beyond history retention and start when this version first opens
+the database; earlier events cannot be reconstructed. Requests blocked by the
+front-door access policy before the receiver runs are not counted. Transport
+failures that never reach Podium remain visible in Dispatcharr's delivery logs.
+The same view is available from `GET /api/connect/status`. `/api/metrics` exposes
+`podium_connect_deliveries_total`, `podium_connect_receiver_errors_total`,
+`podium_connect_sync_errors_total`, `podium_connect_pending_events`, and (after
+the first accepted delivery) `podium_connect_last_received_timestamp_seconds`.
 
 ## Quality priors
 
