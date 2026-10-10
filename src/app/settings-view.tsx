@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { VERSION } from '@/lib/version';
+import { ConnectActivityPanel } from './connect-activity';
 
 interface Field {
   key: string;
@@ -111,6 +112,11 @@ const GROUPS: Record<
     },
   ],
   measurement: [
+    {
+      title: 'Dispatcharr live events',
+      description: 'Receive stream switches and failures directly from Dispatcharr.',
+      keys: ['PODIUM_CONNECT_EVENTS', 'PODIUM_CONNECT_URL'],
+    },
     {
       title: 'Quick checks',
       description: 'Set the workload and decide what counts as a working stream.',
@@ -584,6 +590,8 @@ export function SettingsView() {
                       );
                     })}
                 </div>
+
+                {section.id === 'measurement' && <ConnectActivityPanel />}
 
                 {section.id === 'connection' && (
                   <div className="mt-4 flex flex-wrap items-center gap-3">

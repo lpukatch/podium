@@ -32,6 +32,7 @@ describe('parseConnectEvent', () => {
     );
     expect(event).toEqual({
       event: 'stream_switch',
+      channelName: 'ESPN',
       channelKey: '09bbd059-1a49-47ee-a525-c1444e1c6bd7',
       channelId: null,
       streamId: 77177,
@@ -48,7 +49,11 @@ describe('parseConnectEvent', () => {
       JSON.stringify({ channel_id: 'abc', stream_id: 77013, error_type: 'buffering_timeout' }),
       2_000,
     );
-    expect(event).toMatchObject({ channelKey: 'abc', streamId: 77013, reason: '' });
+    expect(event).toMatchObject({
+      channelKey: 'abc',
+      streamId: 77013,
+      reason: 'buffering_timeout',
+    });
   });
 
   it('reads absent fields as not-observed, never as values', () => {
@@ -97,6 +102,32 @@ describe('parseConnectEvent', () => {
     const event = parseConnectEvent('channel_error', FORM, form({ channel_id: '12abc' }), 6_000);
     expect(event?.channelId).toBeNull();
     expect(event?.channelKey).toBe('12abc');
+  });
+
+  it('bounds display names and preserves channel-error context without changing attribution', () => {
+    const event = parseConnectEvent(
+      'channel_error',
+      FORM,
+      form({
+        channel_id: 'abc',
+        channel_name: 'x'.repeat(500),
+        stream_id: '7',
+        error_type: 'buffering_timeout',
+      }),
+      7_000,
+    );
+    expect(event?.channelName).toHaveLength(200);
+    expect(event?.reason).toBe('buffering_timeout');
+    expect(toLedgerEvents(event ? [event] : [])).toEqual([
+      {
+        at: 7_000,
+        channelKey: 'abc',
+        kind: 'error',
+        streamId: 7,
+        previousStreamId: null,
+        manual: false,
+      },
+    ]);
   });
 });
 

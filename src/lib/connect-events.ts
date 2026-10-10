@@ -60,6 +60,8 @@ export function isConnectEventName(raw: string): raw is ConnectEventName {
 /** One delivery, parsed and ready to store. */
 export interface ConnectEvent {
   event: ConnectEventName;
+  /** Optional display context; never used to identify or charge a leg. */
+  channelName?: string;
   /**
    * The channel, as the ledger spells it.
    *
@@ -200,11 +202,14 @@ export function parseConnectEvent(
   if (channelKey === '') return null;
   return {
     event,
+    ...(fields.channel_name ? { channelName: firstString(fields.channel_name).slice(0, 200) } : {}),
     channelKey,
     channelId: eventNumber(fields.channel_id),
     streamId: eventNumber(fields.stream_id),
     previousStreamId: eventNumber(fields.previous_stream_id),
-    reason: firstString(fields.reason),
+    reason:
+      firstString(fields.reason) ||
+      (event === 'channel_error' ? firstString(fields.error_type) : ''),
     receivedAt,
   };
 }

@@ -324,6 +324,20 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
   let connectSignature = '';
   let lastConnectAttempt = 0;
   const CONNECT_SYNC_MS = 5 * 60_000;
+  const noteConnectSync = (live: Config, wanted: boolean, error: string | null): void => {
+    try {
+      store.recordConnectSync(
+        {
+          wanted,
+          podiumUrl: live.PODIUM_CONNECT_URL,
+          dispatcharrUrl: live.DISPATCHARR_URL,
+        },
+        error,
+      );
+    } catch (failure) {
+      log(`could not record connect status: ${errorText(failure)}`);
+    }
+  };
   const maybeSyncConnectEvents = async (): Promise<void> => {
     if (stopping) return;
     const live = currentConfig();
@@ -347,6 +361,7 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
         }
       } catch (error) {
         log(`connect events: could not read the settings: ${errorText(error)}`);
+        noteConnectSync(live, wanted, 'Could not prepare Connect credentials; check worker logs');
         return;
       }
     } else {
@@ -356,6 +371,7 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
         if ((store.settings().PODIUM_CONNECT_TOKEN ?? '').trim() === '') return;
       } catch (error) {
         log(`connect events: could not read the settings: ${errorText(error)}`);
+        noteConnectSync(live, wanted, 'Could not read Connect settings; check worker logs');
         return;
       }
     }
@@ -390,8 +406,14 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
         // install to the silence of one that never opted in.
         store.setSettings({ PODIUM_CONNECT_TOKEN: null });
       }
+      noteConnectSync(live, wanted, null);
     } catch (error) {
       log(`connect events sync failed: ${errorText(error)}`);
+      noteConnectSync(
+        live,
+        wanted,
+        'Could not reconcile Dispatcharr subscriptions; check worker logs',
+      );
     }
   };
 

@@ -36,6 +36,7 @@ import { createHash } from 'crypto';
 import { mkdirSync } from 'fs';
 import { dirname } from 'path';
 import type { ConnectEventName } from './connect-events';
+import type { ConnectActivity, ConnectDelivery, ConnectSummary } from './connect-status';
 import type { ProbeResult, SoakResult } from './probe';
 import type { Leg, StabilityRecord } from './stability';
 import { pickBestVariant, type VariantVerdict, verdictStatus } from './variants';
@@ -565,6 +566,41 @@ CREATE TABLE IF NOT EXISTS connect_events (
 );
 CREATE INDEX IF NOT EXISTS connect_events_received ON connect_events (received_at);
 
+-- Observability is deliberately separate from the consumed event queue.
+-- Totals start on upgrade; old deliveries cannot be reconstructed from legs.
+CREATE TABLE IF NOT EXISTS connect_activity (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    tracking_since INTEGER NOT NULL,
+    accepted INTEGER NOT NULL DEFAULT 0,
+    rejected INTEGER NOT NULL DEFAULT 0,
+    last_received_at INTEGER,
+    last_rejected_at INTEGER,
+    last_rejection TEXT,
+    sync_errors INTEGER NOT NULL DEFAULT 0,
+    last_sync_at INTEGER,
+    last_sync_success_at INTEGER,
+    sync_error TEXT,
+    sync_wanted INTEGER NOT NULL DEFAULT 0,
+    sync_podium_url TEXT NOT NULL DEFAULT '',
+    sync_dispatcharr_url TEXT NOT NULL DEFAULT ''
+);
+INSERT OR IGNORE INTO connect_activity (id, tracking_since)
+    VALUES (1, CAST(strftime('%s', 'now') AS INTEGER) * 1000);
+CREATE TABLE IF NOT EXISTS connect_delivery_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event TEXT NOT NULL,
+    channel_key TEXT,
+    channel_name TEXT,
+    stream_id INTEGER,
+    previous_stream_id INTEGER,
+    reason TEXT NOT NULL DEFAULT '',
+    received_at INTEGER NOT NULL,
+    status INTEGER NOT NULL,
+    error TEXT
+);
+CREATE INDEX IF NOT EXISTS connect_delivery_history_received
+    ON connect_delivery_history (received_at);
+
 CREATE INDEX IF NOT EXISTS quality_samples_bucket
     ON quality_samples (provider_id, tier, sampled_at);
 `;
@@ -631,6 +667,7 @@ export interface StoredSoakResult {
 /** One queued Connect delivery, between the webhook route and the ledger. */
 export interface ConnectEventRow {
   event: ConnectEventName;
+  channelName?: string;
   channelKey: string;
   streamId: number | null;
   previousStreamId: number | null;
@@ -2737,8 +2774,90 @@ export class Store {
           event.reason,
           event.receivedAt,
         );
+        this.sql(`INSERT INTO connect_delivery_history
+          (event, channel_key, channel_name, stream_id, previous_stream_id, reason, received_at, status)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 204)`).run(
+          event.event,
+          event.channelKey.slice(0, 200),
+          event.channelName?.slice(0, 200) ?? null,
+          event.streamId,
+          event.previousStreamId,
+          event.reason.slice(0, 200),
+          event.receivedAt,
+        );
+        this.sql(`UPDATE connect_activity SET accepted = accepted + 1,
+          last_received_at = MAX(COALESCE(last_received_at, 0), ?) WHERE id = 1`).run(
+          event.receivedAt,
+        );
       }
+      this.trimConnectHistory();
     })();
+  }
+
+  /** Refusals keep a fixed diagnostic, never the unauthenticated body or token. */
+  recordConnectRejection(event: ConnectEventName, status: number, error: string): void {
+    const at = Date.now();
+    this.db.transaction(() => {
+      this.sql(`INSERT INTO connect_delivery_history (event, received_at, status, error)
+        VALUES (?, ?, ?, ?)`).run(event, at, status, error);
+      this.sql(`UPDATE connect_activity SET rejected = rejected + 1,
+        last_rejected_at = ?, last_rejection = ? WHERE id = 1`).run(at, error);
+      this.trimConnectHistory();
+    })();
+  }
+
+  private trimConnectHistory(): void {
+    this.sql('DELETE FROM connect_delivery_history WHERE received_at < ?').run(
+      Date.now() - STABILITY_HISTORY_MS,
+    );
+    this.sql(`DELETE FROM connect_delivery_history WHERE id NOT IN
+      (SELECT id FROM connect_delivery_history ORDER BY id DESC LIMIT 500)`).run();
+  }
+
+  /** A successful reconciliation is not proof that a webhook has been delivered. */
+  recordConnectSync(
+    input: { wanted: boolean; podiumUrl: string; dispatcharrUrl: string },
+    error: string | null,
+  ): void {
+    const at = Date.now();
+    this.sql(`UPDATE connect_activity SET last_sync_at = ?,
+      last_sync_success_at = CASE WHEN ? IS NULL THEN ? ELSE last_sync_success_at END,
+      sync_errors = sync_errors + CASE WHEN ? IS NULL THEN 0 ELSE 1 END,
+      sync_error = ?, sync_wanted = ?, sync_podium_url = ?, sync_dispatcharr_url = ? WHERE id = 1`).run(
+      at,
+      error,
+      at,
+      error,
+      error,
+      input.wanted ? 1 : 0,
+      input.podiumUrl.trim().replace(/\/+$/, ''),
+      input.dispatcharrUrl,
+    );
+  }
+
+  connectActivity(): ConnectActivity {
+    const summary = this.sql(`SELECT tracking_since AS trackingSince, accepted, rejected,
+      last_received_at AS lastReceivedAt, last_rejected_at AS lastRejectedAt,
+      last_rejection AS lastRejection, sync_errors AS syncErrors,
+      last_sync_at AS lastSyncAt, last_sync_success_at AS lastSyncSuccessAt,
+      sync_error AS syncError, sync_wanted AS syncWanted,
+      sync_podium_url AS syncPodiumUrl, sync_dispatcharr_url AS syncDispatcharrUrl
+      FROM connect_activity WHERE id = 1`).get() as Omit<ConnectSummary, 'syncWanted'> & {
+      syncWanted: number;
+    };
+    const recent =
+      this.sql(`SELECT id, event, channel_key AS channelKey, channel_name AS channelName,
+      stream_id AS streamId, previous_stream_id AS previousStreamId, reason,
+      received_at AS receivedAt, status, error FROM connect_delivery_history
+      WHERE received_at >= ? ORDER BY id DESC LIMIT 25`).all(
+        Date.now() - STABILITY_HISTORY_MS,
+      ) as ConnectDelivery[];
+    const pending = this.sql('SELECT COUNT(*) AS n FROM connect_events').get() as { n: number };
+    return {
+      summary: { ...summary, syncWanted: Boolean(summary.syncWanted) },
+      pending: pending.n,
+      recent,
+    };
   }
 
   /**

@@ -10,8 +10,9 @@
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { POST } from '@/app/api/connect/events/[event]/route';
+import { GET } from '@/app/api/connect/status/route';
 import { Store } from '@/lib/store';
 
 const TOKEN = 'a'.repeat(48);
@@ -40,6 +41,7 @@ describe('the connect event receiver', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     delete process.env.PODIUM_DATA_DIR;
     rmSync(dir, { recursive: true, force: true });
   });
@@ -116,5 +118,80 @@ describe('the connect event receiver', () => {
       'x-podium-connect-token': TOKEN,
     });
     expect(resp.status).toBe(401);
+  });
+
+  it('reports accepted deliveries after consumption without exposing secrets or raw bodies', async () => {
+    await call(
+      'stream_switch',
+      'channel_id=abc&channel_name=Demo&stream_id=2&previous_stream_id=1&reason=manual&secret=private-payload',
+      { 'x-podium-connect-token': TOKEN },
+    );
+    expect(queued()).toBe(1);
+    const resp = GET();
+    const text = await resp.text();
+    const body = JSON.parse(text);
+    expect(body).toMatchObject({
+      state: 'disabled',
+      pending: 0,
+      summary: { accepted: 1, rejected: 0 },
+    });
+    expect(body.recent[0]).toMatchObject({
+      event: 'stream_switch',
+      channelKey: 'abc',
+      channelName: 'Demo',
+      streamId: 2,
+      previousStreamId: 1,
+      reason: 'manual',
+      status: 204,
+    });
+    expect(text).not.toContain(TOKEN);
+    expect(text).not.toContain('private-payload');
+    expect(resp.headers.get('cache-control')).toBe('no-store');
+  });
+
+  it('counts malformed and unauthorized deliveries separately from accepted events', async () => {
+    await call('channel_error', 'channel_id=private-body', {
+      'x-podium-connect-token': 'private-token',
+    });
+    await call('channel_error', 'not json', {
+      'content-type': 'application/json',
+      'x-podium-connect-token': TOKEN,
+    });
+    const body = await GET().json();
+    expect(body.summary).toMatchObject({ accepted: 0, rejected: 2, lastReceivedAt: null });
+    expect(body.recent.map((row: { status: number }) => row.status)).toEqual([400, 401]);
+    expect(JSON.stringify(body)).not.toMatch(/private-body|private-token/);
+  });
+
+  it('reports the effective stored configuration and subscription reconciliation', async () => {
+    const store = new Store(join(dir, 'podium.db'));
+    store.setSettings({ PODIUM_CONNECT_EVENTS: 'true', PODIUM_CONNECT_URL: 'http://podium:3456' });
+    store.recordConnectSync(
+      { wanted: true, podiumUrl: 'http://podium:3456', dispatcharrUrl: 'http://dispatcharr:9191' },
+      null,
+    );
+    store.close();
+    const body = await GET().json();
+    expect(body).toMatchObject({
+      enabled: true,
+      stabilityEnabled: true,
+      callbackUrl: 'http://podium:3456',
+      state: 'listening',
+      summary: { accepted: 0, lastReceivedAt: null },
+    });
+  });
+
+  it('counts receiver failures with a fixed diagnostic rather than exception contents', async () => {
+    vi.spyOn(Store.prototype, 'recordConnectEvents').mockImplementation(() => {
+      throw new Error('private-exception-detail');
+    });
+    const response = await call('channel_error', 'channel_id=abc', {
+      'x-podium-connect-token': TOKEN,
+    });
+    expect(response.status).toBe(500);
+    const body = await GET().json();
+    expect(body.summary).toMatchObject({ accepted: 0, rejected: 1 });
+    expect(body.recent[0].status).toBe(500);
+    expect(JSON.stringify(body)).not.toContain('private-exception-detail');
   });
 });
