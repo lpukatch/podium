@@ -320,6 +320,8 @@ describe('a pass writing a channel with a long-dead stream', () => {
       [planned],
       counters,
       DEFAULT_STRATEGY,
+      // The pass's stability read; these tests rank without ledger evidence.
+      new Map(),
       byId,
       new Map([[5, 'Provider A']]),
       removal,
@@ -357,6 +359,8 @@ describe('a pass writing a channel with a long-dead stream', () => {
       [revived],
       counters,
       DEFAULT_STRATEGY,
+      // The pass's stability read; these tests rank without ledger evidence.
+      new Map(),
       byId,
       new Map([[5, 'Provider A']]),
       plan,

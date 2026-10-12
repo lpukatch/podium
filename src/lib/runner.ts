@@ -1787,6 +1787,7 @@ export class Runner {
         planned,
         counters,
         strategy,
+        stability,
         streamById,
         providerNames,
         removal,
@@ -2320,29 +2321,38 @@ export class Runner {
       // right stream on Saturday" has no answer anywhere. Best-effort and last,
       // because it is a report and a report must never fail a pass.
       try {
-        this.checkTeamarrRules(runId, channels, streamById, groupNames, providerNames, strategy, {
-          audioOnly: (groupId, groupName) => eligibility.policyFor(groupId, groupName).audioOnly,
-          minResolution: (channelId, groupId, groupName) =>
-            channelResolutionFloor(
-              this.deps.rules.get().channelFloors,
-              channelId,
-              eligibility.policyFor(groupId, groupName).minResolution,
-            ),
-          maxResolution: (channelId, groupId, groupName) =>
-            channelResolutionCeiling(
-              this.deps.rules.get().channelCeilings,
-              channelId,
-              eligibility.policyFor(groupId, groupName).maxResolution,
-            ),
-          // Teamarr orders the channels it creates, which are the ones an
-          // operator has marked measure-only or ranked off their own
-          // assignment. Its rules are never evaluated anywhere else, so a
-          // disagreement anywhere else is measuring the wrong population.
-          managed: (groupId, groupName) => {
-            const resolved = eligibility.policyFor(groupId, groupName);
-            return Boolean(resolved.measureOnly) || assignmentIsRule(resolved.mode);
+        this.checkTeamarrRules(
+          runId,
+          channels,
+          streamById,
+          groupNames,
+          providerNames,
+          strategy,
+          stability,
+          {
+            audioOnly: (groupId, groupName) => eligibility.policyFor(groupId, groupName).audioOnly,
+            minResolution: (channelId, groupId, groupName) =>
+              channelResolutionFloor(
+                this.deps.rules.get().channelFloors,
+                channelId,
+                eligibility.policyFor(groupId, groupName).minResolution,
+              ),
+            maxResolution: (channelId, groupId, groupName) =>
+              channelResolutionCeiling(
+                this.deps.rules.get().channelCeilings,
+                channelId,
+                eligibility.policyFor(groupId, groupName).maxResolution,
+              ),
+            // Teamarr orders the channels it creates, which are the ones an
+            // operator has marked measure-only or ranked off their own
+            // assignment. Its rules are never evaluated anywhere else, so a
+            // disagreement anywhere else is measuring the wrong population.
+            managed: (groupId, groupName) => {
+              const resolved = eligibility.policyFor(groupId, groupName);
+              return Boolean(resolved.measureOnly) || assignmentIsRule(resolved.mode);
+            },
           },
-        });
+        );
       } catch (err) {
         log(`rule check failed: ${String(err)}`);
       }
@@ -2916,6 +2926,8 @@ export class Runner {
     groupNames: Map<number, string>,
     providerNames: Map<number, string>,
     strategy: RankStrategy,
+    /** The pass's one stability read, shared rather than queried again. */
+    stability: Map<number, StabilityRecord>,
     policy: {
       audioOnly: (groupId: number | null, groupName?: string) => boolean | undefined;
       /** Whether another app owns this channel's ordering. */
@@ -2939,9 +2951,6 @@ export class Runner {
     if (!stored) return;
 
     const verdicts = store.verdicts([...new Set(channels.flatMap((c) => c.streams))]);
-    // The ledger in the same one read, so the stats each rule is scored
-    // against carry the same stability view a publish would write.
-    const stability = store.stabilityRecords();
     const inputs: ChannelInput[] = [];
     for (const channel of channels) {
       if (channel.hidden_from_output) continue;
@@ -3583,12 +3592,13 @@ export class Runner {
       measured: number;
     },
     strategy: RankStrategy,
+    /** The pass's one stability read, shared rather than queried again. */
+    stability: Map<number, StabilityRecord>,
     byId: Map<number, Stream>,
     providerNames: Map<number, string>,
     removal?: DeadRemoval,
   ): Promise<void> {
     const log = this.deps.log ?? (() => {});
-    const stability = this.stabilityRecords();
     for (const entry of planned) {
       const { channel, hits, fresh, cacheComplete, audioOnly, measureOnly } = entry;
       if (!cacheComplete) continue;
