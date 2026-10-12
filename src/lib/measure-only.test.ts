@@ -146,6 +146,8 @@ describe('the pass', () => {
       planned,
       counters,
       DEFAULT_STRATEGY,
+      // The pass's stability read; these tests rank without ledger evidence.
+      new Map(),
       new Map([
         [1, stream(1)],
         [2, stream(2)],

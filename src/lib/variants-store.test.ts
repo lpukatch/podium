@@ -144,6 +144,25 @@ describe('per-variant rows', () => {
     store.close();
   });
 
+  it('stages more candidates than one multi-row insert can carry', () => {
+    // The temp table is filled in chunks of 2_000, so a catalogue larger than
+    // one chunk must come back whole: a boundary bug here would silently drop
+    // every stream past the first chunk from ranking.
+    const store = new Store(':memory:');
+    const count = 2_500;
+    for (let id = 1; id <= count; id += 1) store.put(id, `h${id}`, verdict(true, { height: id }));
+    const streams = Array.from({ length: count }, (_, i) => ({
+      id: i + 1,
+      streamHash: `h${i + 1}`,
+    }));
+
+    const staged = store.variantsForStreams(streams);
+    expect(staged.size).toBe(count);
+    expect(staged.get(count)?.get(0)?.alive).toBe(true);
+    expect(staged.get(count)?.get(0)?.result?.height).toBe(count);
+    store.close();
+  });
+
   it('counts streams, not logins, in cache health', () => {
     const store = new Store(':memory:');
     const now = Date.now();

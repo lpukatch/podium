@@ -318,6 +318,19 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
     // An unreadable activity table must not suppress unrelated metrics.
   }
 
+  // The catalogue snapshot, read once for the whole scrape: the stability
+  // section walks it for dead-channel counting and the provider section
+  // aggregates it by provider. Two full reads per scrape was one more than
+  // either needed.
+  let catalogueRows: ReturnType<Store['catalogue']>['rows'] = [];
+  let catalogueWrittenAt: number | null = null;
+  try {
+    ({ rows: catalogueRows, writtenAt: catalogueWrittenAt } = store.catalogue());
+  } catch {
+    // An unreadable catalogue reports no dead channels and no provider
+    // quality; both sections below handle the empty case.
+  }
+
   // --- stability ledger ----------------------------------------------------
   //
   // Aggregates only, no per-stream series: a catalogue's worth of stream ids is
@@ -365,7 +378,7 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
     // series worth alerting on above all the others: it is the one state
     // reordering cannot improve, so it is the one that needs a person.
     const byChannel = new Map<number, number[]>();
-    for (const row of store.catalogue().rows) {
+    for (const row of catalogueRows) {
       const list = byChannel.get(row.channelId);
       if (list) list.push(row.streamId);
       else byChannel.set(row.channelId, [row.streamId]);
@@ -438,7 +451,8 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
   // the numbers here are the numbers every podium page already shows. Empty
   // until the first pass that fetches a catalogue -- an unconfigured install
   // reports nothing rather than zeros, because there is no catalogue to sum.
-  const { rows, writtenAt } = store.catalogue();
+  const rows = catalogueRows;
+  const writtenAt = catalogueWrittenAt;
   if (writtenAt !== null) {
     out.add(
       'podium_catalogue_age_seconds',

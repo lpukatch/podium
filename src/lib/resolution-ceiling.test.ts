@@ -357,6 +357,8 @@ describe('a pass writing a channel that has a ceiling', () => {
       entries,
       counters,
       DEFAULT_STRATEGY,
+      // The pass's stability read; these tests rank without ledger evidence.
+      new Map(),
       byId,
       new Map([[5, 'Provider A']]),
     );

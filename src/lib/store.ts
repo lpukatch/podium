@@ -1546,8 +1546,21 @@ export class Store {
         'CREATE TEMP TABLE IF NOT EXISTS _podium_candidates (id INTEGER PRIMARY KEY, hash TEXT NOT NULL)',
       );
       this.sql('DELETE FROM _podium_candidates').run();
-      const insert = this.sql('INSERT INTO _podium_candidates (id, hash) VALUES (?, ?)');
-      for (const [id, hash] of hashes) insert.run(id, hash);
+      // Multi-row inserts: one prepared statement per chunk instead of one
+      // bind pair per stream, which on a full catalogue was the heaviest
+      // single write of every pass. 2 binds a row against a 2_000-row chunk
+      // stays an order of magnitude under SQLite's bind-variable ceiling.
+      const entries = [...hashes];
+      const CHUNK = 2_000;
+      for (let i = 0; i < entries.length; i += CHUNK) {
+        const chunk = entries.slice(i, i + CHUNK);
+        const holes = chunk.map(() => '(?, ?)').join(',');
+        // Not cached: the text varies with the chunk, and only the last one
+        // differs.
+        this.db
+          .prepare(`INSERT INTO _podium_candidates (id, hash) VALUES ${holes}`)
+          .run(...chunk.flat());
+      }
       const rows = this.sql(
         `SELECT p.stream_id, p.variant_id, p.probed_at, p.alive, p.result, p.dead_streak
          FROM probe_cache p JOIN _podium_candidates c
