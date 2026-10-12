@@ -159,11 +159,20 @@ export async function pruneDeletedChannelRules(
 /** Keep the newest `BACKUPS_KEPT` copies; the ISO stamp sorts by age. */
 function trimBackups(path: string): void {
   const dir = dirname(path);
-  const prefix = `${basename(path)}${BACKUP_TAG}`;
+  const base = basename(path);
+  const prefix = `${base}${BACKUP_TAG}`;
   const copies = readdirSync(dir)
     .filter((file) => file.startsWith(prefix))
     .sort();
   for (const file of copies.slice(0, Math.max(0, copies.length - BACKUPS_KEPT))) {
+    unlinkSync(join(dir, file));
+  }
+  // Upgrades leave older backup spellings beside these -- `.bak-` in two
+  // different stamp formats -- which nothing writes any more and nothing else
+  // ever cleaned. They are snapshots of a file the kept copies supersede, so
+  // they go, all of them, the next time a prune writes a backup here.
+  const legacy = readdirSync(dir).filter((file) => file.startsWith(`${base}.bak-`));
+  for (const file of legacy) {
     unlinkSync(join(dir, file));
   }
 }

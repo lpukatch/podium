@@ -75,6 +75,16 @@ export interface SyncOutcome {
 
 export interface SyncOptions {
   /**
+   * Checked before any work starts and again immediately before the write.
+   *
+   * The loop passes its lock state: a worker that decided to push and then
+   * lost the lock must not write a whole-set replacement on its way out while
+   * the new holder is doing the same. Returning true abandons the push with a
+   * reason and without an error -- an abandoned push is not a failure, and
+   * recording it as one would light up the sync page for housekeeping.
+   */
+  shouldAbort?: () => boolean;
+  /**
    * Run every check and report the outcome, but do not write.
    *
    * What the Quality page's preview uses, and the only honest way to answer
@@ -235,6 +245,11 @@ export async function syncToTeamarr(
     return fail('no Teamarr URL is configured');
   }
 
+  // Before anything expensive -- a lost lock is a reason to do none of it.
+  if (options.shouldAbort?.()) {
+    return fail('the worker no longer holds the lock; nothing was pushed');
+  }
+
   const scope = scopeFromConfig(config);
   const samples = store.qualitySamples();
   const profile = buildProfile(samples, { scope });
@@ -315,6 +330,15 @@ export async function syncToTeamarr(
 
   if (options.dryRun) {
     return { ...outcome, reason: 'preview only, nothing was written' };
+  }
+
+  // The push is the one irreversibly shared thing this function does, and the
+  // world it decided in -- lock held, rules fitted -- is minutes stale by the
+  // time it gets here. A deposed worker writing while the new holder writes
+  // the same set is a race with no winner, so the caller's state is asked once
+  // more, at the door.
+  if (options.shouldAbort?.()) {
+    return fail('the worker no longer holds the lock; nothing was pushed');
   }
 
   try {

@@ -166,6 +166,24 @@ describe('pruneDeletedChannelRules', () => {
     expect(kept.at(-1)).toContain('2026-09-14T00-06-00');
   });
 
+  it('sweeps legacy backup spellings no current code writes', async () => {
+    // Upgrades leave `.bak-` files behind in two retired stamp formats.
+    // Nothing writes those any more, so the trim that keeps the newest
+    // `.pruned-` copies is also what finally removes them.
+    writeRules(tenRules());
+    for (const legacy of [
+      'rules.json.bak-20260804-221100',
+      'rules.json.bak-2026-08-21T00-23-53-975Z',
+    ]) {
+      writeFileSync(join(dir, legacy), '{}', 'utf8');
+    }
+
+    await pruneDeletedChannelRules(path, allBut(3), async (id) => id === 3);
+
+    expect(readdirSync(dir).filter((f) => f.includes('.bak-'))).toEqual([]);
+    expect(backups()).toHaveLength(1);
+  });
+
   it('does nothing without a rules file', async () => {
     expect(await pruneDeletedChannelRules(path, [1], async () => true)).toBeNull();
   });

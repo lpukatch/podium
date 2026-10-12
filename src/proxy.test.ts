@@ -15,8 +15,9 @@ import { proxy } from './proxy';
 
 const TOKEN = 'tok-123';
 
-const request = (path: string, headers: Record<string, string> = {}): NextRequest =>
+const request = (path: string, headers: Record<string, string> = {}, method = 'GET'): NextRequest =>
   new NextRequest(`http://podium.example${path}`, {
+    method,
     headers: { host: 'podium.example', ...headers },
   });
 
@@ -54,5 +55,39 @@ describe('the ?token= door', () => {
   it('a bad token with no other credential is still refused', () => {
     const response = proxy(request('/?token=stale-and-wrong'));
     expect(response.status).toBe(401);
+  });
+});
+
+describe('the body-size ceiling', () => {
+  beforeEach(() => {
+    process.env.PODIUM_ALLOWED_HOSTS = 'podium.example';
+  });
+
+  afterEach(() => {
+    delete process.env.PODIUM_ALLOWED_HOSTS;
+  });
+
+  it('refuses an oversized API write with a 413', () => {
+    const response = proxy(
+      request('/api/rule-check', { 'content-length': String(6 * 1024 * 1024) }, 'POST'),
+    );
+    expect(response.status).toBe(413);
+  });
+
+  it('lets a write that declares a sane size through', () => {
+    const response = proxy(request('/api/rule-check', { 'content-length': '65536' }, 'POST'));
+    expect(response.status).toBe(200);
+  });
+
+  it('leaves reads alone whatever they declare', () => {
+    const response = proxy(
+      request('/api/state', { 'content-length': String(6 * 1024 * 1024) }, 'GET'),
+    );
+    expect(response.status).toBe(200);
+  });
+
+  it('ignores the ceiling outside the API', () => {
+    const response = proxy(request('/', { 'content-length': String(6 * 1024 * 1024) }, 'POST'));
+    expect(response.status).toBe(200);
   });
 });

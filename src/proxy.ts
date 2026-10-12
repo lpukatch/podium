@@ -24,6 +24,18 @@ import { type AccessPolicy, checkAccess, forwardedHostOf, parseHostList } from '
 /** The cookie the token lands in, so a browser only presents it once. */
 const TOKEN_COOKIE = 'podium_token';
 
+/**
+ * The most a request body may claim to be.
+ *
+ * Every writer here takes JSON the size of a rules file or a backup bundle --
+ * kilobytes, a hundred of them at most -- so a Content-Length past this is not
+ * a legitimate request, and the cheap place to say so is the door, before the
+ * body is buffered into memory. Reads are untouched, and a body that arrives
+ * without a length (chunked) passes: the routes that parse it fail on their
+ * own long before anything near this size.
+ */
+const MAX_BODY_BYTES = 5 * 1024 * 1024;
+
 function policy(): AccessPolicy {
   return {
     allowedHosts: parseHostList(process.env.PODIUM_ALLOWED_HOSTS),
@@ -129,6 +141,23 @@ function plantTokenCookie(response: NextResponse, token: string, https: boolean)
 export function proxy(request: NextRequest): NextResponse {
   const url = new URL(request.url);
   const { token } = policy();
+
+  // A body larger than anything a writer here legitimately sends is refused at
+  // the door, on the length the client itself declared -- nothing was read to
+  // say it.
+  const contentLength = Number(request.headers.get('content-length') ?? 0);
+  if (
+    contentLength > MAX_BODY_BYTES &&
+    url.pathname.startsWith('/api/') &&
+    request.method !== 'GET' &&
+    request.method !== 'HEAD'
+  ) {
+    return refuse(
+      413,
+      `Request body too large (limit ${Math.round(MAX_BODY_BYTES / 1024 / 1024)} MB).`,
+      url.pathname,
+    );
+  }
 
   // `?token=...` is how a browser gets its first credential: there is no login
   // page to type it into, and asking people to set a cookie by hand is how a

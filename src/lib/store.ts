@@ -61,6 +61,10 @@ CREATE TABLE IF NOT EXISTS probe_cache (
     variant_id   INTEGER NOT NULL DEFAULT 0,
     probed_at    INTEGER NOT NULL,
     alive        INTEGER NOT NULL,
+    -- Materialised from the verdict json at write time: whether ffprobe saw
+    -- black frames. Lets "which streams have a black variant" be answered by
+    -- an aggregate instead of a full-table json_extract.
+    black        INTEGER NOT NULL DEFAULT 0,
     result       TEXT    NOT NULL,
     -- Consecutive dead verdicts, reset to 0 by any alive one. Drives the
     -- backoff in deadTtlFor(). Per variant: one login dying says nothing
@@ -1381,6 +1385,7 @@ export class Store {
         }
       }
       this.splitProbeCacheByVariant();
+      this.addProbeCacheBlackColumn();
       if (path !== ':memory:') {
         Store.initializedPaths.add(path);
       }
@@ -1436,6 +1441,40 @@ export class Store {
           DROP TABLE probe_cache;
           ALTER TABLE probe_cache_split RENAME TO probe_cache;
           CREATE INDEX IF NOT EXISTS probe_cache_probed_at ON probe_cache (probed_at);
+        `);
+      })
+      .immediate();
+  }
+
+  /**
+   * The black flag, materialised.
+   *
+   * `deadStreams()` used to ask `json_extract(result, '$.black')` of every row
+   * in the cache to find the streams with a black variant -- a full-table
+   * parse on every pass with removal on, and on every soak-queue and on-demand
+   * check request besides. `put()` knows the flag when it writes, so a column
+   * is the same fact for free at read time. The backfill recovers it for rows
+   * written before the column existed; the json is left in place, since every
+   * reader of the verdict proper still reads the json.
+   *
+   * Immediate with an in-transaction re-check, for the same reason as the
+   * variant split: both processes construct a Store at boot against one file.
+   */
+  private addProbeCacheBlackColumn(): void {
+    const hasBlackColumn = () =>
+      (this.db.pragma('table_info(probe_cache)') as Array<{ name: string }>).some(
+        (col) => col.name === 'black',
+      );
+    if (hasBlackColumn()) return;
+    this.db
+      .transaction(() => {
+        if (hasBlackColumn()) return;
+        this.db.exec(`
+          ALTER TABLE probe_cache ADD COLUMN black INTEGER NOT NULL DEFAULT 0;
+          UPDATE probe_cache
+            SET black = CASE WHEN json_valid(result)
+                              AND COALESCE(json_extract(result, '$.black'), 0)
+                             THEN 1 ELSE 0 END;
         `);
       })
       .immediate();
@@ -1599,11 +1638,12 @@ export class Store {
    */
   put(streamId: number, streamHash: string, result: ProbeResult, variantId = 0): void {
     this.sql(
-      `INSERT INTO probe_cache (stream_id, stream_hash, variant_id, probed_at, alive, result, dead_streak)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO probe_cache (stream_id, stream_hash, variant_id, probed_at, alive, black, result, dead_streak)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(stream_id, stream_hash, variant_id) DO UPDATE SET
          probed_at   = excluded.probed_at,
          alive       = excluded.alive,
+         black       = excluded.black,
          result      = excluded.result,
          dead_streak = CASE WHEN excluded.alive = 1 THEN 0
                             ELSE probe_cache.dead_streak + 1 END`,
@@ -1613,6 +1653,7 @@ export class Store {
       variantId,
       Date.now(),
       result.alive ? 1 : 0,
+      result.black ? 1 : 0,
       JSON.stringify(result),
       result.alive ? 0 : 1,
     );
@@ -1756,8 +1797,8 @@ export class Store {
    * because `pickBestVariant` prefers a usable login to a black-screened one
    * and a stream is only listed when the verdict that survives is itself dead
    * or black. Black-screened-but-alive streams reach this list through the
-   * `json_extract` arm of the candidate query and then survive (or not) the
-   * same fold everything else does.
+   * materialised `black` column of the candidate query and then survive (or
+   * not) the same fold everything else does.
    *
    * The winner's `dead_streak` is recovered by reference identity:
    * `pickBestVariant` returns one of the objects handed to it, so the entry
@@ -1774,10 +1815,7 @@ export class Store {
        WHERE stream_id IN (
          SELECT stream_id FROM probe_cache
          GROUP BY stream_id
-         HAVING MAX(alive) = 0
-            OR COALESCE(SUM(CASE WHEN json_valid(result)
-                                  AND COALESCE(json_extract(result, '$.black'), 0)
-                                THEN 1 ELSE 0 END), 0) > 0
+         HAVING MAX(alive) = 0 OR COALESCE(SUM(black), 0) > 0
        )`,
     ).all() as Array<{
       row_id: number;
@@ -3237,6 +3275,14 @@ export class Store {
         `INSERT INTO catalogue_state (id, written_at, run_id) VALUES (1, ?, ?)
          ON CONFLICT(id) DO UPDATE SET written_at = excluded.written_at, run_id = excluded.run_id`,
       ).run(Date.now(), runId);
+      // Unclaimed clocks for channels the catalogue no longer carries can
+      // never be cleared by a pass -- a pass only walks the channels it has.
+      // This replace is the one moment the full managed set is known, so the
+      // stale clocks go out with the old snapshot. Clocks on live channels
+      // are untouched: only markUnmatched moves those.
+      this.sql(
+        'DELETE FROM unmatched_since WHERE channel_id NOT IN (SELECT DISTINCT channel_id FROM catalogue)',
+      ).run();
     })();
   }
 
