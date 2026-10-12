@@ -34,6 +34,9 @@ function call(body: Record<string, unknown>): Promise<Response> {
   );
 }
 
+/** What mockImplementation expects: the class is constructed with the URL. */
+type FakeClientCtor = new (url: string) => TeamarrClient;
+
 describe('the teamarr test gate', () => {
   let dir: string;
 
@@ -82,7 +85,7 @@ describe('the teamarr test gate', () => {
     vi.mocked(TeamarrClient).mockImplementation(
       class {
         rules = async () => [];
-      } as unknown as new (url: string) => TeamarrClient,
+      } as unknown as FakeClientCtor,
     );
 
     const resp = await call({ PODIUM_TEAMARR_URL: 'http://teamarr:9195' });
