@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
+import { responseErrorText } from '@/lib/error-text';
 import { resolveEnv } from '@/lib/settings';
 import { IDLE_PROGRESS, STALE_LOCK_MS, Store } from '@/lib/store';
 
@@ -93,7 +94,7 @@ export function GET() {
     });
   } catch (error) {
     return NextResponse.json(
-      { error: 'Cannot read progress', detail: String(error).slice(0, 300) },
+      { error: 'Cannot read progress', detail: responseErrorText(error) },
       { status: 500 },
     );
   } finally {

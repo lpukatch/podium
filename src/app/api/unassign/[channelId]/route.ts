@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireCredentials } from '@/lib/config';
 import { DispatcharrClient } from '@/lib/dispatcharr';
+import { responseErrorText } from '@/lib/error-text';
 import { catalogueRows, withoutStream } from '@/lib/runner';
 import { noteStreamOrder, config as serverConfig, snapshot } from '@/lib/server/state';
 import { Store } from '@/lib/store';
@@ -90,7 +91,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
 
     return NextResponse.json({ status: 'removed', channelId: id, streamId, previous, order });
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   } finally {
     store?.close();
   }

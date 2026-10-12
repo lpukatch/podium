@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
 import { ALWAYS, assignmentIsRule, Eligibility, type GroupPolicy } from '@/lib/eligibility';
+import { responseErrorText } from '@/lib/error-text';
 import { assignedCandidates } from '@/lib/runner';
 import {
   channelCeilings,
@@ -180,7 +181,7 @@ export async function GET(request: Request) {
     return NextResponse.json(
       {
         error: configured ? 'Cannot reach Dispatcharr' : 'Podium is not set up yet',
-        detail: configured ? String(error).slice(0, 300) : '',
+        detail: configured ? responseErrorText(error) : '',
         hint: configured
           ? 'Check Dispatcharr is up, and the port-forward if running locally.'
           : 'Add a Dispatcharr URL and an API key (or username and password) below.',

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { Eligibility } from '@/lib/eligibility';
+import { responseErrorText } from '@/lib/error-text';
 import { leadingWord, matchKey } from '@/lib/normalize';
 import { groupPatterns, index, matcher, policies, snapshot } from '@/lib/server/state';
 
@@ -144,6 +145,6 @@ export async function GET(request: Request) {
       })),
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   }
 }

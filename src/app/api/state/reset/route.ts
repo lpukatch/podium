@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
+import { responseErrorText } from '@/lib/error-text';
 import { Store } from '@/lib/store';
 
 export async function POST() {
@@ -9,7 +10,7 @@ export async function POST() {
     store.resetData();
     return NextResponse.json({ ok: true });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   } finally {
     store.close();
   }

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
 import { summarizeDead } from '@/lib/dead';
+import { responseErrorText } from '@/lib/error-text';
 import { snapshot } from '@/lib/server/state';
 import type { DeadStreamRow } from '@/lib/store';
 import { Store } from '@/lib/store';
@@ -36,7 +37,7 @@ export async function GET() {
     return NextResponse.json({ ...summarizeDead(rows, snap, snap.fetchedAt), cacheUnavailable });
   } catch (error) {
     return NextResponse.json(
-      { error: 'Cannot read dead streams', detail: String(error).slice(0, 300) },
+      { error: 'Cannot read dead streams', detail: responseErrorText(error) },
       { status: 500 },
     );
   }

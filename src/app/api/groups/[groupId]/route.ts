@@ -1,11 +1,22 @@
 import { NextResponse } from 'next/server';
 import { ALWAYS, MAX_GRACE_MINUTES, VALID_MODES, validGraceMinutes } from '@/lib/eligibility';
+import { responseErrorText } from '@/lib/error-text';
 import { parseMaxResolution, parseMinResolution, RESOLUTION_CHOICES } from '@/lib/resolution';
 import { readRulesDoc, writeRulesDoc } from '@/lib/server/state';
 
 export const dynamic = 'force-dynamic';
 
 export async function PUT(request: Request, context: { params: Promise<{ groupId: string }> }) {
+  try {
+    return await putGroupRule(request, context);
+  } catch (error) {
+    // Same reason as the channel rule route: a rules-file failure is a 500
+    // with a reason the settings page can show, not a bare framework error.
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
+  }
+}
+
+async function putGroupRule(request: Request, context: { params: Promise<{ groupId: string }> }) {
   const { groupId } = await context.params;
   const id = Number(groupId);
   if (!Number.isInteger(id)) {

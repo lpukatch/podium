@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
+import { responseErrorText } from '@/lib/error-text';
 import { DEFAULT_WEIGHTS, isUsable } from '@/lib/scoring';
 import { resolveEnv } from '@/lib/settings';
 import { STALE_LOCK_MS, Store } from '@/lib/store';
@@ -102,7 +103,7 @@ export function GET() {
     });
   } catch (error) {
     return NextResponse.json(
-      { error: 'Cannot read stats', detail: String(error).slice(0, 300) },
+      { error: 'Cannot read stats', detail: responseErrorText(error) },
       { status: 500 },
     );
   } finally {

@@ -104,6 +104,28 @@ function refuse(status: number, message: string, path: string): NextResponse {
   return harden(response);
 }
 
+/**
+ * Hand the token back as a cookie, so a browser only presents it once.
+ *
+ * `lax`, not `strict`: strict drops the cookie on any cross-site navigation,
+ * so following a bookmark or a link from another page would land on a
+ * logged-out Podium and there is no login form to recover with. Writes do not
+ * rely on the cookie being withheld -- Sec-Fetch-Site and Origin refuse a
+ * cross-site POST whether or not it carries one. `secure` follows what the
+ * browser is actually on: a plain-http install would set a Secure cookie and
+ * then silently never see it again.
+ */
+function plantTokenCookie(response: NextResponse, token: string, https: boolean): NextResponse {
+  response.cookies.set(TOKEN_COOKIE, token, {
+    httpOnly: true,
+    sameSite: 'lax',
+    path: '/',
+    secure: https,
+    maxAge: 60 * 60 * 24 * 365,
+  });
+  return response;
+}
+
 export function proxy(request: NextRequest): NextResponse {
   const url = new URL(request.url);
   const { token } = policy();
@@ -128,6 +150,14 @@ export function proxy(request: NextRequest): NextResponse {
       policy(),
     );
     if (verdict.ok) {
+      // An API caller gets an answer, not a redirect: a 307 would ask it for a
+      // second request most clients will not follow, and the credential has
+      // already been checked. The request proceeds on the token it carried,
+      // and the cookie is planted on the way through so the next call presents
+      // it in a header like every other credential.
+      if (url.pathname.startsWith('/api/')) {
+        return plantTokenCookie(harden(NextResponse.next()), token, client.https);
+      }
       url.searchParams.delete('token');
       // Redirect to the scheme the *browser* is on. Behind a TLS-terminating
       // proxy this process only ever sees http, and sending the browser there
@@ -140,24 +170,12 @@ export function proxy(request: NextRequest): NextResponse {
       // proxy does not listen on.
       url.port = '';
       url.host = client.authority;
-      const response = NextResponse.redirect(url);
-      response.cookies.set(TOKEN_COOKIE, token, {
-        httpOnly: true,
-        // `lax`, not `strict`: strict drops the cookie on any cross-site
-        // navigation, so following a bookmark or a link from another page would
-        // land on a logged-out Podium and there is no login form to recover
-        // with. Writes do not rely on the cookie being withheld -- Sec-Fetch-Site
-        // and Origin refuse a cross-site POST whether or not it carries one.
-        sameSite: 'lax',
-        path: '/',
-        // False on a plain-http install, where a Secure cookie would be set and
-        // then silently never sent back.
-        secure: client.https,
-        maxAge: 60 * 60 * 24 * 365,
-      });
-      return harden(response);
+      return plantTokenCookie(harden(NextResponse.redirect(url)), token, client.https);
     }
-    return refuse(verdict.status, verdict.message, url.pathname);
+    // A stale `?token=` must not defeat a session that is otherwise fine: it
+    // was offered, found wanting, and is now ignored. Falling through lets the
+    // header credentials answer; if none of them work either, the refusal
+    // below names the real reason.
   }
 
   const bearer = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ?? '';

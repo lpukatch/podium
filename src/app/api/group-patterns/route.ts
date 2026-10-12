@@ -6,6 +6,7 @@ import {
   VALID_MODES,
   validGraceMinutes,
 } from '@/lib/eligibility';
+import { responseErrorText } from '@/lib/error-text';
 import { parseMaxResolution, parseMinResolution, RESOLUTION_CHOICES } from '@/lib/resolution';
 import { readRulesDoc, snapshot, userGroups, writeRulesDoc } from '@/lib/server/state';
 
@@ -27,6 +28,14 @@ interface PatternRow {
 
 /** Add or replace a name-pattern rule, and report which groups it would hit. */
 export async function PUT(request: Request) {
+  try {
+    return await putGroupPattern(request);
+  } catch (error) {
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
+  }
+}
+
+async function putGroupPattern(request: Request) {
   const body = (await request.json().catch(() => null)) as {
     pattern?: string;
     mode?: string;
@@ -172,6 +181,14 @@ export async function PUT(request: Request) {
 }
 
 export async function DELETE(request: Request) {
+  try {
+    return await deleteGroupPattern(request);
+  } catch (error) {
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
+  }
+}
+
+async function deleteGroupPattern(request: Request) {
   const pattern = new URL(request.url).searchParams.get('pattern') ?? '';
   const doc = readRulesDoc();
   const patterns = (doc.group_patterns ?? []) as PatternRow[];

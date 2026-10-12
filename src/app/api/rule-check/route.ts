@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
+import { responseErrorText } from '@/lib/error-text';
 import { applyMatches, checkInputs, scoredChannelIds } from '@/lib/rule-check-inputs';
 import { snapshot } from '@/lib/server/state';
 import { resolveEnv } from '@/lib/settings';
@@ -30,7 +31,7 @@ export function GET() {
       latest,
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   } finally {
     store?.close();
   }
@@ -100,7 +101,7 @@ export async function POST(request: Request) {
       skew: match?.known ? (describeSkew(match.coverage) ?? undefined) : undefined,
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   } finally {
     store?.close();
   }

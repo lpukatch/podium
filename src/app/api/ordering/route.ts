@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { responseErrorText } from '@/lib/error-text';
 import {
   DEFAULT_WEIGHTS,
   type HdrPreference,
@@ -107,7 +108,7 @@ export async function GET() {
       providers: snap.providers.map((p) => ({ id: p.id, name: p.name })),
     } satisfies OrderingResponse);
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   }
 }
 
@@ -166,6 +167,6 @@ export async function PUT(request: Request) {
 
     return NextResponse.json({ status: 'saved' });
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   }
 }
