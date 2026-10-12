@@ -342,6 +342,12 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     const variantResults = new Map<number, VariantVerdict[]>();
     const probeOptions = {
       limits,
+      // The same machine-level cap the worker probes under. Lane limits bound
+      // what the account allows; this bounds what the container does -- each
+      // probe in flight is an ffprobe and an ffmpeg decoding video, and
+      // without it a many-provider channel could fan this check out to its
+      // 50-stream bound in one go.
+      maxConcurrent: config.PODIUM_MAX_CONCURRENT_PROBES,
       probe: async (job: ProbeJob) => {
         const result = await probe(job.url, {
           timeoutMs: config.PODIUM_PROBE_TIMEOUT_MS,

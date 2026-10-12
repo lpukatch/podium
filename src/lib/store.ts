@@ -1985,12 +1985,28 @@ export class Store {
        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
     );
     const remove = this.sql('DELETE FROM settings WHERE key = ?');
+    const touch = this.sql('UPDATE settings SET updated_at = ?');
     const now = Date.now();
     this.db.transaction(() => {
+      let deleted = false;
       for (const [key, value] of Object.entries(values)) {
-        if (value === null) remove.run(key);
-        else upsert.run(key, value, now);
+        if (value === null) {
+          if (remove.run(key).changes > 0) deleted = true;
+        } else {
+          upsert.run(key, value, now);
+        }
       }
+      // A save that only removes keys runs deletes alone, and a delete touches
+      // no timestamp -- so MAX(updated_at) stays exactly where it was, and
+      // settingsVersion(), which is that MAX, does not move. Every reader
+      // hangs off that version: the web's config() cache and the worker's
+      // liveConfig() would both have gone on serving the config as it was
+      // before the save, silently keeping a field the operator just cleared.
+      // Clearing is a change like any other, so stamp the surviving rows. On
+      // a table the save emptied there is nothing left to stamp, but the
+      // version is then 0, which is itself different from any populated
+      // state -- the readers reload either way.
+      if (deleted) touch.run(now);
     })();
   }
 
@@ -3356,7 +3372,12 @@ export class Store {
     };
   }
 
-  /** Hard reset for all historical and cached data. */
+  /**
+   * Hard reset for all historical and cached data. The settings table and the
+   * worker lock are deliberately left alone: this is the "start measuring
+   * again" button, not "reinstall" -- config and the identity of whoever is
+   * currently probing are not measurements.
+   */
   resetData(): void {
     this.db.transaction(() => {
       this.sql('DELETE FROM probe_cache').run();
@@ -3368,6 +3389,25 @@ export class Store {
       this.sql('DELETE FROM catalogue_state').run();
       this.sql('DELETE FROM assign_blocks').run();
       this.sql('DELETE FROM quality_samples').run();
+      // Pending soak work is live state, not history: a queue that survived
+      // the reset would keep drawing provider slots window after window,
+      // probing against a catalogue that no longer exists.
+      this.sql('DELETE FROM soak_requests').run();
+      this.sql('DELETE FROM soak_results').run();
+      // Records of past passes and state derived from them. A reset that kept
+      // any of these would leave the UI and the metrics narrating data the
+      // reset just disowned.
+      this.sql('DELETE FROM stream_legs').run();
+      this.sql('DELETE FROM rule_checks').run();
+      this.sql('DELETE FROM rule_check_misses').run();
+      this.sql('DELETE FROM unmatched_since').run();
+      this.sql('DELETE FROM teamarr_rules').run();
+      this.sql('DELETE FROM teamarr_sync').run();
+      this.sql('DELETE FROM teamarr_sync_log').run();
+      this.sql('DELETE FROM connect_events').run();
+      this.sql('DELETE FROM connect_activity').run();
+      this.sql('DELETE FROM connect_delivery_history').run();
+      this.sql('DELETE FROM progress').run();
     })();
   }
 
