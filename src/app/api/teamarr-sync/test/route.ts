@@ -62,6 +62,25 @@ export async function POST(request: Request) {
       });
     }
 
+    // The Dispatcharr test refuses to dial out until there is something to
+    // authenticate with, because an ungated reachability answer is a way to
+    // make the server fetch an arbitrary URL for the asking. Teamarr takes no
+    // credential, so the equivalent bar is the integration being switched on
+    // in what is already configured -- saved settings or environment, NOT this
+    // request's fields, which a drive-by POST could set to true for the
+    // duration of one request. An operator typing a URL before saving hits
+    // this too; the message is written for them rather than for an attacker.
+    const storedConfig = loadConfig(resolveEnv(process.env, store.settings()));
+    if (!storedConfig.PODIUM_TEAMARR_SYNC) {
+      return NextResponse.json({
+        ok: false,
+        needsEnabled: true,
+        error:
+          'Teamarr sync is off in your saved settings, so there is nothing to test ' +
+          'against. Switch it on, save, then test.',
+      });
+    }
+
     const live = await new TeamarrClient(url).rules();
     const summary = summarise(live);
 

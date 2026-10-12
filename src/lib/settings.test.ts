@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from './config';
 import {
   describeSettings,
@@ -279,6 +279,53 @@ describe('settings persistence', () => {
     expect(store.settingsVersion()).toBe(0);
     store.setSettings({ PODIUM_DRY_RUN: 'false' });
     expect(store.settingsVersion()).toBeGreaterThan(0);
+  });
+
+  it('moves the version for a save whose every field is a clear', () => {
+    // settingsVersion() is MAX(updated_at) and a delete touches no timestamp,
+    // so a null-only save used to leave the version -- and with it the web's
+    // config() cache and the worker's liveConfig() -- frozen on the config as
+    // it was before the save.
+    store.setSettings({ PODIUM_DRY_RUN: 'false', PODIUM_AUTO_ASSIGN: 'false' });
+    const before = store.settingsVersion();
+    store.setSettings({ PODIUM_DRY_RUN: null, PODIUM_AUTO_ASSIGN: null });
+    expect(store.settings()).toEqual({});
+    expect(store.settingsVersion()).not.toBe(before);
+  });
+
+  it('moves the version when a clear lands alongside an untouched survivor', () => {
+    // Fake clock: two saves inside one millisecond would stamp the same
+    // `updated_at` and the assertion would be flaky by construction.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_000_000);
+      store.setSettings({ PODIUM_DRY_RUN: 'false', PODIUM_AUTO_ASSIGN: 'false' });
+      const before = store.settingsVersion();
+      vi.setSystemTime(2_000_000);
+      store.setSettings({ PODIUM_DRY_RUN: null });
+      expect(store.settings()).toEqual({ PODIUM_AUTO_ASSIGN: 'false' });
+      expect(store.settingsVersion()).not.toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not move the version when a clear names nothing stored', () => {
+    // A save that changes nothing must not wake every reader up to reload the
+    // same config.
+    store.setSettings({ PODIUM_DRY_RUN: 'false' });
+    const before = store.settingsVersion();
+    store.setSettings({ PODIUM_AUTO_ASSIGN: null });
+    expect(store.settingsVersion()).toBe(before);
+  });
+
+  it('a save that empties the table drops the version to zero', () => {
+    // Zero is the fresh-install reading; it differs from any populated state,
+    // which is what makes an emptied table invalidate the caches too.
+    store.setSettings({ PODIUM_DRY_RUN: 'false' });
+    expect(store.settingsVersion()).toBeGreaterThan(0);
+    store.setSettings({ PODIUM_DRY_RUN: null });
+    expect(store.settingsVersion()).toBe(0);
   });
 
   it('turns auto-assign off, and back on, through the stored value', () => {
