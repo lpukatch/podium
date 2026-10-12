@@ -1,5 +1,32 @@
 import { describe, expect, it } from 'vitest';
-import { regression, type SyncScore, underpowered } from './teamarr-sync';
+import { loadConfig } from './config';
+import { regression, type SyncScore, syncToTeamarr, underpowered } from './teamarr-sync';
+
+describe('the abort door', () => {
+  it('abandons the push before touching anything when the caller says so', async () => {
+    // The abort is checked right after the URL guard, before the store is read
+    // or anything dials out -- a deposed worker does not so much as build the
+    // profile it will not push. Neither argument is reached beyond the URL,
+    // so empty stand-ins prove the ordering.
+    let dialed = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (() => {
+      dialed += 1;
+      throw new Error('should not be reached');
+    }) as unknown as typeof fetch;
+    try {
+      const config = loadConfig({ PODIUM_TEAMARR_URL: 'http://teamarr:9195' });
+      const outcome = await syncToTeamarr({} as never, config, {
+        shouldAbort: () => true,
+      });
+      expect(outcome.pushed).toBe(false);
+      expect(outcome.reason).toContain('no longer holds the lock');
+      expect(dialed).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
 
 const score = (over: Partial<SyncScore> = {}): SyncScore => ({
   channels: 100,

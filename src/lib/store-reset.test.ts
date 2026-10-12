@@ -124,3 +124,48 @@ describe('resetData', () => {
     expect(() => store.resetData()).not.toThrow();
   });
 });
+
+describe('replaceCatalogue prunes clocks the catalogue no longer carries', () => {
+  let dir: string;
+  let store: Store;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'podium-catalogue-'));
+    store = new Store(join(dir, 'podium.db'));
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('drops unmatched clocks for channels it no longer manages, and only those', () => {
+    store.markUnmatched(11, [1], 1_000);
+    store.markUnmatched(12, [2], 2_000);
+    // Channel 12 vanishes from the catalogue; channel 11 stays.
+    store.replaceCatalogue(
+      [
+        {
+          channelId: 11,
+          channelName: 'Kept',
+          slot: 0,
+          streamId: 1,
+          providerId: 5,
+          providerName: 'A',
+        },
+      ],
+      'run-1',
+    );
+
+    expect([...store.unmatchedSince(11).keys()]).toEqual([1]);
+    expect(store.unmatchedSince(12).size).toBe(0);
+  });
+
+  it('does not prune on an empty write', () => {
+    // replaceCatalogue refuses an empty snapshot outright -- a truncated fetch
+    // must not look like "nothing is managed" -- so the clocks survive it too.
+    store.markUnmatched(11, [1], 1_000);
+    store.replaceCatalogue([], 'run-1');
+    expect(store.unmatchedSince(11).size).toBe(1);
+  });
+});

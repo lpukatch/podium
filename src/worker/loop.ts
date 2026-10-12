@@ -538,7 +538,12 @@ export async function startWorker(config: Config, log: Log): Promise<() => Promi
     syncing = true;
     void (async () => {
       try {
-        const outcome = await syncToTeamarr(store, live, { scheduled: true });
+        // Handed to the push so a lock lost mid-sync stops it at the write:
+        // a deposed worker must not race the new holder into Teamarr.
+        const outcome = await syncToTeamarr(store, live, {
+          scheduled: true,
+          shouldAbort: () => !holding || stopping,
+        });
         store.saveTeamarrSync(outcome);
         if (outcome.pushed) {
           log(
