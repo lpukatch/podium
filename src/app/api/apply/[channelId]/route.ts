@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { requireCredentials } from '@/lib/config';
 import { DispatcharrClient } from '@/lib/dispatcharr';
 import { currentProgrammes, describeVerdict, Eligibility } from '@/lib/eligibility';
+import { responseErrorText } from '@/lib/error-text';
 import { catalogueRows, composeApplyOrder } from '@/lib/runner';
 import {
   groupPatterns,
@@ -144,7 +145,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       heldBack: verdict.allowed ? null : describeVerdict(verdict),
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   } finally {
     store?.close();
   }

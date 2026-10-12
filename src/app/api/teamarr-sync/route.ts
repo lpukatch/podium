@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
+import { responseErrorText } from '@/lib/error-text';
 import { resolveEnv } from '@/lib/settings';
 import { Store } from '@/lib/store';
 import { DEFER_RETRY_MS, syncToTeamarr } from '@/lib/teamarr-sync';
@@ -56,7 +57,7 @@ export function GET() {
       last: last?.outcome ?? null,
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   } finally {
     store?.close();
   }
@@ -92,7 +93,7 @@ export async function POST(request: Request) {
     if (!truthy('dryRun')) store.saveTeamarrSync(outcome);
     return NextResponse.json(outcome);
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   } finally {
     store?.close();
   }

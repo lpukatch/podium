@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { responseErrorText } from '@/lib/error-text';
 import { parseMaxResolution, parseMinResolution, RESOLUTION_CHOICES } from '@/lib/resolution';
 import { readRulesDoc, writeRulesDoc } from '@/lib/server/state';
 
@@ -13,6 +14,20 @@ interface ChannelEntry {
 }
 
 export async function PUT(request: Request, context: { params: Promise<{ channelId: string }> }) {
+  try {
+    return await putChannelRule(request, context);
+  } catch (error) {
+    // A rules-file read or write failure is a 500 with a reason, not the
+    // framework's generic error page: the settings page surfaces the message
+    // and an operator can act on it.
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
+  }
+}
+
+async function putChannelRule(
+  request: Request,
+  context: { params: Promise<{ channelId: string }> },
+) {
   const { channelId } = await context.params;
   const id = Number(channelId);
   if (!Number.isInteger(id)) {

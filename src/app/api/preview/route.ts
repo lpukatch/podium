@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
 import { Eligibility } from '@/lib/eligibility';
+import { responseErrorText } from '@/lib/error-text';
 import type { ChannelRule } from '@/lib/matcher';
 import type { ProbeResult } from '@/lib/probe';
 import { groupFilter } from '@/lib/provider-groups';
@@ -19,7 +20,7 @@ export const dynamic = 'force-dynamic';
  */
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as {
+    const body = (await request.json().catch(() => null)) as {
       channelId: number;
       aliases?: string[];
       contains?: string[];
@@ -30,7 +31,45 @@ export async function POST(request: Request) {
       aliasProviders?: Record<string, number[]>;
       aliasProviderGroupFilters?: Record<string, Record<string, unknown>>;
       containsGroupFilters?: Record<string, unknown>;
-    };
+    } | null;
+    if (body === null) {
+      return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
+    }
+
+    // The editor sends well-formed bodies; these guards are for everything
+    // else that can POST here. `channelId` of `undefined` used to sail through
+    // and match nothing, and a non-object `aliasProviders` threw mid-handler
+    // into the 500 below -- both are answers the request can have up front.
+    if (!Number.isInteger(body.channelId)) {
+      return NextResponse.json({ error: 'bad channel id' }, { status: 400 });
+    }
+    const isObject = (value: unknown): value is Record<string, unknown> =>
+      typeof value === 'object' && value !== null && !Array.isArray(value);
+    for (const field of [
+      'aliasGroupFilters',
+      'aliasProviders',
+      'aliasProviderGroupFilters',
+      'containsGroupFilters',
+    ] as const) {
+      if (body[field] !== undefined && !isObject(body[field])) {
+        return NextResponse.json({ error: `${field} must be an object` }, { status: 400 });
+      }
+    }
+    if (
+      body.groupFilter !== undefined &&
+      body.groupFilter !== null &&
+      !isObject(body.groupFilter)
+    ) {
+      return NextResponse.json({ error: 'groupFilter must be an object or null' }, { status: 400 });
+    }
+    for (const [alias, ids] of Object.entries(body.aliasProviders ?? {})) {
+      if (!Array.isArray(ids)) {
+        return NextResponse.json(
+          { error: `aliasProviders.${alias} must be an array of stream ids` },
+          { status: 400 },
+        );
+      }
+    }
 
     const snap = await snapshot();
     const m = matcher();
@@ -68,7 +107,10 @@ export async function POST(request: Request) {
         body.aliasProviders === undefined
           ? existing?.aliasProviders
           : Object.fromEntries(
-              Object.entries(body.aliasProviders).map(([alias, ids]) => [alias, new Set(ids)]),
+              Object.entries(body.aliasProviders).map(([alias, ids]) => [
+                alias,
+                new Set((ids as unknown[]).map(Number).filter(Number.isFinite)),
+              ]),
             ),
       aliasProviderGroupFilters:
         body.aliasProviderGroupFilters === undefined
@@ -246,6 +288,6 @@ export async function POST(request: Request) {
       currentOrder: (channel?.streams ?? []).map((id) => describe(id, null)).filter(Boolean),
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   }
 }

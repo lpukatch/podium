@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { responseErrorText } from '@/lib/error-text';
 import { index, matcher, readRulesDoc, snapshot, writeRulesDoc } from '@/lib/server/state';
 
 export const dynamic = 'force-dynamic';
@@ -79,7 +80,7 @@ export async function GET(request: Request) {
       totalStreams: snap.streams.length,
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   }
 }
 
@@ -97,6 +98,6 @@ export async function PUT(request: Request) {
 
     return NextResponse.json({ status: 'saved', strip: clean });
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   }
 }

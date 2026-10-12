@@ -8,6 +8,7 @@ import {
   wouldBreakAuth,
 } from '@/lib/backup';
 import { loadConfig } from '@/lib/config';
+import { responseErrorText } from '@/lib/error-text';
 import { loadRules } from '@/lib/rules';
 import { readRulesDoc, writeRulesDoc } from '@/lib/server/state';
 import { credentialMoveMessage, movedCredentials } from '@/lib/settings';
@@ -53,7 +54,7 @@ export function GET() {
       },
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   } finally {
     store?.close();
   }
@@ -89,7 +90,7 @@ export async function POST(request: Request) {
       const detail =
         error instanceof ZodError
           ? error.issues.map((i) => `${i.path.join('.') || 'file'}: ${i.message}`).join('; ')
-          : String(error);
+          : responseErrorText(error);
       return NextResponse.json(
         { error: `not a Podium backup: ${detail.slice(0, 200)}` },
         { status: 400 },
@@ -162,10 +163,10 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           error: undone
-            ? `the database was not restored: ${String(error).slice(0, 200)}. ` +
+            ? `the database was not restored: ${responseErrorText(error)}. ` +
               'Nothing was changed -- rules.json was put back as it was. ' +
               'Import the same backup again once the cause is fixed.'
-            : `rules.json was replaced, but the database was not restored: ${String(error).slice(0, 200)}. ` +
+            : `rules.json was replaced, but the database was not restored: ${responseErrorText(error)}. ` +
               'Import the same backup again once the cause is fixed.',
         },
         { status: 500 },
@@ -182,7 +183,7 @@ export async function POST(request: Request) {
       },
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   } finally {
     store?.close();
   }

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { loadConfig, requireCredentials } from '@/lib/config';
+import { responseErrorText } from '@/lib/error-text';
 import {
   credentialMoveMessage,
   describeSettings,
@@ -36,7 +37,7 @@ export function GET() {
       })(),
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   } finally {
     store?.close();
   }
@@ -87,7 +88,7 @@ export async function PUT(request: Request) {
       fields: describeSettings(process.env, store.settings()),
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   } finally {
     store?.close();
   }
@@ -108,7 +109,7 @@ function loadConfigSafely(stored: Record<string, string>): { ok: boolean; messag
   } catch (error) {
     return {
       ok: false,
-      message: String(error)
+      message: responseErrorText(error)
         .replace(/^Error:\s*/, '')
         .slice(0, 200),
     };

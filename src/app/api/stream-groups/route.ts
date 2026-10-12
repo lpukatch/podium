@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { compileGlob, Eligibility } from '@/lib/eligibility';
+import { responseErrorText } from '@/lib/error-text';
 import {
   groupPatterns,
   index,
@@ -70,7 +71,7 @@ export async function GET() {
       excludedStreams: groups.filter((g) => g.excluded).reduce((n, g) => n + g.streams, 0),
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   }
 }
 
@@ -88,6 +89,6 @@ export async function PUT(request: Request) {
 
     return NextResponse.json({ status: 'saved', excludeGroups: clean });
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   }
 }

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
+import { responseErrorText } from '@/lib/error-text';
 import { ALL_GROUPS, Store } from '@/lib/store';
 
 export const dynamic = 'force-dynamic';
@@ -58,7 +59,7 @@ export function GET() {
       groups: Object.fromEntries(marks.byGroup),
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   } finally {
     store?.close();
   }
@@ -84,7 +85,7 @@ export async function POST(request: Request) {
     if (scope.groupId === ALL_GROUPS) store.clearGroupRefreshMarks();
     return NextResponse.json({ queued: true, scope: scope.label, forcedAt });
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   } finally {
     store?.close();
   }
@@ -101,7 +102,7 @@ export function DELETE(request: Request) {
     const cleared = store.clearRefreshMark(scope.groupId);
     return NextResponse.json({ cancelled: cleared > 0, scope: scope.label });
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   } finally {
     store?.close();
   }

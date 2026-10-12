@@ -7,6 +7,7 @@ import {
   describeVerdict,
   Eligibility,
 } from '@/lib/eligibility';
+import { responseErrorText } from '@/lib/error-text';
 import { Mutex } from '@/lib/mutex';
 import { resolveOrdering, withResolutionCeiling, withResolutionFloor } from '@/lib/ordering';
 import { isInterlaced, type ProbeResult, probe } from '@/lib/probe';
@@ -636,7 +637,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       unprobed,
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error).slice(0, 300) }, { status: 500 });
+    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   } finally {
     store?.close();
   }
