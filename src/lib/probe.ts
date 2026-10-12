@@ -15,6 +15,20 @@ import { type ChildProcess, spawn } from 'child_process';
 
 const runningChildren = new Set<ChildProcess>();
 
+/**
+ * Append a chunk, keeping at most the last `max` characters.
+ *
+ * ffprobe prints its JSON report once, at the end, and its errors line by
+ * line before that -- the useful part of either stream is always the tail. A
+ * server that answers a probe with an endless error banner was otherwise
+ * buffered in full for the whole timeout, tens of MB per probe times the
+ * lane width; `sampleStream` already clipped, and `probe` now does too, by
+ * the same reasoning.
+ */
+export function clipTail(current: string, chunk: string, max: number): string {
+  return current.length + chunk.length <= max ? current + chunk : (current + chunk).slice(-max);
+}
+
 process.on('exit', () => {
   for (const child of runningChildren) {
     try {
@@ -527,8 +541,7 @@ export async function sampleStream(
 
     child.stderr.on('data', (chunk) => {
       const text = String(chunk);
-      stderr += text;
-      if (stderr.length > 16384) stderr = stderr.slice(-8192);
+      stderr = clipTail(stderr, text, 16_384);
 
       lineBuffer += text;
       const lines = lineBuffer.split(/[\r\n]+/);
@@ -609,10 +622,10 @@ export async function probe(url: string, options: ProbeOptions = {}): Promise<Pr
     }, timeoutMs);
 
     child.stdout.on('data', (chunk) => {
-      stdout += chunk;
+      stdout = clipTail(stdout, String(chunk), 65_536);
     });
     child.stderr.on('data', (chunk) => {
-      stderr += chunk;
+      stderr = clipTail(stderr, String(chunk), 16_384);
     });
 
     child.on('error', (error) => {

@@ -63,8 +63,8 @@ describe('the session poller', () => {
     );
   });
 
-  afterEach(() => {
-    stop?.();
+  afterEach(async () => {
+    await stop?.();
     stop = null;
     vi.unstubAllGlobals();
     vi.useRealTimers();
@@ -118,7 +118,7 @@ describe('the session poller', () => {
     await vi.advanceTimersByTimeAsync(10_000);
     await vi.advanceTimersByTimeAsync(10_000);
 
-    stop();
+    await stop();
     stop = null;
 
     const store = new Store(cfg.dbPath);
@@ -442,6 +442,55 @@ describe('the session poller', () => {
     // of a fortnight, and there is nothing here worth stopping a worker for.
     expect(lines.join('\n')).toContain('session poll failed');
   });
+
+  it('backs off through an outage and restarts the escalation on recovery', async () => {
+    let failing = true;
+    const attempts: number[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL) => {
+        if (String(input).includes('/proxy/ts/status')) {
+          attempts.push(Date.now());
+          if (failing) throw new Error('connection refused');
+          return new Response(JSON.stringify({ channels: [], count: 0 }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ count: 0, results: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }),
+    );
+    vi.useFakeTimers();
+    const cfg = config();
+    storeSettings(cfg, { PODIUM_STABILITY: 'true', PODIUM_STABILITY_POLL_MS: '10000' });
+    const lines: string[] = [];
+    stop = await startWorker(cfg, (m) => lines.push(m));
+
+    // t=10s: attempt fails; the first failure keeps the interval, so t=20s
+    // tries again and doubles the gap to 20s. t=30s therefore lands inside
+    // the backoff and must not dial out at all.
+    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(attempts.length).toBe(2);
+    // The escalation is on the log, not silent: an operator watching an
+    // outage has to be able to tell "backing off" from "gone".
+    expect(lines.join('\n')).toContain('retrying in 20s');
+
+    failing = false;
+    await vi.advanceTimersByTimeAsync(10_000); // t=40s: inside the window the second gap named
+    expect(attempts.length).toBe(3);
+
+    // Recovery reset the climb: the next failure is one interval again, not
+    // the fourth doubling.
+    failing = true;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(attempts.length).toBe(4);
+    expect(lines.join('\n')).not.toContain('retrying in 40s');
+  });
 });
 
 describe('the soak wake', () => {
@@ -463,8 +512,8 @@ describe('the soak wake', () => {
     );
   });
 
-  afterEach(() => {
-    stop?.();
+  afterEach(async () => {
+    await stop?.();
     stop = null;
     vi.unstubAllGlobals();
     vi.useRealTimers();

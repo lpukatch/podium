@@ -49,7 +49,7 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
-  let stopWorker: (() => void) | null = null;
+  let stopWorker: (() => Promise<void>) | null = null;
   if (worker) {
     log('starting worker');
     stopWorker = await startWorker(config, log);
@@ -64,8 +64,12 @@ async function main(): Promise<void> {
 
   const shutdown = (signal: string) => {
     log(`${signal} received, shutting down`);
-    stopWorker?.();
-    // Next installs its own signal handling; give both a moment, then go.
+    // The stop drains an in-flight pass before it closes the store; exit a
+    // moment after it lands, inside the hard window below. A wedged pass
+    // cannot hold shutdown open -- the timeout fires regardless.
+    void Promise.resolve(stopWorker?.()).then(() => {
+      setTimeout(() => process.exit(0), 250).unref();
+    });
     setTimeout(() => process.exit(0), 2000).unref();
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));

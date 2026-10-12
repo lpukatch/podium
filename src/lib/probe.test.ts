@@ -13,6 +13,7 @@ import { tmpdir } from 'os';
 import { basename, join } from 'path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+  clipTail,
   DEAD_REASONS,
   deadDetail,
   deadReason,
@@ -32,6 +33,22 @@ function hasFfmpeg(): boolean {
     return false;
   }
 }
+
+describe('clipTail', () => {
+  it('appends whole while under the cap', () => {
+    expect(clipTail('abc', 'def', 100)).toBe('abcdef');
+  });
+
+  it('keeps the last max characters once the cap is crossed', () => {
+    // The tail, not the head: ffprobe prints its errors line by line and its
+    // JSON report last, so the end of the stream is the part worth keeping.
+    expect(clipTail('abcdef', 'ghij', 4)).toBe('ghij');
+  });
+
+  it('caps a single chunk bigger than the buffer to its own tail', () => {
+    expect(clipTail('', 'abcdefgh', 3)).toBe('fgh');
+  });
+});
 
 describe('parseSampleStderr', () => {
   it('takes the last bitrate, not the first', () => {

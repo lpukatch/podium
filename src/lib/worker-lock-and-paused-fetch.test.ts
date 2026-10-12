@@ -110,7 +110,7 @@ describe('startWorker when the lock is held', () => {
     // Waiting, not holding: the lock is still the other worker's, and stopping
     // a waiter must not delete a lock it never took.
     expect(store.lockState()?.owner).toBe('someone-else');
-    stop();
+    await stop();
     expect(store.lockState()?.owner).toBe('someone-else');
   });
 
@@ -126,7 +126,7 @@ describe('startWorker when the lock is held', () => {
 
       expect(lines.join('\n')).toContain('paced loop started (lock acquired)');
       expect(store.lockState()?.owner).not.toBe('someone-else');
-      stop();
+      await stop();
     } finally {
       vi.useRealTimers();
     }
@@ -154,8 +154,8 @@ describe('the dry-run banner', () => {
     delete process.env.PODIUM_DRY_RUN;
   });
 
-  afterEach(() => {
-    stop?.();
+  afterEach(async () => {
+    await stop?.();
     stop = null;
     globalThis.fetch = originalFetch;
     if (originalDryRun === undefined) delete process.env.PODIUM_DRY_RUN;
@@ -295,5 +295,111 @@ describe('Pacer.pausedByActivity', () => {
 
   it('is true when someone is watching', () => {
     expect(pacer().pausedByActivity(watching)).toBe(true);
+  });
+});
+
+describe('stop drains the pass in flight', () => {
+  let dir: string;
+  let stop: (() => Promise<void>) | null = null;
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'podium-drain-'));
+    writeFileSync(join(dir, 'rules.json'), JSON.stringify({ schema: 2, channels: [] }), 'utf8');
+  });
+
+  afterEach(async () => {
+    await stop?.();
+    stop = null;
+    globalThis.fetch = originalFetch;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** The lock row, read through a second handle the way an observer would. */
+  const lockHeldBy = (config: ReturnType<typeof loadConfig>): string | null => {
+    const s = new Store(config.dbPath);
+    try {
+      return s.lockState()?.owner ?? null;
+    } finally {
+      s.close();
+    }
+  };
+
+  it('lets the pass settle before closing the store', async () => {
+    // The pass only has something in flight once it reaches for the stream
+    // catalogue, so every earlier endpoint -- token, activity, provider
+    // accounts -- answers normally and this one holds. Before that point the
+    // pass can end paused without dialling out at all, which is precisely the
+    // state where the old close-on-the-spot stop was fine.
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    globalThis.fetch = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.includes('/channels/streams/')) {
+        await held;
+        throw new Error('offline');
+      }
+      const body = url.includes('/accounts/token/')
+        ? { access: 'a', refresh: 'r' }
+        : url.includes('/proxy/ts/status')
+          ? { channels: [], count: 0 }
+          : {
+              count: 1,
+              next: null,
+              results: [
+                {
+                  id: 7,
+                  name: 'Provider A',
+                  max_streams: 5,
+                  profiles: [{ id: 70, name: 'Default', is_default: true, is_active: true }],
+                },
+              ],
+            };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => body,
+        text: async () => JSON.stringify(body),
+      } as Response;
+    }) as unknown as typeof fetch;
+
+    const config = loadConfig({ PODIUM_DATA_DIR: dir, DISPATCHARR_API_KEY: 'k' });
+    // The loop resolves its config from the environment plus the settings
+    // table, not from the object above -- paths are all that object is read
+    // for. Without a stored credential the pass pauses before it fetches
+    // anything, and there would be nothing in flight to drain.
+    const seed = new Store(config.dbPath);
+    seed.setSettings({ DISPATCHARR_API_KEY: 'k' });
+    seed.close();
+    const lines: string[] = [];
+    stop = await startWorker(config, (m) => lines.push(m));
+
+    // Wait until the pass is demonstrably mid-flight: the lock is held by the
+    // worker, which happens the instant it starts.
+    const deadline = Date.now() + 2_000;
+    while (lockHeldBy(config) === null && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(lockHeldBy(config)).not.toBeNull();
+
+    const stopFn = stop;
+    if (!stopFn) throw new Error('worker did not start');
+    const stopped = stopFn();
+    let settled = false;
+    void stopped.then(() => {
+      settled = true;
+    });
+    // One real beat of the event loop: enough for the old shape -- close on
+    // the spot -- to already have happened.
+    await new Promise((r) => setTimeout(r, 25));
+    expect(settled).toBe(false);
+
+    release();
+    await stopped;
+    expect(settled).toBe(true);
+    // Released, not merely closed: the drain ran to the end of its sequence.
+    expect(lockHeldBy(config)).toBeNull();
   });
 });
