@@ -2395,7 +2395,19 @@ export class Runner {
     const fresh = this.epg.fresh(source, config.PODIUM_EPG_TTL_MS);
     if (fresh) return { rows: fresh, expiresAt: expiry() };
 
-    const rows = await client.epgWindow();
+    let rows: Array<Record<string, unknown>>;
+    try {
+      rows = await client.epgWindow();
+    } catch (error) {
+      // A fetch that throws -- connection refused, a timeout -- is the same
+      // Dispatcharr hiccup an empty grid is, and the fallback below is the
+      // one built for it. The throw used to propagate instead: the stale-grid
+      // resilience stopped exactly at the most common hiccup shape, and the
+      // whole pass failed, discarding the cached grid it was written to
+      // serve.
+      this.deps.log?.(`epg fetch failed; will serve last good rows: ${errorText(error)}`);
+      rows = [];
+    }
     if (rows.length > 0) {
       this.epg.set(source, rows);
       return { rows, expiresAt: expiry() };

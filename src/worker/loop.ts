@@ -33,10 +33,21 @@ import { DEFER_RETRY_MS, syncToTeamarr } from '../lib/teamarr-sync';
 export type Log = (message: string) => void;
 
 export interface WorkerHandle {
-  stop: () => void;
+  stop: () => Promise<void>;
   runner: Runner;
   store: Store;
 }
+
+/**
+ * How long stop() waits for an in-flight pass to settle before it closes the
+ * store under it. Bounded, because a wedged pass must not hold shutdown open:
+ * the entrypoint force-exits two seconds after a signal either way, so this
+ * is the drain's whole budget, not a courtesy the pass can outlive.
+ */
+const STOP_DRAIN_MS = 1_500;
+
+/** Ceiling on the session poller's outage backoff. */
+const MAX_POLL_BACKOFF_MS = 300_000;
 
 /** Local wall-clock time, which is how a run is identified in the UI and logs. */
 function clock(ms: number): string {
@@ -181,7 +192,7 @@ const LOCK_RETRY_MS = 30_000;
  * SQLite read every 30s and turns that into a pause of at most the staleness
  * window.
  */
-export async function startWorker(config: Config, log: Log): Promise<() => void> {
+export async function startWorker(config: Config, log: Log): Promise<() => Promise<void>> {
   const { runner, store, liveConfig } = buildRunner(config, log);
 
   const owner = lockOwner();
@@ -197,6 +208,9 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
   // and race each other's reorders into Dispatcharr, which is the whole reason
   // for the worker lock.
   let running = false;
+  // The pass in flight, if any. `running` gates re-entry; this is what stop()
+  // waits on, so an in-flight pass settles before the store closes under it.
+  let pass: Promise<void> | null = null;
   let wakeRequested = false;
   let lastMark = 0;
   // The soak queue's equivalent of `lastMark`. A string rather than a number
@@ -213,6 +227,11 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
   const tracker = makeStabilityTracker();
   let polling = false;
   let sessionTimer: ReturnType<typeof setInterval> | null = null;
+  // Consecutive poll failures and the earliest instant a retry is worth
+  // dialling: an outage should not buy a failed attempt and a log line every
+  // interval. Reset by the first poll that lands.
+  let pollFailures = 0;
+  let pollNextAt = 0;
   // Held across polls so the JWT is not re-fetched every ten seconds, and
   // rebuilt whenever the credentials it was built from change -- or after a
   // failure, which is the cheapest way to recover from a token this client
@@ -473,7 +492,9 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
       // unanswerable from the progress page before.
       runner.noteNextRun(nextAt);
       log(idle ? `nothing due; sleeping until ${clock(nextAt)}` : `next pass at ${clock(nextAt)}`);
-      timer = setTimeout(() => void tick(), waitMs);
+      timer = setTimeout(() => {
+        pass = tick();
+      }, waitMs);
     }
   };
 
@@ -585,7 +606,7 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
       timer = null;
     }
     log('re-check requested; starting a pass now');
-    void tick();
+    pass = tick();
   };
 
   /**
@@ -622,6 +643,11 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
       takeAndDropConnectEvents();
       return;
     }
+    // An outage should not buy a failed attempt and a log line every
+    // interval: the catch below escalates the gap, and this is where a poll
+    // inside that gap is skipped. The disabled-stability path above is
+    // deliberately not gated -- it drains the tracker and touches no network.
+    if (Date.now() < pollNextAt) return;
     polling = true;
     try {
       // Converge Dispatcharr's subscriptions first: a delivery that only
@@ -658,10 +684,25 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
         clientCount: channel.clientCount,
       }));
       flushLegs(tracker.observe(samples, at));
+      // A poll that landed ends the outage; the next failure escalates from
+      // one interval again rather than resuming the old climb.
+      pollFailures = 0;
+      pollNextAt = 0;
     } catch (error) {
       // Debug-ish by nature but logged plainly: an install whose credentials
       // have gone stale would otherwise show an empty ledger and no reason.
-      log(`session poll failed: ${errorText(error)}`);
+      // The retry gap doubles per consecutive failure, from the poll interval
+      // up to a ceiling -- the shape that once filled a log with a refused
+      // connection every ten seconds through a Dispatcharr restart, at the
+      // cost of at most doubling the ledger's blind window.
+      pollFailures += 1;
+      const base = Math.max(currentConfig().PODIUM_STABILITY_POLL_MS, 1_000);
+      const backoffMs = Math.min(base * 2 ** (pollFailures - 1), MAX_POLL_BACKOFF_MS);
+      pollNextAt = Date.now() + backoffMs;
+      log(
+        `session poll failed: ${errorText(error)}` +
+          (backoffMs > base ? `; retrying in ${Math.round(backoffMs / 1000)}s` : ''),
+      );
       // The token may be the thing that went stale; the next poll rebuilds.
       client = null;
     } finally {
@@ -729,7 +770,7 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
       timer = null;
     }
     log('soak requested; starting a pass now');
-    void tick();
+    pass = tick();
   };
 
   /**
@@ -839,7 +880,7 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
     // undo, and this line is what someone reads to check before walking away.
     if (currentConfig().PODIUM_DRY_RUN) log('DRY RUN: nothing will be written to Dispatcharr');
 
-    void tick();
+    pass = tick();
     log(
       `paced loop started${waited ? ' (lock acquired)' : ''}, considering a pass every ` +
         `${Math.round(currentConfig().PODIUM_TICK_MS / 1000)}s`,
@@ -848,12 +889,22 @@ export async function startWorker(config: Config, log: Log): Promise<() => void>
 
   acquire();
 
-  return () => {
+  return async () => {
     stopping = true;
     if (timer) clearTimeout(timer);
     if (retry) clearTimeout(retry);
     if (beat) clearInterval(beat);
     if (sessionTimer) clearInterval(sessionTimer);
+    // Let an in-flight pass settle before the store closes under it. This
+    // used to close immediately: a pass mid-write spent the rest of shutdown
+    // failing against a closed database, and an in-flight soak leg was
+    // abandoned half-written. Bounded by STOP_DRAIN_MS -- the entrypoint
+    // force-exits 2s after a signal regardless, so a wedged pass cannot hold
+    // the process open past that anyway.
+    await Promise.race([
+      pass?.catch(() => {}),
+      new Promise<void>((resolve) => setTimeout(resolve, STOP_DRAIN_MS).unref?.()),
+    ]);
     try {
       // Before the store closes. A container restarting during an evening's
       // viewing would otherwise lose every leg in flight, which on an install
