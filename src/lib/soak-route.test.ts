@@ -144,4 +144,24 @@ describe('soaking everything', () => {
     expect(resp.status).toBe(200);
     expect((await resp.json()).skippedDead).toBe(0);
   });
+
+  it('queues streams for specified channels without the dead', async () => {
+    const { POST } = await import('../app/api/soak/route');
+    const resp = await POST(post({ scope: 'channels', id: [10] }));
+    const body = await resp.json();
+    expect(resp.status).toBe(200);
+    expect(body).toMatchObject({ requested: 2, queued: 2, skippedDead: 1, source: 'manual' });
+    const queued = withStore((store) => store.pendingSoaks().map((row) => row.streamId));
+    expect(queued.sort()).toEqual([1, 3]);
+  });
+
+  it('queues streams across multiple channels deduplicated', async () => {
+    const { POST } = await import('../app/api/soak/route');
+    const resp = await POST(post({ scope: 'channels', channelIds: [10, 20] }));
+    const body = await resp.json();
+    expect(resp.status).toBe(200);
+    expect(body).toMatchObject({ requested: 3, queued: 3, skippedDead: 1, source: 'manual' });
+    const queued = withStore((store) => store.pendingSoaks().map((row) => row.streamId));
+    expect(queued.sort()).toEqual([1, 3, 4]);
+  });
 });

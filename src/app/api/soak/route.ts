@@ -68,23 +68,34 @@ function open(): Store {
  * Read from the live catalogue rather than from the ledger, so a channel that
  * has never been soaked still resolves to its streams.
  */
-async function streamsForChannels(channelIds: number[]): Promise<SoakRequest[]> {
-  const snap = await snapshot();
+async function streamsForChannels(channelIds: number[], store?: Store): Promise<SoakRequest[]> {
+  const snap = await snapshot().catch(() => null);
   const wanted = new Set(channelIds);
   const out: SoakRequest[] = [];
   const seen = new Set<number>();
-  for (const channel of snap.channels) {
-    if (!wanted.has(channel.id)) continue;
-    for (const streamId of channel.streams) {
-      if (seen.has(streamId)) continue;
-      seen.add(streamId);
-      out.push({ streamId, channelId: channel.id });
+  if (snap && snap.channels.length > 0) {
+    for (const channel of snap.channels) {
+      if (!wanted.has(channel.id)) continue;
+      for (const streamId of channel.streams) {
+        if (seen.has(streamId)) continue;
+        seen.add(streamId);
+        out.push({ streamId, channelId: channel.id });
+      }
+    }
+  }
+  if (out.length === 0 && store) {
+    const rows = store.catalogue().rows;
+    for (const row of rows) {
+      if (!wanted.has(row.channelId)) continue;
+      if (seen.has(row.streamId)) continue;
+      seen.add(row.streamId);
+      out.push({ streamId: row.streamId, channelId: row.channelId });
     }
   }
   return out;
 }
 
-/** `{scope: 'stream'|'channel'|'group', id}` into the streams it names. */
+/** `{scope: 'stream'|'channel'|'channels'|'group', id}` into the streams it names. */
 async function resolveScope(
   scope: string | null,
   rawId: unknown,
@@ -107,18 +118,29 @@ async function resolveScope(
   if (scope === 'channel') {
     if (!Number.isInteger(id)) return { error: 'bad channel id' };
     return {
-      streams: await streamsForChannels([id]),
+      streams: await streamsForChannels([id], store),
       label: `channel ${id}`,
+      source: 'manual',
+      skipDead: true,
+    };
+  }
+  if (scope === 'channels') {
+    const rawList = Array.isArray(rawId) ? rawId : [];
+    const channelIds = rawList.map(Number).filter(Number.isInteger);
+    if (channelIds.length === 0) return { error: 'no channel ids provided' };
+    return {
+      streams: await streamsForChannels(channelIds, store),
+      label: `${channelIds.length} channel(s)`,
       source: 'manual',
       skipDead: true,
     };
   }
   if (scope === 'group') {
     if (!Number.isInteger(id)) return { error: 'bad group id' };
-    const snap = await snapshot();
-    const channelIds = snap.channels.filter((c) => c.groupId === id).map((c) => c.id);
+    const snap = await snapshot().catch(() => null);
+    const channelIds = snap?.channels.filter((c) => c.groupId === id).map((c) => c.id) ?? [];
     return {
-      streams: await streamsForChannels(channelIds),
+      streams: await streamsForChannels(channelIds, store),
       label: `group ${id} (${channelIds.length} channel(s))`,
       source: 'manual',
       skipDead: true,
@@ -184,11 +206,13 @@ export async function POST(request: Request) {
     const body = (await request.json().catch(() => ({}))) as {
       scope?: string;
       id?: unknown;
+      channelIds?: unknown;
       now?: boolean;
       seconds?: unknown;
     };
     store = open();
-    const resolved = await resolveScope(body.scope ?? null, body.id, body.now === true, store);
+    const rawId = body.id ?? body.channelIds;
+    const resolved = await resolveScope(body.scope ?? null, rawId, body.now === true, store);
     if ('error' in resolved) {
       return NextResponse.json({ error: resolved.error }, { status: 400 });
     }

@@ -8,8 +8,9 @@
  */
 
 import { LoaderCircle } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DeadEntry, DeadResponse } from '@/lib/dead';
+import { orderToApply } from './check-panel';
 
 const card = 'rounded-xl border border-[var(--color-line)] bg-[var(--color-panel)]';
 const btn =
@@ -73,12 +74,34 @@ function ChannelChip({ c }: { c: DeadEntry['channels'][number] }) {
 
 export function DeadView({
   onOpenChannel,
+  onChanged,
 }: {
   onOpenChannel?: (channelId: number, groupId: number | null) => void;
+  onChanged?: () => Promise<void> | void;
 }) {
   const [data, setData] = useState<DeadResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  // Probing state for dead-first channels
+  const [probing, setProbing] = useState(false);
+  const [probeProgress, setProbeProgress] = useState<{
+    current: number;
+    total: number;
+    channelName: string;
+    probed: number;
+    dead: number;
+    applied: number;
+  } | null>(null);
+  const [probeResultNote, setProbeResultNote] = useState<{ text: string; bad: boolean } | null>(
+    null,
+  );
+  const [autoApply, setAutoApply] = useState(true);
+  const probeAbortRef = useRef<AbortController | null>(null);
+
+  // Soaking state for dead-first channels
+  const [soaking, setSoaking] = useState(false);
+  const [soakNote, setSoakNote] = useState<string | null>(null);
 
   // No polling: verdicts turn over on the worker's cadence (minutes to hours,
   // with the dead backoff stretching the dead ones further), not second by
@@ -105,6 +128,179 @@ export function DeadView({
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    return () => {
+      if (probeAbortRef.current) {
+        probeAbortRef.current.abort();
+      }
+    };
+  }, []);
+
+  const cancelProbe = useCallback(() => {
+    if (probeAbortRef.current) {
+      probeAbortRef.current.abort();
+    }
+  }, []);
+
+  const startProbeDeadFirst = async () => {
+    if (!data) return;
+    const targets = data.channels.filter((c) => c.servedFirstDead);
+    if (targets.length === 0) return;
+
+    const controller = new AbortController();
+    probeAbortRef.current = controller;
+    setProbing(true);
+    setProbeResultNote(null);
+    setSoakNote(null);
+
+    let totalProbed = 0;
+    let totalDead = 0;
+    let totalApplied = 0;
+    let completed = 0;
+    let errors = 0;
+
+    try {
+      for (const [i, chan] of targets.entries()) {
+        if (controller.signal.aborted) break;
+        setProbeProgress({
+          current: i + 1,
+          total: targets.length,
+          channelName: chan.name || `Channel ${chan.id}`,
+          probed: totalProbed,
+          dead: totalDead,
+          applied: totalApplied,
+        });
+
+        try {
+          const resp = await fetch(`/api/check/${chan.id}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
+          });
+          const checkData = (await resp.json()) as {
+            probed?: number;
+            dead?: number;
+            error?: string;
+            identical?: boolean;
+            allowed?: boolean;
+            workerOrder?: number[];
+            kept?: number[];
+            dropOrder?: number[];
+            pruned?: number[];
+          };
+
+          if (resp.ok && !checkData.error) {
+            totalProbed += checkData.probed ?? 0;
+            totalDead += checkData.dead ?? 0;
+            completed++;
+
+            if (autoApply && !checkData.identical && checkData.workerOrder) {
+              const targetOrder = orderToApply(
+                {
+                  dropOrder: checkData.dropOrder ?? [],
+                  kept: checkData.kept ?? [],
+                  workerOrder: checkData.workerOrder,
+                },
+                false,
+              );
+              if (targetOrder.length > 0) {
+                const applyResp = await fetch(`/api/apply/${chan.id}`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  signal: controller.signal,
+                  body: JSON.stringify({
+                    order: targetOrder,
+                    removeUnmatched: false,
+                    force: checkData.allowed === false,
+                    allowAssign: true,
+                    pruned: checkData.pruned ?? [],
+                  }),
+                });
+                if (applyResp.ok) {
+                  totalApplied++;
+                }
+              }
+            }
+          } else {
+            errors++;
+          }
+        } catch {
+          if (controller.signal.aborted) break;
+          errors++;
+        }
+      }
+
+      if (controller.signal.aborted) {
+        setProbeResultNote({
+          text: `Probe cancelled after ${completed} of ${targets.length} channel(s) (${totalProbed} streams probed, ${totalDead} dead${
+            totalApplied > 0 ? `, ${totalApplied} applied` : ''
+          }).`,
+          bad: false,
+        });
+      } else {
+        setProbeResultNote({
+          text: `Finished probing ${completed} channel(s) (${totalProbed} streams probed, ${totalDead} dead)${
+            totalApplied > 0 ? ` · ${totalApplied} applied` : ''
+          }${errors > 0 ? ` · ${errors} skipped or failed` : ''}.`,
+          bad: errors > 0 && completed === 0,
+        });
+      }
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        setProbeResultNote({
+          text: `Probe error: ${err instanceof Error ? err.message : String(err)}`,
+          bad: true,
+        });
+      }
+    } finally {
+      setProbing(false);
+      setProbeProgress(null);
+      probeAbortRef.current = null;
+      await load();
+      if (onChanged) await onChanged();
+    }
+  };
+
+  const queueSoakDeadFirst = async () => {
+    if (!data) return;
+    const targets = data.channels.filter((c) => c.servedFirstDead);
+    if (targets.length === 0) return;
+    setSoaking(true);
+    setSoakNote(null);
+    setProbeResultNote(null);
+
+    try {
+      const resp = await fetch('/api/soak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          scope: 'channels',
+          id: targets.map((c) => c.id),
+        }),
+      });
+      const body = (await resp.json()) as {
+        queued?: number;
+        skippedDead?: number;
+        error?: string;
+      };
+      if (!resp.ok || body.error) {
+        setSoakNote(`Cannot queue soak: ${body.error ?? `HTTP ${resp.status}`}`);
+        return;
+      }
+      setSoakNote(
+        `Queued ${body.queued} stream(s) to soak` +
+          ((body.skippedDead ?? 0) > 0
+            ? `; left out ${body.skippedDead} that were dead at their last probe`
+            : '') +
+          ` (runs when worker has spare capacity).`,
+      );
+    } catch (e) {
+      setSoakNote(`Cannot queue soak: ${String(e)}`);
+    } finally {
+      setSoaking(false);
+    }
+  };
 
   if (error) {
     return (
@@ -192,6 +388,95 @@ export function DeadView({
                 totals.oldestProbedAt ? `oldest checked ${ago(totals.oldestProbedAt)}` : undefined
               }
             />
+          </div>
+
+          <div className={`${card} mt-4 p-5`}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className={heading}>Dead-first channels ({totals.channelsServedFirst})</h3>
+                <p className="mt-1 text-sm text-[var(--color-muted)]">
+                  {totals.channelsServedFirst > 0
+                    ? 'Channels currently serving a dead or black-screened stream to viewers.'
+                    : 'No channels are currently serving dead streams first.'}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                {probing ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={cancelProbe}
+                      className={`${btn} border-[var(--color-bad)] text-[var(--color-bad)]`}
+                    >
+                      Cancel probe
+                    </button>
+                    <span className="flex items-center gap-2 text-sm text-[var(--color-muted)]">
+                      <LoaderCircle
+                        className="h-4 w-4 animate-spin text-[var(--color-accent)]"
+                        aria-hidden="true"
+                      />
+                      {probeProgress
+                        ? `Probing channel ${probeProgress.current} of ${probeProgress.total}: ${probeProgress.channelName} (${probeProgress.probed} probed${probeProgress.dead > 0 ? `, ${probeProgress.dead} dead` : ''}${probeProgress.applied > 0 ? `, ${probeProgress.applied} applied` : ''})…`
+                        : 'Preparing to probe…'}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <label className="flex cursor-pointer items-center gap-1.5 text-sm text-[var(--color-muted)]">
+                      <input
+                        type="checkbox"
+                        checked={autoApply}
+                        onChange={(e) => setAutoApply(e.target.checked)}
+                        className="contrast-checkbox h-4 w-4 shrink-0"
+                      />
+                      Apply reorders
+                    </label>
+                    <button
+                      type="button"
+                      disabled={totals.channelsServedFirst === 0 || soaking}
+                      onClick={() => void startProbeDeadFirst()}
+                      className={btn}
+                      title={
+                        totals.channelsServedFirst === 0
+                          ? 'No channels currently have a dead first stream'
+                          : `Probe all ${totals.channelsServedFirst} channel(s) with dead first streams`
+                      }
+                    >
+                      Probe all ({totals.channelsServedFirst})
+                    </button>
+                    <button
+                      type="button"
+                      disabled={totals.channelsServedFirst === 0 || soaking}
+                      onClick={() => void queueSoakDeadFirst()}
+                      className={btn}
+                      title={
+                        totals.channelsServedFirst === 0
+                          ? 'No channels currently have a dead first stream'
+                          : `Queue soaks for streams on ${totals.channelsServedFirst} channel(s)`
+                      }
+                    >
+                      {soaking && (
+                        <LoaderCircle
+                          className="mr-1 inline h-4 w-4 animate-spin"
+                          aria-hidden="true"
+                        />
+                      )}
+                      {soaking ? 'Queueing soak…' : `Soak all (${totals.channelsServedFirst})`}
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+            {probeResultNote && (
+              <p
+                className={`mt-2 text-sm ${
+                  probeResultNote.bad ? 'text-[var(--color-bad)]' : 'text-[var(--color-accent)]'
+                }`}
+              >
+                {probeResultNote.text}
+              </p>
+            )}
+            {soakNote && <p className="mt-2 text-sm text-[var(--color-accent)]">{soakNote}</p>}
           </div>
 
           {data.providers.length > 0 && (

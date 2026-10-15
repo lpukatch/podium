@@ -1353,7 +1353,14 @@ export default function Page() {
 
             {tab === 'stats' && <StatsView />}
 
-            {tab === 'dead' && <DeadView onOpenChannel={openDeadChannel} />}
+            {tab === 'dead' && (
+              <DeadView
+                onOpenChannel={openDeadChannel}
+                onChanged={async () => {
+                  await load();
+                }}
+              />
+            )}
 
             {tab === 'quality' && <QualityView />}
 
