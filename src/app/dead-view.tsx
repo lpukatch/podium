@@ -10,7 +10,7 @@
 import { LoaderCircle } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DeadEntry, DeadResponse } from '@/lib/dead';
-import { orderToApply } from './check-panel';
+import { type ProbeProgress, probeChannels, probeNote } from './probe-loop';
 
 const card = 'rounded-xl border border-[var(--color-line)] bg-[var(--color-panel)]';
 const btn =
@@ -85,14 +85,7 @@ export function DeadView({
 
   // Probing state for dead-first channels
   const [probing, setProbing] = useState(false);
-  const [probeProgress, setProbeProgress] = useState<{
-    current: number;
-    total: number;
-    channelName: string;
-    probed: number;
-    dead: number;
-    applied: number;
-  } | null>(null);
+  const [probeProgress, setProbeProgress] = useState<ProbeProgress | null>(null);
   const [probeResultNote, setProbeResultNote] = useState<{ text: string; bad: boolean } | null>(
     null,
   );
@@ -101,7 +94,7 @@ export function DeadView({
 
   // Soaking state for dead-first channels
   const [soaking, setSoaking] = useState(false);
-  const [soakNote, setSoakNote] = useState<string | null>(null);
+  const [soakNote, setSoakNote] = useState<{ text: string; bad: boolean } | null>(null);
 
   // No polling: verdicts turn over on the worker's cadence (minutes to hours,
   // with the dead backoff stretching the dead ones further), not second by
@@ -154,112 +147,18 @@ export function DeadView({
     setProbeResultNote(null);
     setSoakNote(null);
 
-    let totalProbed = 0;
-    let totalDead = 0;
-    let totalApplied = 0;
-    let completed = 0;
-    let errors = 0;
+    const outcome = await probeChannels(targets, {
+      signal: controller.signal,
+      autoApply,
+      onProgress: setProbeProgress,
+    });
+    setProbeResultNote(probeNote(outcome));
 
-    try {
-      for (const [i, chan] of targets.entries()) {
-        if (controller.signal.aborted) break;
-        setProbeProgress({
-          current: i + 1,
-          total: targets.length,
-          channelName: chan.name || `Channel ${chan.id}`,
-          probed: totalProbed,
-          dead: totalDead,
-          applied: totalApplied,
-        });
-
-        try {
-          const resp = await fetch(`/api/check/${chan.id}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            signal: controller.signal,
-          });
-          const checkData = (await resp.json()) as {
-            probed?: number;
-            dead?: number;
-            error?: string;
-            identical?: boolean;
-            allowed?: boolean;
-            workerOrder?: number[];
-            kept?: number[];
-            dropOrder?: number[];
-            pruned?: number[];
-          };
-
-          if (resp.ok && !checkData.error) {
-            totalProbed += checkData.probed ?? 0;
-            totalDead += checkData.dead ?? 0;
-            completed++;
-
-            if (autoApply && !checkData.identical && checkData.workerOrder) {
-              const targetOrder = orderToApply(
-                {
-                  dropOrder: checkData.dropOrder ?? [],
-                  kept: checkData.kept ?? [],
-                  workerOrder: checkData.workerOrder,
-                },
-                false,
-              );
-              if (targetOrder.length > 0) {
-                const applyResp = await fetch(`/api/apply/${chan.id}`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  signal: controller.signal,
-                  body: JSON.stringify({
-                    order: targetOrder,
-                    removeUnmatched: false,
-                    force: checkData.allowed === false,
-                    allowAssign: true,
-                    pruned: checkData.pruned ?? [],
-                  }),
-                });
-                if (applyResp.ok) {
-                  totalApplied++;
-                }
-              }
-            }
-          } else {
-            errors++;
-          }
-        } catch {
-          if (controller.signal.aborted) break;
-          errors++;
-        }
-      }
-
-      if (controller.signal.aborted) {
-        setProbeResultNote({
-          text: `Probe cancelled after ${completed} of ${targets.length} channel(s) (${totalProbed} streams probed, ${totalDead} dead${
-            totalApplied > 0 ? `, ${totalApplied} applied` : ''
-          }).`,
-          bad: false,
-        });
-      } else {
-        setProbeResultNote({
-          text: `Finished probing ${completed} channel(s) (${totalProbed} streams probed, ${totalDead} dead)${
-            totalApplied > 0 ? ` · ${totalApplied} applied` : ''
-          }${errors > 0 ? ` · ${errors} skipped or failed` : ''}.`,
-          bad: errors > 0 && completed === 0,
-        });
-      }
-    } catch (err) {
-      if (!controller.signal.aborted) {
-        setProbeResultNote({
-          text: `Probe error: ${err instanceof Error ? err.message : String(err)}`,
-          bad: true,
-        });
-      }
-    } finally {
-      setProbing(false);
-      setProbeProgress(null);
-      probeAbortRef.current = null;
-      await load();
-      if (onChanged) await onChanged();
-    }
+    setProbing(false);
+    setProbeProgress(null);
+    probeAbortRef.current = null;
+    await load();
+    if (onChanged) await onChanged();
   };
 
   const queueSoakDeadFirst = async () => {
@@ -285,18 +184,23 @@ export function DeadView({
         error?: string;
       };
       if (!resp.ok || body.error) {
-        setSoakNote(`Cannot queue soak: ${body.error ?? `HTTP ${resp.status}`}`);
+        setSoakNote({
+          text: `Cannot queue soak: ${body.error ?? `HTTP ${resp.status}`}`,
+          bad: true,
+        });
         return;
       }
-      setSoakNote(
-        `Queued ${body.queued} stream(s) to soak` +
+      setSoakNote({
+        text:
+          `Queued ${body.queued} stream(s) to soak` +
           ((body.skippedDead ?? 0) > 0
             ? `; left out ${body.skippedDead} that were dead at their last probe`
             : '') +
-          ` (runs when worker has spare capacity).`,
-      );
+          ' (runs when worker has spare capacity).',
+        bad: false,
+      });
     } catch (e) {
-      setSoakNote(`Cannot queue soak: ${String(e)}`);
+      setSoakNote({ text: `Cannot queue soak: ${String(e)}`, bad: true });
     } finally {
       setSoaking(false);
     }
@@ -476,7 +380,15 @@ export function DeadView({
                 {probeResultNote.text}
               </p>
             )}
-            {soakNote && <p className="mt-2 text-sm text-[var(--color-accent)]">{soakNote}</p>}
+            {soakNote && (
+              <p
+                className={`mt-2 text-sm ${
+                  soakNote.bad ? 'text-[var(--color-bad)]' : 'text-[var(--color-accent)]'
+                }`}
+              >
+                {soakNote.text}
+              </p>
+            )}
           </div>
 
           {data.providers.length > 0 && (

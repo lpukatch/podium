@@ -66,14 +66,18 @@ function open(): Store {
  * carries them.
  *
  * Read from the live catalogue rather than from the ledger, so a channel that
- * has never been soaked still resolves to its streams.
+ * has never been soaked still resolves to its streams. A crawl that fails is
+ * the one case the managed catalogue stands in for, and then for the whole
+ * request: a crawl that answered is the truth about which channels exist, and
+ * a channel missing from it must not be queued from rows an earlier pass
+ * wrote -- the channel may have been deleted upstream entirely.
  */
-async function streamsForChannels(channelIds: number[], store?: Store): Promise<SoakRequest[]> {
+async function streamsForChannels(channelIds: number[], store: Store): Promise<SoakRequest[]> {
   const snap = await snapshot().catch(() => null);
   const wanted = new Set(channelIds);
   const out: SoakRequest[] = [];
   const seen = new Set<number>();
-  if (snap && snap.channels.length > 0) {
+  if (snap) {
     for (const channel of snap.channels) {
       if (!wanted.has(channel.id)) continue;
       for (const streamId of channel.streams) {
@@ -82,15 +86,14 @@ async function streamsForChannels(channelIds: number[], store?: Store): Promise<
         out.push({ streamId, channelId: channel.id });
       }
     }
+    return out;
   }
-  if (out.length === 0 && store) {
-    const rows = store.catalogue().rows;
-    for (const row of rows) {
-      if (!wanted.has(row.channelId)) continue;
-      if (seen.has(row.streamId)) continue;
-      seen.add(row.streamId);
-      out.push({ streamId: row.streamId, channelId: row.channelId });
-    }
+  for (const row of store.catalogue().rows) {
+    if (!wanted.has(row.channelId)) continue;
+    // The same stream can sit on two channels; it is queued once.
+    if (seen.has(row.streamId)) continue;
+    seen.add(row.streamId);
+    out.push({ streamId: row.streamId, channelId: row.channelId });
   }
   return out;
 }
@@ -126,8 +129,11 @@ async function resolveScope(
   }
   if (scope === 'channels') {
     const rawList = Array.isArray(rawId) ? rawId : [];
-    const channelIds = rawList.map(Number).filter(Number.isInteger);
-    if (channelIds.length === 0) return { error: 'no channel ids provided' };
+    if (rawList.length === 0) return { error: 'no channel ids provided' };
+    // As strict as the single-channel scope above: coerce nothing, or a null
+    // in the list would land on channel 0 and a true on channel 1.
+    if (!rawList.every((v) => Number.isInteger(v))) return { error: 'bad channel ids' };
+    const channelIds = rawList as number[];
     return {
       streams: await streamsForChannels(channelIds, store),
       label: `${channelIds.length} channel(s)`,
@@ -137,8 +143,11 @@ async function resolveScope(
   }
   if (scope === 'group') {
     if (!Number.isInteger(id)) return { error: 'bad group id' };
-    const snap = await snapshot().catch(() => null);
-    const channelIds = snap?.channels.filter((c) => c.groupId === id).map((c) => c.id) ?? [];
+    // Group membership lives only in the crawl, so its failure is an error,
+    // not "this group has no channels": swallowing it here used to answer 404
+    // about a fifty-channel group while Dispatcharr was merely unreachable.
+    const snap = await snapshot();
+    const channelIds = snap.channels.filter((c) => c.groupId === id).map((c) => c.id);
     return {
       streams: await streamsForChannels(channelIds, store),
       label: `group ${id} (${channelIds.length} channel(s))`,

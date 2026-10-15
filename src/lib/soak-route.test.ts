@@ -9,9 +9,21 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { snapshot } from '@/lib/server/state';
 import { DEAD, type ProbeResult } from './probe';
 import { Store } from './store';
+
+// The crawl is faked per test. Most tests leave it failing -- this suite is
+// about the queue, and a failed crawl is also what exercises the catalogue
+// fallback -- and the snapshot-path tests resolve it explicitly.
+vi.mock('@/lib/server/state', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/server/state')>();
+  return {
+    ...actual,
+    snapshot: vi.fn(() => Promise.reject(new Error('crawl unavailable in tests'))),
+  };
+});
 
 let dir = '';
 
@@ -59,6 +71,9 @@ const post = (body: unknown) =>
 
 describe('soaking everything', () => {
   beforeEach(() => {
+    // A snapshot-path test leaves a resolved crawl behind; every other test
+    // needs the failing one so the catalogue fallback answers.
+    vi.mocked(snapshot).mockReset().mockRejectedValue(new Error('crawl unavailable in tests'));
     withStore((store) => {
       store.clearSoaks();
       // Two managed channels. Stream 3 appears on both and must be queued once.
@@ -163,5 +178,48 @@ describe('soaking everything', () => {
     expect(body).toMatchObject({ requested: 3, queued: 3, skippedDead: 1, source: 'manual' });
     const queued = withStore((store) => store.pendingSoaks().map((row) => row.streamId));
     expect(queued.sort()).toEqual([1, 3, 4]);
+  });
+
+  it('resolves named channels from the crawl, dropping ids the crawl does not know', async () => {
+    // Channel 20 sits in the managed catalogue but not in the crawl: it was
+    // deleted upstream, and its stale rows must not be queued.
+    vi.mocked(snapshot).mockResolvedValue({
+      channels: [{ id: 10, name: 'A', tvgId: 'a', streams: [1, 2], groupId: 1 }],
+      streams: [],
+      providers: [],
+      groups: [],
+      fetchedAt: Date.now(),
+    });
+    const { POST } = await import('../app/api/soak/route');
+    const resp = await POST(post({ scope: 'channels', id: [10, 20] }));
+    const body = await resp.json();
+    expect(resp.status).toBe(200);
+    // Requested counts the survivors of the dead filter: stream 2 on channel
+    // 10 is dead, and channel 20 resolved to nothing at all.
+    expect(body).toMatchObject({ requested: 1, queued: 1, skippedDead: 1 });
+    const queued = withStore((store) => store.pendingSoaks().map((row) => row.streamId));
+    expect(queued).toEqual([1]);
+  });
+
+  it('reports a failed crawl for a group instead of an empty one', async () => {
+    vi.mocked(snapshot).mockRejectedValue(new Error('Dispatcharr unreachable'));
+    const { POST } = await import('../app/api/soak/route');
+    const resp = await POST(post({ scope: 'group', id: 5 }));
+    expect(resp.status).toBe(500);
+    expect((await resp.json()).error).toContain('Dispatcharr unreachable');
+  });
+
+  it('refuses channel ids that are not integers rather than coercing them', async () => {
+    const { POST } = await import('../app/api/soak/route');
+    const resp = await POST(post({ scope: 'channels', id: [10, null] }));
+    expect(resp.status).toBe(400);
+    expect((await resp.json()).error).toBe('bad channel ids');
+  });
+
+  it('refuses an empty channel list', async () => {
+    const { POST } = await import('../app/api/soak/route');
+    const resp = await POST(post({ scope: 'channels', id: [] }));
+    expect(resp.status).toBe(400);
+    expect((await resp.json()).error).toBe('no channel ids provided');
   });
 });

@@ -11,6 +11,7 @@ import { CheckPanel } from './check-panel';
 import { DeadView } from './dead-view';
 import { NameNoiseView } from './name-noise-view';
 import { OrderingView } from './ordering-view';
+import { type ProbeProgress, probeChannels, probeNote } from './probe-loop';
 import { ProgressView } from './progress-view';
 import { ProviderGroupFilterEditor } from './provider-group-filter';
 import { QualityView } from './quality-view';
@@ -349,13 +350,7 @@ export default function Page() {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [probingGroup, setProbingGroup] = useState(false);
-  const [probeProgress, setProbeProgress] = useState<{
-    current: number;
-    total: number;
-    channelName: string;
-    probed: number;
-    dead: number;
-  } | null>(null);
+  const [probeProgress, setProbeProgress] = useState<ProbeProgress | null>(null);
   const [probeResultNote, setProbeResultNote] = useState<{ text: string; bad: boolean } | null>(
     null,
   );
@@ -753,7 +748,9 @@ export default function Page() {
   };
 
   /**
-   * Probe every probeable channel in this group on-demand.
+   * Probe every probeable channel in this group on-demand. Measuring only --
+   * applying what the checks imply is the Dead tab's loop, for channels that
+   * are already serving a dead stream first.
    */
   const startProbeAll = useCallback(
     async (targetGroup: GroupRow) => {
@@ -765,72 +762,16 @@ export default function Page() {
       setProbingGroup(true);
       setProbeResultNote(null);
 
-      let totalProbed = 0;
-      let totalDead = 0;
-      let completed = 0;
-      let errors = 0;
+      const outcome = await probeChannels(targets, {
+        signal: controller.signal,
+        onProgress: setProbeProgress,
+      });
+      setProbeResultNote(probeNote(outcome));
 
-      try {
-        for (const [i, chan] of targets.entries()) {
-          if (controller.signal.aborted) break;
-          setProbeProgress({
-            current: i + 1,
-            total: targets.length,
-            channelName: chan.name || `Channel ${chan.id}`,
-            probed: totalProbed,
-            dead: totalDead,
-          });
-
-          try {
-            const resp = await fetch(`/api/check/${chan.id}`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              signal: controller.signal,
-            });
-            const data = (await resp.json()) as {
-              probed?: number;
-              dead?: number;
-              error?: string;
-            };
-            if (resp.ok && !data.error) {
-              totalProbed += data.probed ?? 0;
-              totalDead += data.dead ?? 0;
-              completed++;
-            } else {
-              errors++;
-            }
-          } catch {
-            if (controller.signal.aborted) break;
-            errors++;
-          }
-        }
-
-        if (controller.signal.aborted) {
-          setProbeResultNote({
-            text: `Probe cancelled after ${completed} of ${targets.length} channel(s) (${totalProbed} streams probed, ${totalDead} dead).`,
-            bad: false,
-          });
-        } else {
-          setProbeResultNote({
-            text: `Finished probing ${completed} channel(s) (${totalProbed} streams probed, ${totalDead} dead)${
-              errors > 0 ? ` · ${errors} skipped or failed` : ''
-            }.`,
-            bad: errors > 0 && completed === 0,
-          });
-        }
-      } catch (err) {
-        if (!controller.signal.aborted) {
-          setProbeResultNote({
-            text: `Probe error: ${err instanceof Error ? err.message : String(err)}`,
-            bad: true,
-          });
-        }
-      } finally {
-        setProbingGroup(false);
-        setProbeProgress(null);
-        probeAbortRef.current = null;
-        await load();
-      }
+      setProbingGroup(false);
+      setProbeProgress(null);
+      probeAbortRef.current = null;
+      await load();
     },
     [load],
   );
