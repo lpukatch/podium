@@ -306,7 +306,7 @@ export function DeadView({
                 </h3>
                 <p className="mt-1 text-sm text-[var(--color-muted)]">
                   {totals.channelsAffected > 0
-                    ? 'Every channel carrying a dead or black-screened stream. A probe re-checks all of a channel\'s streams, so this refreshes every dead verdict in the list.'
+                    ? "Every channel carrying a dead or black-screened stream. A probe re-checks all of a channel's streams, so this refreshes every dead verdict in the list."
                     : 'No channel is currently carrying a dead or black-screened stream.'}
                 </p>
               </div>
