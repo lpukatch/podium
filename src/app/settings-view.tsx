@@ -21,6 +21,38 @@ interface Field {
 
 type SectionId = 'connection' | 'automation' | 'measurement' | 'learning';
 
+/**
+ * One provider in a Test Connection result.
+ *
+ * `profiles` carries the account's active logins with their own caps -- the
+ * account-level `maxStreams` is only the default profile's cap, because
+ * Dispatcharr keeps those two in sync and leaves every additional profile its
+ * own limit. A null cap is Dispatcharr's 0, "unlimited".
+ */
+type TestProvider = {
+  name: string;
+  maxStreams: number;
+  profiles?: Array<{ name: string; maxStreams: number | null }>;
+};
+
+/**
+ * The connections one provider offers, as the test line prints them.
+ *
+ * Mirrors what Dispatcharr's own accounts table totals: per-profile limits,
+ * not the account-level number. The resolution of an unlimited profile follows
+ * the lane builder rather than Dispatcharr's ∞ -- it probes an unlimited login
+ * at the account's cap -- so the total shown is the one the runner actually
+ * gets. An account reporting no active profiles keeps the account-level cap:
+ * that is the stored-URL lane such an account probes on.
+ */
+function describeTestProvider(p: TestProvider): string {
+  const active = p.profiles ?? [];
+  if (active.length === 0) return `${p.name} (${p.maxStreams})`;
+  const caps = active.map((profile) => profile.maxStreams ?? p.maxStreams);
+  const total = caps.reduce((sum, cap) => sum + cap, 0);
+  return active.length > 1 ? `${p.name} (${caps.join('+')}=${total})` : `${p.name} (${total})`;
+}
+
 const SECTIONS: Array<{
   id: SectionId;
   sources: Field['section'][];
@@ -288,7 +320,7 @@ export function SettingsView() {
           ? {
               ok: true,
               text: `Connected. ${body.providers.length} provider(s): ${body.providers
-                .map((p: { name: string; maxStreams: number }) => `${p.name} (${p.maxStreams})`)
+                .map((p: TestProvider) => describeTestProvider(p))
                 .join(', ')}`,
             }
           : { ok: false, text: body.error ?? 'failed' },
