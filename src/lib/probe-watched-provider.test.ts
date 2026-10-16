@@ -97,11 +97,12 @@ describe('laneLimits with probeWatchedProvider', () => {
   });
 
   it('takes the reserve once per account, not once per login', () => {
-    // Two logins with max_streams 5 are one account with five connections far
-    // more often than two accounts with five each. Read per lane this would
-    // reserve two twice and still open six probes against the five slots the
-    // viewer is sitting in, so capacity is the largest single login's cap and
-    // the reserve comes off once: 5 - 1 - 2 = 2, dealt across the two lanes.
+    // Capacity is the account's: the sum of its lanes' caps, which is what
+    // Dispatcharr enforces (its pool checks each profile's own max_streams)
+    // and what the idle path already assumes. The reserve still comes off
+    // once -- 10 - 1 viewer - 2 reserve = 7 -- dealt a slot at a time across
+    // the lanes with room, each bounded by its own headroom: 4 left on the
+    // login the viewer sits in, 5 on the other.
     const limits = pacer().laneLimits(
       new Map([
         ['7:0', 5],
@@ -117,15 +118,40 @@ describe('laneLimits with probeWatchedProvider', () => {
         ]),
       ),
     );
-    expect([...limits].reduce((sum, [, free]) => sum + free, 0)).toBe(2);
-    expect(limits.get('7:0')).toBe(1);
-    expect(limits.get('7:1')).toBe(1);
+    expect([...limits].reduce((sum, [, free]) => sum + free, 0)).toBe(7);
+    expect(limits.get('7:0')).toBe(4);
+    expect(limits.get('7:1')).toBe(3);
+  });
+
+  it('a login whose connection is free stays checkable while the other is watched', () => {
+    // The report behind this: one provider, two logins capped at 1 each, one
+    // connection in use. Read as "the account is the largest single login"
+    // the account had one connection and the viewer was in it, so probe while
+    // watching closed the whole provider. Read as what Dispatcharr enforces,
+    // the spare login is a spare connection and gets the work.
+    const limits = pacer({ watchedFreeSlots: 0 }).laneLimits(
+      new Map([
+        ['7:0', 1],
+        ['7:1', 1],
+      ]),
+      watching,
+      new Map([['7:0', 1]]),
+      yielding(
+        [['7:0', 1]],
+        new Map([
+          ['7:0', 7],
+          ['7:1', 7],
+        ]),
+      ),
+    );
+    expect([...limits]).toEqual([['7:1', 1]]);
   });
 
   it('never deals a login more than its own cap has left', () => {
-    // The account can spare three, but the second login sells one connection
-    // and its own viewer is in it. Spreading the work evenly must not mean
-    // handing that lane capacity that does not exist.
+    // The account can spare four -- 6 of caps minus 2 of viewers -- but the
+    // second login sells one connection and its own viewer is in it. Spreading
+    // the work evenly must not mean handing that lane capacity that does not
+    // exist.
     const limits = pacer({ watchedFreeSlots: 0 }).laneLimits(
       new Map([
         ['7:0', 5],
@@ -144,7 +170,7 @@ describe('laneLimits with probeWatchedProvider', () => {
         ]),
       ),
     );
-    expect([...limits]).toEqual([['7:0', 3]]);
+    expect([...limits]).toEqual([['7:0', 4]]);
   });
 
   it('still pauses everything when a viewer cannot be placed', () => {

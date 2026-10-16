@@ -305,6 +305,68 @@ export interface VariantVerdict {
 }
 
 /**
+ * The lanes a manual check may open on each login, right now.
+ *
+ * The same reading of an account the worker paces against -- `Pacer.laneLimits`
+ * and the `sharedLanes` it grants watched accounts from: one lane per active
+ * login, live viewers charged to the lane Dispatcharr named, the courtesy
+ * reserve taken once per provider, and what is left dealt a slot at a time
+ * across the lanes with room.
+ *
+ * The difference from the worker is the company the check keeps. It runs
+ * beside a pass, and the pass's own probes are invisible to the activity read
+ * by design -- `activityOptions` filters the probe's user agent out of
+ * `/proxy/ts/status`, and a direct probe never touches Dispatcharr at all --
+ * so a lane can look free while the pass is holding it. `yieldToWorker` is
+ * the answer, and it is deliberately stingy: one slot of *surplus* per
+ * provider, and never the last. A probe that collides with the pass costs a
+ * retry; refusing the check strands a provider whose second connection is
+ * verifiably free for as long as the pass runs -- which, on an install that
+ * is always a little behind, is always. The old arithmetic applied that yield
+ * per lane, which closed every capped lane on a multi-login account the
+ * moment a pass started, and read nothing but the caps: viewers were
+ * invisible to it too, so a check could open a lane a viewer was sitting in.
+ *
+ * `reserveFor` names the courtesy slots for one provider. It fails closed the
+ * same way the worker's does -- a session that cannot be placed could be on
+ * any of them -- and it is the caller's policy, not this loop's.
+ */
+export function checkLaneLimits(
+  loginsByProvider: Map<number, ProviderLogin[]>,
+  viewersByLane: Map<string, number>,
+  reserveFor: (providerId: number) => number,
+  yieldToWorker: boolean,
+): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const [providerId, logins] of loginsByProvider) {
+    const headroom = logins.map((login) => ({
+      key: laneKey(providerId, login.id),
+      free: Math.max(0, login.maxStreams - (viewersByLane.get(laneKey(providerId, login.id)) ?? 0)),
+    }));
+    let spare = headroom.reduce((sum, lane) => sum + lane.free, 0) - reserveFor(providerId);
+    if (yieldToWorker && spare > 1) spare -= 1;
+
+    // Dealt a slot at a time, cyclically, so a 3-connection login and a
+    // 2-connection one split a four-slot check 3:2 rather than the smaller
+    // lane being handed work past its cap. The same walk `sharedLanes` runs.
+    const grants = new Map(headroom.map((lane) => [lane.key, 0]));
+    for (let dealt = true; spare > 0 && dealt; ) {
+      dealt = false;
+      for (const lane of headroom) {
+        if (spare <= 0) break;
+        const grant = grants.get(lane.key) ?? 0;
+        if (grant >= lane.free) continue;
+        grants.set(lane.key, grant + 1);
+        spare -= 1;
+        dealt = true;
+      }
+    }
+    for (const [key, grant] of grants) out.set(key, grant);
+  }
+  return out;
+}
+
+/**
  * The one verdict a stream reports, from whatever the cache holds for it.
  *
  * Pooling makes that a single row, and this returns it. It stays a fold because

@@ -56,8 +56,10 @@ import {
 import { Store } from '@/lib/store';
 import {
   buildVariants,
+  checkLaneLimits,
   drawVariant,
   POOLED_VARIANT,
+  type ProviderLogin,
   pickBestVariant,
   probeTargetUrl,
   providerLogins,
@@ -252,10 +254,12 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     const watching = sessions === null || sessions.length > 0;
     const loginsByProvider = new Map(snap.providers.map((p) => [p.id, providerLogins(p)]));
     const providerOfProfile = new Map<number, number>();
+    const loginByProfile = new Map<number, { providerId: number; login: ProviderLogin }>();
     for (const [providerId, logins] of loginsByProvider) {
       for (const login of logins) {
         if (login.dispatcharrProfileId !== null) {
           providerOfProfile.set(login.dispatcharrProfileId, providerId);
+          loginByProfile.set(login.dispatcharrProfileId, { providerId, login });
         }
       }
     }
@@ -276,17 +280,23 @@ export async function POST(request: Request, context: { params: Promise<{ channe
           : 0;
 
     // Per-login lane limits, from the same reading of the account the worker
-    // uses: one lane per active login, each shrunk by the courtesy reserve
-    // and -- when the worker is probing -- the one slot this check yields to it.
-    const limits = new Map<string, number>();
-    for (const [providerId, logins] of loginsByProvider) {
-      for (const login of logins) {
-        limits.set(
-          laneKey(providerId, login.id),
-          Math.max(0, login.maxStreams - reserveFor(providerId) - (workerBusy ? 1 : 0)),
-        );
-      }
+    // uses (see `checkLaneLimits`): live viewers charged to the lane
+    // Dispatcharr named them on -- so a viewer occupying one of a two-login
+    // account's connections leaves the other checkable -- the courtesy
+    // reserve once per provider, and, while a pass is probing, one slot of
+    // surplus yielded to it. The pass's own probes are invisible to the
+    // activity read, so that yield is the only courtesy it gets; the old
+    // arithmetic took one per lane, which closed every capped lane on a
+    // multi-login account for as long as a pass ran.
+    const viewersByLane = new Map<string, number>();
+    for (const session of sessions ?? []) {
+      if (session.profileId === null) continue;
+      const lane = loginByProfile.get(session.profileId);
+      if (!lane) continue;
+      const key = laneKey(lane.providerId, lane.login.id);
+      viewersByLane.set(key, (viewersByLane.get(key) ?? 0) + 1);
     }
+    const limits = checkLaneLimits(loginsByProvider, viewersByLane, reserveFor, workerBusy);
 
     const jobs: ProbeJob[] = [];
     const maxCheckStreams = 50;
