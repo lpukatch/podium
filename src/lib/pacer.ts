@@ -219,15 +219,12 @@ export class Pacer {
    * The reserve is taken once per *account*, not once per lane, and this is
    * the reason the method exists rather than being another branch in the loop
    * above. Lanes are per login and Podium treats their caps as independent
-   * pools, which is fine while the arithmetic only ever hands out capacity the
-   * provider agreed to. It stops being fine here: two logins on one account
-   * with `max_streams` 5 each are one account with five connections far more
-   * often than they are ten, so a per-lane reserve of two would reserve four
-   * on paper and still let the pass open six probes against the five slots a
-   * viewer is sitting in. Capacity is therefore read as the largest single
-   * login's cap -- the conservative reading of "how big is this account" --
-   * every viewer named anywhere on it is subtracted, and the reserve comes off
-   * once.
+   * pools -- which is what Dispatcharr enforces too: its connection pool
+   * checks each profile's own `max_streams`, so a 3-cap login beside a 2-cap
+   * one really does carry five. Capacity is therefore the sum of the lanes'
+   * caps, the same reading the idle path takes (`laneBudgets` sets each lane
+   * at its own cap and their capacities add up), every viewer named anywhere
+   * on the account is subtracted once, and the reserve comes off once.
    *
    * What is left is dealt out a slot at a time so several logins share the
    * work, each bounded by its own headroom: a 5-connection login and a
@@ -255,7 +252,7 @@ export class Pacer {
     }
 
     for (const lanes of lanesOf.values()) {
-      const cap = Math.max(...lanes.map((lane) => base.get(lane) ?? 0));
+      const cap = lanes.reduce((sum, lane) => sum + (base.get(lane) ?? 0), 0);
       const viewers = lanes.reduce(
         (sum, lane) => sum + (yielding.attributedByLane.get(lane) ?? 0),
         0,
