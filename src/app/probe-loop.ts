@@ -1,6 +1,7 @@
 /**
  * The client loop behind both Probe-all buttons: every probeable channel in a
- * group (the Groups tab) and every dead-first channel (the Dead tab).
+ * group (the Groups tab) and every channel carrying a dead or black stream
+ * (the Dead tab).
  *
  * It exists once because the two used to be copies, and every rule the loop
  * learned -- stop on capacity refusals, never apply a partial verdict, report

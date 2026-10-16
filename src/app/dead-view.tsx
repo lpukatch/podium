@@ -83,7 +83,7 @@ export function DeadView({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // Probing state for dead-first channels
+  // Probing state for the channels carrying dead streams
   const [probing, setProbing] = useState(false);
   const [probeProgress, setProbeProgress] = useState<ProbeProgress | null>(null);
   const [probeResultNote, setProbeResultNote] = useState<{ text: string; bad: boolean } | null>(
@@ -92,7 +92,7 @@ export function DeadView({
   const [autoApply, setAutoApply] = useState(true);
   const probeAbortRef = useRef<AbortController | null>(null);
 
-  // Soaking state for dead-first channels
+  // Soaking state for the channels carrying dead streams
   const [soaking, setSoaking] = useState(false);
   const [soakNote, setSoakNote] = useState<{ text: string; bad: boolean } | null>(null);
 
@@ -136,9 +136,13 @@ export function DeadView({
     }
   }, []);
 
-  const startProbeDeadFirst = async () => {
+  // `data.channels` is already exactly the affected set: the fold only lists
+  // channels with a dead or black stream on them. Probing one re-probes every
+  // stream the channel carries, so this loop is how every dead verdict in the
+  // list gets refreshed at once.
+  const startProbe = async () => {
     if (!data) return;
-    const targets = data.channels.filter((c) => c.servedFirstDead);
+    const targets = data.channels;
     if (targets.length === 0) return;
 
     const controller = new AbortController();
@@ -161,9 +165,9 @@ export function DeadView({
     if (onChanged) await onChanged();
   };
 
-  const queueSoakDeadFirst = async () => {
+  const queueSoak = async () => {
     if (!data) return;
-    const targets = data.channels.filter((c) => c.servedFirstDead);
+    const targets = data.channels;
     if (targets.length === 0) return;
     setSoaking(true);
     setSoakNote(null);
@@ -297,11 +301,13 @@ export function DeadView({
           <div className={`${card} mt-4 p-5`}>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h3 className={heading}>Dead-first channels ({totals.channelsServedFirst})</h3>
+                <h3 className={heading}>
+                  Channels with dead streams ({n(totals.channelsAffected)})
+                </h3>
                 <p className="mt-1 text-sm text-[var(--color-muted)]">
-                  {totals.channelsServedFirst > 0
-                    ? 'Channels currently serving a dead or black-screened stream to viewers.'
-                    : 'No channels are currently serving dead streams first.'}
+                  {totals.channelsAffected > 0
+                    ? "Every channel carrying a dead or black-screened stream. A probe re-checks all of a channel's streams, so this refreshes every dead verdict in the list."
+                    : 'No channel is currently carrying a dead or black-screened stream.'}
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-3">
@@ -337,26 +343,26 @@ export function DeadView({
                     </label>
                     <button
                       type="button"
-                      disabled={totals.channelsServedFirst === 0 || soaking}
-                      onClick={() => void startProbeDeadFirst()}
+                      disabled={totals.channelsAffected === 0 || soaking}
+                      onClick={() => void startProbe()}
                       className={btn}
                       title={
-                        totals.channelsServedFirst === 0
-                          ? 'No channels currently have a dead first stream'
-                          : `Probe all ${totals.channelsServedFirst} channel(s) with dead first streams`
+                        totals.channelsAffected === 0
+                          ? 'No channel has a dead or black stream'
+                          : `Probe all ${totals.channelsAffected} channel(s) carrying dead or black streams`
                       }
                     >
-                      Probe all ({totals.channelsServedFirst})
+                      Probe all ({n(totals.channelsAffected)})
                     </button>
                     <button
                       type="button"
-                      disabled={totals.channelsServedFirst === 0 || soaking}
-                      onClick={() => void queueSoakDeadFirst()}
+                      disabled={totals.channelsAffected === 0 || soaking}
+                      onClick={() => void queueSoak()}
                       className={btn}
                       title={
-                        totals.channelsServedFirst === 0
-                          ? 'No channels currently have a dead first stream'
-                          : `Queue soaks for streams on ${totals.channelsServedFirst} channel(s)`
+                        totals.channelsAffected === 0
+                          ? 'No channel has a dead or black stream'
+                          : `Queue soaks for streams on ${totals.channelsAffected} channel(s)`
                       }
                     >
                       {soaking && (
@@ -365,7 +371,7 @@ export function DeadView({
                           aria-hidden="true"
                         />
                       )}
-                      {soaking ? 'Queueing soak…' : `Soak all (${totals.channelsServedFirst})`}
+                      {soaking ? 'Queueing soak…' : `Soak all (${n(totals.channelsAffected)})`}
                     </button>
                   </>
                 )}
