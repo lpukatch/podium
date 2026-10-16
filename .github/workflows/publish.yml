@@ -85,6 +85,12 @@ jobs:
           # Skips the attestation manifest, which otherwise shows up on the
           # packages page as an "unknown/unknown" platform entry.
           provenance: false
+          # Export with Docker media types, not OCI ones: Unraid's Docker tab
+          # fails to parse an OCI-typed manifest and shows the template as
+          # "not available". Combined with push: true this stays a single
+          # export -- buildx sets push on an explicit image export rather than
+          # adding a second registry one.
+          outputs: type=image,oci-mediatypes=false
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
