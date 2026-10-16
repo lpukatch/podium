@@ -71,7 +71,19 @@ export async function POST(request: Request) {
     return NextResponse.json({
       ok: true,
       // Enough to prove it reached the right instance, not just something.
-      providers: providers.map((p) => ({ name: p.name, maxStreams: p.maxStreams })),
+      providers: providers.map((p) => ({
+        name: p.name,
+        maxStreams: p.maxStreams,
+        // The account-level cap is the default profile's cap -- Dispatcharr
+        // keeps the two in sync and gives every additional profile its own
+        // limit. Report the active profiles so the test line can show the
+        // connections the account really offers; Dispatcharr's own accounts
+        // table totals these the same way. Inactive ones are dropped, as the
+        // lane builder drops them.
+        profiles: p.profiles
+          .filter((profile) => profile.isActive)
+          .map((profile) => ({ name: profile.name, maxStreams: profile.maxStreams })),
+      })),
     });
   } catch (error) {
     return NextResponse.json({ ok: false, error: String(error).slice(0, 200) });
