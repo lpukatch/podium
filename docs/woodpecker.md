@@ -38,6 +38,11 @@ behavior is unchanged. `.forgejo/default_merge_message/` is also unchanged.
    the release script's token authentication.
 5. Update Forgejo branch-protection required checks to the new Woodpecker check
    names after the first run. Remove the old Actions check requirements.
+6. Disable the **Actions** unit in the upstream Forgejo repository's **Settings**
+   once Woodpecker is working. This is a repository setting, not a Git change:
+   it prevents Forgejo from running the GitHub workflows as a fallback after
+   `.forgejo/workflows/` is removed. Leave GitHub Actions enabled on the mirror
+   and leave the shared Forgejo runner running for other repositories.
 
 ## Checks and images
 
