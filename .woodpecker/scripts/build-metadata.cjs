@@ -15,6 +15,10 @@ const metadata = {
   // The plugin parses cache_from as a list; escape its literal comma.
   PLUGIN_CACHE_FROM: String.raw`type=registry\,ref=${registry}/${image}:buildcache`,
   PLUGIN_DRY_RUN: event === 'pull_request' ? 'true' : 'false',
+  // A custom exporter overrides the plugin's default push=true. Explicit push=
+  // also prevents its fallback `docker push`, which needs a daemon-local image.
+  // dry_run alone does not disable pushing from a custom BuildKit exporter.
+  PLUGIN_OUTPUT: `type=image,oci-mediatypes=false,push=${event !== 'pull_request'}`,
 };
 
 let tags;

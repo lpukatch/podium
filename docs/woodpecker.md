@@ -55,6 +55,10 @@ behavior is unchanged. `.forgejo/default_merge_message/` is also unchanged.
 
 Only tag builds move `latest`. Non-tag app versions include the short commit
 SHA. Docker media types and disabled provenance preserve Unraid compatibility.
+The generated BuildKit exporter explicitly sets `push=true` for publishing and
+`push=false` for PRs. With a custom exporter, the plugin's `dry_run` flag alone
+does not control exporter pushes, and omitting `push=` invokes a separate
+`docker push` that cannot see BuildKit's image store.
 Build metadata is generated at runtime so the registry hostname is not committed
 to the public mirror. No registry password is written into the build context.
 
