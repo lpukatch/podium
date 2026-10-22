@@ -32,7 +32,6 @@ steps:
         from_secret: registry_token
       platforms: linux/amd64
       provenance: false
-      output: type=image,oci-mediatypes=false
       build_args_from_env:
         - PODIUM_BUILD_VERSION
       labels:
