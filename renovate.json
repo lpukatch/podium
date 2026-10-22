@@ -6,7 +6,7 @@
       "customType": "regex",
       "description": "Update tool versions pinned in CI workflows via `# renovate:` annotations",
       "managerFilePatterns": [
-        "/(^|/)\\.forgejo/workflows/[^/]+\\.ya?ml$/",
+        "/(^|/)\\.woodpecker/[^/]+\\.ya?ml$/",
         "/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"
       ],
       "matchStrings": [

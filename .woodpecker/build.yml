@@ -1,0 +1,40 @@
+when:
+  - event: [push, pull_request]
+    branch: main
+  - event: manual
+    branch: main
+    evaluate: 'RELEASE != "true"'
+  - event: tag
+    ref: refs/tags/v*
+
+steps:
+  - name: metadata
+    image: node:24-bookworm
+    environment:
+      REGISTRY:
+        from_secret: registry
+      IMAGE_NAME:
+        from_secret: image_name
+    commands:
+      - node .woodpecker/scripts/build-metadata.cjs
+
+  # Allowlist this exact image with WOODPECKER_PLUGINS_PRIVILEGED on the server.
+  # Do not add commands here: that would override the plugin entrypoint.
+  - name: build-and-publish
+    image: woodpeckerci/plugin-docker-buildx:6.1.2
+    settings:
+      env_file: .woodpecker-build.env
+      registry:
+        from_secret: registry
+      username:
+        from_secret: registry_username
+      password:
+        from_secret: registry_token
+      platforms: linux/amd64
+      provenance: false
+      output: type=image,oci-mediatypes=false
+      build_args_from_env:
+        - PODIUM_BUILD_VERSION
+      labels:
+        - org.opencontainers.image.title=podium
+        - org.opencontainers.image.description=Provider-aware stream checker and reorderer for Dispatcharr

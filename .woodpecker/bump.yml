@@ -1,0 +1,14 @@
+# Start a manual pipeline on main with RELEASE=true and optional BUMP_TYPE.
+when:
+  - event: manual
+    branch: main
+    evaluate: 'RELEASE == "true"'
+
+steps:
+  - name: version-bump
+    image: node:24-bookworm
+    environment:
+      BYPASS_TOKEN:
+        from_secret: bypass_token
+    commands:
+      - sh .woodpecker/scripts/bump.sh
