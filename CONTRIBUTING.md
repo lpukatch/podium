@@ -44,6 +44,10 @@ npm run test:run
 
 CI runs exactly these three, plus a Docker build.
 
+Upstream CI runs on Woodpecker; GitHub's mirror workflows remain separate.
+See [Woodpecker setup](docs/woodpecker.md) for secrets, runner requirements,
+and the manual release procedure.
+
 Do not open a pull or merge request until these checks and the Docker build pass
 locally; CI is confirmation, not the first test run.
 
