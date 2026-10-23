@@ -607,5 +607,24 @@ describe('renderMetrics', () => {
       const text = renderMetrics(store, { maxAgeMs: 3600_000, now: NOW });
       expect(text).toContain('provider="we\\"ird\\\\name"');
     });
+
+    it('honours minBitrateKbps when classifying low_bitrate and rank1 healthy streams', () => {
+      store.replaceCatalogue([row(10, 'ESPN', 0, 1, 'Provider A')], 'r1');
+      store.put(1, 'h', alive({ bitrateKbps: 1200 }));
+
+      const withDefault = parse(renderMetrics(store, { maxAgeMs: 3600_000, now: NOW }));
+      expect(withDefault.get('podium_provider_streams{provider="Provider A",state="alive"}')).toBe(
+        1,
+      );
+      expect(withDefault.get('podium_provider_rank1_healthy{provider="Provider A"}')).toBe(1);
+
+      const withHigherFloor = parse(
+        renderMetrics(store, { maxAgeMs: 3600_000, minBitrateKbps: 2000, now: NOW }),
+      );
+      expect(
+        withHigherFloor.get('podium_provider_streams{provider="Provider A",state="low_bitrate"}'),
+      ).toBe(1);
+      expect(withHigherFloor.get('podium_provider_rank1_healthy{provider="Provider A"}')).toBe(0);
+    });
   });
 });

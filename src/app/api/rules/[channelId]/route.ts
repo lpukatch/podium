@@ -40,10 +40,13 @@ async function putChannelRule(
     exclude?: string[];
     providers?: unknown;
     groupFilter?: { includeGroups?: string[]; excludeGroups?: string[] } | null;
-    aliasGroupFilters?: Record<string, { excludeGroups?: string[] }>;
+    aliasGroupFilters?: Record<string, { includeGroups?: string[]; excludeGroups?: string[] }>;
     aliasProviders?: Record<string, number[]>;
-    aliasProviderGroupFilters?: Record<string, Record<string, { excludeGroups?: string[] }>>;
-    containsGroupFilters?: Record<string, { excludeGroups?: string[] }>;
+    aliasProviderGroupFilters?: Record<
+      string,
+      Record<string, { includeGroups?: string[]; excludeGroups?: string[] }>
+    >;
+    containsGroupFilters?: Record<string, { includeGroups?: string[]; excludeGroups?: string[] }>;
     /**
      * `720p`, `1080p` or `2160p`; `none` to ignore the group's floor; `inherit`
      * to take the group's. Absent leaves whatever is stored alone, and `null`
@@ -115,12 +118,25 @@ async function putChannelRule(
         entry.exclude_groups = clean(body.groupFilter.excludeGroups);
     }
   }
+  const serialiseGroupFilter = (
+    filter: { includeGroups?: string[]; excludeGroups?: string[] } | undefined,
+  ): { include_groups?: string[]; exclude_groups?: string[] } | null => {
+    if (!filter) return null;
+    const include = filter.includeGroups !== undefined ? clean(filter.includeGroups) : undefined;
+    const exclude = clean(filter.excludeGroups);
+    if (include === undefined && exclude.length === 0) return null;
+    return {
+      ...(include !== undefined ? { include_groups: include } : {}),
+      ...(exclude.length > 0 ? { exclude_groups: exclude } : {}),
+    };
+  };
+
   if (body.aliasGroupFilters !== undefined) {
     entry.alias_group_filters = Object.fromEntries(
       Object.entries(body.aliasGroupFilters)
         .filter(([line]) => clean(body.aliases).includes(line))
-        .filter(([, filter]) => clean(filter.excludeGroups).length > 0)
-        .map(([line, filter]) => [line, { exclude_groups: clean(filter.excludeGroups) }]),
+        .map(([line, filter]) => [line, serialiseGroupFilter(filter)] as const)
+        .filter((pair): pair is [string, NonNullable<(typeof pair)[1]>] => pair[1] !== null),
     );
   }
   if (body.aliasProviders !== undefined) {
@@ -141,11 +157,9 @@ async function putChannelRule(
           alias,
           Object.fromEntries(
             Object.entries(providers)
-              .filter(
-                ([id, filter]) =>
-                  Number.isInteger(Number(id)) && clean(filter.excludeGroups).length > 0,
-              )
-              .map(([id, filter]) => [id, { exclude_groups: clean(filter.excludeGroups) }]),
+              .filter(([id]) => Number.isInteger(Number(id)))
+              .map(([id, filter]) => [id, serialiseGroupFilter(filter)] as const)
+              .filter((pair): pair is [string, NonNullable<(typeof pair)[1]>] => pair[1] !== null),
           ),
         ]),
     );
@@ -154,8 +168,8 @@ async function putChannelRule(
     entry.contains_group_filters = Object.fromEntries(
       Object.entries(body.containsGroupFilters)
         .filter(([line]) => clean(body.contains).includes(line))
-        .filter(([, filter]) => clean(filter.excludeGroups).length > 0)
-        .map(([line, filter]) => [line, { exclude_groups: clean(filter.excludeGroups) }]),
+        .map(([line, filter]) => [line, serialiseGroupFilter(filter)] as const)
+        .filter((pair): pair is [string, NonNullable<(typeof pair)[1]>] => pair[1] !== null),
     );
   }
   if (body.minResolution !== undefined) {

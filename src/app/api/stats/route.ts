@@ -19,6 +19,7 @@ export function GET() {
     const boot = loadConfig();
     store = new Store(boot.dbPath);
     const config = loadConfig(resolveEnv(process.env, store.settings()));
+    const weights = { ...DEFAULT_WEIGHTS, minBitrateKbps: config.PODIUM_MIN_BITRATE_KBPS };
     const { rows, writtenAt } = store.catalogue();
     const streamIds = [...new Set(rows.map((row) => row.streamId))];
     const verdicts = store.verdicts(streamIds);
@@ -41,7 +42,7 @@ export function GET() {
           ? 'dead'
           : result.black
             ? 'black'
-            : result.bitrateKbps > 0 && result.bitrateKbps < DEFAULT_WEIGHTS.minBitrateKbps
+            : result.bitrateKbps > 0 && result.bitrateKbps < weights.minBitrateKbps
               ? 'low_bitrate'
               : 'alive';
       states[state]++;
@@ -53,7 +54,7 @@ export function GET() {
       const provider = primaryByProvider.get(row.providerName) ?? { primary: 0, healthy: 0 };
       provider.primary++;
       const verdict = verdicts.get(row.streamId)?.result;
-      if (verdict && isUsable(verdict)) {
+      if (verdict && isUsable(verdict, weights)) {
         provider.healthy++;
         healthyPrimary++;
       }

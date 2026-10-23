@@ -101,6 +101,39 @@ describe('PUT /api/rules/[channelId]', () => {
     await put(PUT, { aliases: ['A'], minResolution: '1080i' }, { channelId: '5' });
     expect(doc().channels[0]!.min_resolution).toBe('1080p');
   });
+
+  it('preserves includeGroups alongside excludeGroups on alias and contains filters', async () => {
+    const { PUT } = await import('../app/api/rules/[channelId]/route');
+    await put(
+      PUT,
+      {
+        aliases: ['ESPN'],
+        contains: ['Sports'],
+        aliasGroupFilters: {
+          ESPN: { includeGroups: ['US*'], excludeGroups: ['PPV*'] },
+        },
+        aliasProviderGroupFilters: {
+          ESPN: { '7': { includeGroups: ['HD*'] } },
+        },
+        containsGroupFilters: {
+          Sports: { includeGroups: ['UK*'] },
+        },
+      },
+      { channelId: '5' },
+    );
+
+    const rule = loadRules(doc()).matcher.rules.get(5);
+    expect(rule?.aliasGroupFilters?.ESPN).toEqual({
+      includeGroups: ['US*'],
+      excludeGroups: ['PPV*'],
+    });
+    expect(rule?.aliasProviderGroupFilters?.ESPN?.['7']).toEqual({
+      includeGroups: ['HD*'],
+    });
+    expect(rule?.containsGroupFilters?.Sports).toEqual({
+      includeGroups: ['UK*'],
+    });
+  });
 });
 
 describe('PUT /api/groups/[groupId]', () => {
