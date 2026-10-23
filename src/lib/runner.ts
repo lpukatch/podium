@@ -1380,6 +1380,10 @@ export class Runner {
     const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const started = Date.now();
     store.startRun(runId);
+    delete this.progress.measured;
+    delete this.progress.soaked;
+    delete this.progress.soakTotal;
+    delete this.progress.soakDrops;
     this.emit({
       runId,
       phase: 'fetching',
@@ -2368,7 +2372,17 @@ export class Runner {
           failed: row.failed + lane.failed,
         };
       }
-      return this.finish(runId, started, counters, heldBack, eligibleChannels, lanes, false);
+      const blockedSoaks = this.blockedSoakStreams(channels, groupNames, eligibility, epgRows);
+      return this.finish(
+        runId,
+        started,
+        counters,
+        heldBack,
+        eligibleChannels,
+        lanes,
+        false,
+        blockedSoaks,
+      );
     } catch (error) {
       store.finishRun(runId, { ...counters, error: errorText(error).slice(0, 500) });
       this.emit({ phase: 'failed', message: errorText(error).slice(0, 200) });
@@ -3142,25 +3156,12 @@ export class Runner {
     // probing. A soak must not mistake their pregame placeholder (or missing
     // EPG) for evidence that the actual event feed drops. Re-evaluate at soak
     // time: probes may have taken long enough for the gate to change.
-    const programmes = currentProgrammes(context.epgRows as never[]);
-    const blocked = new Set<number>();
-    for (const channel of context.channels) {
-      const groupName =
-        channel.groupId === null ? undefined : context.groupNames.get(channel.groupId);
-      if (context.eligibility.policyFor(channel.groupId, groupName).mode !== AFTER_EPG_START)
-        continue;
-      if (
-        !context.eligibility.allows(
-          channel.groupId,
-          channel.tvgId,
-          programmes,
-          new Date(),
-          groupName,
-        ).allowed
-      ) {
-        for (const streamId of channel.streams) blocked.add(streamId);
-      }
-    }
+    const blocked = this.blockedSoakStreams(
+      context.channels,
+      context.groupNames,
+      context.eligibility,
+      context.epgRows,
+    );
 
     // The rest before each soak comes out of the round, so it is counted in.
     const rounds = generous ? Math.floor(budgetMs / (soakSeconds * 1_000 + cooldownMs)) : 1;
@@ -3555,6 +3556,27 @@ export class Runner {
     return { soaked: spent, drops };
   }
 
+  private blockedSoakStreams(
+    channels: Channel[],
+    groupNames: Map<number, string>,
+    eligibility: Eligibility,
+    epgRows: unknown[],
+  ): Set<number> {
+    const programmes = currentProgrammes(epgRows as never[]);
+    const blocked = new Set<number>();
+    for (const channel of channels) {
+      const groupName = channel.groupId === null ? undefined : groupNames.get(channel.groupId);
+      if (eligibility.policyFor(channel.groupId, groupName).mode !== AFTER_EPG_START) continue;
+      if (
+        !eligibility.allows(channel.groupId, channel.tvgId, programmes, new Date(), groupName)
+          .allowed
+      ) {
+        for (const streamId of channel.streams) blocked.add(streamId);
+      }
+    }
+    return blocked;
+  }
+
   /**
    * How many queued soaks a pass could start now. See `RunSummary.soakBacklog`.
    *
@@ -3562,12 +3584,16 @@ export class Runner {
    * unreadable queue is not a reason to stop the loop from sleeping -- the
    * alternative is a worker spinning once a minute on a table it cannot read.
    */
-  private drainableSoaks(): number {
+  private drainableSoaks(blocked?: Set<number>): number {
     try {
       const config = this.deps.config();
-      const queue = this.deps.store.pendingSoakCount();
       const windowOpen = soakWindowOpen(config.PODIUM_SOAK_WINDOW);
-      return queue.manual + queue.now + (windowOpen ? queue.sweep : 0);
+      if (!blocked || blocked.size === 0) {
+        const queue = this.deps.store.pendingSoakCount();
+        return queue.manual + queue.now + (windowOpen ? queue.sweep : 0);
+      }
+      const rows = this.deps.store.pendingSoaks(SOAK_QUEUE_SCAN, { excludeSweep: !windowOpen });
+      return rows.filter((row) => !blocked.has(row.streamId)).length;
     } catch {
       return 0;
     }
@@ -3934,6 +3960,7 @@ export class Runner {
     eligibleChannels: number,
     lanes: RunSummary['lanes'],
     paused: boolean,
+    blockedSoaks?: Set<number>,
   ): RunSummary {
     this.deps.store.finishRun(runId, { ...counters, channels: eligibleChannels });
     const summary: RunSummary = {
@@ -3941,7 +3968,7 @@ export class Runner {
       elapsedMs: Date.now() - started,
       channels: eligibleChannels,
       ...counters,
-      soakBacklog: paused ? 0 : this.drainableSoaks(),
+      soakBacklog: paused ? 0 : this.drainableSoaks(blockedSoaks),
       eligibleChannels,
       heldBack,
       lanes,

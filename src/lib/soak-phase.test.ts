@@ -355,20 +355,51 @@ describe('the soak phase', () => {
       return clean();
     };
 
-    await runner(env).runOnce();
+    const firstSummary = await runner(env).runOnce();
     expect(soaked).toEqual([101]);
     expect(store.pendingSoaks().map((row) => row.streamId)).toEqual([103]);
     expect(store.soakResults([102, 103]).size).toBe(0);
+    // Stream 103 is held back by after_epg_start, so it cannot be started until
+    // kickoff and must not count toward soakBacklog.
+    expect(firstSummary.soakBacklog).toBe(0);
 
     live = true;
-    await runner(env).runOnce();
+    const secondSummary = await runner(env).runOnce();
     expect(soaked).toEqual([101]);
     expect(store.pendingSoaks().map((row) => row.streamId)).toEqual([103]);
+    expect(secondSummary.soakBacklog).toBe(0);
 
     kickoffMinutesAgo = 10;
     await runner(env).runOnce();
     expect(soaked).toEqual(expect.arrayContaining([101, 102, 103]));
     expect(store.pendingSoaks()).toEqual([]);
     expect(store.soakResults([102, 103]).size).toBe(2);
+  });
+
+  it('clears soak progress fields at the start of a subsequent run', async () => {
+    script.run = async (_url, options) => {
+      const at = Date.now();
+      options.onConnect?.(at);
+      return {
+        legs: [{ startedAt: at, heldMs: 5_000, dropped: true, failedDial: false, error: 'eof' }],
+        heldMs: 5_000,
+        drops: 1,
+        failedDials: 0,
+        unreachable: false,
+        stopped: false,
+      };
+    };
+    const instance = runner({ PODIUM_SOAK_COOLDOWN_MS: '0' });
+    await instance.runOnce();
+    expect(store.getProgress().soakTotal).toBeGreaterThan(0);
+
+    // Once the queue is empty, the next pass does not enter the soak phase and
+    // must not carry the previous pass's soak counters in progress.
+    store.clearSoaks();
+    await instance.runOnce();
+    const after = store.getProgress();
+    expect(after.soaked).toBeUndefined();
+    expect(after.soakTotal).toBeUndefined();
+    expect(after.soakDrops).toBeUndefined();
   });
 });
