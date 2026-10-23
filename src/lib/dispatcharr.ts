@@ -876,6 +876,9 @@ export class DispatcharrClient {
       tvgId: row.effective_tvg_id || row.tvg_id || '',
       streams: row.streams ?? [],
       groupId: row.effective_channel_group_id ?? row.channel_group_id ?? null,
+      ...(typeof row.hidden_from_output === 'boolean'
+        ? { hidden_from_output: row.hidden_from_output }
+        : {}),
     };
   }
 
@@ -918,6 +921,7 @@ export class DispatcharrClient {
       channel_group?: number | null;
       stream_profile?: number | { id?: number | string | null } | null;
       stream_profile_id?: number | string | null;
+      is_stale?: boolean;
     };
     const rows = await this.paged<Row>('/api/channels/streams/');
     const out: Stream[] = [];
@@ -932,6 +936,7 @@ export class DispatcharrClient {
         currentViewers: row.current_viewers ?? 0,
         groupId: row.channel_group ?? null,
         streamProfileId: streamProfileId(row),
+        ...(typeof row.is_stale === 'boolean' ? { is_stale: row.is_stale } : {}),
       });
     }
     return out;

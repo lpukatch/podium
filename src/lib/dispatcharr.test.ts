@@ -402,23 +402,39 @@ describe('resource mapping', () => {
           streams: [9],
           channel_group_id: 5,
           effective_channel_group_id: 6,
+          hidden_from_output: true,
         },
       ],
     }));
     const [ch] = await new DispatcharrClient('http://d', { apiKey: 'k' }).channels();
-    expect(ch).toMatchObject({ name: 'override', tvgId: 'b', groupId: 6, streams: [9] });
+    expect(ch).toMatchObject({
+      name: 'override',
+      tvgId: 'b',
+      groupId: 6,
+      streams: [9],
+      hidden_from_output: true,
+    });
   });
 
-  it('drops streams with no url', async () => {
+  it('drops streams with no url and preserves is_stale when present', async () => {
     stubFetch(() => ({
       body: [
-        { id: 1, name: 'ok', url: 'http://a', m3u_account: 2, stream_hash: 'h' },
+        {
+          id: 1,
+          name: 'ok',
+          url: 'http://a',
+          m3u_account: 2,
+          stream_hash: 'h',
+          is_stale: true,
+        },
         { id: 2, name: 'no url' },
+        { id: 3, name: 'fresh', url: 'http://b', m3u_account: 2, stream_hash: 'h2' },
       ],
     }));
     const streams = await new DispatcharrClient('http://d', { apiKey: 'k' }).streams();
-    expect(streams).toHaveLength(1);
-    expect(streams[0]).toMatchObject({ id: 1, providerId: 2, streamHash: 'h' });
+    expect(streams).toHaveLength(2);
+    expect(streams[0]).toMatchObject({ id: 1, providerId: 2, streamHash: 'h', is_stale: true });
+    expect(streams[1]?.is_stale).toBeUndefined();
   });
 
   it('maps either stream-profile relation shape', async () => {
