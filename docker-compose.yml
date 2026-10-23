@@ -3,11 +3,10 @@
 #   docker compose up -d
 #
 # On first start it writes an empty rules.json into the volume and comes up with
-# nothing to check. Open the UI, pick a group, and add aliases; or import rules
-# you already have with:
+# nothing to check. Open the UI, pick a group, and add aliases; or upload a
+# backup / import an existing export from a checkout with:
 #
-#   docker compose run --rm podium node_modules/.bin/tsx src/scripts/import.ts \
-#     --json /path/to/export.json --out /app/data/rules.json
+#   npm run import -- --json /path/to/export.json --out ./data/rules.json
 
 services:
   podium:

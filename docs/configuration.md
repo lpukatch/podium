@@ -159,7 +159,7 @@ proxy as one worth rotating.
 | `PODIUM_DEAD_TTL_MS` | `10800000` | how soon a stream that *just* died is rechecked |
 | `PODIUM_DEAD_TTL_MAX_MS` | `86400000` | ceiling once that has backed off; [see below](#when-there-is-nothing-to-do) |
 | `PODIUM_UNKNOWN_BITRATE_TTL_MS` | `1800000` | how soon an alive-but-unmeasured stream is tried again; [see below](#streams-whose-bitrate-never-resolved) |
-| `PODIUM_MIN_FREE_SLOTS` | `1` | connections held back on a provider somebody is streaming from; [see below](#when-one-viewer-stops-everything) |
+| `PODIUM_MIN_FREE_SLOTS` | `1` | connections held back on a provider somebody is streaming from (environment-only); [see below](#when-one-viewer-stops-everything) |
 | `PODIUM_PAUSE_WHEN_WATCHING` | `true` | stop while anyone is streaming |
 | `PODIUM_PROBE_IDLE_PROVIDERS` | `false` | narrow that pause to the provider being watched; [see below](#when-one-viewer-stops-everything) |
 | `PODIUM_PROBE_WATCHED_PROVIDER` | `false` | probe that provider too, on its spare connections; [see below](#sharing-the-provider-being-watched) |
@@ -377,7 +377,7 @@ the first accepted delivery) `podium_connect_last_received_timestamp_seconds`.
 ## Quality priors
 
 Which probes the learned priors — and the Teamarr rules exported from them —
-are allowed to measure. These are the **Settings → Quality priors** fields, and
+are allowed to measure. These are the **Settings → App settings → Learn & export → Which results to learn from** fields, and
 setting them in the environment is the same as editing them there: everything
 below is stored, so a value set here is the starting point rather than the last
 word.
@@ -648,7 +648,7 @@ catalogue snapshot.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `PODIUM_METRICS_CHANNELS` | `true` | also expose the per-channel source series — every managed channel's slots with provider and verdict; the only families that scale with the catalogue, so the switch exists for a Prometheus watching its cardinality |
+| `PODIUM_METRICS_CHANNELS` | `true` | also expose the per-channel source series — every managed channel's slots with provider and verdict; the only families that scale with the catalogue, so the switch exists for a Prometheus watching its cardinality (environment-only) |
 
 A scrape job needs the path, and the token if you set one:
 
