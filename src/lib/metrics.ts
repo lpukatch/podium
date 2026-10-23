@@ -76,6 +76,8 @@ type ProviderResolution = (typeof RESOLUTIONS)[number];
 export interface MetricsOptions {
   /** Freshness target, so compliance can be expressed as a ratio. */
   maxAgeMs: number;
+  /** Minimum bitrate floor (kbps) below which a live stream is classified as low_bitrate. */
+  minBitrateKbps?: number;
   /** Beyond this with no heartbeat, the worker is considered absent. */
   staleLockMs?: number;
   /**
@@ -462,6 +464,10 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
     );
   }
   if (rows.length > 0) {
+    const weights =
+      options.minBitrateKbps === undefined
+        ? DEFAULT_WEIGHTS
+        : { ...DEFAULT_WEIGHTS, minBitrateKbps: options.minBitrateKbps };
     const verdicts = store.verdicts([...new Set(rows.map((r) => r.streamId))]);
 
     // The same precedence `isUsable` applies when ranking: dead first, then a
@@ -471,7 +477,7 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
       if (!result) return 'unmeasured';
       if (!result.alive) return 'dead';
       if (result.black) return 'black';
-      if (result.bitrateKbps > 0 && result.bitrateKbps < DEFAULT_WEIGHTS.minBitrateKbps)
+      if (result.bitrateKbps > 0 && result.bitrateKbps < weights.minBitrateKbps)
         return 'low_bitrate';
       return 'alive';
     };
@@ -516,7 +522,7 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
       const entry = rank1.get(row.providerName) ?? { total: 0, healthy: 0 };
       entry.total += 1;
       const verdict = verdicts.get(row.streamId)?.result;
-      if (verdict && isUsable(verdict)) entry.healthy += 1;
+      if (verdict && isUsable(verdict, weights)) entry.healthy += 1;
       rank1.set(row.providerName, entry);
     }
 
@@ -547,7 +553,7 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
         // Only the streams that would actually rank contribute a score: `score`
         // returns 0 for everything else, and a median dragged toward 0 by dead
         // streams would double-count what the state family already says.
-        if (verdict && isUsable(verdict)) scores.push(score(verdict));
+        if (verdict && isUsable(verdict, weights)) scores.push(score(verdict, weights));
         // Only a bitrate the probe actually read counts toward the stats: a
         // declared one is exactly the number this section exists not to trust.
         if (verdict?.bitrateMeasured && verdict.bitrateKbps > 0) {

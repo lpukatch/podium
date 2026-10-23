@@ -398,12 +398,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     // not show is worse than no term at all.
     let stability = new Map<number, StabilityRecord>();
     try {
-      const store = new Store(config.dbPath);
-      try {
-        stability = store.stabilityRecords();
-      } finally {
-        store.close();
-      }
+      stability = store.stabilityRecords();
     } catch {
       // As the runner does: an unreadable ledger ranks as no evidence rather
       // than failing the check.

@@ -27,6 +27,7 @@ export function GET() {
     const config = loadConfig(resolveEnv(process.env, store.settings()));
     const body = renderMetrics(store, {
       maxAgeMs: config.PODIUM_MAX_AGE_MS,
+      minBitrateKbps: config.PODIUM_MIN_BITRATE_KBPS,
       channelMetrics: config.PODIUM_METRICS_CHANNELS,
     });
     return new NextResponse(body, {
