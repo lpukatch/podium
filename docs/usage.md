@@ -87,7 +87,7 @@ deleted from every stream name before anything else reads it — so the tokens
 behind it are still parsed and the alias stays a plain name. A word-shaped entry
 only matches a whole word: `"HD"` will not eat the end of `GOLD`.
 
-**Settings → Name noise** is the same list with the answer attached: type a word
+**Settings → Name cleanup** is the same list with the answer attached: type a word
 and it says how many stream names it changes and what four of them become,
 before you save it. Worth using, because a strip entry is the one rule that acts
 on every channel at once.
@@ -252,7 +252,7 @@ reaches them. Names, with `*`/`?` globs, rather than ids: providers churn their
 M3U and Dispatcharr rebuilds the groups, so an id list quietly lets them back
 in. This is the same reason the channel-side policy grew `Auto | *`.
 
-**Settings → Provider stream groups** lists the groups your providers actually
+**Settings → Provider groups** lists the groups your providers actually
 import, how many streams each holds and how many are currently claimed —
 claimed first, since a group nothing matches is not worth reading — with a
 toggle per group.
@@ -580,7 +580,7 @@ install starts that weight at 0.1: enough to decide between feeds whose video
 already ties, never enough to promote a 720p stream over a 1080p one on the
 strength of its soundtrack. An install that predates the setting keeps it at 0,
 so upgrading never reshuffles a lineup nobody asked to change; raise it in
-**Settings → Stream ordering** to opt in.
+**Settings → Ranking** to opt in.
 
 A channel whose 5.1 only appears during live coverage will change position
 between passes. That is the measurement being honest about a stream that
@@ -636,7 +636,7 @@ colour in its own metadata rather than the fields ffprobe reads, so `is_unknown`
 catches both, and a DV feed ranks like an unprobed one until someone teaches
 the probe to read it.
 
-Podium can rank on it too, if asked. **Settings → Stream ordering → Advanced**
+Podium can rank on it too, if asked. **Settings → Ranking → Advanced**
 has a *Preferred HDR format* of no preference, HLG or HDR10 (PQ), and an *HDR*
 weight beside the others. With a flavour chosen, a stream carrying it scores
 full marks on that term, the other flavour scores nothing, and SDR or unknown
@@ -822,7 +822,7 @@ leave one request each.
 
 ### The nightly sweep
 
-**Settings → Probing → Soak during these hours** turns on the automatic version.
+**Settings → App settings → Measure streams → Stability & long checks → Soak during these hours** turns on the automatic version.
 Give it a range like `03:00-06:00` (ranges that cross midnight are fine) and
 Podium fills whatever capacity is spare inside it, measuring streams it knows
 least about first: never-observed before stale, oldest before newest, slot 0
@@ -877,7 +877,7 @@ streams' fault.
 Three things prevent that now:
 
 - **A spare connection.** Soaks leave one connection free per account (**Settings
-  → Probing → Connections a soak leaves free**), so a five-connection account
+  → App settings → Measure streams → Stability & long checks → Connections a soak leaves free**), so a five-connection account
   soaks four at a time. A single-connection account still soaks one.
 - **A rest between connections.** Every soak slot waits after a connection
   closes before opening another — a reconnect or the next stream alike — and
@@ -942,7 +942,7 @@ scales with the bitrate itself. At the default weights the bonus is worth 0.05,
 where being encoded at half the rate costs 0.15 — so the better-encoded stream
 loses by 0.10 and stays there.
 
-Two fields under **Settings → Stream ordering → Advanced** handle this.
+Two fields under **Settings → Ranking → Advanced** handle this.
 
 | Field | New installs | Upgrades | What it does |
 | --- | --- | --- | --- |
@@ -1030,7 +1030,7 @@ cost — for a failure far rarer than dead, black or throttled.
 
 ![Stream ordering settings: mode, preferred providers, and quality weights](images/stream-ordering.png)
 
-Mode and weights live in **Settings → Stream ordering**. Preferred providers
+Mode and weights live in **Settings → Ranking**. Preferred providers
 only apply in `provider` mode; in `quality` mode the best measured source wins
 outright, whoever carries it.
 
@@ -1061,7 +1061,7 @@ so learning from all of it measures the wrong population twice over: the
 baseline every exported number is quoted against becomes a film library's
 bitrate, and an account's effect becomes a claim about its movie encoder.
 
-**Settings → Quality priors** decides which probes count. Two signals, and an
+**Settings → App settings → Learn & export → Which results to learn from** decides which probes count. Two signals, and an
 `exclude` that vetoes both:
 
 | Setting | What it does |
@@ -1616,7 +1616,7 @@ So the rule set you upload is **kept**, and every later pass re-runs the check
 against what it has just measured, while the verdicts are still there. Each
 pass records its counts, and the disagreements themselves, which is how
 Saturday's misses are still readable on Monday. The Quality tab shows the last
-ten passes and the most recent pass's misses under **Checked automatically each
+ten passes and the most recent pass's misses under **Re-scored each
 pass**.
 
 The stored miss names the streams as they stood at the time and carries the
