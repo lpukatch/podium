@@ -656,12 +656,16 @@ export function validateSettings(patch: Record<string, unknown>): {
       values[key] = String(field.scale ? Math.round(n * field.scale) : n);
     } else if (field.kind === 'boolean') {
       values[key] = ['1', 'true', 'yes', 'on'].includes(text.toLowerCase()) ? 'true' : 'false';
-    } else if (key === 'DISPATCHARR_URL' || key === 'PODIUM_TEAMARR_URL') {
-      // Both are bases with an API path appended to them, and both are checked
-      // by the same rules -- see `base-url.ts`. The Teamarr URL used to fall
-      // through to the untyped branch below, which accepted anything at all:
-      // the client then appended its path to it, and a base ending in `#` threw
-      // that path away and sent the request somewhere else entirely.
+    } else if (
+      key === 'DISPATCHARR_URL' ||
+      key === 'PODIUM_TEAMARR_URL' ||
+      key === 'PODIUM_CONNECT_URL'
+    ) {
+      // All three are bases with an API path appended to them, and all three
+      // are checked by the same rules -- see `base-url.ts`. Falling through to
+      // the untyped branch below accepted anything at all: the client or
+      // webhook provisioner then appended its path to it, and a base ending in
+      // `#` threw that path away and sent the request somewhere else entirely.
       const problem = baseUrlProblem(text);
       if (problem) errors.push({ key, message: problem });
       else values[key] = normaliseBaseUrl(text, field.label);

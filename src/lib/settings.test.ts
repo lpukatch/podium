@@ -140,6 +140,13 @@ describe('validateSettings', () => {
     expect(validateSettings({ DISPATCHARR_URL: 'http://d:9191/' }).values.DISPATCHARR_URL).toBe(
       'http://d:9191',
     );
+    expect(validateSettings({ PODIUM_CONNECT_URL: 'ftp://podium:3456' }).errors).toHaveLength(1);
+    expect(
+      validateSettings({ PODIUM_CONNECT_URL: 'http://podium:3456/#frag' }).errors,
+    ).toHaveLength(1);
+    expect(
+      validateSettings({ PODIUM_CONNECT_URL: 'http://podium:3456/' }).values.PODIUM_CONNECT_URL,
+    ).toBe('http://podium:3456');
   });
 
   it('no longer accepts lane overrides at all', () => {
