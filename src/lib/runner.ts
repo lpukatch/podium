@@ -1508,10 +1508,12 @@ export class Runner {
       // the verdict, what airs next decides how long the loop may sleep on it.
       const upcoming = nextProgrammeStarts(epgRows as never[]);
 
-      const streamToChannel = new Map<number, number>();
+      const streamToChannels = new Map<number, number[]>();
       for (const channel of channels) {
         for (const streamId of channel.streams) {
-          streamToChannel.set(streamId, channel.id);
+          const list = streamToChannels.get(streamId);
+          if (list) list.push(channel.id);
+          else streamToChannels.set(streamId, [channel.id]);
         }
       }
 
@@ -1524,7 +1526,7 @@ export class Runner {
         streams.map((s) => ({
           providerId: s.providerId,
           currentViewers: s.currentViewers,
-          channelId: streamToChannel.get(s.id),
+          channelIds: streamToChannels.get(s.id),
         })),
         activity,
       );

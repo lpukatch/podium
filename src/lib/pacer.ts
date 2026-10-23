@@ -406,6 +406,7 @@ export interface ViewerStream {
   providerId: number;
   currentViewers?: number;
   channelId?: number | null;
+  channelIds?: number[];
 }
 
 /** Count in-flight streams per provider, from the channels currently watched. */
@@ -418,9 +419,10 @@ export function viewersByProvider(
     const viewers = stream.currentViewers ?? 0;
     const watched =
       activity.channelIds.size > 0 &&
-      stream.channelId !== null &&
-      stream.channelId !== undefined &&
-      activity.channelIds.has(stream.channelId);
+      ((stream.channelId !== null &&
+        stream.channelId !== undefined &&
+        activity.channelIds.has(stream.channelId)) ||
+        Boolean(stream.channelIds?.some((channelId) => activity.channelIds.has(channelId))));
     if (viewers > 0 || watched) {
       counts.set(stream.providerId, (counts.get(stream.providerId) ?? 0) + Math.max(viewers, 1));
     }

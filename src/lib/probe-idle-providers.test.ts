@@ -17,7 +17,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from './config';
-import { type Activity, busyUnknown, Pacer } from './pacer';
+import { type Activity, busyUnknown, Pacer, viewersByProvider } from './pacer';
 import { RulesSource } from './rules-source';
 import { laneBudgets, Runner } from './runner';
 import { Store } from './store';
@@ -375,5 +375,16 @@ describe('a watching pass, end to end', () => {
 
     expect(summary.paused).toBe(true);
     expect(paths).not.toContain('/api/channels/streams/');
+  });
+
+  it('attributes a viewer on an earlier channel when a stream is shared across channels', () => {
+    // Stream 100 appears on both channel 5 and channel 9. Watching channel 5
+    // must still charge provider 7 even though channel 9 appeared later in the
+    // channel catalogue.
+    const counts = viewersByProvider(
+      [{ providerId: 7, currentViewers: 0, channelIds: [5, 9] }],
+      watching,
+    );
+    expect(counts.get(7)).toBe(1);
   });
 });
