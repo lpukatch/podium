@@ -1508,7 +1508,7 @@ export default function Page() {
                         }
                         className="rounded-lg border border-[var(--color-line)] bg-[var(--color-panel)] px-2 py-1.5 text-sm"
                       >
-                        <option value="">No cap</option>
+                        <option value="">No ceiling</option>
                         {RESOLUTION_CHOICES.map((r) => (
                           <option key={r} value={r}>
                             {r} and under
@@ -2626,7 +2626,7 @@ export default function Page() {
                         : maxResolution === 'none'
                           ? null
                           : maxResolution;
-                    return effective ? `Capped at ${effective}` : 'No cap';
+                    return effective ? `Capped at ${effective}` : 'No ceiling';
                   })()}
                 </span>
               </div>
