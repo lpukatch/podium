@@ -1,12 +1,23 @@
 #!/bin/sh
 set -eu
 
-# Defense in depth: never release from a push, PR, or a non-main ref.
-test "$CI_PIPELINE_EVENT" = manual
-test "$CI_COMMIT_BRANCH" = main
-test "${RELEASE:-}" = true
-: "${BYPASS_TOKEN:?Set the bypass_token secret}"
-BUMP_TYPE=${BUMP_TYPE:-auto}
+# CI releases require an explicit manual event; local releases use Git auth.
+LOCAL=false
+if [ "${1:-}" = --local ]; then
+  LOCAL=true
+  BUMP_TYPE=${2:-auto}
+  test "$(git branch --show-current)" = main
+  if [ -n "$(git status --porcelain)" ]; then
+    echo 'Commit or stash changes before releasing.' >&2
+    exit 1
+  fi
+else
+  test "$CI_PIPELINE_EVENT" = manual
+  test "$CI_COMMIT_BRANCH" = main
+  test "${RELEASE:-}" = true
+  : "${BYPASS_TOKEN:?Set the bypass_token secret}"
+  BUMP_TYPE=${BUMP_TYPE:-auto}
+fi
 case "$BUMP_TYPE" in
   auto|patch|minor|major) ;;
   *) echo 'BUMP_TYPE must be auto, patch, minor, or major' >&2; exit 1 ;;
@@ -17,9 +28,14 @@ if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
   git fetch --unshallow origin
 fi
 git fetch origin main --tags
-git checkout -B main origin/main
-git config user.name 'Woodpecker CI'
-git config user.email 'woodpecker@forgejo.local'
+if [ "$LOCAL" = true ]; then
+  git merge --ff-only origin/main
+  test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+else
+  git checkout -B main origin/main
+  git config user.name 'Woodpecker CI'
+  git config user.email 'woodpecker@forgejo.local'
+fi
 
 LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -n 1)
 LATEST_TAG=${LATEST_TAG:-v0.0.0}
@@ -58,16 +74,23 @@ const version = v.join('.');
 const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
 pkg.version = version;
 fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+lock.version = version;
+lock.packages[''].version = version;
+fs.writeFileSync('package-lock.json', JSON.stringify(lock, null, 2) + '\n');
 console.log(version);
 NODE
 )
 
-git add package.json
+git add package.json package-lock.json
 if ! git diff --cached --quiet; then
   git commit -m "chore(release): v$NEW_VERSION"
 fi
 git tag -a "v$NEW_VERSION" -m "Release v$NEW_VERSION"
 
+if [ "$LOCAL" = true ]; then
+  git push --atomic origin HEAD:main "refs/tags/v$NEW_VERSION"
+else
 # Supply the bypass token only to the push, never in the remote URL or logs.
 ASKPASS=$(mktemp)
 trap 'rm -f "$ASKPASS"' EXIT
@@ -79,7 +102,8 @@ case "$1" in
 esac
 ASKPASS_SCRIPT
 chmod 700 "$ASKPASS"
-GIT_ASKPASS="$ASKPASS" GIT_TERMINAL_PROMPT=0 git -c credential.helper= push "$CI_REPO_CLONE_URL" HEAD:main --follow-tags
+GIT_ASKPASS="$ASKPASS" GIT_TERMINAL_PROMPT=0 git -c credential.helper= push --atomic "$CI_REPO_CLONE_URL" HEAD:main "refs/tags/v$NEW_VERSION"
+fi
 
 printf '\nReleased v%s (previous: %s)\n\n## Changelog\n' "$NEW_VERSION" "$LATEST_TAG"
 if [ "$LATEST_TAG" = v0.0.0 ]; then
