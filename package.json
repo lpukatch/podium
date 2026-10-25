@@ -1,6 +1,6 @@
 {
   "name": "podium",
-  "version": "1.16.0",
+  "version": "1.17.0",
   "private": true,
   "license": "MIT",
   "description": "Ranks the streams behind your Dispatcharr channels, best first, by measuring them rather than trusting their names.",
@@ -12,6 +12,7 @@
   "bugs": "https://github.com/lpukatch/podium/issues",
   "scripts": {
     "dev": "next dev -p 3456",
+    "release:bump": "sh .woodpecker/scripts/bump.sh --local",
     "build": "next build && npm run build:worker",
     "start": "next start -p 3456",
     "type-check": "tsc --noEmit",

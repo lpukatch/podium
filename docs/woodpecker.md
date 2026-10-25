@@ -80,3 +80,17 @@ subjects. It updates `package.json`, commits, and pushes an annotated tag using
 the bypass token. The changelog is printed in the job log. The pushed tag starts
 the image build and, after mirroring, the existing GitHub release workflow.
 Run only one release pipeline at a time.
+
+### Release from a local checkout
+
+From a clean `main` checkout with Git push access, run:
+
+```sh
+npm run release:bump -- minor
+```
+
+Use `patch`, `minor`, `major`, or `auto` (the default). The command fetches main
+and tags, fast-forwards to main, updates both package files, and atomically
+pushes the release commit and annotated tag. The tag triggers Woodpecker image
+publishing and the mirrored GitHub release. Local releases use your existing
+Git authentication; no Woodpecker token is needed.
