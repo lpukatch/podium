@@ -24,6 +24,8 @@ steps:
     image: woodpeckerci/plugin-docker-buildx:6.1.2
     settings:
       env_file: .woodpecker-build.env
+      # Explicit parser splits newline-delimited tags; implicit .tags loading does not.
+      tags_file: .tags
       registry:
         from_secret: registry
       username:

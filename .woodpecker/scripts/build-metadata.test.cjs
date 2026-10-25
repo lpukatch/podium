@@ -47,3 +47,10 @@ for (const event of ['push', 'pull_request', 'tag', 'manual']) {
     }
   });
 }
+
+// v6.1.2 implicitly reads .tags through a comma-separated CLI StringSlice.
+// Newline tags require its explicit tags_file parser (plugin/impl.go).
+test('release workflow explicitly selects the newline tag-file parser', () => {
+  const workflow = fs.readFileSync(path.join(__dirname, '../build.yml'), 'utf8');
+  assert.match(workflow, /^      tags_file: \.tags$/m);
+});
