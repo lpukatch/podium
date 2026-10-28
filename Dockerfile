@@ -1,6 +1,11 @@
 # syntax=docker/dockerfile:1
 
-FROM node:26-bookworm-slim AS deps
+# Debian 13 (trixie), not bookworm: Debian 12 is oldstable, and its security
+# repo stopped covering the ffmpeg/libxml2/glib stack this image ships -- which
+# is where every CRITICAL and nearly every HIGH in the trivy operator's scan of
+# the deployed image came from, all without a fix backported. Trixie moves each
+# of those packages a major version instead.
+FROM node:26-trixie-slim AS deps
 WORKDIR /app
 # better-sqlite3 is a native addon. When no prebuild matches this platform and
 # node version it falls back to node-gyp, which needs python3 and a toolchain --
@@ -12,7 +17,7 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 
-FROM node:26-bookworm-slim AS build
+FROM node:26-trixie-slim AS build
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -26,12 +31,14 @@ ENV NEXT_TELEMETRY_DISABLED=1 \
 RUN npm run build
 
 
-FROM node:26-bookworm-slim AS runtime
+FROM node:26-trixie-slim AS runtime
 WORKDIR /app
 
 # ffmpeg is the one heavy dependency and is non-negotiable: ffprobe is the whole
 # product. tini reaps the ffprobe children -- without it a timed-out probe can
-# leave a zombie holding a provider slot for the life of the container.
+# leave a zombie holding a provider slot for the life of the container. On trixie
+# this is ffmpeg 7.1, two majors past bookworm's 5.1; the JSON output format is
+# stable across the jump but is the first place to look if probes misbehave.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg tini \
     && rm -rf /var/lib/apt/lists/*
