@@ -6,7 +6,7 @@ when:
 
 steps:
   - name: version-bump
-    image: node:24-bookworm
+    image: node:26-bookworm
     environment:
       BYPASS_TOKEN:
         from_secret: bypass_token
