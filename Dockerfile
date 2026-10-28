@@ -39,9 +39,16 @@ WORKDIR /app
 # leave a zombie holding a provider slot for the life of the container. On trixie
 # this is ffmpeg 7.1, two majors past bookworm's 5.1; the JSON output format is
 # stable across the jump but is the first place to look if probes misbehave.
+#
+# npm ships in every node image and carries its own vendored dependencies
+# (undici, brace-expansion, http-cache-semantics) that trivy attributes to the
+# runtime image -- they are npm's, not the app's, which npm ci never installs.
+# The standalone server and the healthcheck need only node, so npm (and its
+# ~17M) goes in the same RUN. The deps and build stages keep theirs.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg tini \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
