@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM node:24-bookworm-slim AS deps
+FROM node:26-bookworm-slim AS deps
 WORKDIR /app
 # better-sqlite3 is a native addon. When no prebuild matches this platform and
 # node version it falls back to node-gyp, which needs python3 and a toolchain --
@@ -12,7 +12,7 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 
-FROM node:24-bookworm-slim AS build
+FROM node:26-bookworm-slim AS build
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -26,7 +26,7 @@ ENV NEXT_TELEMETRY_DISABLED=1 \
 RUN npm run build
 
 
-FROM node:24-bookworm-slim AS runtime
+FROM node:26-bookworm-slim AS runtime
 WORKDIR /app
 
 # ffmpeg is the one heavy dependency and is non-negotiable: ffprobe is the whole

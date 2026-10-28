@@ -4,23 +4,23 @@ when:
 
 steps:
   - name: install
-    image: node:24-bookworm
+    image: node:26-bookworm
     commands:
       - node --test .woodpecker/scripts/build-metadata.test.cjs
       - npm ci
 
   - name: lint-and-format
-    image: node:24-bookworm
+    image: node:26-bookworm
     commands:
       - npm run format:check
 
   - name: type-check
-    image: node:24-bookworm
+    image: node:26-bookworm
     commands:
       - npm run type-check
 
   - name: test
-    image: node:24-bookworm
+    image: node:26-bookworm
     commands:
       # Containers do not share installed system packages with earlier steps.
       - apt-get update && apt-get install -y --no-install-recommends ffmpeg

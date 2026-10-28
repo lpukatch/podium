@@ -9,7 +9,7 @@ when:
 
 steps:
   - name: metadata
-    image: node:24-bookworm
+    image: node:26-bookworm
     environment:
       REGISTRY:
         from_secret: registry
