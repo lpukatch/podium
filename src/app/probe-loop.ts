@@ -111,7 +111,8 @@ export async function probeChannels(
       check = (await resp.json()) as CheckResponse;
       if (!resp.ok || check.error) {
         out.errors++;
-        if (resp.status === 503 && ++capacityRefusals >= 2) {
+        capacityRefusals = resp.status === 503 ? capacityRefusals + 1 : 0;
+        if (capacityRefusals >= 2) {
           out.capacityStopped = true;
           break;
         }
@@ -122,6 +123,7 @@ export async function probeChannels(
         out.aborted = true;
         break;
       }
+      capacityRefusals = 0;
       out.errors++;
       continue;
     }
