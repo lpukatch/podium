@@ -107,6 +107,83 @@ describe('probeChannels', () => {
     expect(probeNote(out).text).toContain('no spare provider capacity');
   });
 
+  it.each(['http', 'network'])(
+    'resets capacity refusals after an unrelated %s failure',
+    async (failure) => {
+      let checks = 0;
+      vi.stubGlobal('fetch', async () => {
+        checks++;
+        if (checks === 2) {
+          if (failure === 'network') throw new TypeError('fetch failed');
+          return respond({ error: 'Check failed' }, 500)();
+        }
+        if (checks === 1 || checks === 3) return respond({ error: 'No spare slots' }, 503)();
+        return respond(completeCheck)();
+      });
+      const out = await probeChannels(
+        [1, 2, 3, 4].map((id) => ({ id, name: null })),
+        { signal: new AbortController().signal },
+      );
+      expect(checks).toBe(4);
+      expect(out.capacityStopped).toBe(false);
+      expect(out.completed).toBe(1);
+      expect(out.errors).toBe(3);
+    },
+  );
+
+  it.each(['http', 'network', 'body'])(
+    'bounds alternating capacity refusals and %s failures',
+    async (failure) => {
+      let checks = 0;
+      vi.stubGlobal('fetch', async () => {
+        checks++;
+        if (checks % 2 === 1) return respond({ error: 'No spare slots' }, 503)();
+        if (failure === 'network') throw new TypeError('fetch failed');
+        if (failure === 'body') {
+          return {
+            ok: false,
+            status: 500,
+            json: async () => {
+              throw new SyntaxError('Invalid JSON');
+            },
+          } as unknown as Response;
+        }
+        return respond({ error: 'Check failed' }, 500)();
+      });
+      const out = await probeChannels(
+        Array.from({ length: 10 }, (_, id) => ({ id, name: null })),
+        { signal: new AbortController().signal },
+      );
+      expect(checks).toBe(7);
+      expect(out.capacityStopped).toBe(true);
+      expect(out.errors).toBe(7);
+      expect(out.completed).toBe(0);
+      expect(probeNote(out).text).toContain('no spare provider capacity');
+    },
+  );
+
+  it.each(['http', 'network'])(
+    'stops on two consecutive refusals after an unrelated %s failure',
+    async (failure) => {
+      let checks = 0;
+      vi.stubGlobal('fetch', async () => {
+        checks++;
+        if (checks === 2) {
+          if (failure === 'network') throw new TypeError('fetch failed');
+          return respond({ error: 'Check failed' }, 500)();
+        }
+        return respond({ error: 'No spare slots' }, 503)();
+      });
+      const out = await probeChannels(
+        [1, 2, 3, 4, 5].map((id) => ({ id, name: null })),
+        { signal: new AbortController().signal },
+      );
+      expect(checks).toBe(4);
+      expect(out.errors).toBe(4);
+      expect(out.capacityStopped).toBe(true);
+    },
+  );
+
   it('keeps going when a capacity refusal is a one-off', async () => {
     const statuses = [503, 200, 503];
     let i = 0;
