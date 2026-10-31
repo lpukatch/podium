@@ -36,7 +36,7 @@ export interface ProbeOutcome {
   applyFailed: number;
   errors: number;
   aborted: boolean;
-  /** Stopped early: two checks in a row found no spare provider capacity. */
+  /** Stopped early: two consecutive or four total checks found no spare capacity. */
   capacityStopped: boolean;
 }
 
@@ -85,7 +85,10 @@ export async function probeChannels(
   // A single 503 can be a stream ending mid-check; two in a row is every lane
   // taken, and the channels after it would each pay a full Dispatcharr preamble
   // only to be told the same thing.
+  // Bound mixed-error runs too: unrelated failures reset the streak, but four
+  // refusals across the run are enough to stop spending time on busy providers.
   let capacityRefusals = 0;
+  let capacityRefusalTotal = 0;
 
   for (const [i, chan] of targets.entries()) {
     if (opts.signal.aborted) {
@@ -112,7 +115,8 @@ export async function probeChannels(
       if (!resp.ok || check.error) {
         out.errors++;
         capacityRefusals = resp.status === 503 ? capacityRefusals + 1 : 0;
-        if (capacityRefusals >= 2) {
+        if (resp.status === 503) capacityRefusalTotal++;
+        if (capacityRefusals >= 2 || capacityRefusalTotal >= 4) {
           out.capacityStopped = true;
           break;
         }
