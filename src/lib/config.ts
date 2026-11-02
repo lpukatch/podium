@@ -537,6 +537,8 @@ export type RawConfig = z.infer<typeof configSchema>;
 export interface Config extends RawConfig {
   dbPath: string;
   rulesPath: string;
+  /** Where the last Dispatcharr crawl is cached on disk. */
+  cataloguePath: string;
   /** Whether there is anything to authenticate to Dispatcharr with. */
   hasCredentials: boolean;
 }
@@ -567,6 +569,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     ...raw,
     dbPath: join(raw.PODIUM_DATA_DIR, 'podium.db'),
     rulesPath: raw.PODIUM_RULES || join(raw.PODIUM_DATA_DIR, 'rules.json'),
+    // The last Dispatcharr crawl, written so a web restart serves the UI from
+    // disk instead of re-crawling. Same directory the rest of the state lives
+    // in, and safe to delete: it is a cache, not a record.
+    cataloguePath: join(raw.PODIUM_DATA_DIR, 'catalogue.json'),
     hasCredentials: Boolean(
       raw.DISPATCHARR_API_KEY || (raw.DISPATCHARR_USERNAME && raw.DISPATCHARR_PASSWORD),
     ),
