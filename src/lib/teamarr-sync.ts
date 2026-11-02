@@ -252,20 +252,46 @@ export async function syncToTeamarr(
 
   const scope = scopeFromConfig(config);
   const samples = store.qualitySamples();
-  const profile = buildProfile(samples, { scope });
+  const scoped = samples.filter((sample) => inScope(sample, scope));
 
-  if (profile.totalSamples < config.PODIUM_TEAMARR_MIN_SAMPLES) {
+  if (scoped.length < config.PODIUM_TEAMARR_MIN_SAMPLES) {
     return fail(
-      `only ${profile.totalSamples} in-scope samples, and the floor is ` +
+      `only ${scoped.length} in-scope samples, and the floor is ` +
         `${config.PODIUM_TEAMARR_MIN_SAMPLES}. A few hours of samples still fit ` +
         `confident-looking rules; this is the guard against pushing them.`,
     );
   }
 
-  const miner = mineNames(
-    samples.filter((sample) => inScope(sample, scope)),
-    profile.groups,
-  );
+  // Assembled before anything below it, and not only because everything below
+  // it scores what it produces. The population floor used to sit behind the
+  // profile fit, the miner, the rules fetch and the per-channel match read --
+  // minutes of fitting and a sweep that makes Teamarr refresh its stats cache,
+  // all to compute a channel count whose only role was to say "come back in an
+  // hour". Ninety-six per cent of scheduled attempts on a live install were
+  // deferrals; each one paid for the whole pipeline to decline. The count needs
+  // the verdicts and nothing else, so the guard is asked here, before any of
+  // that runs -- and the assembly is reused below rather than repeated, because
+  // a second assembly is the comparison bug `checkInputs` exists to prevent.
+  const snap = await snapshot();
+  const { channels, strategy } = checkInputs(snap, store);
+
+  // Asked before the fitting as well as before the write, for the same reason
+  // it is asked before the write: a regression found on a population this thin
+  // is the same unreliable reading as the agreement that produced it. Deferring
+  // re-asks the question when the answer is worth having, where refusing would
+  // bank the doubtful one -- and deferring *early* re-asks it without having
+  // spent the fitting on an answer nobody will use.
+  if (!options.force && (options.scheduled || options.dryRun)) {
+    const thin = underpowered(
+      scoredChannelIds(channels).length,
+      config.PODIUM_TEAMARR_MIN_CHANNELS,
+      store.peakManagedChannels(at - PEAK_WINDOW_MS),
+    );
+    if (thin) return { at, pushed: false, deferred: true, reason: `deferred: ${thin}` };
+  }
+
+  const profile = buildProfile(samples, { scope });
+  const miner = mineNames(scoped, profile.groups);
   const generated = teamarrRules(profile, { consolidated: miner.passB.consolidated });
   if (generated.rules.length === 0) {
     return fail('the profile produced no rules worth pushing');
@@ -274,11 +300,6 @@ export async function syncToTeamarr(
   const client = new TeamarrClient(config.PODIUM_TEAMARR_URL);
   const existing = await client.rules();
   const merged = mergeTeamarrRules(existing, generated.rules) as TeamarrRuleRow[];
-
-  // Scored against the same channels, from the same verdicts, in the same pass
-  // -- see `checkInputs`. Two assemblies would compare two populations.
-  const snap = await snapshot();
-  const { channels, strategy } = checkInputs(snap, store);
 
   // Teamarr's own attach-time state, for the channels about to be scored. Read
   // once and applied to both sides, because a rule set carrying `epg_match`
@@ -307,19 +328,6 @@ export async function syncToTeamarr(
     coverage: match.known ? match.coverage : undefined,
     skew: match.known ? (describeSkew(match.coverage) ?? undefined) : undefined,
   };
-
-  // Before the regression test rather than after it, because a regression
-  // found on a population this thin is the same unreliable reading as the
-  // agreement that produced it -- deferring re-asks the question when the
-  // answer is worth having, where refusing would bank the doubtful one.
-  if (!options.force && (options.scheduled || options.dryRun)) {
-    const thin = underpowered(
-      before.summary.channels,
-      config.PODIUM_TEAMARR_MIN_CHANNELS,
-      store.peakManagedChannels(at - PEAK_WINDOW_MS),
-    );
-    if (thin) return { ...outcome, deferred: true, reason: `deferred: ${thin}` };
-  }
 
   // Only where there was something to compare. An install whose channels carry
   // no verdicts yet scores 0 against 0, which is not evidence of anything.
