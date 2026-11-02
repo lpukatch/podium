@@ -311,6 +311,31 @@ export const configSchema = z.object({
    */
   PODIUM_TEAMARR_MIN_CHANNELS: num(20),
 
+  /**
+   * How big a share of this install's best recent population a scheduled push
+   * must clear, as a fraction (0-1) of the largest channel count of the last
+   * seven days. Zero -- the default -- keeps the floor absolute, which is the
+   * behaviour this setting exists to replace without changing it for anyone
+   * who has not asked for the new one.
+   *
+   * The reason a fraction exists: the checkable population is a function of
+   * when events are live, and every install's calendar is its own. One runs a
+   * hundred channels on autumn Saturdays and a dozen midweek; another peaks
+   * every evening at the same hour. An absolute floor ships a push on the
+   * first thin day that touches it, while the population that would actually
+   * stress-test the rules arrives later, untaken. A fraction of the recent
+   * peak delays the write towards whatever this install's own busy spell is --
+   * no schedule is hardcoded and no day of the week is named, because the
+   * curve differs per install and the data already knows whose it is.
+   *
+   * A stale escape keeps the fraction from becoming a starvation bug: if no
+   * push has landed in seven days -- the same window the peak is measured
+   * over -- the bar falls back to the absolute floor, so an install whose
+   * big population came and went unpushed still ships its rules eventually.
+   * See `populationBar`.
+   */
+  PODIUM_TEAMARR_PEAK_FRACTION: num(0),
+
   PODIUM_QUALITY_EVENT_ONLY: bool(true),
   /**
    * Globs that put a group in scope whatever its policy says, comma- or

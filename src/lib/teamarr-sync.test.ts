@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import { loadConfig } from './config';
 import type { Store } from './store';
-import { regression, type SyncScore, syncToTeamarr, underpowered } from './teamarr-sync';
+import {
+  populationBar,
+  regression,
+  STALE_AFTER_MS,
+  type SyncScore,
+  syncToTeamarr,
+  underpowered,
+} from './teamarr-sync';
 
 // The population gate reads the catalogue through `snapshot`. Tests here never
 // want a real crawl, and an empty catalogue is exactly the thin population the
@@ -144,6 +151,7 @@ describe('the population gate — asked before the pipeline, not after it', () =
         verdicts: () => new Map(),
         stabilityRecords: () => new Map(),
         peakManagedChannels: () => 50,
+        teamarrSyncLog: () => [],
       } as unknown as Store;
       const outcome = await syncToTeamarr(store, config, { scheduled: true });
       expect(outcome.deferred).toBe(true);
@@ -152,6 +160,58 @@ describe('the population gate — asked before the pipeline, not after it', () =
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+});
+
+describe('populationBar — where a scheduled push is allowed to land', () => {
+  // Three installs, one formula, no schedule written down. The rhythm of an
+  // event catalogue is the operator's, not this code's: a football weekend, a
+  // nightly prime time and a quiet catalogue that never gets big must all be
+  // served by the same measured bar, which is why the bar reads a peak and
+  // not a clock.
+  it('keeps the absolute floor when the fraction is zero', () => {
+    // The default, and the behaviour every existing install already has.
+    expect(populationBar(20, 140, 0, 0)).toBe(20);
+  });
+
+  it('raises the bar towards a weekend-scale peak', () => {
+    // The Saturday install: a floor of 20 lets a push land on a Tuesday
+    // sliver, while the population that would actually stress the rules --
+    // 140 channels -- arrives days later. Half of the peak is only reachable
+    // on the busy days, which is the point.
+    expect(populationBar(20, 140, 0.5, 0)).toBe(70);
+  });
+
+  it('drifts a nightly install towards its own evening', () => {
+    // A catalogue that peaks every night does not need a big fraction to
+    // change behaviour: the bar is cleared nightly, so the push simply moves
+    // from a random thin hour to the strong one.
+    expect(populationBar(20, 60, 0.5, 0)).toBe(30);
+  });
+
+  it('leaves a small install exactly where it was', () => {
+    // An install whose peak is below the floor is capped by the absolute
+    // guard's own min(floor, peak); a fraction of a small peak is smaller
+    // still, and must not raise the bar past what the install has ever had.
+    expect(populationBar(20, 8, 0.5, 0)).toBe(8);
+  });
+
+  it('stands down once nothing has pushed in seven days', () => {
+    // The starvation escape. If the busy spell came and went without a push --
+    // cancelled fixtures, a shrunken catalogue -- the fraction must not hold
+    // the rules hostage forever.
+    expect(populationBar(20, 140, 0.5, STALE_AFTER_MS)).toBe(20);
+    expect(populationBar(20, 140, 0.5, STALE_AFTER_MS - 1)).toBe(70);
+  });
+
+  it('lets a first push through on no history at all', () => {
+    // A peak of zero is "nothing checked yet", and a fraction of it would be
+    // a bar nothing can clear.
+    expect(populationBar(20, 0, 0.5, 0)).toBe(0);
+  });
+
+  it('rounds the fraction up, so "half" cannot mean one channel short', () => {
+    expect(populationBar(1, 41, 0.5, 0)).toBe(21);
   });
 });
 

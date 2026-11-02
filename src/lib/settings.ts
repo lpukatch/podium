@@ -355,6 +355,16 @@ export const FIELDS: FieldSpec[] = [
     max: 10_000,
   },
   {
+    key: 'PODIUM_TEAMARR_PEAK_FRACTION',
+    kind: 'number',
+    label: 'Push at a share of the busiest recent population',
+    help: 'Delay scheduled pushes until the checkable population reaches this fraction (0-1) of the largest of the last seven days. 0 keeps the floor absolute.',
+    more: 'Event catalogues swing with the calendar -- a football weekend runs a hundred channels where a Tuesday runs twenty -- and a push landing at the floor has been checked on a sliver of what a day later would have compared. A fraction drifts the push towards this install\'s own busy spell, whenever that is. If nothing has pushed in seven days the bar falls back to the floor above, so a missed busy spell cannot stall pushes forever.',
+    section: 'teamarr',
+    min: 0,
+    max: 1,
+  },
+  {
     key: 'PODIUM_QUALITY_EVENT_ONLY',
     kind: 'boolean',
     label: 'Learn only from event channels',

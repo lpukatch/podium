@@ -183,6 +183,52 @@ export function regression(before: SyncScore, after: SyncScore): string | null {
 export const PEAK_WINDOW_MS = 7 * 86_400_000;
 
 /**
+ * How long a scheduled push may go without landing before the relative bar
+ * stands down.
+ *
+ * The same seven days the peak itself is measured over. A bar set at a
+ * fraction of the recent peak is a bet that this install's busy spell will
+ * come round again; an install whose big population came and went without a
+ * push -- cancelled fixtures, a catalogue that shrank mid-week -- must not
+ * wait on a bet forever. Past this point the bar falls back to the absolute
+ * floor and whatever population next clears it ships the rules.
+ */
+export const STALE_AFTER_MS = 7 * 86_400_000;
+
+/**
+ * The population a scheduled push must clear before it may write.
+ *
+ * Two parts, and the second is what makes the first incomplete. The absolute
+ * floor answers "is there enough to check at all"; it cannot answer "is this
+ * the check this install is capable of" -- an event-driven catalogue can run
+ * twenty orderable channels on a quiet Tuesday and a hundred when the fixtures
+ * are on, and a push that lands at the floor has been checked on a fifth of
+ * what a day's patience would have bought.
+ *
+ * The fraction closes that: the bar rises to a share of the largest population
+ * the install actually reached recently, so the push drifts towards whatever
+ * this install's own busy spell is -- a Saturday, a nightly window, a monthly
+ * event -- without any schedule being written down. The rhythm differs per
+ * install and is unknown to this code; the peak is measured, not configured,
+ * which is the whole reason the bar can be shared between them.
+ *
+ * At a fraction of zero -- the default -- this returns the absolute guard's
+ * own answer unchanged, so an install that has not opted in behaves exactly
+ * as `underpowered` always has.
+ */
+export function populationBar(
+  floor: number,
+  peak: number,
+  fraction: number,
+  lastPushAgeMs: number,
+): number {
+  const base = Math.min(floor, peak);
+  if (fraction <= 0 || peak <= 0) return base;
+  if (lastPushAgeMs >= STALE_AFTER_MS) return base;
+  return Math.max(base, Math.ceil(fraction * peak));
+}
+
+/**
  * How soon a deferred push tries again.
  *
  * Short enough that a push deferred at breakfast still happens the same day
@@ -282,10 +328,20 @@ export async function syncToTeamarr(
   // bank the doubtful one -- and deferring *early* re-asks it without having
   // spent the fitting on an answer nobody will use.
   if (!options.force && (options.scheduled || options.dryRun)) {
+    const peak = store.peakManagedChannels(at - PEAK_WINDOW_MS);
+    // The last *push*, not the last attempt -- a deferral is an attempt too,
+    // and measuring staleness from one would keep the escape hatch permanently
+    // armed on an install that defers hourly but has pushed recently.
+    const lastPush = store.teamarrSyncLog().find((row) => row.pushed);
     const thin = underpowered(
       scoredChannelIds(channels).length,
-      config.PODIUM_TEAMARR_MIN_CHANNELS,
-      store.peakManagedChannels(at - PEAK_WINDOW_MS),
+      populationBar(
+        config.PODIUM_TEAMARR_MIN_CHANNELS,
+        peak,
+        config.PODIUM_TEAMARR_PEAK_FRACTION,
+        at - (lastPush?.ranAt ?? 0),
+      ),
+      peak,
     );
     if (thin) return { at, pushed: false, deferred: true, reason: `deferred: ${thin}` };
   }
