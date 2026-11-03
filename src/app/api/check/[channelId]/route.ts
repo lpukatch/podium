@@ -458,22 +458,38 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         .filter((c): c is NonNullable<typeof c> => c !== null)
         .slice(0, 4);
 
-      try {
-        consensusReport = await checkStreamConsensus(topCandidates, {
-          sampleSeconds: 8,
-          timeoutMs: 12000,
-          maxConcurrent: 4,
-          userAgent: probeUserAgent(config),
-        });
-        for (const outlier of consensusReport.outliers) {
-          outlierSet.add(outlier.streamId);
-          outlierReasonMap.set(outlier.streamId, outlier.reason);
+      // Consensus is a comparison, and fewer than two alive feeds have nothing
+      // to compare against. Sampling the one feed anyway would spend up to
+      // twelve seconds of extraction to report an inconclusive the operator
+      // could have been told for free, so the work is skipped outright and the
+      // report stays absent from the response.
+      if (topCandidates.length >= 2) {
+        try {
+          consensusReport = await checkStreamConsensus(topCandidates, {
+            sampleSeconds: 8,
+            timeoutMs: 12000,
+            maxConcurrent: 4,
+            userAgent: probeUserAgent(config),
+          });
+          for (const outlier of consensusReport.outliers) {
+            outlierSet.add(outlier.streamId);
+            outlierReasonMap.set(outlier.streamId, outlier.reason);
+          }
+          // A cluster exists whenever a majority agreed among the feeds that
+          // could be sampled, but when a feed failed to extract the report's
+          // status is `inconclusive` -- the agreement was not checked against
+          // everything. Badging the cluster green while the response also
+          // carries the inconclusive note ("agreement ... does not verify
+          // those feeds") hands the operator two opposite answers to the same
+          // question, so the badge is earned only by a verdict.
+          if (consensusReport.status === 'confirmed' || consensusReport.status === 'divergent') {
+            for (const cId of consensusReport.consensusCluster) {
+              consensusMatchSet.add(cId);
+            }
+          }
+        } catch {
+          // Consensus error is non-fatal: probe report proceeds
         }
-        for (const cId of consensusReport.consensusCluster) {
-          consensusMatchSet.add(cId);
-        }
-      } catch {
-        // Consensus error is non-fatal: probe report proceeds
       }
     }
 
