@@ -185,7 +185,11 @@ async function putChannelRule(
   }
   if (body.excludeFast !== undefined) {
     if (body.excludeFast === null) delete entry.exclude_fast;
-    else entry.exclude_fast = Boolean(body.excludeFast);
+    // `Boolean("false")` is `true`: a string body value would silently invert
+    // the operator's intent and flip which streams this channel may claim.
+    // Anything that is not a real boolean is refused instead.
+    else if (typeof body.excludeFast === 'boolean') entry.exclude_fast = body.excludeFast;
+    else return NextResponse.json({ error: 'excludeFast must be a boolean' }, { status: 400 });
   }
 
   // A floor above the ceiling leaves nothing usable, and an operator who sets

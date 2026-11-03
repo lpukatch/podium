@@ -410,6 +410,31 @@ export function rejectedBy(guards: Guards, norm: NormalizedName): string {
   return '';
 }
 
+/**
+ * Whether an alias line asks for FAST streams, and so must not have the fast
+ * guard applied to it. Same reasoning as `wantsRadio` in `guardsFor`: a
+ * channel whose own aliases are FAST names ("Pluto TV: CBS News Texas") would
+ * otherwise have every candidate it could ever match rejected by the
+ * default-on guard.
+ *
+ * Read both ways an alias can name the platform -- an `@`-qualifier
+ * ("@Prime", "@UK-FAST") and a provider-punctuated leading segment
+ * ("Pluto TV: ..."). The segment needs a separator to count: "Prime Time
+ * News" is a schedule, not a platform. Qualifier keys arrive matchKey-folded,
+ * so the word boundary is gone ("UK-FAST" folds to "ukfast"); a key
+ * containing "fast" names a FAST brand either way, and the cost of a
+ * lookalike qualifier is only a relaxed guard on that one line.
+ */
+function aliasAsksForFast(spec: AliasSpec): boolean {
+  if (/\bfast\b/i.test(spec.text)) return true;
+  const separator = /[|:]/.exec(spec.text);
+  if (separator && isFastPrefix(spec.text.slice(0, separator.index))) return true;
+  for (const key of [...spec.require, ...spec.requireFirst]) {
+    if (key.includes('fast') || isFastPrefix(key)) return true;
+  }
+  return false;
+}
+
 export class Matcher {
   constructor(
     readonly rules: Map<number, ChannelRule>,
@@ -501,23 +526,21 @@ export class Matcher {
    */
   guardsFor(rule: ChannelRule): Guards {
     const regions = rule.excludeRegions ?? this.guards.regions;
-    const wantsRadio = rule.aliases.some((alias) => {
+    let wantsRadio = false;
+    let wantsFast = false;
+    for (const alias of rule.aliases) {
       const spec = parseAlias(alias);
-      return (
-        /^\s*radio\b/i.test(spec.text) ||
-        spec.require.has('radio') ||
-        spec.requireFirst.has('radio')
-      );
-    });
-    const wantsFast = rule.aliases.some((alias) => {
-      const spec = parseAlias(alias);
-      return (
-        /\bfast\b/i.test(spec.text) ||
-        spec.require.has('fast') ||
-        spec.requireFirst.has('fast') ||
-        [...spec.require, ...spec.requireFirst].some((k) => isFastPrefix(k))
-      );
-    });
+      if (
+        !wantsRadio &&
+        (/^\s*radio\b/i.test(spec.text) ||
+          spec.require.has('radio') ||
+          spec.requireFirst.has('radio'))
+      ) {
+        wantsRadio = true;
+      }
+      if (!wantsFast && aliasAsksForFast(spec)) wantsFast = true;
+      if (wantsRadio && wantsFast) break;
+    }
     const fast = rule.excludeFast != null ? rule.excludeFast : this.guards.fast && !wantsFast;
     if (regions === this.guards.regions && !wantsRadio && fast === this.guards.fast) {
       return this.guards;
@@ -620,11 +643,8 @@ export class Matcher {
           current = { ...current, regions };
         }
       }
-      if (current.fast && required.size > 0) {
-        const asksForFast = [...required].some((req) => req === 'fast' || isFastPrefix(req));
-        if (asksForFast) {
-          current = { ...current, fast: false };
-        }
+      if (current.fast && aliasAsksForFast(spec)) {
+        current = { ...current, fast: false };
       }
       return current;
     };

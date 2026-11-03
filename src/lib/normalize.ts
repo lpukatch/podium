@@ -160,6 +160,7 @@ const FAST_PLATFORMS = new Set([
   'amazonuk',
   'amazonnews',
   'prime',
+  'primevideo',
   'xumo',
   'xumotv',
   'pluto',
@@ -180,27 +181,44 @@ const FAST_PLATFORMS = new Set([
 ]);
 
 /**
- * Whether a prefix or tag indicates a Free Ad-supported Streaming TV (FAST) or
- * digital-only 24/7 news loop stream.
+ * A FAST platform name opening a segment: "Amazon US", "Prime Video", "PRIME",
+ * "Samsung TV Plus". Tested against the segment text (not its fold key) so the
+ * word boundary is real -- "Amazonas: TV Cultura" and "Plexus" are places and
+ * names, not platforms.
+ */
+const FAST_PLATFORM_START = /^(?:amazon|prime|samsung|pluto|xumo|roku|tubi|plex)\b/i;
+
+/**
+ * Whether a prefix segment indicates a Free Ad-supported Streaming TV (FAST)
+ * or digital-only 24/7 news loop stream.
  *
  * Major US networks distribute 24/7 news-only loops across FAST platforms
- * (Amazon News, Prime, Xumo, Pluto, Samsung TV Plus, Tubi, Roku). These feeds
- * carry the local affiliate station's name/number but do not broadcast the
- * live network programming (sports, primetime, specials).
+ * (Amazon News, Prime Video, Xumo, Pluto, Samsung TV Plus, Tubi, Roku). These
+ * feeds carry the local affiliate station's name/number but do not broadcast
+ * the live network programming (sports, primetime, specials).
  */
 export function isFastPrefix(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
-  const key = matchKey(trimmed);
-  if (FAST_PLATFORMS.has(key)) return true;
-  if (key.includes('fast')) return true;
-  if (/^amazon/i.test(key)) return true;
-  if (/^samsung/i.test(key)) return true;
-  if (/^pluto/i.test(key)) return true;
-  if (/^xumo/i.test(key)) return true;
-  if (/^roku/i.test(key)) return true;
-  if (/^tubi/i.test(key)) return true;
-  if (/^plex/i.test(key)) return true;
+  if (FAST_PLATFORMS.has(matchKey(trimmed))) return true;
+  if (/\bfast\b/i.test(trimmed)) return true;
+  if (FAST_PLATFORM_START.test(trimmed)) return true;
+  if (/24[\s/-]?7\s*(?:news|stream)/i.test(trimmed)) return true;
+  return false;
+}
+
+/**
+ * The same question for a bracketed tag. Brackets are delivery notes more
+ * often than branding -- "AMC+ (Amazon Channel)" is a linear cable feed that
+ * happens to be delivered through Prime Video Channels -- so only an exact
+ * platform name, the word FAST, or a 24/7 news/stream tag counts here, not
+ * the looser prefix-start match.
+ */
+export function isFastTag(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (FAST_PLATFORMS.has(matchKey(trimmed))) return true;
+  if (/\bfast\b/i.test(trimmed)) return true;
   if (/24[\s/-]?7\s*(?:news|stream)/i.test(trimmed)) return true;
   return false;
 }
@@ -448,7 +466,7 @@ export function normalize(
     .replace(/^[\s\-_.]+|[\s\-_.]+$/g, '')
     .replace(/\s+/g, ' ');
 
-  const fastPrefix = prefixes.find((p) => isFastPrefix(p)) ?? brackets.find((b) => isFastPrefix(b));
+  const fastPrefix = prefixes.find((p) => isFastPrefix(p)) ?? brackets.find((b) => isFastTag(b));
   const isFast = fastPrefix !== undefined;
 
   return {
