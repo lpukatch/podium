@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import type { ConsensusReport } from '@/lib/consensus';
 
 interface Row {
   id: number;
@@ -31,6 +32,11 @@ interface Row {
   stability?: string;
   /** True when the drops-per-hour health check is sinking this stream. */
   unstable?: boolean;
+  /** Flagged when audio fingerprint does not match consensus broadcast feeds. */
+  outlier?: boolean;
+  outlierReason?: string;
+  /** True when audio fingerprint matches the consensus broadcast cluster. */
+  consensusMatch?: boolean;
 }
 
 /**
@@ -116,6 +122,7 @@ interface CheckResult {
     unstable: number;
     allBad: boolean;
   };
+  consensus?: ConsensusReport;
   rows: Row[];
   unclaimed: Row[];
   unprobed?: Row[];
@@ -192,6 +199,7 @@ export function CheckPanel({
   const [note, setNote] = useState('');
   // Dropping unclaimed streams is destructive, so it is opt-in per apply.
   const [dropUnclaimed, setDropUnclaimed] = useState(false);
+  const [checkConsensus, setCheckConsensus] = useState(false);
   // Per stream, because a soak is per stream and several can be asked for in
   // turn. Keyed by id rather than held on the row so a re-check does not wipe
   // what the operator just queued.
@@ -207,7 +215,11 @@ export function CheckPanel({
     // otherwise still be sent with the apply.
     setDropUnclaimed(false);
     try {
-      const url = force ? `/api/check/${channelId}?force=true` : `/api/check/${channelId}`;
+      const query = new URLSearchParams();
+      if (force) query.set('force', 'true');
+      if (checkConsensus) query.set('consensus', 'true');
+      const qs = query.toString() ? `?${query.toString()}` : '';
+      const url = `/api/check/${channelId}${qs}`;
       const resp = await fetch(url, { method: 'POST' });
       const body = await resp.json();
       if (!resp.ok || body.error) {
@@ -343,10 +355,20 @@ export function CheckPanel({
           >
             {busy ? 'Probing…' : 'Probe this channel'}
           </button>
-          <p className="text-sm text-[var(--color-muted)]">
-            Probes this channel's streams immediately and shows the order they imply, next to the
-            order Dispatcharr has now. Nothing is written until you apply.
-          </p>
+          <div>
+            <p className="text-sm text-[var(--color-muted)]">
+              Probes this channel's streams immediately and shows the order they imply, next to the
+              order Dispatcharr has now. Nothing is written until you apply.
+            </p>
+            <label className="mt-2 flex items-center gap-2 text-xs text-[var(--color-muted)] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={checkConsensus}
+                onChange={(e) => setCheckConsensus(e.target.checked)}
+              />
+              <span>Compare audio across feeds</span>
+            </label>
+          </div>
         </div>
         {onSoakChannel && (
           <div className="grid gap-2 py-3 sm:grid-cols-[15rem_minmax(0,1fr)] sm:items-center sm:gap-4">
@@ -381,6 +403,21 @@ export function CheckPanel({
             {result.dead > 0 && (
               <span className={`${pill} bg-[var(--color-bad)] text-[var(--color-on-bad)]`}>
                 {result.dead} dead
+              </span>
+            )}
+            {result.consensus && (
+              <span
+                className={`${pill} ${
+                  result.consensus.outliers.length > 0
+                    ? 'bg-[var(--color-bad)] text-[var(--color-on-bad)]'
+                    : 'bg-[var(--color-accent-soft)] text-[var(--color-accent)]'
+                }`}
+              >
+                {result.consensus.outliers.length > 0
+                  ? `${result.consensus.outliers.length} audio outlier(s)`
+                  : result.consensus.status === 'confirmed'
+                    ? 'audio consensus confirmed'
+                    : 'audio comparison inconclusive'}
               </span>
             )}
             {nothingToChange ? (
@@ -427,6 +464,31 @@ export function CheckPanel({
                   `${result.channelStability.measured} stream(s) measured here drop often ` +
                   `(${result.channelStability.total} on the channel). ` +
                   `Soak the rest to find out whether any of them holds.`}
+            </p>
+          )}
+
+          {result.consensus && result.consensus.outliers.length > 0 && (
+            <div className="mt-3 rounded-lg border border-[var(--color-bad)] bg-[var(--color-panel)] p-3 text-sm">
+              <div className="font-semibold text-[var(--color-bad)]">Divergent audio detected</div>
+              <p className="mt-1 text-xs text-[var(--color-muted)]">
+                One or more sampled feeds differ from the majority. Broadcast delays or local ad
+                breaks can also cause differences.
+              </p>
+              <ul className="mt-2 list-disc list-inside text-xs space-y-1">
+                {result.consensus.outliers.map((o) => (
+                  <li key={o.streamId}>
+                    <span className="font-mono">{o.name || `Stream #${o.streamId}`}</span>:
+                    similarity score {o.similarityToCluster.toFixed(2)} vs consensus ({o.reason})
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {result.consensus && result.consensus.failures.length > 0 && (
+            <p className="mt-3 text-sm text-[var(--color-muted)]">
+              Audio could not be compared for {result.consensus.failures.length} feed(s). Agreement
+              between the remaining feeds does not verify those feeds.
             </p>
           )}
 
@@ -517,6 +579,19 @@ export function CheckPanel({
                           <span className="ml-1 text-[var(--color-warn)]">
                             (drops too often — ranked after every stream that holds, and never
                             served first)
+                          </span>
+                        )}
+                        {row.outlier && (
+                          <span
+                            title={row.outlierReason}
+                            className="ml-1 rounded bg-[var(--color-bad)] px-1.5 py-0.5 text-xs text-[var(--color-on-bad)] font-medium"
+                          >
+                            audio outlier (mismatched broadcast)
+                          </span>
+                        )}
+                        {row.consensusMatch && (
+                          <span className="ml-1 rounded bg-[var(--color-accent-soft)] px-1.5 py-0.5 text-xs text-[var(--color-accent)] font-medium">
+                            consensus match
                           </span>
                         )}
                         <StabilityCell

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { requireCredentials } from '@/lib/config';
+import { type ConsensusReport, checkStreamConsensus } from '@/lib/consensus';
 import { DispatcharrClient } from '@/lib/dispatcharr';
 import {
   assignmentIsRule,
@@ -103,10 +104,12 @@ export async function POST(request: Request, context: { params: Promise<{ channe
   try {
     const url = new URL(request.url);
     let force = url.searchParams.get('force') === 'true';
-    if (!force && request.headers.get('content-type')?.includes('application/json')) {
+    let runConsensus = url.searchParams.get('consensus') === 'true';
+    if (request.headers.get('content-type')?.includes('application/json')) {
       try {
-        const body = (await request.clone().json()) as { force?: boolean };
+        const body = (await request.clone().json()) as { force?: boolean; consensus?: boolean };
         if (body?.force) force = true;
+        if (body?.consensus) runConsensus = true;
       } catch {
         // Ignored if JSON parsing fails
       }
@@ -438,6 +441,66 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       .filter((entry): entry is RankEntry => entry !== null);
     const ranked = rank(entries, strategy, audioOnly);
 
+    let consensusReport: ConsensusReport | undefined;
+    const outlierSet = new Set<number>();
+    const outlierReasonMap = new Map<number, string>();
+    const consensusMatchSet = new Set<number>();
+
+    if (runConsensus) {
+      const topCandidates = ranked
+        .map((sId) => {
+          const res = results.get(sId);
+          const job = jobMeta.get(sId);
+          const s = streamById.get(sId);
+          if (!res?.alive || !job?.url) return null;
+          return { id: sId, url: job.url, name: s?.name, userAgent: job.userAgent };
+        })
+        .filter((c): c is NonNullable<typeof c> => c !== null)
+        .slice(0, 4);
+
+      // Consensus is a comparison, and fewer than two alive feeds have nothing
+      // to compare against. Sampling the one feed anyway would spend up to
+      // twelve seconds of extraction to report an inconclusive the operator
+      // could have been told for free, so the work is skipped outright and the
+      // report stays absent from the response.
+      if (topCandidates.length >= 2) {
+        try {
+          // Consensus opens provider connections too, so it takes the same
+          // single on-demand slot as the probe phase: without the mutex a
+          // second check's probes would start while this one samples, and the
+          // two would stack slots on a provider exactly the way the mutex
+          // exists to prevent. Two extractions at a time keeps the ffmpeg
+          // fan-out comparable to what the probe phase allows itself.
+          consensusReport = await onDemand.run(() =>
+            checkStreamConsensus(topCandidates, {
+              sampleSeconds: 8,
+              timeoutMs: 12000,
+              maxConcurrent: 2,
+              userAgent: probeUserAgent(config),
+            }),
+          );
+          for (const outlier of consensusReport.outliers) {
+            outlierSet.add(outlier.streamId);
+            outlierReasonMap.set(outlier.streamId, outlier.reason);
+          }
+          // A cluster exists whenever a majority agreed among the feeds that
+          // could be sampled, but when a feed failed to extract the report's
+          // status is `inconclusive` -- the agreement was not checked against
+          // everything. Badging the cluster green while the response also
+          // carries the inconclusive note ("agreement ... does not verify
+          // those feeds") hands the operator two opposite answers to the same
+          // question, so the badge is earned only by a verdict.
+          if (consensusReport.status === 'confirmed' || consensusReport.status === 'divergent') {
+            for (const cId of consensusReport.consensusCluster) {
+              consensusMatchSet.add(cId);
+            }
+          }
+        } catch {
+          // Consensus error is non-fatal: probe report proceeds
+        }
+      }
+    }
+
     // Whether the rule claims a stream is a question about the rule, so it is
     // answered from `hits` -- everything the rule matched -- and not from what
     // this check managed to probe. Those are different sets, and reading the
@@ -585,6 +648,9 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         black: result?.black ?? false,
         currentRank: current.indexOf(streamId) >= 0 ? current.indexOf(streamId) + 1 : null,
         proposedRank: proposed.indexOf(streamId) >= 0 ? proposed.indexOf(streamId) + 1 : null,
+        outlier: outlierSet.has(streamId),
+        outlierReason: outlierReasonMap.get(streamId),
+        consensusMatch: consensusMatchSet.has(streamId),
       };
     };
 
@@ -643,6 +709,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       minResolution: strategy.weights.minResolution ?? null,
       maxResolution: strategy.weights.maxResolution ?? null,
       channelStability: channelVerdict,
+      consensus: consensusReport,
       rows,
       unclaimed,
       unprobed,

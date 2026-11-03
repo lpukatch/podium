@@ -190,7 +190,7 @@ interface FfprobePayload {
  * Real provider streams are HTTP, which is why this went unnoticed, but it also
  * meant none of this could be exercised against a local file.
  */
-function userAgentArgs(url: string, userAgent: string): string[] {
+export function userAgentArgs(url: string, userAgent: string): string[] {
   return /^https?:\/\//i.test(url) ? ['-user_agent', userAgent] : [];
 }
 
@@ -240,7 +240,7 @@ function whitelistFor(scheme: string): string | undefined {
   return Object.hasOwn(PROTOCOL_WHITELISTS, scheme) ? PROTOCOL_WHITELISTS[scheme] : undefined;
 }
 
-function protocolArgs(url: string): string[] {
+export function protocolArgs(url: string): string[] {
   // `rejectUrl` has already refused anything not in the table, so the fallback
   // is unreachable rather than a policy -- and if it ever becomes reachable, it
   // should be the strictest thing here rather than the loosest: no files, and
