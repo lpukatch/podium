@@ -91,6 +91,7 @@ export async function POST(request: Request) {
           : (existing?.providers ?? null),
       stepOrder: existing?.stepOrder ?? 0,
       excludeRegions: existing?.excludeRegions ?? null,
+      excludeFast: existing?.excludeFast ?? null,
       groupFilter:
         body.groupFilter === undefined
           ? existing?.groupFilter

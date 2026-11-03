@@ -11,6 +11,7 @@ interface Hit {
   claimedByChannelIds: number[];
   prefixes: Array<{ name: string; count: number }>;
   sections: Array<{ name: string; count: number }>;
+  isFast?: boolean;
 }
 
 /**
@@ -131,7 +132,17 @@ export function StreamSearch({
                 className="flex flex-wrap items-start gap-3 border-b border-[var(--color-line)] py-3 last:border-0"
               >
                 <span className="min-w-0 flex-1">
-                  <span className="block font-medium">{h.normalized}</span>
+                  <span className="block font-medium">
+                    {h.normalized}
+                    {h.isFast && (
+                      <span
+                        className="ml-2 inline-flex items-center rounded border border-[var(--color-line)] px-1.5 py-0.5 text-[11px] font-semibold tracking-wider text-[var(--color-warn)]"
+                        title="Stream carries a FAST / 24/7 digital news prefix (e.g. Amazon, Prime, Xumo, Pluto)"
+                      >
+                        FAST
+                      </span>
+                    )}
+                  </span>
                   <span className="mt-0.5 block text-sm text-[var(--color-muted)]">
                     {h.count} stream{h.count === 1 ? '' : 's'} · {h.providers.join(', ')}
                     {h.claimedBy && (

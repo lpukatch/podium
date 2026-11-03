@@ -151,6 +151,40 @@ describe('normalize', () => {
     expect(normalize('HBO East').isTimeshift).toBe(false);
   });
 
+  it('detects FAST and digital news loop prefixes', () => {
+    expect(normalize('Amazon US: ABC13 Houston').isFast).toBe(true);
+    expect(normalize('Amazon US: ABC13 Houston').fastPrefix).toBe('Amazon US');
+    expect(normalize('PRIME| ABC13 HOUSTON ᴿᴬᵂ').isFast).toBe(true);
+    expect(normalize('PRIME| ABC13 HOUSTON ᴿᴬᵂ').fastPrefix).toBe('PRIME');
+    expect(normalize("Xumo: KTRK ABC13's 24/7 Streaming Channel").isFast).toBe(true);
+    expect(normalize("Xumo: KTRK ABC13's 24/7 Streaming Channel").fastPrefix).toBe('Xumo');
+    expect(normalize('Pluto TV: CBS News Texas').isFast).toBe(true);
+    expect(normalize('Samsung TV Plus: NBC News NOW').isFast).toBe(true);
+    expect(normalize('Roku: FOX LiveNOW').isFast).toBe(true);
+    expect(normalize('Tubi: ABC News Live').isFast).toBe(true);
+    expect(normalize('UK-FAST: Sports Alpha Main Event ᴴᴰ [Multi]').isFast).toBe(true);
+    expect(normalize('US: Local News (24/7 Stream)').isFast).toBe(true);
+    expect(normalize('Prime Video: ABC13 Houston').isFast).toBe(true);
+    expect(normalize('CNN (Pluto)').isFast).toBe(true);
+
+    // Regular linear broadcast channels must NOT be flagged as FAST
+    expect(normalize('US| ABC 13 HOUSTON TX (KTRK)').isFast).toBe(false);
+    expect(normalize('USA: ABC 13 HOUSTON TX (KTRK) [1080p]').isFast).toBe(false);
+    expect(normalize('CA | Los Angeles | ABC KABC').isFast).toBe(false);
+    expect(normalize('US: FOX News').isFast).toBe(false);
+    expect(normalize('Sky News UK').isFast).toBe(false);
+  });
+
+  it('does not flag lookalike prefixes or delivery-note brackets as FAST', () => {
+    // "fast" inside another word, and places that share a platform's name
+    expect(normalize('Breakfast: CityNews Toronto').isFast).toBe(false);
+    expect(normalize('Amazonas: TV Cultura').isFast).toBe(false);
+    expect(normalize('Plexus: X').isFast).toBe(false);
+    // A bracket noting where a linear feed is delivered is not a FAST brand
+    expect(normalize('AMC+ (Amazon Channel)').isFast).toBe(false);
+    expect(normalize('CNN (Pluto feed)').isFast).toBe(false);
+  });
+
   it('reads resolution and fps', () => {
     const n = normalize('Sky Sports Main Event 1080p 60fps');
     expect(n.quality.height).toBe(1080);
@@ -824,6 +858,64 @@ describe('matcher', () => {
     const m = matcherFor({ channel_id: 1, aliases: ['HBO East'], exclude: ['HBO East'] });
     const index = m.buildIndex([stream(10, 'HBO East')]);
     expect(m.match(m.rules.get(1)!, index)).toEqual([]);
+  });
+
+  it('rejects FAST news streams by default on linear channel aliases', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['ABC 13 HOUSTON'] });
+    const index = m.buildIndex([
+      stream(10, 'Amazon US: ABC13 Houston'),
+      stream(11, 'PRIME| ABC13 HOUSTON ᴿᴬᵂ'),
+      stream(12, 'US| ABC 13 HOUSTON'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[12, 0]]);
+  });
+
+  it('allows FAST streams when an alias explicitly requests a FAST prefix', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['@Prime ABC 13 HOUSTON', 'ABC 13 HOUSTON'] });
+    const index = m.buildIndex([
+      stream(10, 'PRIME| ABC13 HOUSTON ᴿᴬᵂ'),
+      stream(11, 'US| ABC 13 HOUSTON'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([
+      [10, 0],
+      [11, 1],
+    ]);
+  });
+
+  it('allows FAST streams when a channel explicitly disables exclude_fast', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['ABC 13 HOUSTON'], exclude_fast: false });
+    const index = m.buildIndex([
+      stream(10, 'Amazon US: ABC13 Houston'),
+      stream(11, 'US| ABC 13 HOUSTON'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([
+      [10, 0],
+      [11, 0],
+    ]);
+  });
+
+  it('allows FAST streams when channel alias explicitly names FAST', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['@UK-FAST Sports Alpha Main Event'] });
+    const index = m.buildIndex([stream(10, 'UK-FAST: Sports Alpha Main Event')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('matches a channel whose alias is itself a FAST platform name', () => {
+    // "Pluto TV: CBS News Texas" as an alias must not trip the default guard
+    // the way "Radio: Coast FM" would trip the radio guard: the channel is
+    // deliberately managing that feed.
+    const m = matcherFor({ channel_id: 1, aliases: ['Pluto TV: CBS News Texas'] });
+    const index = m.buildIndex([stream(10, 'Pluto TV: CBS News Texas')]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[10, 0]]);
+  });
+
+  it('does not treat a schedule name like "Prime Time News" as a FAST alias', () => {
+    const m = matcherFor({ channel_id: 1, aliases: ['Prime Time News'] });
+    const index = m.buildIndex([
+      stream(10, 'Prime: ABC News Live 24/7'),
+      stream(11, 'Prime Time News'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[11, 0]]);
   });
 
   it('claims a badged stream from an unbadged alias', () => {

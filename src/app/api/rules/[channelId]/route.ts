@@ -56,6 +56,7 @@ async function putChannelRule(
     minResolution?: string | null;
     /** The ceiling twin of `minResolution`, same readings. */
     maxResolution?: string | null;
+    excludeFast?: boolean | null;
   } | null;
   if (body === null) {
     return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
@@ -181,6 +182,14 @@ async function putChannelRule(
   if (body.maxResolution !== undefined) {
     if (ceiling === undefined) delete entry.max_resolution;
     else entry.max_resolution = ceiling ?? 'none';
+  }
+  if (body.excludeFast !== undefined) {
+    if (body.excludeFast === null) delete entry.exclude_fast;
+    // `Boolean("false")` is `true`: a string body value would silently invert
+    // the operator's intent and flip which streams this channel may claim.
+    // Anything that is not a real boolean is refused instead.
+    else if (typeof body.excludeFast === 'boolean') entry.exclude_fast = body.excludeFast;
+    else return NextResponse.json({ error: 'excludeFast must be a boolean' }, { status: 400 });
   }
 
   // A floor above the ceiling leaves nothing usable, and an operator who sets

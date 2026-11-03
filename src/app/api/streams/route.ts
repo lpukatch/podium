@@ -69,6 +69,7 @@ export async function GET(request: Request) {
       claimedByChannelIds: Set<number>;
       /** Distinct leading segments this name appears under, and how often. */
       prefixes: Map<string, number>;
+      isFast: boolean;
       /**
        * The section each stream sits in -- the first word of its leading
        * segment, or of the name itself when the provider did not punctuate one.
@@ -100,10 +101,12 @@ export async function GET(request: Request) {
           claimedByChannelIds: new Set(),
           prefixes: new Map(),
           sections: new Map(),
+          isFast: false,
         };
         buckets.set(key, bucket);
       }
       bucket.count += 1;
+      bucket.isFast = bucket.isFast || Boolean(norm.isFast);
       bucket.providers.add(providerNames.get(stream.providerId) ?? String(stream.providerId));
       if (bucket.samples.length < 3) bucket.samples.push(stream.name);
       bucket.claimedBy ??= claimedBy.get(stream.id) ?? null;
@@ -142,6 +145,7 @@ export async function GET(request: Request) {
           .sort((a, c) => c[1] - a[1] || a[0].localeCompare(c[0]))
           .slice(0, 8)
           .map(([name, count]) => ({ name, count })),
+        isFast: b.isFast,
       })),
     });
   } catch (error) {

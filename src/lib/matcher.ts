@@ -21,6 +21,7 @@
 
 import { compileGlob } from './eligibility';
 import {
+  isFastPrefix,
   matchKey,
   type NormalizedName,
   normalize,
@@ -60,6 +61,8 @@ export interface ChannelRule {
    * common case: most legacy patterns carried no region guard whatsoever.
    */
   excludeRegions: Set<string> | null;
+  /** Rejects FAST / digital-only news loops. Null inherits global guards. */
+  excludeFast?: boolean | null;
   /** Absent means inherit the channel group's provider-group filter. */
   groupFilter?: ProviderGroupFilter;
   /** One filter per alias/contains line, keyed by its full text. */
@@ -75,6 +78,7 @@ export interface Guards {
   regions: Set<string>;
   timeshift: boolean;
   radio: boolean;
+  fast: boolean;
   maxPrefixSegments: number;
   /**
    * Provider groups whose streams no channel may claim, as name globs.
@@ -101,6 +105,7 @@ export const DEFAULT_GUARDS: Guards = {
   regions: new Set(),
   timeshift: true,
   radio: true,
+  fast: true,
   maxPrefixSegments: 3,
   excludeGroups: [],
   strip: [],
@@ -397,11 +402,37 @@ export function tagsSatisfy(spec: AliasSpec, norm: NormalizedName): boolean {
 
 export function rejectedBy(guards: Guards, norm: NormalizedName): string {
   if (guards.timeshift && norm.isTimeshift) return 'timeshift';
+  if (guards.fast && norm.isFast) return 'fast';
   for (const prefix of norm.prefixes) {
     if (guards.radio && prefix.toLowerCase().startsWith('radio')) return 'radio';
     if (guards.regions.size > 0 && guards.regions.has(prefix.trim().toUpperCase())) return 'region';
   }
   return '';
+}
+
+/**
+ * Whether an alias line asks for FAST streams, and so must not have the fast
+ * guard applied to it. Same reasoning as `wantsRadio` in `guardsFor`: a
+ * channel whose own aliases are FAST names ("Pluto TV: CBS News Texas") would
+ * otherwise have every candidate it could ever match rejected by the
+ * default-on guard.
+ *
+ * Read both ways an alias can name the platform -- an `@`-qualifier
+ * ("@Prime", "@UK-FAST") and a provider-punctuated leading segment
+ * ("Pluto TV: ..."). The segment needs a separator to count: "Prime Time
+ * News" is a schedule, not a platform. Qualifier keys arrive matchKey-folded,
+ * so the word boundary is gone ("UK-FAST" folds to "ukfast"); a key
+ * containing "fast" names a FAST brand either way, and the cost of a
+ * lookalike qualifier is only a relaxed guard on that one line.
+ */
+function aliasAsksForFast(spec: AliasSpec): boolean {
+  if (/\bfast\b/i.test(spec.text)) return true;
+  const separator = /[|:]/.exec(spec.text);
+  if (separator && isFastPrefix(spec.text.slice(0, separator.index))) return true;
+  for (const key of [...spec.require, ...spec.requireFirst]) {
+    if (key.includes('fast') || isFastPrefix(key)) return true;
+  }
+  return false;
 }
 
 export class Matcher {
@@ -495,16 +526,31 @@ export class Matcher {
    */
   guardsFor(rule: ChannelRule): Guards {
     const regions = rule.excludeRegions ?? this.guards.regions;
-    const wantsRadio = rule.aliases.some((alias) => {
+    let wantsRadio = false;
+    let wantsFast = false;
+    for (const alias of rule.aliases) {
       const spec = parseAlias(alias);
-      return (
-        /^\s*radio\b/i.test(spec.text) ||
-        spec.require.has('radio') ||
-        spec.requireFirst.has('radio')
-      );
-    });
-    if (regions === this.guards.regions && !wantsRadio) return this.guards;
-    return { ...this.guards, regions, radio: this.guards.radio && !wantsRadio };
+      if (
+        !wantsRadio &&
+        (/^\s*radio\b/i.test(spec.text) ||
+          spec.require.has('radio') ||
+          spec.requireFirst.has('radio'))
+      ) {
+        wantsRadio = true;
+      }
+      if (!wantsFast && aliasAsksForFast(spec)) wantsFast = true;
+      if (wantsRadio && wantsFast) break;
+    }
+    const fast = rule.excludeFast != null ? rule.excludeFast : this.guards.fast && !wantsFast;
+    if (regions === this.guards.regions && !wantsRadio && fast === this.guards.fast) {
+      return this.guards;
+    }
+    return {
+      ...this.guards,
+      regions,
+      radio: this.guards.radio && !wantsRadio,
+      fast,
+    };
   }
 
   /**
@@ -588,11 +634,19 @@ export class Matcher {
      */
     const guardsWith = (spec: AliasSpec): Guards => {
       const required = new Set([...spec.require, ...spec.requireFirst]);
-      if (required.size === 0 || guards.regions.size === 0) return guards;
-      const regions = new Set(
-        [...guards.regions].filter((region) => !required.has(matchKey(region))),
-      );
-      return regions.size === guards.regions.size ? guards : { ...guards, regions };
+      let current = guards;
+      if (required.size > 0 && current.regions.size > 0) {
+        const regions = new Set(
+          [...current.regions].filter((region) => !required.has(matchKey(region))),
+        );
+        if (regions.size !== current.regions.size) {
+          current = { ...current, regions };
+        }
+      }
+      if (current.fast && aliasAsksForFast(spec)) {
+        current = { ...current, fast: false };
+      }
+      return current;
     };
 
     const admit = (

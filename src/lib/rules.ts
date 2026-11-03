@@ -57,6 +57,7 @@ const channelSchema = z.object({
   contains_group_filters: z.record(z.string(), z.unknown()).optional(),
   providers: z.unknown().optional(),
   exclude_regions: z.array(z.string()).nullish(),
+  exclude_fast: z.boolean().nullish(),
   step_order: z.coerce.number().optional(),
   patterns: z.array(patternSchema).nullish(),
   /** `720p`, `1080p`, `2160p`, or `none` to ignore the group's. See `parseMinResolution`. */
@@ -70,6 +71,7 @@ const defaultsSchema = z
     exclude_regions: z.array(z.string()).optional(),
     exclude_timeshift: z.boolean().optional(),
     exclude_radio: z.boolean().optional(),
+    exclude_fast: z.boolean().optional(),
     /** Provider group name globs whose streams nothing may claim. */
     exclude_groups: z.array(z.string()).optional(),
     /** Literal text deleted from every stream name. See `Guards.strip`. */
@@ -327,6 +329,7 @@ export function loadRules(raw: unknown): LoadReport {
     regions: new Set((defaults.exclude_regions ?? []).map((x) => x.toUpperCase())),
     timeshift: defaults.exclude_timeshift ?? DEFAULT_GUARDS.timeshift,
     radio: defaults.exclude_radio ?? DEFAULT_GUARDS.radio,
+    fast: defaults.exclude_fast ?? DEFAULT_GUARDS.fast,
     maxPrefixSegments: defaults.max_prefix_segments ?? DEFAULT_GUARDS.maxPrefixSegments,
     excludeGroups: (defaults.exclude_groups ?? [])
       .map((glob) => glob.trim())
@@ -397,6 +400,7 @@ export function loadRules(raw: unknown): LoadReport {
         entry.exclude_regions === null || entry.exclude_regions === undefined
           ? null
           : new Set(entry.exclude_regions.map((x) => x.toUpperCase())),
+      excludeFast: entry.exclude_fast ?? null,
       groupFilter:
         entry.include_groups !== undefined || entry.exclude_groups !== undefined
           ? groupFilter(entry)

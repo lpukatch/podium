@@ -148,6 +148,79 @@ export interface NormalizedName {
   brackets: string[];
   /** "+1", "+24" -- a different channel entirely, not a variant. */
   isTimeshift: boolean;
+  /** True when a prefix or tag identifies a free ad-supported streaming TV (FAST) or news-only feed. */
+  isFast: boolean;
+  /** The prefix or bracket text that triggered the FAST identification. */
+  fastPrefix?: string;
+}
+
+const FAST_PLATFORMS = new Set([
+  'amazon',
+  'amazonus',
+  'amazonuk',
+  'amazonnews',
+  'prime',
+  'primevideo',
+  'xumo',
+  'xumotv',
+  'pluto',
+  'plutotv',
+  'samsung',
+  'samsungtvplus',
+  'roku',
+  'therokuchannel',
+  'tubi',
+  'tubitv',
+  'plex',
+  'plextv',
+  'localish',
+  'newson',
+  'haystack',
+  'haystacknews',
+  'fast',
+]);
+
+/**
+ * A FAST platform name opening a segment: "Amazon US", "Prime Video", "PRIME",
+ * "Samsung TV Plus". Tested against the segment text (not its fold key) so the
+ * word boundary is real -- "Amazonas: TV Cultura" and "Plexus" are places and
+ * names, not platforms.
+ */
+const FAST_PLATFORM_START = /^(?:amazon|prime|samsung|pluto|xumo|roku|tubi|plex)\b/i;
+
+/**
+ * Whether a prefix segment indicates a Free Ad-supported Streaming TV (FAST)
+ * or digital-only 24/7 news loop stream.
+ *
+ * Major US networks distribute 24/7 news-only loops across FAST platforms
+ * (Amazon News, Prime Video, Xumo, Pluto, Samsung TV Plus, Tubi, Roku). These
+ * feeds carry the local affiliate station's name/number but do not broadcast
+ * the live network programming (sports, primetime, specials).
+ */
+export function isFastPrefix(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (FAST_PLATFORMS.has(matchKey(trimmed))) return true;
+  if (/\bfast\b/i.test(trimmed)) return true;
+  if (FAST_PLATFORM_START.test(trimmed)) return true;
+  if (/24[\s/-]?7\s*(?:news|stream)/i.test(trimmed)) return true;
+  return false;
+}
+
+/**
+ * The same question for a bracketed tag. Brackets are delivery notes more
+ * often than branding -- "AMC+ (Amazon Channel)" is a linear cable feed that
+ * happens to be delivered through Prime Video Channels -- so only an exact
+ * platform name, the word FAST, or a 24/7 news/stream tag counts here, not
+ * the looser prefix-start match.
+ */
+export function isFastTag(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (FAST_PLATFORMS.has(matchKey(trimmed))) return true;
+  if (/\bfast\b/i.test(trimmed)) return true;
+  if (/24[\s/-]?7\s*(?:news|stream)/i.test(trimmed)) return true;
+  return false;
 }
 
 /**
@@ -393,6 +466,9 @@ export function normalize(
     .replace(/^[\s\-_.]+|[\s\-_.]+$/g, '')
     .replace(/\s+/g, ' ');
 
+  const fastPrefix = prefixes.find((p) => isFastPrefix(p)) ?? brackets.find((b) => isFastTag(b));
+  const isFast = fastPrefix !== undefined;
+
   return {
     raw,
     name,
@@ -401,6 +477,8 @@ export function normalize(
     regions,
     brackets,
     isTimeshift,
+    isFast,
+    ...(fastPrefix !== undefined ? { fastPrefix } : {}),
   };
 }
 
