@@ -1,6 +1,24 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { loadConfig } from './config';
+import type { Store } from './store';
 import { regression, type SyncScore, syncToTeamarr, underpowered } from './teamarr-sync';
+
+// The population gate reads the catalogue through `snapshot`. Tests here never
+// want a real crawl, and an empty catalogue is exactly the thin population the
+// gate exists to defer on.
+vi.mock('./server/state', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./server/state')>();
+  return {
+    ...actual,
+    snapshot: vi.fn(async () => ({
+      channels: [],
+      streams: [],
+      providers: [],
+      groups: [],
+      fetchedAt: Date.now(),
+    })),
+  };
+});
 
 describe('the abort door', () => {
   it('abandons the push before touching anything when the caller says so', async () => {
@@ -98,6 +116,42 @@ describe('regression — what refuses an unattended push', () => {
     // by bitrate recovered somewhere else.
     const worse = regression(score(), score({ agreed: 90, deadFirst: 6, gapKbps: 0 }));
     expect(worse).toContain('dead or black');
+  });
+});
+
+describe('the population gate — asked before the pipeline, not after it', () => {
+  // A live install ran this gate 169 times in five weeks and pushed 21. Every
+  // deferral used to pay for the profile fit, the miner, the rules fetch and
+  // the per-channel match read -- minutes of work and an HTTP sweep that makes
+  // Teamarr refresh its stats cache -- to compute a channel count whose only
+  // role was to say "come back in an hour". The count needs the verdicts and
+  // nothing else, so the deferral must happen without any of that running.
+  it('defers a scheduled push on a thin population without dialling anything', async () => {
+    let dialed = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (() => {
+      dialed += 1;
+      throw new Error('should not be reached');
+    }) as unknown as typeof fetch;
+    try {
+      const config = loadConfig({
+        PODIUM_TEAMARR_URL: 'http://teamarr:9195',
+        PODIUM_TEAMARR_MIN_SAMPLES: '0',
+      });
+      const store = {
+        settings: () => [],
+        qualitySamples: () => [],
+        verdicts: () => new Map(),
+        stabilityRecords: () => new Map(),
+        peakManagedChannels: () => 50,
+      } as unknown as Store;
+      const outcome = await syncToTeamarr(store, config, { scheduled: true });
+      expect(outcome.deferred).toBe(true);
+      expect(outcome.reason).toContain('only be checked on 0 of the 50');
+      expect(dialed).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
 
