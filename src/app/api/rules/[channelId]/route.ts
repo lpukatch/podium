@@ -56,6 +56,7 @@ async function putChannelRule(
     minResolution?: string | null;
     /** The ceiling twin of `minResolution`, same readings. */
     maxResolution?: string | null;
+    excludeFast?: boolean | null;
   } | null;
   if (body === null) {
     return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
@@ -181,6 +182,10 @@ async function putChannelRule(
   if (body.maxResolution !== undefined) {
     if (ceiling === undefined) delete entry.max_resolution;
     else entry.max_resolution = ceiling ?? 'none';
+  }
+  if (body.excludeFast !== undefined) {
+    if (body.excludeFast === null) delete entry.exclude_fast;
+    else entry.exclude_fast = Boolean(body.excludeFast);
   }
 
   // A floor above the ceiling leaves nothing usable, and an operator who sets

@@ -21,6 +21,7 @@
 
 import { compileGlob } from './eligibility';
 import {
+  isFastPrefix,
   matchKey,
   type NormalizedName,
   normalize,
@@ -60,6 +61,8 @@ export interface ChannelRule {
    * common case: most legacy patterns carried no region guard whatsoever.
    */
   excludeRegions: Set<string> | null;
+  /** Rejects FAST / digital-only news loops. Null inherits global guards. */
+  excludeFast?: boolean | null;
   /** Absent means inherit the channel group's provider-group filter. */
   groupFilter?: ProviderGroupFilter;
   /** One filter per alias/contains line, keyed by its full text. */
@@ -75,6 +78,7 @@ export interface Guards {
   regions: Set<string>;
   timeshift: boolean;
   radio: boolean;
+  fast: boolean;
   maxPrefixSegments: number;
   /**
    * Provider groups whose streams no channel may claim, as name globs.
@@ -101,6 +105,7 @@ export const DEFAULT_GUARDS: Guards = {
   regions: new Set(),
   timeshift: true,
   radio: true,
+  fast: true,
   maxPrefixSegments: 3,
   excludeGroups: [],
   strip: [],
@@ -397,6 +402,7 @@ export function tagsSatisfy(spec: AliasSpec, norm: NormalizedName): boolean {
 
 export function rejectedBy(guards: Guards, norm: NormalizedName): string {
   if (guards.timeshift && norm.isTimeshift) return 'timeshift';
+  if (guards.fast && norm.isFast) return 'fast';
   for (const prefix of norm.prefixes) {
     if (guards.radio && prefix.toLowerCase().startsWith('radio')) return 'radio';
     if (guards.regions.size > 0 && guards.regions.has(prefix.trim().toUpperCase())) return 'region';
@@ -503,8 +509,25 @@ export class Matcher {
         spec.requireFirst.has('radio')
       );
     });
-    if (regions === this.guards.regions && !wantsRadio) return this.guards;
-    return { ...this.guards, regions, radio: this.guards.radio && !wantsRadio };
+    const wantsFast = rule.aliases.some((alias) => {
+      const spec = parseAlias(alias);
+      return (
+        /\bfast\b/i.test(spec.text) ||
+        spec.require.has('fast') ||
+        spec.requireFirst.has('fast') ||
+        [...spec.require, ...spec.requireFirst].some((k) => isFastPrefix(k))
+      );
+    });
+    const fast = rule.excludeFast != null ? rule.excludeFast : this.guards.fast && !wantsFast;
+    if (regions === this.guards.regions && !wantsRadio && fast === this.guards.fast) {
+      return this.guards;
+    }
+    return {
+      ...this.guards,
+      regions,
+      radio: this.guards.radio && !wantsRadio,
+      fast,
+    };
   }
 
   /**
@@ -588,11 +611,22 @@ export class Matcher {
      */
     const guardsWith = (spec: AliasSpec): Guards => {
       const required = new Set([...spec.require, ...spec.requireFirst]);
-      if (required.size === 0 || guards.regions.size === 0) return guards;
-      const regions = new Set(
-        [...guards.regions].filter((region) => !required.has(matchKey(region))),
-      );
-      return regions.size === guards.regions.size ? guards : { ...guards, regions };
+      let current = guards;
+      if (required.size > 0 && current.regions.size > 0) {
+        const regions = new Set(
+          [...current.regions].filter((region) => !required.has(matchKey(region))),
+        );
+        if (regions.size !== current.regions.size) {
+          current = { ...current, regions };
+        }
+      }
+      if (current.fast && required.size > 0) {
+        const asksForFast = [...required].some((req) => req === 'fast' || isFastPrefix(req));
+        if (asksForFast) {
+          current = { ...current, fast: false };
+        }
+      }
+      return current;
     };
 
     const admit = (

@@ -70,5 +70,17 @@ describe('stream search ownership', () => {
     const body = await search([]);
     expect(body.groups[0].claimedBy).toBeNull();
     expect(body.groups[0].claimedByChannelIds).toEqual([]);
+    expect(body.groups[0].isFast).toBe(false);
+  });
+
+  it('marks a result as isFast if any stream carries a FAST prefix', async () => {
+    state.index.mockResolvedValue({
+      normalized: new Map([
+        [1, { name: 'NBC', prefixes: ['Amazon US'], isFast: true }],
+        [2, { name: 'NBC', prefixes: [] }],
+      ]),
+    });
+    const body = await search([]);
+    expect(body.groups[0].isFast).toBe(true);
   });
 });

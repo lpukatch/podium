@@ -148,6 +148,61 @@ export interface NormalizedName {
   brackets: string[];
   /** "+1", "+24" -- a different channel entirely, not a variant. */
   isTimeshift: boolean;
+  /** True when a prefix or tag identifies a free ad-supported streaming TV (FAST) or news-only feed. */
+  isFast: boolean;
+  /** The prefix or bracket text that triggered the FAST identification. */
+  fastPrefix?: string;
+}
+
+const FAST_PLATFORMS = new Set([
+  'amazon',
+  'amazonus',
+  'amazonuk',
+  'amazonnews',
+  'prime',
+  'xumo',
+  'xumotv',
+  'pluto',
+  'plutotv',
+  'samsung',
+  'samsungtvplus',
+  'roku',
+  'therokuchannel',
+  'tubi',
+  'tubitv',
+  'plex',
+  'plextv',
+  'localish',
+  'newson',
+  'haystack',
+  'haystacknews',
+  'fast',
+]);
+
+/**
+ * Whether a prefix or tag indicates a Free Ad-supported Streaming TV (FAST) or
+ * digital-only 24/7 news loop stream.
+ *
+ * Major US networks distribute 24/7 news-only loops across FAST platforms
+ * (Amazon News, Prime, Xumo, Pluto, Samsung TV Plus, Tubi, Roku). These feeds
+ * carry the local affiliate station's name/number but do not broadcast the
+ * live network programming (sports, primetime, specials).
+ */
+export function isFastPrefix(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  const key = matchKey(trimmed);
+  if (FAST_PLATFORMS.has(key)) return true;
+  if (key.includes('fast')) return true;
+  if (/^amazon/i.test(key)) return true;
+  if (/^samsung/i.test(key)) return true;
+  if (/^pluto/i.test(key)) return true;
+  if (/^xumo/i.test(key)) return true;
+  if (/^roku/i.test(key)) return true;
+  if (/^tubi/i.test(key)) return true;
+  if (/^plex/i.test(key)) return true;
+  if (/24[\s/-]?7\s*(?:news|stream)/i.test(trimmed)) return true;
+  return false;
 }
 
 /**
@@ -393,6 +448,9 @@ export function normalize(
     .replace(/^[\s\-_.]+|[\s\-_.]+$/g, '')
     .replace(/\s+/g, ' ');
 
+  const fastPrefix = prefixes.find((p) => isFastPrefix(p)) ?? brackets.find((b) => isFastPrefix(b));
+  const isFast = fastPrefix !== undefined;
+
   return {
     raw,
     name,
@@ -401,6 +459,8 @@ export function normalize(
     regions,
     brackets,
     isTimeshift,
+    isFast,
+    ...(fastPrefix !== undefined ? { fastPrefix } : {}),
   };
 }
 
