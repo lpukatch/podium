@@ -205,7 +205,7 @@ export function CheckPanel({
   // what the operator just queued.
   const [soaks, setSoaks] = useState<Record<number, SoakState>>({});
 
-  const check = async (force = false, withConsensus?: boolean) => {
+  const check = async (force = false) => {
     setBusy(true);
     setError('');
     setNote('');
@@ -214,11 +214,10 @@ export function CheckPanel({
     // unprobed streams, and a tick left over from the previous channel would
     // otherwise still be sent with the apply.
     setDropUnclaimed(false);
-    const useConsensus = withConsensus ?? checkConsensus;
     try {
       const query = new URLSearchParams();
       if (force) query.set('force', 'true');
-      if (useConsensus) query.set('consensus', 'true');
+      if (checkConsensus) query.set('consensus', 'true');
       const qs = query.toString() ? `?${query.toString()}` : '';
       const url = `/api/check/${channelId}${qs}`;
       const resp = await fetch(url, { method: 'POST' });
@@ -583,7 +582,10 @@ export function CheckPanel({
                           </span>
                         )}
                         {row.outlier && (
-                          <span className="ml-1 rounded bg-[var(--color-bad)] px-1.5 py-0.5 text-xs text-[var(--color-on-bad)] font-medium">
+                          <span
+                            title={row.outlierReason}
+                            className="ml-1 rounded bg-[var(--color-bad)] px-1.5 py-0.5 text-xs text-[var(--color-on-bad)] font-medium"
+                          >
                             audio outlier (mismatched broadcast)
                           </span>
                         )}

@@ -179,7 +179,7 @@ describe('consensus audio fingerprinting', () => {
           { id: 3, url: 'http://stream/outlier', name: 'Amazon US News Loop' },
           { id: 4, url: 'http://stream/fail', name: 'Dead Feed' },
         ],
-        { extractPcm: fakeExtractor, maxConcurrent: 4 },
+        { extractPcm: fakeExtractor, maxCandidates: 4, maxConcurrent: 2 },
       );
 
       expect(report.analyzedCount).toBe(3);
@@ -187,6 +187,44 @@ describe('consensus audio fingerprinting', () => {
       expect(report.outliers).toHaveLength(1);
       expect(report.outliers[0]!.streamId).toBe(3);
       expect(report.outliers[0]!.similarityToCluster).toBeLessThan(0.4);
+      // The extractor's own error reaches the report; a generic failure string
+      // would hide which feed failed and why.
+      expect(report.failures).toEqual([{ streamId: 4, name: 'Dead Feed', reason: 'Stream 404' }]);
+    });
+
+    it('bounds in-flight extractions and skips past the candidate cap', async () => {
+      let inFlight = 0;
+      let peak = 0;
+      const slowExtractor = async () => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        inFlight -= 1;
+        return generatePcm(4, 440, 1.5);
+      };
+
+      const streams = [1, 2, 3, 4, 5, 6].map((id) => ({
+        id,
+        url: `http://stream/feed${id}`,
+        name: `Feed ${id}`,
+      }));
+      const report = await checkStreamConsensus(streams, {
+        extractPcm: slowExtractor,
+        maxCandidates: 4,
+        maxConcurrent: 2,
+      });
+
+      expect(peak).toBeLessThanOrEqual(2);
+      expect(report.analyzedCount).toBe(4);
+      // The four sampled feeds agree outright, but two feeds were never
+      // sampled, so the report withholds the confirmed verdict rather than
+      // vouching for feeds it did not compare.
+      expect(report.status).toBe('inconclusive');
+      expect(report.consensusCluster).toEqual([1, 2, 3, 4]);
+      expect(report.failures).toEqual([
+        { streamId: 5, name: 'Feed 5', reason: 'Candidate limit exceeded' },
+        { streamId: 6, name: 'Feed 6', reason: 'Candidate limit exceeded' },
+      ]);
     });
   });
 });
@@ -304,7 +342,7 @@ describe('conservative consensus decisions', () => {
 });
 
 describe('capture scheduling', () => {
-  it('starts all four captures before any completes and never queues a later batch', async () => {
+  it('holds extraction to two in flight and never queues feeds past the cap', async () => {
     const started: string[] = [];
     const releases: Array<() => void> = [];
     const pending = checkStreamConsensus(
@@ -318,10 +356,21 @@ describe('capture scheduling', () => {
         },
       },
     );
+    // The default throttle starts the first two candidates and goes no
+    // further until one lands -- all four at once was the behaviour the
+    // option's name promised to prevent.
+    expect(started).toEqual(['0', '1']);
+    releases.shift()?.();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(started).toEqual(['0', '1', '2']);
+    releases.shift()?.();
+    await new Promise((resolve) => setTimeout(resolve, 10));
     expect(started).toEqual(['0', '1', '2', '3']);
-    for (const release of releases) release();
+    // The fifth feed is past the candidate cap: freeing every slot must not
+    // start it in a later batch. The cap skips; it does not queue.
+    for (const release of releases.splice(0)) release();
     const report = await pending;
-    expect(started).toHaveLength(4);
+    expect(started).toEqual(['0', '1', '2', '3']);
     expect(report.status).toBe('inconclusive');
     expect(report.failures).toHaveLength(5);
   });

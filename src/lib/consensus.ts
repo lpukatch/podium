@@ -3,13 +3,14 @@
  *
  * Compares short, concurrently requested audio samples. Agreement is evidence
  * of matching audio, not proof of a particular broadcast source.
- * Audio is decoded as mono 8 kHz PCM; at most four feeds are opened together.
+ * Audio is decoded as mono 8 kHz PCM; at most four feeds are sampled, with at
+ * most two extractions in flight at once.
  * Alignment tolerates up to two seconds of broadcast/startup delay. Larger
  * delays and different local ad breaks can still make a check inconclusive.
  */
 
 import { type ChildProcess, spawn } from 'child_process';
-import { rejectUrl } from './probe';
+import { protocolArgs, rejectUrl, userAgentArgs } from './probe';
 
 export interface FrameFeature {
   /** Root-mean-square energy of the frame. */
@@ -300,7 +301,9 @@ export function evaluateConsensus(
     .map((input) => ({
       streamId: input.streamId,
       name: input.name,
-      reason: input.error ? 'Audio extraction failed' : 'Insufficient audio to compare',
+      // The caller's own reason -- a timeout, a rejected URL, the candidate
+      // cap -- is more legible on the panel than a generic failure string.
+      reason: input.error ?? 'Insufficient audio to compare',
     }));
 
   if (valid.length < 2) {
@@ -438,7 +441,12 @@ export async function extractAudioPcm(
     'error',
     '-threads',
     '1',
-    ...(options.userAgent ? ['-user_agent', options.userAgent] : []),
+    // The same two rules every probe spawn follows: the user agent is an
+    // HTTP-only option ffmpeg rejects on other transports, and the protocol
+    // whitelist keeps a provider playlist from naming a file:// or udp://
+    // segment this decode would otherwise follow.
+    ...(options.userAgent ? userAgentArgs(url, options.userAgent) : []),
+    ...protocolArgs(url),
     '-t',
     String(seconds),
     '-i',
@@ -456,7 +464,12 @@ export async function extractAudioPcm(
   return new Promise<Buffer>((resolve, reject) => {
     let child: ChildProcess | null = null;
     try {
-      child = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      // ffmpegPath defaults to a bare `ffmpeg` resolved from PATH, never a file
+      // in this project. Without the opt-out Turbopack cannot prove that and
+      // traces the whole source tree into the standalone output.
+      child = spawn(/*turbopackIgnore: true*/ ffmpegPath, args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
     } catch (err) {
       return reject(err);
     }
@@ -493,7 +506,13 @@ export async function extractAudioPcm(
     };
 
     const timer = setTimeout(() => {
-      fail(new Error(`Audio extraction timed out after ${timeoutMs}ms`));
+      // A slow CDN or an HLS stall that never lets ffmpeg reach `-t` can still
+      // have delivered most of the sample -- five of eight seconds is fifty
+      // frames, well past the fifteen a fingerprint needs. The close handler
+      // accepts exactly this partial output, so the timeout must not be
+      // stricter about it than an abnormal exit is.
+      if (chunks.length > 0) finish(Buffer.concat(chunks));
+      else fail(new Error(`Audio extraction timed out after ${timeoutMs}ms`));
     }, timeoutMs);
 
     child.stdout?.on('data', (chunk: Buffer) => {
@@ -533,38 +552,61 @@ export async function checkStreamConsensus(
     /** Fallback user agent; a stream's own takes precedence. */
     userAgent?: string;
     /** Candidate cap, at most four. Excess feeds are skipped, never sampled in later batches. */
+    maxCandidates?: number;
+    /**
+     * How many extractions run at once. A cap on candidates alone would start
+     * every ffmpeg decode simultaneously; this bounds the decodes in flight the
+     * way the probe phase's own machine-level cap bounds its probes.
+     */
     maxConcurrent?: number;
     extractPcm?: (url: string, opts: ExtractAudioOptions) => Promise<Buffer>;
   } = {},
 ): Promise<ConsensusReport> {
   const extractor = options.extractPcm ?? extractAudioPcm;
-  const limit = Math.min(4, Math.max(1, Math.floor(options.maxConcurrent ?? 4)));
-  const candidates = streams.slice(0, limit);
-  const inputs: StreamConsensusInput[] = await Promise.all(
-    candidates.map(async (stream) => {
-      try {
-        const pcm = await extractor(stream.url, {
-          seconds: options.sampleSeconds ?? 8,
-          timeoutMs: options.timeoutMs ?? 12000,
-          userAgent: stream.userAgent ?? options.userAgent,
-        });
-        return {
-          streamId: stream.id,
-          name: stream.name,
-          fingerprint: computeAudioFingerprint(pcm),
-        };
-      } catch {
-        return {
-          streamId: stream.id,
-          name: stream.name,
-          fingerprint: null,
-          error: 'Audio extraction failed',
-        };
-      }
-    }),
-  );
-  for (const stream of streams.slice(limit)) {
+  const candidateCap = Math.min(4, Math.max(1, Math.floor(options.maxCandidates ?? 4)));
+  const concurrency = Math.max(1, Math.floor(options.maxConcurrent ?? 2));
+  const candidates = streams.slice(0, candidateCap);
+
+  const extractOne = async (stream: (typeof candidates)[number]): Promise<StreamConsensusInput> => {
+    try {
+      const pcm = await extractor(stream.url, {
+        seconds: options.sampleSeconds ?? 8,
+        timeoutMs: options.timeoutMs ?? 12000,
+        userAgent: stream.userAgent ?? options.userAgent,
+      });
+      return {
+        streamId: stream.id,
+        name: stream.name,
+        fingerprint: computeAudioFingerprint(pcm),
+      };
+    } catch (err) {
+      return {
+        streamId: stream.id,
+        name: stream.name,
+        fingerprint: null,
+        error: err instanceof Error ? err.message : 'Audio extraction failed',
+      };
+    }
+  };
+
+  // A worker pool, not Promise.all: at most `concurrency` extractions in
+  // flight, the next candidate starting only as a slot frees.
+  const inputs: StreamConsensusInput[] = [];
+  let next = 0;
+  const worker = async () => {
+    while (next < candidates.length) {
+      const stream = candidates[next++]!;
+      inputs.push(await extractOne(stream));
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, candidates.length) }, worker));
+
+  for (const stream of streams.slice(candidateCap)) {
     inputs.push({ streamId: stream.id, name: stream.name, error: 'Candidate limit exceeded' });
   }
+  // Completion order under the pool varies run to run; the verdict does not
+  // depend on input order, but a stable order keeps the report comparable
+  // across two checks of the same channel.
+  inputs.sort((a, b) => a.streamId - b.streamId);
   return evaluateConsensus(inputs);
 }

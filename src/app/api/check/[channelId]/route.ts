@@ -465,12 +465,20 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       // report stays absent from the response.
       if (topCandidates.length >= 2) {
         try {
-          consensusReport = await checkStreamConsensus(topCandidates, {
-            sampleSeconds: 8,
-            timeoutMs: 12000,
-            maxConcurrent: 4,
-            userAgent: probeUserAgent(config),
-          });
+          // Consensus opens provider connections too, so it takes the same
+          // single on-demand slot as the probe phase: without the mutex a
+          // second check's probes would start while this one samples, and the
+          // two would stack slots on a provider exactly the way the mutex
+          // exists to prevent. Two extractions at a time keeps the ffmpeg
+          // fan-out comparable to what the probe phase allows itself.
+          consensusReport = await onDemand.run(() =>
+            checkStreamConsensus(topCandidates, {
+              sampleSeconds: 8,
+              timeoutMs: 12000,
+              maxConcurrent: 2,
+              userAgent: probeUserAgent(config),
+            }),
+          );
           for (const outlier of consensusReport.outliers) {
             outlierSet.add(outlier.streamId);
             outlierReasonMap.set(outlier.streamId, outlier.reason);
