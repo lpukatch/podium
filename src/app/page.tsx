@@ -276,6 +276,10 @@ export default function Page() {
   const [groups, setGroups] = useState<GroupRow[]>([]);
   const [patterns, setPatterns] = useState<PatternRule[]>([]);
   const [streamCount, setStreamCount] = useState(0);
+  // When the channel/stream catalogue behind this page was crawled. With the
+  // snapshot served stale while Dispatcharr is re-fetched in the background,
+  // the age is the one thing that keeps that honest.
+  const [fetchedAt, setFetchedAt] = useState<number | null>(null);
   // A catalogue-wide re-check covers every group, so a group that has not been
   // asked for on its own is still being re-checked while this is set.
   const [refreshAllAt, setRefreshAllAt] = useState<number | null>(null);
@@ -383,6 +387,7 @@ export default function Page() {
       if (Array.isArray(body.providerGroups))
         setProviderGroups(body.providerGroups as Array<{ id: number; name: string }>);
       setStreamCount(body.streamCount as number);
+      setFetchedAt((body.fetchedAt as number | null) ?? null);
       setRefreshAllAt((body.refreshAllQueuedAt as number | null) ?? null);
       catalogueLoaded.current = true;
     } catch (e) {
@@ -1244,6 +1249,7 @@ export default function Page() {
             {totals.managed} managed · {totals.excluded} excluded · {totals.gaps} with no match ·{' '}
             {totals.regex > 0 ? `${totals.regex} on legacy regex · ` : ''}
             {streamCount.toLocaleString()} streams
+            {fetchedAt ? ` · catalogue ${since(fetchedAt)}` : ''}
           </p>
         )}
       </header>
