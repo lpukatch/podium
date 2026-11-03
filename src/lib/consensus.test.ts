@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  type AudioFingerprint,
   checkStreamConsensus,
   compareFingerprints,
   computeAudioFingerprint,
@@ -132,7 +133,7 @@ describe('consensus audio fingerprinting', () => {
       expect(report.outliers).toHaveLength(1);
       expect(report.outliers[0]!.streamId).toBe(999);
       expect(report.outliers[0]!.similarityToCluster).toBeLessThan(0.4);
-      expect(report.outliers[0]!.reason).toContain('divergent content');
+      expect(report.outliers[0]!.reason).toContain('divergent audio');
     });
 
     it('reports no outliers when all feeds agree', () => {
@@ -178,7 +179,7 @@ describe('consensus audio fingerprinting', () => {
           { id: 3, url: 'http://stream/outlier', name: 'Amazon US News Loop' },
           { id: 4, url: 'http://stream/fail', name: 'Dead Feed' },
         ],
-        { extractPcm: fakeExtractor, maxConcurrent: 2 },
+        { extractPcm: fakeExtractor, maxConcurrent: 4 },
       );
 
       expect(report.analyzedCount).toBe(3);
@@ -187,5 +188,141 @@ describe('consensus audio fingerprinting', () => {
       expect(report.outliers[0]!.streamId).toBe(3);
       expect(report.outliers[0]!.similarityToCluster).toBeLessThan(0.4);
     });
+  });
+});
+
+// Deterministic, nonperiodic features prevent a repeating tone from masking
+// misalignment or accidentally matching unrelated audio.
+function features(seed: number): AudioFingerprint {
+  let state = seed;
+  const random = () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 0x100000000 - 0.5;
+  };
+  return {
+    frames: Array.from({ length: 159 }, () => ({ rms: random(), zcr: random(), flux: random() })),
+    durationSeconds: 8,
+    sampleCount: 64000,
+  };
+}
+
+describe('conservative consensus decisions', () => {
+  const a = features(1);
+  const b = features(42);
+  it('does not choose a winner when two feeds disagree', () => {
+    const inputs = [
+      { streamId: 1, fingerprint: a },
+      { streamId: 2, fingerprint: b },
+    ];
+    for (const order of [inputs, [...inputs].reverse()]) {
+      expect(evaluateConsensus(order)).toMatchObject({
+        status: 'inconclusive',
+        consensusCluster: [],
+        outliers: [],
+      });
+    }
+  });
+  it('does not choose a winner for a two versus two split', () => {
+    expect(
+      evaluateConsensus([
+        { streamId: 1, fingerprint: a },
+        { streamId: 2, fingerprint: a },
+        { streamId: 3, fingerprint: b },
+        { streamId: 4, fingerprint: b },
+      ]),
+    ).toMatchObject({ status: 'inconclusive', consensusCluster: [], outliers: [] });
+  });
+  it('returns inconclusive for failed, empty, and solitary samples', () => {
+    for (const inputs of [
+      [],
+      [{ streamId: 1, fingerprint: null, error: 'failure' }],
+      [{ streamId: 1, fingerprint: a }],
+    ]) {
+      expect(evaluateConsensus(inputs)).toMatchObject({
+        status: 'inconclusive',
+        consensusCluster: [],
+        outliers: [],
+      });
+    }
+  });
+  it('retains extraction failures even when the remaining pair agrees', () => {
+    expect(
+      evaluateConsensus([
+        { streamId: 1, fingerprint: a },
+        { streamId: 2, fingerprint: a },
+        { streamId: 3, error: 'failure' },
+      ]),
+    ).toMatchObject({
+      status: 'inconclusive',
+      consensusCluster: [1, 2],
+      failures: [{ streamId: 3 }],
+    });
+  });
+  it('requires the outlier threshold as well as majority agreement', () => {
+    const mixed = {
+      ...a,
+      frames: a.frames.map((frame, i) => ({
+        rms: 0.55 * frame.rms + 0.835 * b.frames[i]!.rms,
+        zcr: 0.55 * frame.zcr + 0.835 * b.frames[i]!.zcr,
+        flux: 0.55 * frame.flux + 0.835 * b.frames[i]!.flux,
+      })),
+    };
+    const sim = compareFingerprints(a, mixed).similarity;
+    expect(sim).toBeGreaterThan(0.4);
+    expect(sim).toBeLessThan(0.65);
+    expect(
+      evaluateConsensus([
+        { streamId: 1, fingerprint: a },
+        { streamId: 2, fingerprint: a },
+        { streamId: 3, fingerprint: mixed },
+      ]),
+    ).toMatchObject({ status: 'inconclusive', outliers: [] });
+  });
+  it('aligns nonperiodic audio near the supported two-second delay', () => {
+    const delayed = { ...a, frames: [...b.frames.slice(0, 36), ...a.frames.slice(0, -36)] };
+    expect(compareFingerprints(a, delayed)).toMatchObject({
+      matched: true,
+      similarity: 1,
+      offsetSeconds: 1.8,
+    });
+  });
+  it('confirms agreement and reports divergence only with a clear majority', () => {
+    expect(
+      evaluateConsensus([
+        { streamId: 1, fingerprint: a },
+        { streamId: 2, fingerprint: a },
+      ]).status,
+    ).toBe('confirmed');
+    expect(
+      evaluateConsensus([
+        { streamId: 1, fingerprint: a },
+        { streamId: 2, fingerprint: a },
+        { streamId: 3, fingerprint: b },
+      ]),
+    ).toMatchObject({ status: 'divergent', outliers: [{ streamId: 3 }] });
+  });
+});
+
+describe('capture scheduling', () => {
+  it('starts all four captures before any completes and never queues a later batch', async () => {
+    const started: string[] = [];
+    const releases: Array<() => void> = [];
+    const pending = checkStreamConsensus(
+      Array.from({ length: 5 }, (_, id) => ({ id, url: String(id) })),
+      {
+        extractPcm: async (url, options) => {
+          started.push(url);
+          expect(options.seconds).toBe(8);
+          await new Promise<void>((resolve) => releases.push(resolve));
+          return Buffer.alloc(0);
+        },
+      },
+    );
+    expect(started).toEqual(['0', '1', '2', '3']);
+    for (const release of releases) release();
+    const report = await pending;
+    expect(started).toHaveLength(4);
+    expect(report.status).toBe('inconclusive');
+    expect(report.failures).toHaveLength(5);
   });
 });

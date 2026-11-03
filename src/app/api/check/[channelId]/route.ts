@@ -458,24 +458,22 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         .filter((c): c is NonNullable<typeof c> => c !== null)
         .slice(0, 4);
 
-      if (topCandidates.length >= 2) {
-        try {
-          consensusReport = await checkStreamConsensus(topCandidates, {
-            sampleSeconds: 5,
-            timeoutMs: 8000,
-            maxConcurrent: 2,
-            userAgent: probeUserAgent(config),
-          });
-          for (const outlier of consensusReport.outliers) {
-            outlierSet.add(outlier.streamId);
-            outlierReasonMap.set(outlier.streamId, outlier.reason);
-          }
-          for (const cId of consensusReport.consensusCluster) {
-            consensusMatchSet.add(cId);
-          }
-        } catch {
-          // Consensus error is non-fatal: probe report proceeds
+      try {
+        consensusReport = await checkStreamConsensus(topCandidates, {
+          sampleSeconds: 8,
+          timeoutMs: 12000,
+          maxConcurrent: 4,
+          userAgent: probeUserAgent(config),
+        });
+        for (const outlier of consensusReport.outliers) {
+          outlierSet.add(outlier.streamId);
+          outlierReasonMap.set(outlier.streamId, outlier.reason);
         }
+        for (const cId of consensusReport.consensusCluster) {
+          consensusMatchSet.add(cId);
+        }
+      } catch {
+        // Consensus error is non-fatal: probe report proceeds
       }
     }
 

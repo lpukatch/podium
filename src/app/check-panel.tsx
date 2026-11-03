@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import type { ConsensusReport } from '@/lib/consensus';
 
 interface Row {
   id: number;
@@ -121,17 +122,7 @@ interface CheckResult {
     unstable: number;
     allBad: boolean;
   };
-  consensus?: {
-    analyzedCount: number;
-    consensusCluster: number[];
-    outliers: Array<{
-      streamId: number;
-      name?: string;
-      similarityToCluster: number;
-      reason: string;
-    }>;
-    pairwise: Record<string, number>;
-  };
+  consensus?: ConsensusReport;
   rows: Row[];
   unclaimed: Row[];
   unprobed?: Row[];
@@ -376,7 +367,7 @@ export function CheckPanel({
                 checked={checkConsensus}
                 onChange={(e) => setCheckConsensus(e.target.checked)}
               />
-              <span>Verify audio consensus (detects FAST news loops &amp; mismatched feeds)</span>
+              <span>Compare audio across feeds</span>
             </label>
           </div>
         </div>
@@ -425,7 +416,9 @@ export function CheckPanel({
               >
                 {result.consensus.outliers.length > 0
                   ? `${result.consensus.outliers.length} audio outlier(s)`
-                  : 'audio consensus confirmed'}
+                  : result.consensus.status === 'confirmed'
+                    ? 'audio consensus confirmed'
+                    : 'audio comparison inconclusive'}
               </span>
             )}
             {nothingToChange ? (
@@ -477,12 +470,10 @@ export function CheckPanel({
 
           {result.consensus && result.consensus.outliers.length > 0 && (
             <div className="mt-3 rounded-lg border border-[var(--color-bad)] bg-[var(--color-panel)] p-3 text-sm">
-              <div className="font-semibold text-[var(--color-bad)]">
-                Audio Mismatch Detected (Divergent Content)
-              </div>
+              <div className="font-semibold text-[var(--color-bad)]">Divergent audio detected</div>
               <p className="mt-1 text-xs text-[var(--color-muted)]">
-                One or more candidate streams carry audio completely different from the consensus
-                linear broadcast feeds (likely a FAST news loop).
+                One or more sampled feeds differ from the majority. Broadcast delays or local ad
+                breaks can also cause differences.
               </p>
               <ul className="mt-2 list-disc list-inside text-xs space-y-1">
                 {result.consensus.outliers.map((o) => (
@@ -493,6 +484,13 @@ export function CheckPanel({
                 ))}
               </ul>
             </div>
+          )}
+
+          {result.consensus && result.consensus.failures.length > 0 && (
+            <p className="mt-3 text-sm text-[var(--color-muted)]">
+              Audio could not be compared for {result.consensus.failures.length} feed(s). Agreement
+              between the remaining feeds does not verify those feeds.
+            </p>
           )}
 
           {result.rows.length > 0 && (

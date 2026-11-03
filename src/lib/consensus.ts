@@ -1,15 +1,11 @@
 /**
  * Lightweight audio fingerprinting and cross-stream consensus analysis.
  *
- * Solves the FAST / secondary stream dilemma ("one of these things is not like the other")
- * by comparing candidate audio tracks during live events.
- *
- * Resource bounds:
- * - Audio-only decoding (-vn), downmixed to mono 8,000 Hz 16-bit PCM.
- * - Memory footprint: < 5 MB RAM per sample (~80 KB PCM buffer for 5 seconds).
- * - CPU footprint: < 1% of a single core for ~150ms.
- * - Sliding time-offset cross-correlation handles broadcast latency differences (1-10s)
- *   between different IPTV providers.
+ * Compares short, concurrently requested audio samples. Agreement is evidence
+ * of matching audio, not proof of a particular broadcast source.
+ * Audio is decoded as mono 8 kHz PCM; at most four feeds are opened together.
+ * Alignment tolerates up to two seconds of broadcast/startup delay. Larger
+ * delays and different local ad breaks can still make a check inconclusive.
  */
 
 import { type ChildProcess, spawn } from 'child_process';
@@ -44,8 +40,10 @@ export interface StreamConsensusInput {
 }
 
 export interface ConsensusReport {
+  status: 'confirmed' | 'divergent' | 'inconclusive';
+  failures: Array<{ streamId: number; name?: string; reason: string }>;
   analyzedCount: number;
-  /** Stream IDs in majority audio agreement (the live network broadcast). */
+  /** Stream IDs in majority audio agreement (among the sampled feeds). */
   consensusCluster: number[];
   /** Stream IDs with divergent audio (e.g. 24/7 FAST news loops). */
   outliers: Array<{
@@ -297,11 +295,20 @@ export function evaluateConsensus(
 ): ConsensusReport {
   const valid = inputs.filter((i) => i.fingerprint && i.fingerprint.frames.length >= 15);
   const pairwise: Record<string, number> = {};
+  const failures = inputs
+    .filter((input) => !valid.includes(input))
+    .map((input) => ({
+      streamId: input.streamId,
+      name: input.name,
+      reason: input.error ? 'Audio extraction failed' : 'Insufficient audio to compare',
+    }));
 
   if (valid.length < 2) {
     return {
+      status: 'inconclusive',
+      failures,
       analyzedCount: valid.length,
-      consensusCluster: valid.map((v) => v.streamId),
+      consensusCluster: [],
       outliers: [],
       pairwise: {},
     };
@@ -326,33 +333,39 @@ export function evaluateConsensus(
     }
   }
 
-  // Greedy cluster seeding: each unvisited stream starts a cluster and pulls
-  // in every stream directly similar to *it* above the threshold (this is not
-  // a transitive connected-components search -- a stream similar to a member
-  // but not to the seed lands in a later cluster). The largest seed group is
-  // taken as the broadcast consensus.
-  const visited = new Set<number>();
+  // Find pairwise-agreeing groups rather than order-dependent seed groups.
+  // The capture path limits inputs to four, so this small clique search is bounded.
   const clusters: number[][] = [];
-
-  for (const s of valid) {
-    if (visited.has(s.streamId)) continue;
-    const cluster: number[] = [s.streamId];
-    visited.add(s.streamId);
-
-    for (const other of valid) {
-      if (visited.has(other.streamId)) continue;
-      const sim = matrix.get(s.streamId)?.get(other.streamId) ?? 0;
-      if (sim >= threshold) {
-        cluster.push(other.streamId);
-        visited.add(other.streamId);
-      }
+  function search(group: number[], remaining: number[]) {
+    if (remaining.length === 0) {
+      if (group.length >= 2) clusters.push(group);
+      return;
     }
-    clusters.push(cluster);
+    const [id, ...rest] = remaining;
+    search(group, rest);
+    if (group.every((member) => (matrix.get(member)?.get(id!) ?? 0) >= threshold)) {
+      search([...group, id!], rest);
+    }
   }
-
-  // Largest cluster represents the primary broadcast consensus
+  search(
+    [],
+    valid.map((s) => s.streamId),
+  );
   clusters.sort((a, b) => b.length - a.length);
-  const consensusCluster = clusters[0] ?? [];
+  const largest = clusters[0] ?? [];
+  const hasMajority = largest.length >= 2 && largest.length > valid.length / 2;
+  const unique = largest.length > (clusters[1]?.length ?? 0);
+  const consensusCluster = hasMajority && unique ? largest : [];
+  if (consensusCluster.length === 0) {
+    return {
+      status: 'inconclusive',
+      failures,
+      analyzedCount: valid.length,
+      consensusCluster: [],
+      outliers: [],
+      pairwise,
+    };
+  }
   const consensusSet = new Set(consensusCluster);
 
   const outliers: ConsensusReport['outliers'] = [];
@@ -367,18 +380,24 @@ export function evaluateConsensus(
     }
     const avgSim = consensusCluster.length > 0 ? sumSim / consensusCluster.length : 0;
 
-    if (avgSim < OUTLIER_THRESHOLD || consensusCluster.length >= 2) {
+    if (avgSim < OUTLIER_THRESHOLD) {
       outliers.push({
         streamId: s.streamId,
         name: s.name,
         similarityToCluster: Math.round(avgSim * 1000) / 1000,
-        reason:
-          'Audio does not match consensus linear feeds (divergent content / likely news loop)',
+        reason: 'Audio differs from the majority of sampled feeds (divergent audio)',
       });
     }
   }
 
   return {
+    status:
+      outliers.length > 0
+        ? 'divergent'
+        : failures.length === 0 && consensusCluster.length === valid.length
+          ? 'confirmed'
+          : 'inconclusive',
+    failures,
     analyzedCount: valid.length,
     consensusCluster,
     outliers,
@@ -389,8 +408,7 @@ export function evaluateConsensus(
 /**
  * Extract a bounded 8 kHz mono 16-bit PCM buffer from a stream using ffmpeg.
  *
- * Runs strictly with `-vn` (no video decode), which keeps memory below 5 MB RAM
- * and CPU usage below 1% of a core.
+ * Uses `-vn` to avoid video decode and bounds the returned PCM buffer.
  */
 /** Options for audio extraction, shared by the default and injected extractors. */
 export interface ExtractAudioOptions {
@@ -404,8 +422,8 @@ export async function extractAudioPcm(
   url: string,
   options: ExtractAudioOptions = {},
 ): Promise<Buffer> {
-  const seconds = options.seconds ?? 5;
-  const timeoutMs = options.timeoutMs ?? 8000;
+  const seconds = options.seconds ?? 8;
+  const timeoutMs = options.timeoutMs ?? 12000;
   const ffmpegPath = options.ffmpegPath ?? 'ffmpeg';
 
   if (rejectUrl(url)) {
@@ -504,7 +522,7 @@ export async function extractAudioPcm(
 
 /**
  * Run audio consensus check on a list of candidate streams.
- * Downloads a bounded 5s audio sample from each candidate, computes fingerprints,
+ * Requests bounded audio samples together, computes fingerprints,
  * and performs cross-stream pairwise consensus analysis.
  */
 export async function checkStreamConsensus(
@@ -514,47 +532,39 @@ export async function checkStreamConsensus(
     timeoutMs?: number;
     /** Fallback user agent; a stream's own takes precedence. */
     userAgent?: string;
+    /** Candidate cap, at most four. Excess feeds are skipped, never sampled in later batches. */
     maxConcurrent?: number;
     extractPcm?: (url: string, opts: ExtractAudioOptions) => Promise<Buffer>;
   } = {},
 ): Promise<ConsensusReport> {
   const extractor = options.extractPcm ?? extractAudioPcm;
-  const maxConcurrent = Math.max(1, options.maxConcurrent ?? 2);
-  const inputs: StreamConsensusInput[] = new Array(streams.length);
-
-  let index = 0;
-  async function worker() {
-    while (index < streams.length) {
-      const i = index++;
-      const stream = streams[i]!;
+  const limit = Math.min(4, Math.max(1, Math.floor(options.maxConcurrent ?? 4)));
+  const candidates = streams.slice(0, limit);
+  const inputs: StreamConsensusInput[] = await Promise.all(
+    candidates.map(async (stream) => {
       try {
         const pcm = await extractor(stream.url, {
-          seconds: options.sampleSeconds ?? 5,
-          timeoutMs: options.timeoutMs ?? 8000,
-          // The probe that judged this stream alive used a specific user
-          // agent; extracting with anything else can read a different
-          // (or refused) response from the same URL.
+          seconds: options.sampleSeconds ?? 8,
+          timeoutMs: options.timeoutMs ?? 12000,
           userAgent: stream.userAgent ?? options.userAgent,
         });
-        const fp = computeAudioFingerprint(pcm);
-        inputs[i] = {
+        return {
           streamId: stream.id,
           name: stream.name,
-          fingerprint: fp,
+          fingerprint: computeAudioFingerprint(pcm),
         };
-      } catch (err) {
-        inputs[i] = {
+      } catch {
+        return {
           streamId: stream.id,
           name: stream.name,
           fingerprint: null,
-          error: String(err),
+          error: 'Audio extraction failed',
         };
       }
-    }
+    }),
+  );
+  for (const stream of streams.slice(limit)) {
+    inputs.push({ streamId: stream.id, name: stream.name, error: 'Candidate limit exceeded' });
   }
-
-  const workers = Array.from({ length: Math.min(streams.length, maxConcurrent) }, () => worker());
-  await Promise.all(workers);
-
   return evaluateConsensus(inputs);
 }
