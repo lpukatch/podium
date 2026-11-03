@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { requireCredentials } from '@/lib/config';
-import { checkStreamConsensus, type ConsensusReport } from '@/lib/consensus';
+import { type ConsensusReport, checkStreamConsensus } from '@/lib/consensus';
 import { DispatcharrClient } from '@/lib/dispatcharr';
 import {
   assignmentIsRule,

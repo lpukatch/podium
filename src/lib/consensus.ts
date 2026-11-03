@@ -326,7 +326,11 @@ export function evaluateConsensus(
     }
   }
 
-  // Find clusters of mutual agreement (graph components where similarity >= threshold)
+  // Greedy cluster seeding: each unvisited stream starts a cluster and pulls
+  // in every stream directly similar to *it* above the threshold (this is not
+  // a transitive connected-components search -- a stream similar to a member
+  // but not to the seed lands in a later cluster). The largest seed group is
+  // taken as the broadcast consensus.
   const visited = new Set<number>();
   const clusters: number[][] = [];
 
@@ -388,14 +392,17 @@ export function evaluateConsensus(
  * Runs strictly with `-vn` (no video decode), which keeps memory below 5 MB RAM
  * and CPU usage below 1% of a core.
  */
+/** Options for audio extraction, shared by the default and injected extractors. */
+export interface ExtractAudioOptions {
+  seconds?: number;
+  timeoutMs?: number;
+  userAgent?: string;
+  ffmpegPath?: string;
+}
+
 export async function extractAudioPcm(
   url: string,
-  options: {
-    seconds?: number;
-    timeoutMs?: number;
-    userAgent?: string;
-    ffmpegPath?: string;
-  } = {},
+  options: ExtractAudioOptions = {},
 ): Promise<Buffer> {
   const seconds = options.seconds ?? 5;
   const timeoutMs = options.timeoutMs ?? 8000;
@@ -501,13 +508,14 @@ export async function extractAudioPcm(
  * and performs cross-stream pairwise consensus analysis.
  */
 export async function checkStreamConsensus(
-  streams: Array<{ id: number; url: string; name?: string }>,
+  streams: Array<{ id: number; url: string; name?: string; userAgent?: string }>,
   options: {
     sampleSeconds?: number;
     timeoutMs?: number;
+    /** Fallback user agent; a stream's own takes precedence. */
     userAgent?: string;
     maxConcurrent?: number;
-    extractPcm?: (url: string, opts: any) => Promise<Buffer>;
+    extractPcm?: (url: string, opts: ExtractAudioOptions) => Promise<Buffer>;
   } = {},
 ): Promise<ConsensusReport> {
   const extractor = options.extractPcm ?? extractAudioPcm;
@@ -523,7 +531,10 @@ export async function checkStreamConsensus(
         const pcm = await extractor(stream.url, {
           seconds: options.sampleSeconds ?? 5,
           timeoutMs: options.timeoutMs ?? 8000,
-          userAgent: options.userAgent,
+          // The probe that judged this stream alive used a specific user
+          // agent; extracting with anything else can read a different
+          // (or refused) response from the same URL.
+          userAgent: stream.userAgent ?? options.userAgent,
         });
         const fp = computeAudioFingerprint(pcm);
         inputs[i] = {
