@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { requireCredentials } from '@/lib/config';
+import { checkStreamConsensus, type ConsensusReport } from '@/lib/consensus';
 import { DispatcharrClient } from '@/lib/dispatcharr';
 import {
   assignmentIsRule,
@@ -103,10 +104,12 @@ export async function POST(request: Request, context: { params: Promise<{ channe
   try {
     const url = new URL(request.url);
     let force = url.searchParams.get('force') === 'true';
-    if (!force && request.headers.get('content-type')?.includes('application/json')) {
+    let runConsensus = url.searchParams.get('consensus') === 'true';
+    if (request.headers.get('content-type')?.includes('application/json')) {
       try {
-        const body = (await request.clone().json()) as { force?: boolean };
+        const body = (await request.clone().json()) as { force?: boolean; consensus?: boolean };
         if (body?.force) force = true;
+        if (body?.consensus) runConsensus = true;
       } catch {
         // Ignored if JSON parsing fails
       }
@@ -438,6 +441,44 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       .filter((entry): entry is RankEntry => entry !== null);
     const ranked = rank(entries, strategy, audioOnly);
 
+    let consensusReport: ConsensusReport | undefined;
+    const outlierSet = new Set<number>();
+    const outlierReasonMap = new Map<number, string>();
+    const consensusMatchSet = new Set<number>();
+
+    if (runConsensus) {
+      const topCandidates = ranked
+        .map((sId) => {
+          const res = results.get(sId);
+          const job = jobMeta.get(sId);
+          const s = streamById.get(sId);
+          if (!res?.alive || !job?.url) return null;
+          return { id: sId, url: job.url, name: s?.name, userAgent: job.userAgent };
+        })
+        .filter((c): c is NonNullable<typeof c> => c !== null)
+        .slice(0, 4);
+
+      if (topCandidates.length >= 2) {
+        try {
+          consensusReport = await checkStreamConsensus(topCandidates, {
+            sampleSeconds: 5,
+            timeoutMs: 8000,
+            maxConcurrent: 2,
+            userAgent: probeUserAgent(config),
+          });
+          for (const outlier of consensusReport.outliers) {
+            outlierSet.add(outlier.streamId);
+            outlierReasonMap.set(outlier.streamId, outlier.reason);
+          }
+          for (const cId of consensusReport.consensusCluster) {
+            consensusMatchSet.add(cId);
+          }
+        } catch {
+          // Consensus error is non-fatal: probe report proceeds
+        }
+      }
+    }
+
     // Whether the rule claims a stream is a question about the rule, so it is
     // answered from `hits` -- everything the rule matched -- and not from what
     // this check managed to probe. Those are different sets, and reading the
@@ -585,6 +626,9 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         black: result?.black ?? false,
         currentRank: current.indexOf(streamId) >= 0 ? current.indexOf(streamId) + 1 : null,
         proposedRank: proposed.indexOf(streamId) >= 0 ? proposed.indexOf(streamId) + 1 : null,
+        outlier: outlierSet.has(streamId),
+        outlierReason: outlierReasonMap.get(streamId),
+        consensusMatch: consensusMatchSet.has(streamId),
       };
     };
 
@@ -643,6 +687,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       minResolution: strategy.weights.minResolution ?? null,
       maxResolution: strategy.weights.maxResolution ?? null,
       channelStability: channelVerdict,
+      consensus: consensusReport,
       rows,
       unclaimed,
       unprobed,
