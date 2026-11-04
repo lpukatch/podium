@@ -657,17 +657,25 @@ export function ProgressView() {
                 <span className="text-[var(--color-muted)]">
                   This is the slow measurement, and how long it takes is set by your narrowest
                   provider rather than by the total: one connection and a few hundred streams is the
-                  same wall clock however idle the rest are. <b>Start now</b> ignores the soak
-                  window and begins on the next pass — for a night you know the house is empty. It
-                  does not ignore anything else: it runs at the provider limits and still stops the
-                  moment anyone starts watching. Nothing is written to Dispatcharr, and the queue
-                  can be cleared at any time. Streams that were dead at their last probe are left
-                  out.
+                  same wall clock however idle the rest are. Queued runs use the soak length from
+                  Settings; <b>Start now</b> ignores both the window and that length, beginning on
+                  the next pass at the seconds chosen beside it — for a night you know the house is
+                  empty. It does not ignore anything else: it runs at the provider limits and still
+                  stops the moment anyone starts watching. Nothing is written to Dispatcharr, and
+                  the queue can be cleared at any time. Streams that were dead at their last probe
+                  are left out.
                 </span>
               </span>
               <span className="flex-1" />
+              {/* Positioned with Start now, and labelled as its, because it is:
+                  the seconds travel only on the `now` request. A queue for the
+                  soak window is a request without a length -- the worker runs
+                  it at the soak length from Settings -- and while the select
+                  sat between the two buttons it read as applying to both, so
+                  operators queued 60-second runs and got the Settings length
+                  with no visible explanation. */}
               <label className="text-sm text-[var(--color-muted)]">
-                Seconds each{' '}
+                Seconds each (Start now only){' '}
                 <select
                   value={baselineSeconds}
                   onChange={(e) => setBaselineSeconds(Number(e.target.value))}

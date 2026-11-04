@@ -728,7 +728,9 @@ export function CheckPanel({
                   .map((u) => u.name)
                   .join(', ')
                   .slice(0, 90)}
-                ). Left unchecked they stay on the channel, after the ranked ones.
+                ). Left unchecked they stay on the channel, after the ranked ones. A hand check
+                skips the wait before removing an unmatched stream (Settings), so this drops them
+                immediately rather than starting its clock.
               </span>
             </label>
           )}

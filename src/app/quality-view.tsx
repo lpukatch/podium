@@ -21,7 +21,11 @@ import type { RuleCheck } from '@/lib/teamarr';
 import type { MatchCoverage } from '@/lib/teamarr-match';
 
 /** What `/api/quality-profile` returns: the profile, with the miner's findings. */
-type Profile = QualityProfile & { miner?: MinerReport };
+type Profile = QualityProfile & {
+  miner?: MinerReport;
+  /** The fit the server actually applied, from the settings. */
+  fit?: { minSamples: number; pointsPerMbps: number };
+};
 
 /** What `GET /api/rule-check` returns. */
 interface CheckHistory {
@@ -154,8 +158,6 @@ function SyncReport({ outcome }: { outcome: SyncOutcome }) {
 const card = 'rounded-xl border border-[var(--color-line)] bg-[var(--color-panel)]';
 const btn =
   'rounded-lg border border-[var(--color-line)] bg-[var(--color-panel)] px-4 py-2 text-[15px] hover:border-[var(--color-accent)] disabled:opacity-50';
-const input =
-  'w-full rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2 outline-none focus:border-[var(--color-accent)]';
 const muted = 'text-[var(--color-muted)]';
 
 /** kbps as the operator thinks of it: Mbps once it stops being a small number. */
@@ -243,8 +245,6 @@ export function QualityView() {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [minSamples, setMinSamples] = useState(20);
-  const [pointsPerMbps, setPointsPerMbps] = useState(5);
   const [showAudio, setShowAudio] = useState(false);
   const [showThin, setShowThin] = useState(false);
   // A preview, never a saved setting. The cost of a scope that is too narrow is
@@ -259,12 +259,19 @@ export function QualityView() {
   const [check, setCheck] = useState<RuleCheck | null>(null);
   const [history, setHistory] = useState<CheckHistory | null>(null);
 
-  const load = useCallback(async (min: number, open: boolean) => {
+  // The fit numbers arrive with the profile rather than being typed here. They
+  // were boxes on this tab once, and the trouble was not that people typed into
+  // them -- it was that the scheduled push to Teamarr never saw the typing: it
+  // fitted at the defaults whatever this page showed. Both paths now read the
+  // settings (`PODIUM_QUALITY_MIN_SAMPLES`, `PODIUM_QUALITY_POINTS_PER_MBPS`),
+  // and the server echoes what it actually used so the dimming below matches
+  // the fit rather than a local guess.
+  const fit = profile?.fit ?? { minSamples: 20, pointsPerMbps: 5 };
+
+  const load = useCallback(async (open: boolean) => {
     setLoading(true);
     try {
-      const resp = await fetch(
-        `/api/quality-profile?minSamples=${min}${open ? '&eventOnly=0&include=&exclude=' : ''}`,
-      );
+      const resp = await fetch(`/api/quality-profile${open ? '?eventOnly=0&include=&exclude=' : ''}`);
       const body = await resp.json();
       if (!resp.ok || body.error) {
         setError(String(body.error ?? `HTTP ${resp.status}`));
@@ -280,8 +287,8 @@ export function QualityView() {
   }, []);
 
   useEffect(() => {
-    void load(minSamples, ungated);
-  }, [load, minSamples, ungated]);
+    void load(ungated);
+  }, [load, ungated]);
 
   const loadHistory = useCallback(async () => {
     try {
@@ -301,9 +308,9 @@ export function QualityView() {
   // The export carries the scope being previewed, so the file always describes
   // the table it was downloaded from. Handing over rules fitted on a population
   // the page was not showing is the one way this feature could lie outright.
-  const query =
-    `minSamples=${minSamples}&pointsPerMbps=${pointsPerMbps}` +
-    (ungated ? '&eventOnly=0&include=&exclude=' : '');
+  // The fit numbers are deliberately not sent: the settings are the single
+  // source, so what is downloaded is what a push would push.
+  const query = ungated ? 'eventOnly=0&include=&exclude=' : '';
 
   const loadSync = useCallback(async () => {
     try {
@@ -360,7 +367,7 @@ export function QualityView() {
     setMerging(true);
     setMerged('');
     try {
-      const resp = await fetch(`/api/quality-profile?${query}`, {
+      const resp = await fetch(`/api/quality-profile${query ? `?${query}` : ''}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: await file.text(),
@@ -431,14 +438,14 @@ export function QualityView() {
     // probed once -- and listing them all buries the forty that count under
     // three hundred that do not.
     return profile.buckets.filter(
-      (b) => (showAudio || !b.audioOnly) && (showThin || b.samples >= minSamples),
+      (b) => (showAudio || !b.audioOnly) && (showThin || b.samples >= fit.minSamples),
     );
-  }, [profile, showAudio, showThin, minSamples]);
+  }, [profile, showAudio, showThin, fit.minSamples]);
 
   const hidden = (profile?.buckets.length ?? 0) - buckets.length;
 
   const counted =
-    profile?.buckets.filter((b) => b.samples >= minSamples && !b.audioOnly).length ?? 0;
+    profile?.buckets.filter((b) => b.samples >= fit.minSamples && !b.audioOnly).length ?? 0;
 
   const drops = profile ? scopeDrops(profile.scope) : [];
 
@@ -666,7 +673,7 @@ export function QualityView() {
                 <tr
                   key={`${b.providerId}:${b.groupId ?? ''}:${b.tier}:${b.audioOnly}`}
                   className={`border-b border-[var(--color-line)] ${
-                    b.samples < minSamples ? 'opacity-50' : ''
+                    b.samples < fit.minSamples ? 'opacity-50' : ''
                   }`}
                 >
                   <td className="py-2 pr-3">{b.providerName}</td>
@@ -708,45 +715,14 @@ export function QualityView() {
         <h3 className="text-base">Teamarr</h3>
         <p className={`mt-1 max-w-[70ch] text-sm ${muted}`}>
           Turn what Podium measured into Teamarr scoring rules, then score the rules Teamarr is
-          running against the same measurements.
+          running against the same measurements. The fit has two numbers — the sample floor a name
+          must clear before it earns a rule, and what each Mbps away from your median is worth — and
+          both live in Settings, under Quality, next to the scope. This page and the scheduled push
+          read the same ones, so what you preview here is what a push would push. Right now:{' '}
+          {fit.minSamples} samples per rule, {fit.pointsPerMbps} points per Mbps.
         </p>
 
-        <h4 className="mt-5 text-sm font-medium">1 · Rule settings</h4>
-        <div className="mt-2 grid gap-4 sm:grid-cols-2">
-          <label className="block">
-            <span className={`text-sm ${muted}`}>Minimum samples per bucket</span>
-            <input
-              type="number"
-              min={1}
-              value={minSamples}
-              onChange={(e) => setMinSamples(Math.max(1, Number(e.target.value) || 1))}
-              className={`mt-1 ${input}`}
-            />
-            <span className={`mt-1 block text-xs ${muted}`}>
-              Buckets below this are still measured but do not contribute to any rule.
-            </span>
-          </label>
-          <label className="block">
-            <span className={`text-sm ${muted}`}>Points per Mbps</span>
-            <input
-              type="number"
-              min={0}
-              value={pointsPerMbps}
-              onChange={(e) => setPointsPerMbps(Math.max(0, Number(e.target.value) || 0))}
-              className={`mt-1 ${input}`}
-            />
-            <span className={`mt-1 block text-xs ${muted}`}>
-              Only the ratio against your own rules matters; raise it if yours use larger numbers.
-              Generated account, group and name rules are capped at ±15 so they cannot outrank a
-              direct measurement of the stream. <code>stats_metric</code> rules are exempt — they
-              are the measurement. The bitrate ladder is centred on your median, so a stream Teamarr
-              has no stats for scores 0 and sits level with a median one rather than beneath every
-              stream Podium happens to have probed.
-            </span>
-          </label>
-        </div>
-
-        <h4 className="mt-5 text-sm font-medium">2 · Send them</h4>
+        <h4 className="mt-5 text-sm font-medium">1 · Send them</h4>
 
         {ungated && (
           <p className="mt-2 max-w-[70ch] text-sm text-[var(--color-bad)]">
@@ -810,7 +786,7 @@ export function QualityView() {
         )}
 
         <h4 className="mt-6 border-t border-[var(--color-line)] pt-4 text-sm font-medium">
-          3 · Score the rules you are running
+          2 · Score the rules you are running
         </h4>
         <p className={`mt-1 max-w-[75ch] text-sm ${muted}`}>
           Upload the rules Teamarr is running and Podium scores them against every channel it has
@@ -1117,7 +1093,11 @@ function FileExport({
   return (
     <>
       <div className="mt-3 flex flex-wrap items-center gap-3">
-        <a className={btn} href={`/api/quality-profile?format=teamarr&${query}`} download>
+        <a
+          className={btn}
+          href={`/api/quality-profile?format=teamarr${query ? `&${query}` : ''}`}
+          download
+        >
           Download rules
         </a>
         <label className={`${btn} cursor-pointer`}>
