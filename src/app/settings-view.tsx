@@ -743,6 +743,15 @@ export function SettingsView({ active }: { active?: boolean } = {}) {
                 </button>
               ) : (
                 <>
+                  {/* Said here as well as enforced by the route: on a stock
+                      install the dry run is on, and the reset now refuses
+                      rather than answering a probe-wipe with a bare 200.
+                      Better to read it before clicking than in the error. */}
+                  {effective?.dryRun && (
+                    <p className="text-sm text-[var(--color-bad)]">
+                      The dry run is on, so the reset will be refused — turn it off above first.
+                    </p>
+                  )}
                   <button
                     type="button"
                     className={`${btn} !border-[var(--color-bad)] !bg-[var(--color-bad)] !text-[var(--color-on-bad)] font-medium`}
