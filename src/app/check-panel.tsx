@@ -216,7 +216,7 @@ function streamLabel(rows: Row[] | undefined, id: number): string {
 }
 
 /**
- * Probe this channel now and compare the resulting order with what Dispatcharr
+ * Check this channel now and compare the resulting order with what Dispatcharr
  * already has -- the A/B view against whatever produced the current order.
  */
 export function CheckPanel({
@@ -391,11 +391,11 @@ export function CheckPanel({
             disabled={busy}
             onClick={() => void check()}
           >
-            {busy ? 'Probing…' : 'Probe this channel'}
+            {busy ? 'Checking…' : 'Check this channel'}
           </button>
           <div>
             <p className="text-sm text-[var(--color-muted)]">
-              Probes this channel's streams immediately and shows the order they imply, next to the
+              Checks this channel's streams immediately and shows the order they imply, next to the
               order Dispatcharr has now. Nothing is written until you apply.
             </p>
             <label className="mt-2 flex items-center gap-2 text-xs text-[var(--color-muted)] cursor-pointer">
@@ -415,8 +415,8 @@ export function CheckPanel({
             </button>
             <div>
               <p className="text-sm text-[var(--color-muted)]">
-                Measures how long each stream on this channel holds, rather than how it looks in
-                five seconds.
+                Checks how long each stream on this channel holds, rather than how it looks in five
+                seconds.
               </p>
               {soakNote && <p className="mt-1 text-sm text-[var(--color-accent)]">{soakNote}</p>}
             </div>
@@ -436,7 +436,7 @@ export function CheckPanel({
               </span>
             )}
             <span className={`${pill} bg-[var(--color-accent-soft)] text-[var(--color-accent)]`}>
-              {result.probed} probed
+              {result.probed} checked
             </span>
             {result.dead > 0 && (
               <span className={`${pill} bg-[var(--color-bad)] text-[var(--color-on-bad)]`}>
@@ -475,7 +475,7 @@ export function CheckPanel({
             )}
             {result.workerBusy && (
               <span className="text-[var(--color-muted)]">
-                worker was probing, so this ran at one stream per provider
+                worker was checking, so this ran at one stream per provider
               </span>
             )}
             {result.allowed === false && (
@@ -485,7 +485,7 @@ export function CheckPanel({
                 disabled={busy}
                 onClick={() => void check(true)}
               >
-                Probe anyway (override policy)
+                Check anyway (override policy)
               </button>
             )}
           </div>
@@ -658,7 +658,7 @@ export function CheckPanel({
                         {row.alive && row.usable && !row.black && row.bitrateKbps <= 0 && (
                           <span className="ml-1 text-[var(--color-warn)]">
                             (not measured — ranked below every stream with a reading, and due for
-                            another probe)
+                            another check)
                           </span>
                         )}
                         {row.unstable && (
@@ -697,19 +697,19 @@ export function CheckPanel({
           {result.truncated && (
             <p className="mt-3 text-sm text-[var(--color-warn)]">
               This rule claims {result.totalHits} streams; only the first {result.probeLimit} were
-              probed. The ranking above is partial.
+              checked. The ranking above is partial.
             </p>
           )}
 
           {(result.unprobed?.length ?? 0) > 0 && (
             <p className="mt-3 text-sm text-[var(--color-warn)]">
-              {result.unprobed?.length} stream(s) this rule claims went unprobed: no spare provider
-              capacity, or past the {result.probeLimit} probe cap (
+              {result.unprobed?.length} stream(s) this rule claims went unchecked: no spare provider
+              capacity, or past the {result.probeLimit} check cap (
               {(result.unprobed ?? [])
                 .map((u) => `${u.name} · ${u.provider}`)
                 .join(', ')
                 .slice(0, 120)}
-              ). They stay on the channel, ranked after the ones that were probed, and cannot be
+              ). They stay on the channel, ranked after the ones that were checked, and cannot be
               unassigned until a check gets a verdict for them.
             </p>
           )}

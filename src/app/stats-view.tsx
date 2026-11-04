@@ -85,7 +85,7 @@ export function StatsView() {
           </p>
         </section>
         <section className={`${card} p-4`}>
-          <p className="text-sm text-[var(--color-muted)]">Probe freshness</p>
+          <p className="text-sm text-[var(--color-muted)]">Check freshness</p>
           <p
             className={`mt-1 text-3xl font-semibold tabular-nums ${stats.freshness.breaching ? 'text-[var(--color-bad)]' : ''}`}
           >
@@ -95,7 +95,7 @@ export function StatsView() {
           </p>
           <p className="mt-1 text-sm text-[var(--color-muted)]">
             {stats.freshness.oldestProbeAgeSeconds === null
-              ? 'No managed probe yet'
+              ? 'No managed check yet'
               : stats.freshness.breaching
                 ? `Past ${duration(stats.freshness.targetSeconds)} target`
                 : `Within ${duration(stats.freshness.targetSeconds)} target`}
@@ -116,7 +116,7 @@ export function StatsView() {
         className={`${card} grid divide-y divide-[var(--color-line)] sm:grid-cols-5 sm:divide-x sm:divide-y-0`}
       >
         {[
-          ['Usable', stats.streams.states.alive],
+          ['Live', stats.streams.states.alive],
           ['Dead', stats.streams.states.dead],
           ['Black screen', stats.streams.states.black],
           ['Low bitrate', stats.streams.states.low_bitrate],
@@ -179,7 +179,7 @@ export function StatsView() {
           <p className="mt-1 text-[var(--color-muted)]">
             {stats.lastRun.error
               ? `Failed: ${stats.lastRun.error.slice(0, 120)}`
-              : `${stats.lastRun.probed.toLocaleString()} probed · ${stats.lastRun.dead.toLocaleString()} dead · ${stats.lastRun.reordered.toLocaleString()} reordered`}
+              : `${stats.lastRun.probed.toLocaleString()} checked · ${stats.lastRun.dead.toLocaleString()} dead · ${stats.lastRun.reordered.toLocaleString()} reordered`}
           </p>
         </section>
       )}

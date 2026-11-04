@@ -264,7 +264,7 @@ export function OrderingView() {
     <div className={`${card} p-5`}>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="text-sm font-semibold uppercase tracking-wide text-[var(--color-muted)]">
-          Stream ordering
+          Ranking
         </h3>
         <span className="text-sm text-[var(--color-muted)]">
           {loading ? 'loading…' : activeHelp}
@@ -495,7 +495,7 @@ export function OrderingView() {
 
       <div className="mt-4 flex items-center gap-3">
         <button type="button" className={btn} disabled={loading || saving || !dirty} onClick={save}>
-          {saving ? 'Saving…' : 'Save ordering'}
+          {saving ? 'Saving…' : 'Save ranking'}
         </button>
         {/* Saying it beats implying it. The button going grey was the only
             confirmation a save had happened, which reads identically to a

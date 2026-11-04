@@ -297,12 +297,12 @@ Policy is per Dispatcharr channel group:
 | mode | behaviour |
 | --- | --- |
 | `always` | check the group's **ruled** channels on the normal freshness schedule (default) |
-| `never` | never probe; leave the ordering alone |
+| `never` | never check; leave the ordering alone |
 | `after_epg_start` | rule or not, but only once the channel's EPG programme has started |
 | `assigned` | rule or not, on the normal freshness schedule |
 
-Any of them can carry `measure_only`, which probes the group without ever
-writing to it — see [Measure only](#measure-only-channels-another-app-owns).
+Any of them can carry `measure_only`, which checks the group without ever writing to it — see
+[Check only](#check-only-channels-another-app-owns).
 
 The policy says *when* a channel is checked. What decides whether it is checked
 at all is having a rule: under `always` — which is also what a group you have
@@ -372,25 +372,25 @@ The policy is the row of chips at the top of a group. `assigned` is what
 Dispatcharr has on the channel now; `matched` is what your rules claim — the two
 differing is how you spot a stream the provider has just added.
 
-#### Measure only (channels another app owns)
+#### Check only (channels another app owns)
 
 A fixture channel created by Teamarr carries its own idea of stream order and
 rewrites it on its own schedule. A reorder written from Podium is overwritten,
 which makes the two applications take turns clobbering the field a viewer
 actually reads — and Podium loses that race by design.
 
-What is worth having from those channels is the *measurement*. Probed after
+What is worth having from those channels is the *measurement*. Checked after
 kickoff, while nobody is watching, they are the only source of what the right
 order would have been, which is what the quality priors are fitted from and what
 the exported rules hand back to the app that owns the channel.
 
-Toggling **Measure only** on a group — or `"measure_only": true` in
+Toggling **Check only** on a group — or `"measure_only": true` in
 `rules.json` / `rules.yml`, on a group or a name pattern — keeps everything
 except the writes:
 
 | still happens | suppressed |
 | --- | --- |
-| the probe, at the time the policy says | writing the stream order |
+| the check, at the time the policy says | writing the stream order |
 | the cached verdict and its TTL | assigning a matched stream to the channel |
 | the quality sample the priors are fitted from | |
 | `stream_stats` published to Dispatcharr | |
@@ -400,7 +400,7 @@ stream to a channel another app curates is the more intrusive of the two writes,
 not the lesser.
 
 It is orthogonal to the mode, so the natural setting for a Teamarr install is
-both at once — probe once the fixture is under way, and never write:
+both at once — check once the fixture is under way, and never write:
 
 ```json
 "group_patterns": [
@@ -408,7 +408,7 @@ both at once — probe once the fixture is under way, and never write:
 ]
 ```
 
-Channels handled this way are counted as `measured only` in the pass line on the
+Channels handled this way are counted as `checked only` in the pass line on the
 dashboard rather than folded into `already in order`, which means something
 else — that the channel was checked and found correct. These were ranked and the
 ranking was withheld.
@@ -559,9 +559,9 @@ Two things to know before queueing the whole catalogue:
   an hour or two before kickoff is worth more than queueing everything at nine.
 
 For a single channel, the **Check now** panel on the channel itself is faster
-still — it probes on the spot and shows the ordering the results imply without
-writing anything. To probe all channels in a group immediately on demand, use
-the **Probe all** button on the group view.
+still — it checks on the spot and shows the ordering the results imply without
+writing anything. To check all channels in a group immediately on demand, use
+the **Check all** button on the group view.
 
 ## Ranking
 
@@ -655,7 +655,7 @@ declares one. Podium reads a few seconds of the stream, which also gives it the
 black-screen check from the same read, so it costs one provider connection
 rather than two.
 
-### Stability: the failure a probe cannot see
+### Stability: the failure a check cannot see
 
 Every measurement above is a snapshot. ffprobe resolves codec, resolution and
 bitrate in a few seconds, and a stream that answers well in those seconds is
@@ -753,7 +753,7 @@ Four places ask for one:
   channels Podium manages.
 
 The channel, group and whole-catalogue buttons leave out streams that were dead
-at their last probe; soaking one would only re-learn what the probe already
+at their last check; soaking one would only re-learn what the check already
 said. A single stream asked for by name is soaked regardless.
 
 The first three run whenever a pass has spare capacity and nobody is watching,
@@ -795,13 +795,13 @@ the stream each provider is holding open right now. Those bars are the useful
 part: a soak's wall clock is set by your narrowest provider rather than by the
 total, because accounts soak in parallel, and the bars are where that shows.
 
-It gets its own bar rather than sharing the probe one because the two measure
-different work at different scales: a pass probes hundreds of streams at seconds
+It gets its own bar rather than sharing the check one because the two measure
+different work at different scales: a pass checks hundreds of streams at seconds
 each and soaks tens of them at minutes each, so a single bar would sit still for
 half an hour and then jump.
 
 The block above it shows what is still waiting, split by which drain will take
-it, with a **Clear the queue** button. Nothing queued has been measured yet, so
+it, with a **Clear the queue** button. Nothing queued has been checked yet, so
 clearing it loses nothing.
 
 On a channel, each stream's row in the check panel says where it is: **queued**
@@ -810,7 +810,7 @@ row reads the real queue rather than only remembering your own clicks, so it
 survives a refresh and picks up streams queued by the channel or group buttons
 too.
 
-None of them measures anything on the spot. They queue, exactly as
+None of them checks anything on the spot. They queue, exactly as
 [re-checking a group](#re-checking-on-demand) does, and for the same reason: a
 soak holds a provider connection for minutes, so doing it inside the request
 would be a second scheduler that knows nothing about provider limits or who is
@@ -822,7 +822,7 @@ leave one request each.
 
 ### The nightly sweep
 
-**Settings → App settings → Measure streams → Stability & long checks → Soak during these hours** turns on the automatic version.
+**Settings → App settings → Checking streams → Stability and long checks → Soak during these hours** turns on the automatic version.
 Give it a range like `03:00-06:00` (ranges that cross midnight are fine) and
 Podium fills whatever capacity is spare inside it, measuring streams it knows
 least about first: never-observed before stale, oldest before newest, slot 0
@@ -877,11 +877,11 @@ streams' fault.
 Three things prevent that now:
 
 - **A spare connection.** Soaks leave one connection free per account (**Settings
-  → App settings → Measure streams → Stability & long checks → Connections a soak leaves free**), so a five-connection account
+  → App settings → Checking streams → Stability and long checks → Connections a soak leaves free**), so a five-connection account
   soaks four at a time. A single-connection account still soaks one.
 - **A rest between connections.** Every soak slot waits after a connection
   closes before opening another — a reconnect or the next stream alike — and
-  that includes the first soak of a pass, whose slot a probe was using a moment
+  that includes the first soak of a pass, whose slot a check was using a moment
   earlier. Ten seconds by default (**Rest between soak connections**).
 - **A safety stop.** A drop that lands within three seconds of another soak on
   the same account connecting is treated as the account making room, not the
@@ -1538,7 +1538,7 @@ What it reports:
 | **decided by a tie** | two streams tie at the top, so the rules do not decide the channel at all — whatever Teamarr does next does, and a tie falling the right way is not a working rule set |
 
 The headline counts only the channels **Teamarr orders** — the groups marked
-measure-only, or ranked off their own assignment. Its stream-priority rules are
+check-only, or ranked off their own assignment. Its stream-priority rules are
 evaluated on those and nowhere else, so a disagreement on an ordinary channel is
 a comparison against a population the rules never meet. Measured on a live
 install, 540 channels carried enough verdicts to check and only 224 sat in a

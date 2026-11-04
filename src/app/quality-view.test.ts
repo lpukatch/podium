@@ -53,7 +53,7 @@ const summary = {
 
 describe('describeScope', () => {
   it('says an unconfigured scope learns from everything', () => {
-    expect(describeScope(summary)).toBe('Learning from every probe.');
+    expect(describeScope(summary)).toBe('Learning from every check.');
   });
 
   it('reads the policy gate and the patterns as alternatives', () => {
@@ -77,7 +77,7 @@ describe('scopeDrops', () => {
   it('reports only the reasons that actually dropped something', () => {
     expect(scopeDrops({ ...summary, excluded: 12, unrecorded: 400 })).toEqual([
       { label: 'excluded by pattern', count: 12 },
-      { label: 'probed before the scope was recorded', count: 400 },
+      { label: 'checked before the scope was recorded', count: 400 },
     ]);
   });
 

@@ -92,7 +92,7 @@ const SECTIONS: Array<{
   {
     id: 'measurement',
     sources: ['probing'],
-    title: 'Measure streams',
+    title: 'Checking streams',
     blurb: 'Control how Podium checks playback and detects failures.',
   },
   {
@@ -429,7 +429,7 @@ export function SettingsView({ active }: { active?: boolean } = {}) {
             </span>
           </h2>
           <p className="mt-1 text-sm text-[var(--color-muted)]">
-            Connect services, choose what changes automatically, and tune how streams are measured.
+            Connect services, choose what changes automatically, and tune how streams are checked.
           </p>
         </div>
         <label className="block w-full max-w-xs">
@@ -728,7 +728,7 @@ export function SettingsView({ active }: { active?: boolean } = {}) {
               Danger Zone
             </h3>
             <p className="mt-1 text-sm text-[var(--color-muted)]">
-              Clear all cached probe results and run history. Podium will need to re-probe every
+              Clear all cached check results and run history. Podium will need to re-check every
               stream from scratch on the next pass.
             </p>
             <div className="mt-4 flex flex-wrap items-center gap-3">

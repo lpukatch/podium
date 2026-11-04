@@ -195,7 +195,7 @@ export function describeScope(scope: ScopeSummary): string {
   const parts: string[] = [];
   if (scope.eventOnly) parts.push('channels in groups set to after EPG start or assigned');
   if (scope.include.length > 0) parts.push(`groups matching ${scope.include.join(', ')}`);
-  const admitted = parts.length > 0 ? parts.join(', or ') : 'every probe';
+  const admitted = parts.length > 0 ? parts.join(', or ') : 'every check';
   return scope.exclude.length > 0
     ? `Learning from ${admitted} — except groups matching ${scope.exclude.join(', ')}.`
     : `Learning from ${admitted}.`;
@@ -207,7 +207,7 @@ export function scopeDrops(scope: ScopeSummary): Array<{ label: string; count: n
     { label: 'excluded by pattern', count: scope.excluded },
     { label: 'not an event channel', count: scope.notEvent },
     { label: 'matched no include pattern', count: scope.notIncluded },
-    { label: 'probed before the scope was recorded', count: scope.unrecorded },
+    { label: 'checked before the scope was recorded', count: scope.unrecorded },
   ].filter((row) => row.count > 0);
 }
 
@@ -484,8 +484,8 @@ export function QualityView() {
           them. {describeScope(profile.scope)}{' '}
           {profile.scope.unrecorded > 0 && (
             <>
-              {profile.scope.unrecorded.toLocaleString()} were probed before Podium recorded which
-              channel a probe was for, so their policy cannot be read. Name their groups under{' '}
+              {profile.scope.unrecorded.toLocaleString()} were checked before Podium recorded which
+              channel a check was for, so their policy cannot be read. Name their groups under{' '}
               <strong>Always learn from groups matching</strong> in Settings to use them, or let new
               passes accumulate.
             </>
@@ -663,7 +663,7 @@ export function QualityView() {
                 <th className="py-2 pr-3 font-normal">Group</th>
                 <th className="py-2 pr-3 font-normal">Tier</th>
                 <th className="py-2 pr-3 text-right font-normal">Samples</th>
-                <th className="py-2 pr-3 text-right font-normal">Alive</th>
+                <th className="py-2 pr-3 text-right font-normal">Live</th>
                 <th className="py-2 pr-3 text-right font-normal">Black</th>
                 <th className="py-2 pr-3 text-right font-normal">Median</th>
                 <th className="py-2 pr-3 text-right font-normal">p90</th>
@@ -705,7 +705,7 @@ export function QualityView() {
         </div>
         <p className={`mt-3 text-sm ${muted}`}>
           Only measured bitrates count — declared figures, dead streams and slates are excluded. The
-          Alive and Black columns say how often those happen. Faded rows are below the sample floor
+          Live and Black columns say how often those happen. Faded rows are below the sample floor
           and contribute nothing.
         </p>
       </section>
@@ -729,7 +729,7 @@ export function QualityView() {
 
         {ungated && (
           <p className="mt-2 max-w-[70ch] text-sm text-[var(--color-bad)]">
-            The scope is off, so these rules would be fitted on every probe this install has taken,
+            The scope is off, so these rules would be fitted on every check this install has taken,
             VOD and filler included. Turn it back on above before exporting unless you mean that.
           </p>
         )}
@@ -830,7 +830,7 @@ export function QualityView() {
         <p className={`mt-1 max-w-[75ch] text-sm ${muted}`}>
           Upload the rules Teamarr is running and Podium scores them against every channel it has
           measured that Teamarr orders — the stream your rules put first, beside the stream the
-          measurements say should be first. Nothing is written and nothing is probed, so run it
+          measurements say should be first. Nothing is written and nothing is checked, so run it
           after every edit. The set is kept and re-scored on every later pass, which is the only way
           a fixture channel gets checked at all.
         </p>
