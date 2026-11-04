@@ -308,6 +308,10 @@ export default function Page() {
 
   const [tab, setTab] = useState<Tab>('groups');
   const [section, setSection] = useState<SettingsSection>('general');
+  // Whether the settings form has ever been shown, so its keep-alive container
+  // mounts lazily: a session that never opens Settings pays for neither the
+  // fetch nor the DOM, and one that has keeps its unsaved edits.
+  const [settingsEverOpened, setSettingsEverOpened] = useState(false);
   const sectionRefs = useRef<Partial<Record<SettingsSection, HTMLButtonElement | null>>>({});
   const [groupId, setGroupId] = useState<number | null>(null);
   const [channelId, setChannelId] = useState<number | null>(null);
@@ -470,6 +474,7 @@ export default function Page() {
   // narrow settings strip. Keep the page's vertical position unchanged.
   useEffect(() => {
     if (tab !== 'settings') return;
+    setSettingsEverOpened(true);
     const selected = sectionRefs.current[section];
     const strip = selected?.parentElement;
     if (!selected || !strip) return;
@@ -1129,35 +1134,6 @@ export default function Page() {
     setEditingAlias(null);
   };
 
-  // Every reason this fails is fixed in Settings -- a missing credential, a
-  // wrong URL, a Dispatcharr that moved -- so the settings form is part of the
-  // error screen rather than behind a tab bar this early return skips. Without
-  // it, clearing the environment variables to use the UI left an error card
-  // whose only button was a Retry that could never succeed.
-  if (error) {
-    return (
-      <main className="mx-auto max-w-3xl p-8">
-        <div className={`${card} ${error.needsSetup ? '' : 'border-[var(--color-bad)]'} p-6`}>
-          <h2
-            className={`text-lg font-semibold ${error.needsSetup ? '' : 'text-[var(--color-bad)]'}`}
-          >
-            {error.error}
-          </h2>
-          <p className="mt-2 text-[var(--color-muted)]">{error.detail || error.hint}</p>
-          {error.detail && error.hint && (
-            <p className="mt-1 text-sm text-[var(--color-muted)]">{error.hint}</p>
-          )}
-          <button type="button" className={`${btn} mt-4`} onClick={() => void load()}>
-            {error.needsSetup ? 'Continue' : 'Retry'}
-          </button>
-        </div>
-        <div className="mt-4">
-          <SettingsView />
-        </div>
-      </main>
-    );
-  }
-
   // Catalogue-backed views fetch every channel and stream from Dispatcharr,
   // which takes seconds on a real install. Show a loading state rather than
   // rendering "0 managed, 0 groups" while that request is in flight.
@@ -1222,7 +1198,7 @@ export default function Page() {
           {/* Not "Refresh": the Dead tab has its own, which re-reads the probe
               cache, and two identically named buttons a card apart invited
               the question of which did what. */}
-          {(areaForTab(tab).id === 'channels' || group) && (
+          {!error && (areaForTab(tab).id === 'channels' || group) && (
             <button
               type="button"
               className={`${btn} flex flex-none items-center gap-2`}
@@ -1244,7 +1220,7 @@ export default function Page() {
             v{VERSION}
           </span>
         </div>
-        {!group && areaForTab(tab).id === 'channels' && (
+        {!error && !group && areaForTab(tab).id === 'channels' && (
           <p className="mt-1.5 text-sm tabular-nums text-[var(--color-muted)]">
             {totals.managed} managed · {totals.excluded} excluded · {totals.gaps} with no match ·{' '}
             {totals.regex > 0 ? `${totals.regex} on legacy regex · ` : ''}
@@ -1255,7 +1231,26 @@ export default function Page() {
       </header>
 
       <main className="flex-1">
-        {!group && (
+        {error && (
+          <div className="mx-auto max-w-3xl p-8 pb-4">
+            <div className={`${card} ${error.needsSetup ? '' : 'border-[var(--color-bad)]'} p-6`}>
+              <h2
+                className={`text-lg font-semibold ${error.needsSetup ? '' : 'text-[var(--color-bad)]'}`}
+              >
+                {error.error}
+              </h2>
+              <p className="mt-2 text-[var(--color-muted)]">{error.detail || error.hint}</p>
+              {error.detail && error.hint && (
+                <p className="mt-1 text-sm text-[var(--color-muted)]">{error.hint}</p>
+              )}
+              <button type="button" className={`${btn} mt-4`} onClick={() => void load()}>
+                {error.needsSetup ? 'Continue' : 'Retry'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {!error && !group && (
           <>
             <nav
               aria-label="Main navigation"
@@ -1336,7 +1331,9 @@ export default function Page() {
                     </button>
                   ))}
                 </nav>
-                {section === 'general' && <SettingsView />}
+                {/* The general section's form is kept alive by the block above,
+                    which un-hides it here and keeps it mounted on the other
+                    sub-tabs. */}
                 {section !== 'general' && (
                   <div className="p-5">
                     {section === 'ordering' && <OrderingView />}
@@ -2728,6 +2725,27 @@ export default function Page() {
                 <span className="text-[var(--color-accent)]">{saved}</span>
               )}
             </div>
+          </div>
+        )}
+
+        {/* The settings form stays alive across the whole app: mounted on
+            the first visit to Settings (or on error), then hidden rather than
+            unmounted whenever the operator goes elsewhere -- including drilling
+            into a group or channel. It holds unsaved edits that would otherwise
+            be lost. */}
+        {(settingsEverOpened || Boolean(error)) && (
+          <div
+            className={
+              error
+                ? 'mx-auto max-w-3xl px-8 pb-8'
+                : !group && tab === 'settings' && section === 'general'
+                  ? undefined
+                  : 'hidden'
+            }
+          >
+            <SettingsView
+              active={Boolean(error || (!group && tab === 'settings' && section === 'general'))}
+            />
           </div>
         )}
       </main>

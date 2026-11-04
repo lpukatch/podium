@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RequireClause } from '@/lib/setting-requirements';
 import { clampNote, unsatisfiedRequires } from '@/lib/setting-requirements';
 import { VERSION } from '@/lib/version';
@@ -187,7 +187,7 @@ function requireNote(
   return sentences.join(' ');
 }
 
-export function SettingsView() {
+export function SettingsView({ active }: { active?: boolean } = {}) {
   const [fields, setFields] = useState<Field[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [effective, setEffective] = useState<{ dryRun: boolean; hasCredentials: boolean } | null>(
@@ -237,6 +237,12 @@ export function SettingsView() {
     return ['1', 'true', 'yes', 'on'].includes(raw);
   };
   const dirty = Object.keys(edits).length > 0;
+  const dirtyRef = useRef(false);
+  dirtyRef.current = dirty;
+
+  useEffect(() => {
+    if (active && !dirtyRef.current) void load();
+  }, [active, load]);
 
   /**
    * Every field's effective displayed value, as the dependency checks read the
