@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { VERSION } from '@/lib/version';
+import { clampNote, unsatisfiedRequires } from '@/lib/setting-requirements';
+import type { RequireClause } from '@/lib/setting-requirements';
 import { ConnectActivityPanel } from './connect-activity';
 
 interface Field {
@@ -11,12 +13,28 @@ interface Field {
   help: string;
   more?: string;
   section: 'dispatcharr' | 'behaviour' | 'probing' | 'quality' | 'teamarr';
+  /** Which named group of the page this renders in -- see GROUPS from the API. */
+  group: string;
+  requiresAll?: RequireClause[];
+  requiresAny?: RequireClause[];
+  clampedBy?: { key: string; direction: 'max' | 'min' };
+  /** Stored units per displayed unit, for reading a clamp across two fields. */
+  scale?: number;
   value: string;
   isSet: boolean;
   source: 'stored' | 'environment' | 'default';
   defaultValue: string;
   min?: number;
   max?: number;
+}
+
+/** The page's group taxonomy, delivered alongside the fields it sorts. */
+interface Group {
+  id: string;
+  section: Field['section'];
+  title: string;
+  description: string;
+  advanced?: boolean;
 }
 
 type SectionId = 'connection' | 'automation' | 'measurement' | 'learning';
@@ -85,131 +103,6 @@ const SECTIONS: Array<{
   },
 ];
 
-// Keep the field schema as the source of truth for labels, help and validation.
-// These groups only decide how to scan the form; any newly added field falls
-// into "Other settings" rather than disappearing or landing in the wrong group.
-const GROUPS: Record<
-  SectionId,
-  Array<{ title: string; description: string; keys?: string[]; advanced?: boolean }>
-> = {
-  connection: [
-    { title: 'Server', description: 'The address Podium connects to.', keys: ['DISPATCHARR_URL'] },
-    {
-      title: 'Sign in',
-      description: 'Use an API key, or a username and password.',
-      keys: ['DISPATCHARR_API_KEY', 'DISPATCHARR_USERNAME', 'DISPATCHARR_PASSWORD'],
-    },
-  ],
-  automation: [
-    {
-      title: 'Changes to channels',
-      description: 'Start in dry run to preview changes before Podium writes them.',
-      keys: [
-        'PODIUM_DRY_RUN',
-        'PODIUM_AUTO_ASSIGN',
-        'PODIUM_AUTO_ASSIGN_MAX',
-        'PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER',
-        'PODIUM_AUTO_ASSIGN_PRUNE_PER_PROVIDER',
-        'PODIUM_REMOVE_UNMATCHED',
-        'PODIUM_REMOVE_UNMATCHED_AFTER_MS',
-        'PODIUM_REMOVE_DEAD_AFTER_CHECKS',
-        'PODIUM_WRITE_STATS',
-      ],
-    },
-    {
-      title: 'While someone is watching',
-      description: 'Protect viewing sessions from competing probes.',
-      keys: [
-        'PODIUM_PAUSE_WHEN_WATCHING',
-        'PODIUM_PROBE_IDLE_PROVIDERS',
-        'PODIUM_PROBE_WATCHED_PROVIDER',
-        'PODIUM_WATCHED_FREE_SLOTS',
-      ],
-    },
-    {
-      title: 'Timing & cached results',
-      description: 'Adjust how often Podium works and when a result needs checking again.',
-      keys: [
-        'PODIUM_MAX_AGE_MS',
-        'PODIUM_TICK_MS',
-        'PODIUM_IDLE_MAX_MS',
-        'PODIUM_EPG_TTL_MS',
-        'PODIUM_LIVE_TTL_MS',
-        'PODIUM_DEAD_TTL_MS',
-        'PODIUM_DEAD_TTL_MAX_MS',
-        'PODIUM_UNKNOWN_BITRATE_TTL_MS',
-        'PODIUM_MAX_SLICE',
-      ],
-      advanced: true,
-    },
-  ],
-  measurement: [
-    {
-      title: 'Dispatcharr live events',
-      description: 'Receive stream switches and failures directly from Dispatcharr.',
-      keys: ['PODIUM_CONNECT_EVENTS', 'PODIUM_CONNECT_URL'],
-    },
-    {
-      title: 'Quick checks',
-      description: 'Set the workload and decide what counts as a working stream.',
-      keys: [
-        'PODIUM_MAX_CONCURRENT_PROBES',
-        'PODIUM_MIN_BITRATE_KBPS',
-        'PODIUM_DETECT_BLACK',
-        'PODIUM_ANALYZE_SECONDS',
-      ],
-    },
-    {
-      title: 'How to connect to streams',
-      description: 'Choose whether checks use the provider directly or go through Dispatcharr.',
-      keys: [
-        'PODIUM_PROBE_VIA_DISPATCHARR',
-        'PODIUM_DIRECT_PROFILE_USER_AGENT',
-        'PODIUM_SOAK_VIA_DISPATCHARR',
-        'PODIUM_PROBE_CLIENT_USER_AGENT',
-      ],
-      advanced: true,
-    },
-    {
-      title: 'Stability & long checks',
-      description: 'Find streams that fail after they start playing.',
-      keys: [
-        'PODIUM_STABILITY',
-        'PODIUM_STABILITY_POLL_MS',
-        'PODIUM_SOAK_WINDOW',
-        'PODIUM_SOAK_SECONDS',
-        'PODIUM_SOAK_MAX_PER_CHANNEL',
-        'PODIUM_SOAK_MAX_AGE_MS',
-        'PODIUM_SOAK_COOLDOWN_MS',
-        'PODIUM_SOAK_SPARE_SLOTS',
-      ],
-      advanced: true,
-    },
-  ],
-  learning: [
-    {
-      title: 'Which results to learn from',
-      description: 'Limit the samples used to fit quality rules. Excluded history is kept.',
-      keys: [
-        'PODIUM_QUALITY_EVENT_ONLY',
-        'PODIUM_QUALITY_INCLUDE_GROUPS',
-        'PODIUM_QUALITY_EXCLUDE_GROUPS',
-      ],
-    },
-    {
-      title: 'Send rules to Teamarr',
-      description: 'Set a destination and choose manual or scheduled pushes.',
-      keys: ['PODIUM_TEAMARR_URL', 'PODIUM_TEAMARR_SYNC', 'PODIUM_TEAMARR_SYNC_MS'],
-    },
-    {
-      title: 'Before a scheduled push',
-      description: 'Require enough samples and channels before sending new rules.',
-      keys: ['PODIUM_TEAMARR_MIN_SAMPLES', 'PODIUM_TEAMARR_MIN_CHANNELS'],
-      advanced: true,
-    },
-  ],
-};
-
 const card = 'rounded-xl border border-[var(--color-line)] bg-[var(--color-panel)]';
 const btn =
   'rounded-lg border border-[var(--color-line)] bg-[var(--color-panel)] px-4 py-2 text-[15px] hover:border-[var(--color-accent)] disabled:opacity-50';
@@ -217,25 +110,94 @@ const pill = 'inline-block rounded-full px-2 py-0.5 text-xs whitespace-nowrap';
 const input =
   'w-full max-w-xl rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2 outline-none focus:border-[var(--color-accent)]';
 
-function groupedRows(section: SectionId, rows: Field[]) {
-  const remaining = [...rows];
-  const groups = GROUPS[section].map((group) => {
-    const selected =
-      group.keys?.flatMap((key) => remaining.filter((field) => field.key === key)) ?? [];
-    for (const field of selected) remaining.splice(remaining.indexOf(field), 1);
-    return { ...group, rows: selected };
-  });
+/**
+ * Groups for a section: the API's taxonomy filtered to it, fields slotted in by
+ * the `group` each field carries. The API's groups are written next to the
+ * field list itself, so a newly added field lands in its group automatically;
+ * one with a group no list knows about falls into "Other settings" rather than
+ * disappearing.
+ */
+function groupedRows(section: { sources: Field['section'][] }, groups: Group[], rows: Field[]) {
+  const out = groups
+    .filter((g) => section.sources.includes(g.section))
+    .map((g) => ({ group: g, rows: rows.filter((f) => f.group === g.id) }));
+  const claimed = new Set(
+    groups.filter((g) => section.sources.includes(g.section)).map((g) => g.id),
+  );
+  const remaining = rows.filter((f) => !claimed.has(f.group));
   if (remaining.length)
-    groups.push({ title: 'Other settings', description: 'Additional options.', rows: remaining });
-  return groups;
+    out.push({
+      group: {
+        id: 'other',
+        // Never read again: this entry is appended after the section filter.
+        section: section.sources[0] ?? 'dispatcharr',
+        title: 'Other settings',
+        description: 'Additional options.',
+      },
+      rows: remaining,
+    });
+  return out;
+}
+
+/**
+ * The sentence explaining an unmet dependency, naming the fields by label.
+ *
+ * "Does nothing while X is off" rather than "requires X": the value stored is
+ * fine, it is just that nothing reads it yet -- an error would send somebody
+ * hunting for a mistake that is not there. A requiresAny clause reads as the
+ * choice it is: "needs A or B on".
+ */
+function requireNote(
+  field: Field,
+  values: Record<string, string>,
+  labels: Record<string, string>,
+): string {
+  const unmet = unsatisfiedRequires(field, values);
+  if (unmet.length === 0) return '';
+  const name = (clause: RequireClause): string => labels[clause.key] ?? clause.key;
+  const inList = (list: RequireClause[] | undefined, clause: RequireClause): boolean =>
+    list?.some((c) => c.key === clause.key && c.state === clause.state) ?? false;
+  const from = (clauses: RequireClause[]): string =>
+    clauses
+      .map((clause) =>
+        clause.state === 'on'
+          ? `“${name(clause)}” is off`
+          : clause.state === 'gt0'
+            ? `“${name(clause)}” is zero`
+            : `“${name(clause)}” is empty`,
+      )
+      .join(' and ');
+  const sentences: string[] = [];
+  const allUnmet = unmet.filter((clause) => inList(field.requiresAll, clause));
+  const anyUnmet = unmet.filter((clause) => inList(field.requiresAny, clause));
+  const switchedOff = allUnmet.filter((clause) => clause.state === 'on');
+  if (switchedOff.length) sentences.push(`Does nothing while ${from(switchedOff)}.`);
+  const notUsable = allUnmet.filter((clause) => clause.state !== 'on');
+  if (notUsable.length) sentences.push(`Has no effect while ${from(notUsable)}.`);
+  if (anyUnmet.length)
+    sentences.push(
+      `Needs ${anyUnmet
+        .map((clause) =>
+          clause.state === 'on'
+            ? `“${name(clause)}” on`
+            : clause.state === 'gt0'
+              ? `“${name(clause)}” above zero`
+              : `“${name(clause)}” filled in`,
+        )
+        .join(' or ')}.`,
+    );
+  return sentences.join(' ');
 }
 
 export function SettingsView() {
   const [fields, setFields] = useState<Field[]>([]);
+  const [groups, setGroups] = useState<Group[]>([]);
   const [effective, setEffective] = useState<{ dryRun: boolean; hasCredentials: boolean } | null>(
     null,
   );
   const [edits, setEdits] = useState<Record<string, string>>({});
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [query, setQuery] = useState('');
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState('');
   const [error, setError] = useState('');
@@ -253,8 +215,10 @@ export function SettingsView() {
       }
       setError('');
       setFields(body.fields as Field[]);
+      setGroups((body.groups ?? []) as Group[]);
       setEffective(body.effective);
       setEdits({});
+      setFieldErrors({});
     } catch (e) {
       setError(String(e));
     }
@@ -274,6 +238,36 @@ export function SettingsView() {
     (edits[f.key] ?? (f.value || f.defaultValue)) === 'true';
   const dirty = Object.keys(edits).length > 0;
 
+  /**
+   * Every field's effective displayed value, as the dependency checks read the
+   * world: the in-progress edit where there is one, the effective value where
+   * not, falling through to the schema default when nothing is set anywhere.
+   * Booleans come out exactly "true"/"false" off the checkbox, whatever raw
+   * string the environment seeded them with.
+   */
+  const dependencyValues: Record<string, string> = {};
+  for (const f of fields) {
+    dependencyValues[f.key] =
+      f.kind === 'boolean'
+        ? checkedValue(f)
+          ? 'true'
+          : 'false'
+        : currentValue(f) || f.defaultValue;
+  }
+  const labels: Record<string, string> = {};
+  for (const f of fields) labels[f.key] = f.label;
+
+  const change = (key: string, value: string) => {
+    setEdits({ ...edits, [key]: value });
+    // The note was about the old value; typing a new one starts it clean.
+    setFieldErrors((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
+
   const save = async () => {
     setBusy(true);
     setError('');
@@ -286,18 +280,26 @@ export function SettingsView() {
       });
       const body = await resp.json();
       if (!resp.ok || body.error) {
-        setError(
-          body.errors
-            ?.map((e: { key: string; message: string }) => `${e.key}: ${e.message}`)
-            .join('; ') ??
-            body.error ??
-            `HTTP ${resp.status}`,
-        );
+        const errors = body.errors as Array<{ key: string; message: string }> | undefined;
+        if (errors?.length) {
+          setFieldErrors(Object.fromEntries(errors.map((e) => [e.key, e.message])));
+          setError('Some fields need attention — see the notes under them.');
+          // Where the eye should go: the form is long, and the first bad
+          // field is usually far below the fold.
+          const first = errors[0];
+          if (first)
+            document
+              .getElementById(`settings-field-${first.key}`)
+              ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          return;
+        }
+        setError(body.error ?? `HTTP ${resp.status}`);
         return;
       }
       setFields(body.fields as Field[]);
       setEdits({});
-      setNote('Saved — the worker picks this up on its next pass.');
+      setFieldErrors({});
+      setNote('Saved — the worker starts a pass within half a minute.');
       setTimeout(() => setNote(''), 4000);
       void load();
     } finally {
@@ -391,6 +393,12 @@ export function SettingsView() {
     }
   };
 
+  const q = query.trim().toLowerCase();
+  const matches = (f: Field): boolean =>
+    q === '' || `${f.label} ${f.help} ${f.more ?? ''} ${f.key}`.toLowerCase().includes(q);
+  const visibleFields = q === '' ? fields : fields.filter(matches);
+  const searching = q !== '';
+
   if (error && fields.length === 0) {
     return (
       <div className={`${card} m-5 border-[var(--color-bad)] p-5`}>
@@ -402,16 +410,27 @@ export function SettingsView() {
 
   return (
     <div className="p-4 sm:p-6">
-      <div className="mb-5">
-        <h2 className="text-xl font-semibold tracking-tight">
-          How Podium runs
-          <span className="ml-2 align-middle text-sm font-normal tabular-nums text-[var(--color-muted)]">
-            v{VERSION}
-          </span>
-        </h2>
-        <p className="mt-1 text-sm text-[var(--color-muted)]">
-          Connect services, choose what changes automatically, and tune how streams are measured.
-        </p>
+      <div className="mb-5 flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h2 className="text-xl font-semibold tracking-tight">
+            How Podium runs
+            <span className="ml-2 align-middle text-sm font-normal tabular-nums text-[var(--color-muted)]">
+              v{VERSION}
+            </span>
+          </h2>
+          <p className="mt-1 text-sm text-[var(--color-muted)]">
+            Connect services, choose what changes automatically, and tune how streams are measured.
+          </p>
+        </div>
+        <label className="block w-full max-w-xs">
+          <input
+            type="search"
+            className={input}
+            placeholder="Search settings…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </label>
       </div>
       {effective && (
         <div className={`${card} mb-5 flex flex-wrap items-center gap-3 p-4`}>
@@ -430,7 +449,7 @@ export function SettingsView() {
             </span>
           )}
           <span className="text-sm text-[var(--color-muted)] sm:ml-auto">
-            Changes apply on the next pass; no restart needed.
+            Saved changes reach the worker within half a minute; no restart needed.
           </span>
         </div>
       )}
@@ -459,8 +478,20 @@ export function SettingsView() {
           </div>
         </nav>
         <div className="min-w-0">
+          {searching && (
+            <div className="mb-5 flex items-center gap-3 text-sm text-[var(--color-muted)]">
+              <span>
+                {visibleFields.length === 0
+                  ? 'No settings match.'
+                  : `${visibleFields.length} setting${visibleFields.length === 1 ? '' : 's'} match.`}
+              </span>
+              <button type="button" className={btn} onClick={() => setQuery('')}>
+                Show everything
+              </button>
+            </div>
+          )}
           {SECTIONS.map((section) => {
-            const rows = fields.filter((f) => section.sources.includes(f.section));
+            const rows = visibleFields.filter((f) => section.sources.includes(f.section));
             if (rows.length === 0) return null;
             return (
               <section
@@ -480,110 +511,133 @@ export function SettingsView() {
                 </p>
 
                 <div className="mt-5 space-y-6">
-                  {groupedRows(section.id, rows)
-                    .filter((group) => group.rows.length > 0)
-                    .map((group) => {
-                      const controls = group.rows.map((f) => (
-                        <div
-                          key={f.key}
-                          className="border-t border-[var(--color-line)] pt-4 first:border-0 first:pt-0"
-                        >
-                          <label className="block">
-                            <span className="flex flex-wrap items-baseline gap-2">
-                              <span className="font-medium">{f.label}</span>
-                              {f.source === 'environment' && (
-                                <span
-                                  className={`${pill} bg-[var(--color-line)] text-[var(--color-muted)]`}
-                                >
-                                  from environment
+                  {groupedRows(section, groups, rows)
+                    .filter((entry) => entry.rows.length > 0)
+                    .map(({ group, rows: groupRows }) => {
+                      const controls = groupRows.map((f) => {
+                        const unmet = unsatisfiedRequires(f, dependencyValues);
+                        const clamp = clampNote(f, dependencyValues, fields);
+                        return (
+                          <div
+                            key={f.key}
+                            id={`settings-field-${f.key}`}
+                            className="scroll-mt-24 border-t border-[var(--color-line)] pt-4 first:border-0 first:pt-0"
+                          >
+                            <div className={unmet.length > 0 ? 'opacity-60' : undefined}>
+                              <label className="block">
+                                <span className="flex flex-wrap items-baseline gap-2">
+                                  <span className="font-medium">{f.label}</span>
+                                  {f.source === 'environment' && (
+                                    <span
+                                      className={`${pill} bg-[var(--color-line)] text-[var(--color-muted)]`}
+                                    >
+                                      from environment
+                                    </span>
+                                  )}
+                                  {f.source === 'stored' && (
+                                    <span
+                                      className={`${pill} bg-[var(--color-accent-soft)] text-[var(--color-accent)]`}
+                                    >
+                                      custom
+                                    </span>
+                                  )}
+                                  {f.kind === 'secret' && f.isSet && (
+                                    <span
+                                      className={`${pill} bg-[var(--color-accent-soft)] text-[var(--color-accent)]`}
+                                    >
+                                      set
+                                    </span>
+                                  )}
                                 </span>
-                              )}
-                              {f.source === 'stored' && (
-                                <span
-                                  className={`${pill} bg-[var(--color-accent-soft)] text-[var(--color-accent)]`}
-                                >
-                                  custom
-                                </span>
-                              )}
-                              {f.kind === 'secret' && f.isSet && (
-                                <span
-                                  className={`${pill} bg-[var(--color-accent-soft)] text-[var(--color-accent)]`}
-                                >
-                                  set
-                                </span>
-                              )}
-                            </span>
 
-                            {f.kind === 'boolean' ? (
-                              <span className="mt-2 flex items-start gap-3">
-                                <input
-                                  type="checkbox"
-                                  className="contrast-checkbox mt-1 h-4 w-4 shrink-0"
-                                  checked={checkedValue(f)}
-                                  onChange={(e) =>
-                                    setEdits({
-                                      ...edits,
-                                      [f.key]: e.target.checked ? 'true' : 'false',
-                                    })
-                                  }
-                                />
-                                <span className="max-w-[70ch] text-sm text-[var(--color-muted)]">
-                                  {f.help}
-                                </span>
-                              </span>
-                            ) : (
-                              <>
-                                <input
-                                  className={`${input} mt-2`}
-                                  type={f.kind === 'secret' ? 'password' : 'text'}
-                                  inputMode={f.kind === 'number' ? 'numeric' : undefined}
-                                  value={currentValue(f)}
-                                  // A blank box with no hint of what it falls back to is
-                                  // why "what is this actually set to?" was unanswerable.
-                                  placeholder={
-                                    f.kind === 'secret' && f.isSet
-                                      ? 'unchanged — type to replace'
-                                      : f.defaultValue
-                                        ? `${f.defaultValue} (default)`
-                                        : ''
-                                  }
-                                  autoComplete={f.kind === 'secret' ? 'new-password' : 'off'}
-                                  onChange={(e) => setEdits({ ...edits, [f.key]: e.target.value })}
-                                />
-                                <span className="mt-1 block max-w-[70ch] text-sm text-[var(--color-muted)]">
-                                  {f.help}
-                                  {f.kind === 'number' &&
-                                    f.min !== undefined &&
-                                    f.max !== undefined && (
-                                      <>
-                                        {' '}
-                                        Between {f.min} and {f.max.toLocaleString()}.
-                                      </>
-                                    )}
-                                </span>
-                              </>
+                                {f.kind === 'boolean' ? (
+                                  <span className="mt-2 flex items-start gap-3">
+                                    <input
+                                      type="checkbox"
+                                      className="contrast-checkbox mt-1 h-4 w-4 shrink-0"
+                                      checked={checkedValue(f)}
+                                      onChange={(e) =>
+                                        change(f.key, e.target.checked ? 'true' : 'false')
+                                      }
+                                    />
+                                    <span className="max-w-[70ch] text-sm text-[var(--color-muted)]">
+                                      {f.help}
+                                    </span>
+                                  </span>
+                                ) : (
+                                  <>
+                                    <input
+                                      className={`${input} mt-2`}
+                                      type={f.kind === 'secret' ? 'password' : 'text'}
+                                      inputMode={f.kind === 'number' ? 'numeric' : undefined}
+                                      value={currentValue(f)}
+                                      // A blank box with no hint of what it falls back to is
+                                      // why "what is this actually set to?" was unanswerable.
+                                      placeholder={
+                                        f.kind === 'secret' && f.isSet
+                                          ? 'unchanged — type to replace'
+                                          : f.defaultValue
+                                            ? `${f.defaultValue} (default)`
+                                            : ''
+                                      }
+                                      autoComplete={f.kind === 'secret' ? 'new-password' : 'off'}
+                                      onChange={(e) => change(f.key, e.target.value)}
+                                    />
+                                    <span className="mt-1 block max-w-[70ch] text-sm text-[var(--color-muted)]">
+                                      {f.help}
+                                      {f.kind === 'number' &&
+                                        f.min !== undefined &&
+                                        f.max !== undefined && (
+                                          <>
+                                            {' '}
+                                            Between {f.min} and {f.max.toLocaleString()}.
+                                          </>
+                                        )}
+                                    </span>
+                                  </>
+                                )}
+                              </label>
+                              {/* Outside the label: inside it, opening this ticked the box. */}
+                              {f.more && (
+                                <details className="mt-1 text-sm text-[var(--color-muted)]">
+                                  <summary className="cursor-pointer select-none hover:text-[var(--color-accent)]">
+                                    More about {f.label}
+                                  </summary>
+                                  <p className="mt-1 max-w-[75ch]">{f.more}</p>
+                                </details>
+                              )}
+                            </div>
+                            {unmet.length > 0 && (
+                              <p className="mt-1 max-w-[70ch] text-sm text-[var(--color-warn)]">
+                                {requireNote(f, dependencyValues, labels)}
+                              </p>
                             )}
-                          </label>
-                          {/* Outside the label: inside it, opening this ticked the box. */}
-                          {f.more && (
-                            <details className="mt-1 text-sm text-[var(--color-muted)]">
-                              <summary className="cursor-pointer select-none hover:text-[var(--color-accent)]">
-                                More about {f.label}
-                              </summary>
-                              <p className="mt-1 max-w-[75ch]">{f.more}</p>
-                            </details>
-                          )}
-                        </div>
-                      ));
+                            {clamp && (
+                              <p className="mt-1 max-w-[70ch] text-sm text-[var(--color-warn)]">
+                                {clamp}
+                              </p>
+                            )}
+                            {fieldErrors[f.key] && (
+                              <p
+                                role="alert"
+                                className="mt-1 max-w-[70ch] text-sm text-[var(--color-bad)]"
+                              >
+                                {fieldErrors[f.key]}
+                              </p>
+                            )}
+                          </div>
+                        );
+                      });
                       return group.advanced ? (
                         <details
-                          key={group.title}
+                          key={group.id}
                           className="rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] p-4 open:bg-[var(--color-panel)]"
+                          open={searching || undefined}
                         >
                           <summary className="cursor-pointer select-none font-medium hover:text-[var(--color-accent)]">
                             {group.title}{' '}
                             <span className="ml-1 text-xs font-normal text-[var(--color-muted)]">
-                              ({group.rows.length} settings)
+                              ({groupRows.length} settings)
                             </span>
                           </summary>
                           <p className="mt-1 text-sm text-[var(--color-muted)]">
@@ -592,13 +646,13 @@ export function SettingsView() {
                           <div className="mt-4 space-y-4">{controls}</div>
                         </details>
                       ) : (
-                        <div key={group.title}>
+                        <div key={group.id}>
                           <h4 className="font-semibold">{group.title}</h4>
                           <p className="mt-0.5 text-sm text-[var(--color-muted)]">
                             {group.description}
                           </p>
                           <div className="mt-4 space-y-4">{controls}</div>
-                          {group.keys?.includes('PODIUM_TEAMARR_URL') && (
+                          {group.id === 'teamarr-push' && (
                             <div className="mt-4 flex flex-wrap items-center gap-3">
                               <button
                                 type="button"
@@ -649,6 +703,12 @@ export function SettingsView() {
               </section>
             );
           })}
+
+          {searching && visibleFields.length === 0 && (
+            <div className={`${card} mb-5 p-8 text-center text-sm text-[var(--color-muted)]`}>
+              Nothing matches “{query.trim()}” in any setting.
+            </div>
+          )}
 
           <section
             id="settings-reset"

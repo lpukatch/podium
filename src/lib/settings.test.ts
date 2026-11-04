@@ -5,11 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from './config';
 import {
   describeSettings,
+  FIELDS,
   FIELD_KEYS,
+  GROUPS,
   mergeForTest,
   resolveEnv,
   validateSettings,
 } from './settings';
+import { clampNote, unsatisfiedRequires } from './setting-requirements';
 import { Store } from './store';
 
 describe('resolveEnv', () => {
@@ -74,7 +77,8 @@ describe('describeSettings', () => {
     const views = describeSettings({ DISPATCHARR_URL: 'http://env' }, { PODIUM_MAX_SLICE: '50' });
     expect(views.find((f) => f.key === 'DISPATCHARR_URL')?.source).toBe('environment');
     expect(views.find((f) => f.key === 'PODIUM_MAX_SLICE')?.source).toBe('stored');
-    expect(views.find((f) => f.key === 'PODIUM_USER_AGENT')?.source).toBeUndefined();
+    // Something that decides where data lives is not on the page at all.
+    expect(views.find((f) => f.key === 'PODIUM_DATA_DIR')).toBeUndefined();
   });
 
   it('returns non-secret values so the form can show them', () => {
@@ -175,6 +179,153 @@ describe('validateSettings', () => {
     expect(validateSettings({ PODIUM_ANALYZE_SECONDS: '6' }).errors).toHaveLength(0);
     // Below a minute the loop would spend its life re-fetching the channel list.
     expect(validateSettings({ PODIUM_TICK_MS: '0' }).errors).toHaveLength(1);
+  });
+
+  it('rejects a fraction where a promoted field counts things too', () => {
+    // Half a connection kept free, half a bitrate -- the same trap the
+    // event-counting fields caught, now that these sit on the page as well.
+    expect(validateSettings({ PODIUM_MIN_FREE_SLOTS: '0.5' }).errors).toHaveLength(1);
+    expect(validateSettings({ PODIUM_MEASURE_SECONDS: '2.5' }).errors).toHaveLength(1);
+    expect(validateSettings({ PODIUM_MIN_BITRATE_KBPS: '500.5' }).errors).toHaveLength(1);
+    // ...while a genuine quantity keeps its decimals.
+    expect(validateSettings({ PODIUM_BLACK_RATIO: '0.5' }).errors).toHaveLength(0);
+  });
+});
+
+describe('the settings page groups', () => {
+  it('files every field into a group the page knows', () => {
+    // The form used to hand-write its own taxonomy of keys, and the first
+    // field added without it -- the Teamarr population fraction -- shipped
+    // rendered as an orphan under "Other settings", a heading nobody reads.
+    // Group membership now lives on the field itself; this is the check that
+    // it was actually written.
+    const known = new Set(GROUPS.map((g) => g.id));
+    const orphans = FIELDS.filter((f) => !known.has(f.group)).map((f) => f.key);
+    expect(orphans).toEqual([]);
+  });
+
+  it('leaves no group empty and points every group at a real section', () => {
+    // An empty group heading is noise on the page; a group whose section no
+    // display section carries renders nowhere at all, silently dropping its
+    // fields instead of orphaning them.
+    const sections = new Set(FIELDS.map((f) => f.section));
+    for (const group of GROUPS) {
+      expect(sections.has(group.section)).toBe(true);
+      expect(FIELDS.some((f) => f.group === group.id)).toBe(true);
+    }
+  });
+
+  it('names only real fields in dependencies and clamps', () => {
+    // A clause naming a key that is not a field would be unreadable forever:
+    // the note would render with the raw key and the dependency would never
+    // resolve. Checked wholesale because each field is one typo away.
+    for (const field of FIELDS) {
+      const clauses = [
+        ...(field.requiresAll ?? []),
+        ...(field.requiresAny ?? []),
+        ...(field.clampedBy ? [field.clampedBy] : []),
+      ];
+      for (const clause of clauses) {
+        expect(FIELD_KEYS.has(clause.key)).toBe(true);
+      }
+    }
+  });
+
+  it('puts the environment probe cluster on the page', () => {
+    // These were runtime knobs with consumers in every pass and no presence in
+    // the UI -- a timeout, the bitrate sample, the user agent an install with
+    // a picky provider needed. Promoted, so this pins them to staying here.
+    for (const key of [
+      'PODIUM_PROBE_TIMEOUT_MS',
+      'PODIUM_USER_AGENT',
+      'PODIUM_MEASURE_BITRATE',
+      'PODIUM_MEASURE_SECONDS',
+      'PODIUM_BLACK_RATIO',
+      'PODIUM_LANE_STAGGER_MS',
+      'PODIUM_MIN_FREE_SLOTS',
+      'PODIUM_METRICS_CHANNELS',
+    ]) {
+      expect(FIELD_KEYS).toContain(key);
+    }
+  });
+});
+
+describe('field dependencies', () => {
+  const field = (key: string) => FIELDS.find((f) => f.key === key)!;
+
+  it('reads an off switch as what blocks a dependent setting', () => {
+    // Yielding the watched provider is buried under two switches; before this
+    // was surfaced, the form happily stored "yes" while nothing read it.
+    const f = field('PODIUM_WATCHED_FREE_SLOTS');
+    expect(unsatisfiedRequires(f, { PODIUM_PROBE_WATCHED_PROVIDER: 'false' })).toHaveLength(1);
+    expect(unsatisfiedRequires(f, { PODIUM_PROBE_WATCHED_PROVIDER: 'true' })).toEqual([]);
+  });
+
+  it('reads a needs-a-value clause off displayed text', () => {
+    // The events switch checks the address by looking at it, the way the code
+    // does: a stored but blank address is as good as off.
+    const f = field('PODIUM_CONNECT_EVENTS');
+    const on = { PODIUM_STABILITY: 'true', PODIUM_CONNECT_URL: 'http://podium:3456' };
+    expect(unsatisfiedRequires(f, on)).toEqual([]);
+    expect(unsatisfiedRequires(f, { ...on, PODIUM_CONNECT_URL: '' })).toHaveLength(1);
+    expect(unsatisfiedRequires(f, { ...on, PODIUM_STABILITY: 'false' })).toHaveLength(1);
+  });
+
+  it('treats a requiresAny as satisfied when one side holds', () => {
+    // The Dispatcharr probe user agent is read under either proxy flag, so
+    // either being on makes the value live -- and neither being on leaves it
+    // stored-but-unread.
+    const f = field('PODIUM_PROBE_CLIENT_USER_AGENT');
+    expect(
+      unsatisfiedRequires(f, {
+        PODIUM_PROBE_VIA_DISPATCHARR: 'false',
+        PODIUM_SOAK_VIA_DISPATCHARR: 'false',
+      }),
+    ).toHaveLength(2);
+    expect(
+      unsatisfiedRequires(f, {
+        PODIUM_PROBE_VIA_DISPATCHARR: 'true',
+        PODIUM_SOAK_VIA_DISPATCHARR: 'false',
+      }),
+    ).toEqual([]);
+  });
+
+  it('notes a clamp only once the value crosses it', () => {
+    // The back-off is floored by the first-failure wait, in stored
+    // milliseconds but displayed here in minutes, like the form shows them.
+    // A back-off above that wait is the legitimate case, not a violation.
+    const f = field('PODIUM_DEAD_TTL_MAX_MS');
+    expect(
+      clampNote(f, { PODIUM_DEAD_TTL_MAX_MS: '20', PODIUM_DEAD_TTL_MS: '30' }, FIELDS),
+    ).toMatch(/never lets this run shorter/);
+    expect(
+      clampNote(f, { PODIUM_DEAD_TTL_MAX_MS: '30', PODIUM_DEAD_TTL_MS: '30' }, FIELDS),
+    ).toBeNull();
+    expect(
+      clampNote(f, { PODIUM_DEAD_TTL_MAX_MS: '60', PODIUM_DEAD_TTL_MS: '30' }, FIELDS),
+    ).toBeNull();
+  });
+
+  it('compares a clamp in stored units, whatever the labels display', () => {
+    // Same field pair as the form shows minutes for both sides, so the test
+    // pins the conversion rather than a coincidence of equal scales.
+    const f = field('PODIUM_UNKNOWN_BITRATE_TTL_MS');
+    expect(
+      clampNote(f, { PODIUM_UNKNOWN_BITRATE_TTL_MS: '90', PODIUM_LIVE_TTL_MS: '60' }, FIELDS),
+    ).toMatch(/never lets this run longer/);
+    expect(
+      clampNote(f, { PODIUM_UNKNOWN_BITRATE_TTL_MS: '45', PODIUM_LIVE_TTL_MS: '60' }, FIELDS),
+    ).toBeNull();
+  });
+
+  it('stays quiet while a field is blank, because blank means the default', () => {
+    const f = field('PODIUM_DEAD_TTL_MAX_MS');
+    expect(
+      clampNote(f, { PODIUM_DEAD_TTL_MAX_MS: '', PODIUM_DEAD_TTL_MS: '30' }, FIELDS),
+    ).toBeNull();
+    expect(
+      clampNote(f, { PODIUM_DEAD_TTL_MAX_MS: '20', PODIUM_DEAD_TTL_MS: '' }, FIELDS),
+    ).toBeNull();
   });
 });
 

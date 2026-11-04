@@ -159,7 +159,7 @@ proxy as one worth rotating.
 | `PODIUM_DEAD_TTL_MS` | `10800000` | how soon a stream that *just* died is rechecked |
 | `PODIUM_DEAD_TTL_MAX_MS` | `86400000` | ceiling once that has backed off; [see below](#when-there-is-nothing-to-do) |
 | `PODIUM_UNKNOWN_BITRATE_TTL_MS` | `1800000` | how soon an alive-but-unmeasured stream is tried again; [see below](#streams-whose-bitrate-never-resolved) |
-| `PODIUM_MIN_FREE_SLOTS` | `1` | connections held back on a provider somebody is streaming from (environment-only); [see below](#when-one-viewer-stops-everything) |
+| `PODIUM_MIN_FREE_SLOTS` | `1` | connections held back on a provider somebody is streaming from; [see below](#when-one-viewer-stops-everything) |
 | `PODIUM_PAUSE_WHEN_WATCHING` | `true` | stop while anyone is streaming |
 | `PODIUM_PROBE_IDLE_PROVIDERS` | `false` | narrow that pause to the provider being watched; [see below](#when-one-viewer-stops-everything) |
 | `PODIUM_PROBE_WATCHED_PROVIDER` | `false` | probe that provider too, on its spare connections; [see below](#sharing-the-provider-being-watched) |
@@ -253,8 +253,14 @@ It needs `PODIUM_PROBE_IDLE_PROVIDERS` on, which in turn needs
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `PODIUM_ANALYZE_SECONDS` | `6` | biggest lever on run time |
+| `PODIUM_PROBE_TIMEOUT_MS` | `20000` | whole-check budget: connecting, analysing and the sample together |
+| `PODIUM_MEASURE_BITRATE` | `true` | sample each stream for a bitrate; off leaves ranking to declared resolution and claimed numbers |
+| `PODIUM_MEASURE_SECONDS` | `5` | length of that sample; black-screen detection watches the same window |
 | `PODIUM_MIN_BITRATE_KBPS` | `500` | below this counts as dead |
 | `PODIUM_DETECT_BLACK` | `true` | black-screen detection |
+| `PODIUM_BLACK_RATIO` | `0.8` | share of the sample that must be black for a stream to be flagged |
+| `PODIUM_LANE_STAGGER_MS` | `0` | delay between starting each parallel check; quick checks and soaks stagger on the same setting |
+| `PODIUM_USER_AGENT` | `VLC/3.0.14` | user agent for direct checks; replaced by the stream-profile agent when that switch below is on |
 | `PODIUM_PROBE_VIA_DISPATCHARR` | `false` | probe through Dispatcharr instead of directly at the provider |
 | `PODIUM_SOAK_VIA_DISPATCHARR` | `false` | soak through Dispatcharr instead of directly at the provider |
 | `PODIUM_PROBE_CLIENT_USER_AGENT` | `Podium-Probe/1` | identifies those probes in Dispatcharr activity reads |
@@ -648,7 +654,7 @@ catalogue snapshot.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `PODIUM_METRICS_CHANNELS` | `true` | also expose the per-channel source series — every managed channel's slots with provider and verdict; the only families that scale with the catalogue, so the switch exists for a Prometheus watching its cardinality (environment-only) |
+| `PODIUM_METRICS_CHANNELS` | `true` | also expose the per-channel source series — every managed channel's slots with provider and verdict; the only families that scale with the catalogue, so the switch exists for a Prometheus watching its cardinality |
 
 A scrape job needs the path, and the token if you set one:
 

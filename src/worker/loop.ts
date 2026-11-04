@@ -216,6 +216,10 @@ export async function startWorker(config: Config, log: Log): Promise<() => Promi
   // The soak queue's equivalent of `lastMark`. A string rather than a number
   // because the thing it watches has two parts -- see `soakQueueVersion`.
   let lastSoakVersion = '';
+  // The settings table's equivalent -- `settingsVersion()` moves whenever any
+  // stored setting is written. Watched so a save from the UI reaches a
+  // sleeping worker in one beat instead of whenever the next pass fell due.
+  let lastSettingsVersion = 0;
   // Guards re-entry the way `running` does for a pass: the push fetches a
   // catalogue and scores it twice, so two at once would race each other into
   // Teamarr's whole-set replacement.
@@ -375,7 +379,10 @@ export async function startWorker(config: Config, log: Log): Promise<() => Promi
           // A generated token lands in the settings table -- the same place the
           // UI-entered Dispatcharr credential lives, and the one place the
           // receiver route can read it. This write bumps settingsVersion, which
-          // the web half notices on its next read.
+          // the web half notices on its next read -- and which this worker's own
+          // settings watcher notices too, buying one spare pass. The loop cannot
+          // tell that a write was its own; a pass that re-reads the same config
+          // is the cheap price of watching the one table both halves share.
           store.setSettings({ PODIUM_CONNECT_TOKEN: token });
         }
       } catch (error) {
@@ -779,6 +786,44 @@ export async function startWorker(config: Config, log: Log): Promise<() => Promi
   };
 
   /**
+   * Notice stored settings changing and start a pass on the spot.
+   *
+   * A pass reads its config at the top, so a setting saved from the UI used to
+   * wait for the natural next pass -- on a settled install up to
+   * `PODIUM_IDLE_MAX_MS` of sleeping first. That was barely a lie for a
+   * freshness target, but "pause while anyone is watching" saved at 9am and
+   * sitting untouched until the worker next woke is the opposite of what the
+   * person at the form asked for. Every checkWake-style watcher exists for the
+   * same shape of reason: work arrived while the loop slept.
+   *
+   * The version is the settings table's own `MAX(updated_at)`, so it moves on
+   * *any* stored write -- including this worker's own Connect-token
+   * provisioning. The loop cannot tell that a write was its own, so a token
+   * generated mid-session buys one spare pass. It is rare (only when a token
+   * is minted or replaced), harmless (a pass that re-reads the same config),
+   * and the price of watching the one table both halves share.
+   */
+  const checkSettingsWake = (): void => {
+    if (stopping || !holding) return;
+    let version: number;
+    try {
+      version = store.settingsVersion();
+    } catch {
+      return;
+    }
+    if (version === lastSettingsVersion) return;
+    lastSettingsVersion = version;
+    wakeRequested = true;
+    if (running) return;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    log('settings changed; starting a pass now');
+    pass = tick();
+  };
+
+  /**
    * Beat, and hand the lock back if it is no longer ours.
    *
    * Losing a lock we believe we hold should be impossible -- it takes two
@@ -853,16 +898,23 @@ export async function startWorker(config: Config, log: Log): Promise<() => Promi
       lastMark = 0;
     }
     // Same reasoning as `lastMark`: whatever is already queued is picked up by
-    // the first pass below, so it is not a wake-up.
+    // the first pass below, so it is not a wake-up. Holds for settings too --
+    // the config a pass reads is whatever is stored by the time it starts.
     try {
       lastSoakVersion = store.soakQueueVersion();
     } catch {
       lastSoakVersion = '';
     }
+    try {
+      lastSettingsVersion = store.settingsVersion();
+    } catch {
+      lastSettingsVersion = 0;
+    }
     beat = setInterval(() => {
       if (!keepLock()) return;
       checkWake();
       checkSoakWake();
+      checkSettingsWake();
       checkSync();
     }, 30_000);
     beat.unref?.();

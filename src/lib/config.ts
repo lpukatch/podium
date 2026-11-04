@@ -554,7 +554,6 @@ export const configSchema = z.object({
    * x slots x four families, where every other family here is per provider).
    */
   PODIUM_METRICS_CHANNELS: bool(true),
-  LOG_LEVEL: z.string().default('info'),
 });
 
 export type RawConfig = z.infer<typeof configSchema>;

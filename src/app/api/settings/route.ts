@@ -4,6 +4,7 @@ import { responseErrorText } from '@/lib/error-text';
 import {
   credentialMoveMessage,
   describeSettings,
+  GROUPS,
   movedCredentials,
   resolveEnv,
   validateSettings,
@@ -26,6 +27,10 @@ export function GET() {
       // Secret values are never returned -- only whether one is set. The API
       // that writes a credential must not also read it back.
       fields: describeSettings(process.env, stored),
+      // The page's group taxonomy, from the same source of truth as the
+      // fields: the form stopped hand-writing its own list, which was how the
+      // first unlisted field landed in "Other settings".
+      groups: GROUPS,
       // What the app is actually using right now, for the parts worth showing.
       effective: (() => {
         const config = loadConfig(resolveEnv(process.env, stored));
@@ -86,6 +91,7 @@ export async function PUT(request: Request) {
     return NextResponse.json({
       status: 'saved',
       fields: describeSettings(process.env, store.settings()),
+      groups: GROUPS,
     });
   } catch (error) {
     return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
