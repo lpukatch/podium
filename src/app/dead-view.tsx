@@ -93,6 +93,10 @@ export function DeadView({
   // The effective dry run, read once from `/api/settings`. Null until known,
   // so a slow answer never shows a promise the page cannot keep.
   const [dryRun, setDryRun] = useState<boolean | null>(null);
+  // Arms the inline confirm for Probe all while "Apply reorders" is on. The
+  // probe-only path never arms it, and unchecking the box disarms whatever is
+  // showing -- the confirm's own sentence points there.
+  const [confirmingProbe, setConfirmingProbe] = useState(false);
   const probeAbortRef = useRef<AbortController | null>(null);
 
   // Soaking state for the channels carrying dead streams
@@ -135,7 +139,8 @@ export function DeadView({
       try {
         const resp = await fetch('/api/settings');
         const body = (await resp.json()) as { effective?: { dryRun?: boolean } };
-        if (resp.ok && typeof body.effective?.dryRun === 'boolean') setDryRun(body.effective.dryRun);
+        if (resp.ok && typeof body.effective?.dryRun === 'boolean')
+          setDryRun(body.effective.dryRun);
       } catch {
         // Advisory only; the probe works either way.
       }
@@ -350,6 +355,36 @@ export function DeadView({
                         : 'Preparing to probe…'}
                     </span>
                   </>
+                ) : confirmingProbe && autoApply ? (
+                  /* One click was one click too few for this button. With
+                     "Apply reorders" ticked -- the default -- Probe all both
+                     probes every channel and writes each verdict's order to
+                     Dispatcharr, and the apply API's own documentation reads
+                     "overwrites the channel's stream array with no undo". So
+                     it gets the same inline two-step the Danger Zone, the
+                     soak card and the Teamarr push use, naming what it
+                     writes. Untick the box and probing is safe and
+                     repeatable, which is what the button says it is again. */
+                  <>
+                    <span className="max-w-[60ch] text-sm text-[var(--color-muted)]">
+                      Probe all {totals.channelsAffected} channel(s) and write each verdict's order
+                      to Dispatcharr? Applying overwrites the channel's stream order and there is no
+                      undo. Untick <b>Apply reorders</b> to probe without writing anything.
+                    </span>
+                    <button
+                      type="button"
+                      className={`${btn} !border-[var(--color-bad)] !bg-[var(--color-bad)] !text-[var(--color-on-bad)]`}
+                      onClick={() => {
+                        setConfirmingProbe(false);
+                        void startProbe();
+                      }}
+                    >
+                      Probe and apply
+                    </button>
+                    <button type="button" className={btn} onClick={() => setConfirmingProbe(false)}>
+                      Cancel
+                    </button>
+                  </>
                 ) : (
                   <>
                     <label className="flex cursor-pointer items-center gap-1.5 text-sm text-[var(--color-muted)]">
@@ -364,7 +399,11 @@ export function DeadView({
                     <button
                       type="button"
                       disabled={totals.channelsAffected === 0 || soaking}
-                      onClick={() => void startProbe()}
+                      onClick={() =>
+                        void (autoApply && totals.channelsAffected > 0
+                          ? setConfirmingProbe(true)
+                          : startProbe())
+                      }
                       className={btn}
                       title={
                         totals.channelsAffected === 0

@@ -254,6 +254,7 @@ export function QualityView() {
   const [merging, setMerging] = useState(false);
   const [merged, setMerged] = useState('');
   const [syncing, setSyncing] = useState(false);
+  const [confirmingSync, setConfirmingSync] = useState(false);
   const [sync, setSync] = useState<SyncStatus | null>(null);
   const [checking, setChecking] = useState(false);
   const [check, setCheck] = useState<RuleCheck | null>(null);
@@ -271,7 +272,9 @@ export function QualityView() {
   const load = useCallback(async (open: boolean) => {
     setLoading(true);
     try {
-      const resp = await fetch(`/api/quality-profile${open ? '?eventOnly=0&include=&exclude=' : ''}`);
+      const resp = await fetch(
+        `/api/quality-profile${open ? '?eventOnly=0&include=&exclude=' : ''}`,
+      );
       const body = await resp.json();
       if (!resp.ok || body.error) {
         setError(String(body.error ?? `HTTP ${resp.status}`));
@@ -755,14 +758,50 @@ export function QualityView() {
               >
                 {syncing ? 'Working…' : 'Preview a push'}
               </button>
-              <button
-                type="button"
-                className={btn}
-                disabled={syncing}
-                onClick={() => void pushToTeamarr(false)}
-              >
-                {syncing ? 'Working…' : 'Sync to Teamarr now'}
-              </button>
+              {/* The same two-step confirm the Danger Zone and the soak card
+                  use. The push rewrites the rule set on the Teamarr instance;
+                  the scoring refusal catches a worse ordering, not a merely
+                  different one, and the write happens the moment the button
+                  is clicked. The dry-run twin one row up is the cheap way to
+                  see the same result without writing -- the confirm is where
+                  that pointer belongs, not buried in help text. */}
+              {confirmingSync ? (
+                <>
+                  <span className={`max-w-[60ch] text-sm ${muted}`}>
+                    Write Podium's merged rules to Teamarr now? A pass replaces the rule set on the
+                    instance. Refusals catch a worse ordering, not a different one —{' '}
+                    <b>Preview a push</b> runs this exact check and writes nothing.
+                  </span>
+                  <button
+                    type="button"
+                    disabled={syncing}
+                    className={`${btn} !border-[var(--color-bad)] !bg-[var(--color-bad)] !text-[var(--color-on-bad)]`}
+                    onClick={() => {
+                      setConfirmingSync(false);
+                      void pushToTeamarr(false);
+                    }}
+                  >
+                    Sync now
+                  </button>
+                  <button
+                    type="button"
+                    className={btn}
+                    disabled={syncing}
+                    onClick={() => setConfirmingSync(false)}
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className={btn}
+                  disabled={syncing}
+                  onClick={() => setConfirmingSync(true)}
+                >
+                  {syncing ? 'Working…' : 'Sync to Teamarr now'}
+                </button>
+              )}
             </div>
             {sync.last && <SyncReport outcome={sync.last} />}
 
