@@ -51,7 +51,10 @@ export function GET() {
 export async function PUT(request: Request) {
   let store: Store | null = null;
   try {
-    const patch = (await request.json()) as Record<string, unknown>;
+    const patch = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+    if (patch === null) {
+      return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
+    }
     const { values, errors } = validateSettings(patch);
     if (errors.length > 0) {
       return NextResponse.json({ error: 'invalid settings', errors }, { status: 400 });

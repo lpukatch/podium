@@ -132,7 +132,10 @@ export async function POST(request: Request) {
       pointsPerMbps: config.PODIUM_QUALITY_POINTS_PER_MBPS,
     });
 
-    const parsed = (await request.json()) as unknown;
+    const parsed = (await request.json().catch(() => null)) as unknown;
+    if (parsed === null) {
+      return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
+    }
     const container = parsed as { rules?: unknown };
     const existing = Array.isArray(parsed) ? parsed : container?.rules;
     if (!Array.isArray(existing)) {
