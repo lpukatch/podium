@@ -2,12 +2,11 @@ import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
 import { Eligibility } from '@/lib/eligibility';
 import { responseErrorText } from '@/lib/error-text';
+import { type CachedVerdict, lastProbeFields } from '@/lib/last-probe';
 import type { ChannelRule } from '@/lib/matcher';
 import { resolveOrdering } from '@/lib/ordering';
-import type { ProbeResult } from '@/lib/probe';
 import { groupFilter } from '@/lib/provider-groups';
 import { parseProviders } from '@/lib/rules';
-import { belowBitrateFloor, frameRate, hdrFormat } from '@/lib/scoring';
 import {
   config,
   groupPatterns,
@@ -156,7 +155,7 @@ export async function POST(request: Request) {
 
     // Last probe result per stream, so the editor can show what is known
     // without having to probe again.
-    let verdicts = new Map<number, { probedAt: number; alive: boolean; result: ProbeResult }>();
+    let verdicts = new Map<number, CachedVerdict>();
     let soakResults = new Map<
       number,
       {
@@ -194,7 +193,6 @@ export async function POST(request: Request) {
       const stream = streamById.get(id);
       if (!stream) return null;
       const norm = m.normalize(stream.name);
-      const last = verdicts.get(id)?.result;
       return {
         id,
         raw: stream.name,
@@ -210,23 +208,7 @@ export async function POST(request: Request) {
         assigned: assigned.has(id),
         matched: matchedIds.has(id),
         currentRank: currentOrder.get(id) ?? null,
-        lastProbedAt: verdicts.get(id)?.probedAt ?? null,
-        lastAlive: verdicts.get(id)?.alive ?? null,
-        lastWidth: last?.width ?? null,
-        lastHeight: last?.height ?? null,
-        // The rate a viewer gets, as `source_fps` publishes it -- see `frameRate`.
-        lastFps: last ? frameRate(last) : null,
-        lastVideoCodec: last?.videoCodec ?? null,
-        // `null` both when unprobed and when ffprobe declared no transfer.
-        lastHdrFormat: last ? hdrFormat(last) : null,
-        lastBitrateKbps: last?.bitrateKbps ?? null,
-        lastLowBitrate: last ? belowBitrateFloor(last, weights, groupPolicy.audioOnly) : null,
-        lastAudioCodec: last?.audioCodec ?? null,
-        lastAudioChannels: last?.audioChannels ?? null,
-        lastChannelLayout: last?.channelLayout ?? null,
-        lastAudioBitrateKbps: last?.audioBitrateKbps ?? null,
-        lastAudioSampleRate: last?.audioSampleRate ?? null,
-        lastBlack: last?.black ?? null,
+        ...lastProbeFields(verdicts.get(id), weights, groupPolicy.audioOnly),
         lastSoak: soakResults.get(id) ?? null,
       };
     };
