@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ConsensusReport } from '@/lib/consensus';
 
 interface Row {
@@ -133,6 +133,37 @@ const btn =
   'rounded-lg border border-[var(--color-line)] bg-[var(--color-panel)] px-4 py-2 text-[15px] hover:border-[var(--color-accent)] disabled:opacity-50';
 const pill = 'inline-block rounded-full px-2 py-0.5 text-xs whitespace-nowrap';
 
+/** A queued instant, coarse enough to read at a glance: "45s ago", "3m ago". */
+function ago(ms: number): string {
+  const s = Math.max(Math.round((Date.now() - ms) / 1000), 0);
+  if (s < 90) return `${s}s ago`;
+  if (s < 5400) return `${Math.round(s / 60)}m ago`;
+  return `${Math.round(s / 3600)}h ago`;
+}
+
+/** Whether a re-check covers this channel, as far as GET /api/refresh says. */
+export interface RecheckState {
+  /** When this channel was queued on its own, if it is. */
+  queuedAt: number | null;
+  /** When the whole catalogue was queued, which includes this channel. */
+  allAt: number | null;
+}
+
+/**
+ * Read this channel's line out of GET /api/refresh.
+ *
+ * Pure and exported so an older server -- one that answers without a
+ * `channels` key -- can be pinned to read as "nothing queued" rather than as an
+ * error. Group marks are not consulted: the panel does not know the channel's
+ * group, and the group's own page already says when it is queued.
+ */
+export function recheckStateFor(
+  body: { all?: number | null; channels?: Record<string, number> },
+  channelId: number,
+): RecheckState {
+  return { queuedAt: body.channels?.[String(channelId)] ?? null, allAt: body.all ?? null };
+}
+
 /** The three orders an apply may send, and which one the tick asks for. */
 type OrderChoice = Pick<CheckResult, 'dropOrder' | 'kept' | 'workerOrder'>;
 
@@ -204,6 +235,24 @@ export function CheckPanel({
   // turn. Keyed by id rather than held on the row so a re-check does not wipe
   // what the operator just queued.
   const [soaks, setSoaks] = useState<Record<number, SoakState>>({});
+  // Tagged with the channel it describes. The panel stays mounted when the page
+  // moves from one channel straight to another, and an untagged line would show
+  // the last channel's queue -- and its Cancel -- until the next read landed.
+  const [recheck, setRecheck] = useState<RecheckState & { channelId: number }>({
+    channelId,
+    queuedAt: null,
+    allAt: null,
+  });
+  const [recheckBusy, setRecheckBusy] = useState(false);
+  const [recheckError, setRecheckError] = useState<{ channelId: number; text: string } | null>(
+    null,
+  );
+  // The channel on screen now, for a response to check itself against before
+  // it is allowed to land.
+  const shownChannel = useRef(channelId);
+  useEffect(() => {
+    shownChannel.current = channelId;
+  }, [channelId]);
 
   const check = async (force = false) => {
     setBusy(true);
@@ -328,6 +377,61 @@ export function CheckPanel({
     return () => clearInterval(timer);
   }, [syncQueue, waitingHere]);
 
+  /** What is queued for this channel now, from the marks themselves. */
+  const syncRecheck = useCallback(async () => {
+    try {
+      const resp = await fetch('/api/refresh');
+      const body = await resp.json();
+      if (!resp.ok || body.error || shownChannel.current !== channelId) return;
+      setRecheck({ channelId, ...recheckStateFor(body, channelId) });
+    } catch {
+      // As with the soak queue: a progress hint, not a verdict.
+    }
+  }, [channelId]);
+
+  // On mount, and while this channel is queued, so the line clears once the
+  // worker has re-probed it and retired the mark. A re-check runs through the
+  // ordinary pass, so ten seconds is well inside how long it takes.
+  const queuedAt = recheck.channelId === channelId ? recheck.queuedAt : null;
+  const allAt = recheck.channelId === channelId ? recheck.allAt : null;
+  const recheckQueued = queuedAt !== null;
+  useEffect(() => {
+    void syncRecheck();
+    if (!recheckQueued) return;
+    const timer = setInterval(() => void syncRecheck(), 10_000);
+    return () => clearInterval(timer);
+  }, [syncRecheck, recheckQueued]);
+
+  /**
+   * Queue this channel for a re-check, or call one off.
+   *
+   * Unlike "Probe this channel", this does not probe: it stamps an instant, and
+   * the next pass treats every verdict older than it as expired -- at the
+   * provider limits, and paused while anyone is watching.
+   */
+  const changeRecheck = async (queue: boolean) => {
+    setRecheckBusy(true);
+    setRecheckError(null);
+    try {
+      const resp = queue
+        ? await fetch('/api/refresh', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scope: 'channel', channelId }),
+          })
+        : await fetch(`/api/refresh?scope=channel&channelId=${channelId}`, { method: 'DELETE' });
+      const body = (await resp.json()) as { error?: string };
+      if (!resp.ok || body.error) {
+        setRecheckError({ channelId, text: body.error ?? `HTTP ${resp.status}` });
+      }
+      await syncRecheck();
+    } catch (e) {
+      setRecheckError({ channelId, text: String(e) });
+    } finally {
+      setRecheckBusy(false);
+    }
+  };
+
   const { dropPending, nothingToChange } = result
     ? pendingChange(result, dropUnclaimed)
     : { dropPending: false, nothingToChange: false };
@@ -384,6 +488,31 @@ export function CheckPanel({
             </div>
           </div>
         )}
+        <div className="grid gap-2 py-3 sm:grid-cols-[15rem_minmax(0,1fr)] sm:items-center sm:gap-4">
+          <button
+            type="button"
+            className={`${btn} w-full`}
+            disabled={recheckBusy}
+            onClick={() => void changeRecheck(!recheckQueued)}
+          >
+            {recheckQueued ? 'Cancel re-check' : 'Re-check this channel'}
+          </button>
+          <div>
+            <p className="text-sm text-[var(--color-muted)]">
+              {queuedAt !== null
+                ? `Queued for a re-check ${ago(queuedAt)}. The worker works through it at the provider limits, and pauses while anyone is watching.`
+                : 'Queues every stream here for the worker, however recently it was checked. Cancelling puts the current verdicts back in service.'}
+            </p>
+            {allAt !== null && !recheckQueued && (
+              <p className="mt-1 text-sm text-[var(--color-accent)]">
+                Everything is queued for a re-check — this channel included.
+              </p>
+            )}
+            {recheckError?.channelId === channelId && (
+              <p className="mt-1 text-sm text-[var(--color-bad)]">{recheckError.text}</p>
+            )}
+          </div>
+        </div>
       </div>
 
       {error && <p className="mt-3 text-sm text-[var(--color-bad)]">{error}</p>}

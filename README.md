@@ -82,9 +82,9 @@ going at breakfast.
 
 The target is a floor, though, and the afternoon of a big game is when that
 shows: everything can be comfortably inside the window and still have been
-measured at four in the morning. A group — or the whole catalogue — can be
-[queued for a re-check](docs/usage.md#re-checking-on-demand) whatever the cache
-says. It queues rather than probes, so the pass that does the work is still the
+measured at four in the morning. A channel, a group, or the whole catalogue
+can be [queued for a re-check](docs/usage.md#re-checking-on-demand) whatever the
+cache says. It queues rather than probes, so the pass that does the work is still the
 paced one, and calling it off puts the existing verdicts straight back in
 service.
 

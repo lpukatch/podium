@@ -149,6 +149,15 @@ CREATE TABLE IF NOT EXISTS refresh_marks (
     forced_at  INTEGER NOT NULL
 );
 
+-- The same request, scoped to one channel. A table of its own rather than more
+-- rows in refresh_marks because channel ids and group ids are both Dispatcharr's
+-- positive integers, and sharing a key column would let channel 7 answer for
+-- group 7.
+CREATE TABLE IF NOT EXISTS channel_refresh_marks (
+    channel_id INTEGER PRIMARY KEY,
+    forced_at  INTEGER NOT NULL
+);
+
 -- Streams a person explicitly took off a channel, so auto-assign does not put
 -- them back. Without this the unassign button is useless whenever
 -- PODIUM_AUTO_ASSIGN is on: the stream is still matched by the alias and still
@@ -694,9 +703,11 @@ export interface RefreshMarks {
   all: number | null;
   /** Per-group marks, by group id. */
   byGroup: Map<number, number>;
+  /** Per-channel marks, by channel id. */
+  byChannel: Map<number, number>;
 }
 
-export const NO_MARKS: RefreshMarks = { all: null, byGroup: new Map() };
+export const NO_MARKS: RefreshMarks = { all: null, byGroup: new Map(), byChannel: new Map() };
 
 /** The configurable half of the database, as a backup bundle carries it. */
 export interface ConfigSnapshot {
@@ -706,18 +717,27 @@ export interface ConfigSnapshot {
 }
 
 /**
- * The instant a channel in this group was last told to re-check from scratch.
+ * The instant a channel was last told to re-check from scratch.
  *
- * The later of the two marks that can cover it, and 0 when neither does -- so a
- * caller compares `probedAt <= forcedAt` unconditionally rather than branching
- * on whether a mark exists, since no real verdict is stamped at or before the
- * epoch. A channel with no group at all is still covered by a whole-catalogue
- * mark; it is in the catalogue.
+ * The latest of the marks that can cover it -- the catalogue's, its group's and
+ * its own -- and 0 when none does, so a caller compares `probedAt <= forcedAt`
+ * unconditionally rather than branching on whether a mark exists, since no real
+ * verdict is stamped at or before the epoch. A channel with no group at all is
+ * still covered by a whole-catalogue mark; it is in the catalogue.
  */
-export function forcedAtFor(marks: RefreshMarks, groupId: number | null | undefined): number {
-  const all = marks.all ?? 0;
-  if (groupId === null || groupId === undefined) return all;
-  return Math.max(all, marks.byGroup.get(groupId) ?? 0);
+export function forcedAtFor(
+  marks: RefreshMarks,
+  groupId: number | null | undefined,
+  channelId?: number,
+): number {
+  let forcedAt = marks.all ?? 0;
+  if (groupId !== null && groupId !== undefined) {
+    forcedAt = Math.max(forcedAt, marks.byGroup.get(groupId) ?? 0);
+  }
+  if (channelId !== undefined) {
+    forcedAt = Math.max(forcedAt, marks.byChannel.get(channelId) ?? 0);
+  }
+  return forcedAt;
 }
 
 export interface Progress {
@@ -2094,11 +2114,18 @@ export class Store {
       group_id: number;
       forced_at: number;
     }>;
-    const marks: RefreshMarks = { all: null, byGroup: new Map() };
+    const marks: RefreshMarks = { all: null, byGroup: new Map(), byChannel: new Map() };
     for (const row of rows) {
       if (row.group_id === ALL_GROUPS) marks.all = row.forced_at;
       else marks.byGroup.set(row.group_id, row.forced_at);
     }
+    const channelRows = this.sql(
+      'SELECT channel_id, forced_at FROM channel_refresh_marks',
+    ).all() as Array<{
+      channel_id: number;
+      forced_at: number;
+    }>;
+    for (const row of channelRows) marks.byChannel.set(row.channel_id, row.forced_at);
     return marks;
   }
 
@@ -2146,6 +2173,39 @@ export class Store {
     return this.sql('DELETE FROM refresh_marks WHERE group_id <> ?').run(ALL_GROUPS).changes;
   }
 
+  /** `setRefreshMark`, for one channel. */
+  setChannelRefreshMark(channelId: number, at: number = Date.now()): void {
+    this.sql(
+      `INSERT INTO channel_refresh_marks (channel_id, forced_at) VALUES (?, ?)
+       ON CONFLICT(channel_id) DO UPDATE SET forced_at = excluded.forced_at`,
+    ).run(channelId, at);
+  }
+
+  /** `clearRefreshMark`, for one channel -- with `at`, only that exact request. */
+  clearChannelRefreshMark(channelId: number, at?: number): number {
+    if (at === undefined) {
+      return this.sql('DELETE FROM channel_refresh_marks WHERE channel_id = ?').run(channelId)
+        .changes;
+    }
+    return this.sql('DELETE FROM channel_refresh_marks WHERE channel_id = ? AND forced_at = ?').run(
+      channelId,
+      at,
+    ).changes;
+  }
+
+  /**
+   * Drop every per-channel mark, for the same reason `clearGroupRefreshMarks`
+   * drops the per-group ones when a whole-catalogue request arrives.
+   *
+   * A group request leaves them alone: the overlap is harmless, since a channel
+   * is held to the later of the two instants, and working out which channels a
+   * group holds would mean asking Dispatcharr from a route that otherwise never
+   * does.
+   */
+  clearChannelRefreshMarks(): number {
+    return this.sql('DELETE FROM channel_refresh_marks').run().changes;
+  }
+
   /**
    * A monotonic stamp over the marks, for a reader that wants to know whether a
    * new request has arrived without caring which.
@@ -2156,9 +2216,12 @@ export class Store {
    * a cancel lowers it, and nothing should wake for a cancel.
    */
   refreshMarksVersion(): number {
-    const row = this.sql('SELECT MAX(forced_at) AS v FROM refresh_marks').get() as {
-      v: number | null;
-    };
+    const row = this.sql(
+      `SELECT MAX(v) AS v FROM (
+         SELECT MAX(forced_at) AS v FROM refresh_marks
+         UNION ALL SELECT MAX(forced_at) FROM channel_refresh_marks
+       )`,
+    ).get() as { v: number | null };
     return row.v ?? 0;
   }
 
@@ -3444,6 +3507,7 @@ export class Store {
       // A mark against verdicts that no longer exist is a request that has
       // already been granted, and leaving it would keep waking the worker.
       this.sql('DELETE FROM refresh_marks').run();
+      this.sql('DELETE FROM channel_refresh_marks').run();
       this.sql('DELETE FROM catalogue').run();
       this.sql('DELETE FROM catalogue_state').run();
       this.sql('DELETE FROM assign_blocks').run();

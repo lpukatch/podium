@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { orderToApply, pendingChange, reconcileSoaks } from './check-panel';
+import { orderToApply, pendingChange, recheckStateFor, reconcileSoaks } from './check-panel';
 
 /**
  * A channel whose rule claims three of its five streams, with the ranking
@@ -124,5 +124,24 @@ describe('reconciling the soak queue with what the panel shows', () => {
   it('returns the same object when nothing moved, so no render is wasted', () => {
     const prev = { 7: { phase: 'done' as const, error: '' }, 8: queued() };
     expect(reconcileSoaks(prev, new Set([8]))).toBe(prev);
+  });
+});
+
+describe('recheckStateFor', () => {
+  it('reads this channel out of the queue, and only this channel', () => {
+    const body = { all: null, groups: { '5': 1000 }, channels: { '5': 2000, '6': 3000 } };
+    expect(recheckStateFor(body, 5)).toEqual({ queuedAt: 2000, allAt: null });
+    expect(recheckStateFor(body, 7)).toEqual({ queuedAt: null, allAt: null });
+  });
+
+  it('reports a whole-catalogue request, which covers every channel', () => {
+    expect(recheckStateFor({ all: 4000, channels: {} }, 5)).toEqual({
+      queuedAt: null,
+      allAt: 4000,
+    });
+  });
+
+  it('reads an older server without channel marks as nothing queued', () => {
+    expect(recheckStateFor({ all: null }, 5)).toEqual({ queuedAt: null, allAt: null });
   });
 });

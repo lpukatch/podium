@@ -178,6 +178,22 @@ function duration(ms: number): string {
 
 const n = (value: number) => value.toLocaleString();
 
+/** Outstanding re-check requests, as /api/progress counts them. */
+interface RefreshQueue {
+  all: number | null;
+  groups: number;
+  channels: number;
+}
+
+/** "2 groups and 1 channel are already queued on their own." */
+function queuedOnTheirOwn(groups: number, channels: number): string {
+  const parts: string[] = [];
+  if (groups > 0) parts.push(`${n(groups)} ${groups === 1 ? 'group' : 'groups'}`);
+  if (channels > 0) parts.push(`${n(channels)} ${channels === 1 ? 'channel' : 'channels'}`);
+  const one = groups + channels === 1;
+  return `${parts.join(' and ')} ${one ? 'is' : 'are'} already queued on ${one ? 'its' : 'their'} own.`;
+}
+
 /**
  * Consecutive passes that changed nothing, folded into one row.
  *
@@ -235,7 +251,7 @@ export function ProgressView() {
   const [heartbeatAge, setHeartbeatAge] = useState<number | null>(null);
   const [error, setError] = useState('');
   // Outstanding re-check requests: when the whole catalogue was queued, and how
-  // many groups were queued on their own.
+  // many groups and channels were queued on their own.
   const [soakQueue, setSoakQueue] = useState<{
     total: number;
     manual: number;
@@ -253,10 +269,7 @@ export function ProgressView() {
    */
   const [baselineSeconds, setBaselineSeconds] = useState(90);
   const [confirmingSoak, setConfirmingSoak] = useState(false);
-  const [refresh, setRefresh] = useState<{ all: number | null; groups: number }>({
-    all: null,
-    groups: 0,
-  });
+  const [refresh, setRefresh] = useState<RefreshQueue>({ all: null, groups: 0, channels: 0 });
   // Re-checking everything is hours of provider work on a large catalogue, so
   // it asks first -- and asks with the real number in front of it.
   const [confirming, setConfirming] = useState(false);
@@ -283,9 +296,13 @@ export function ProgressView() {
       setHeartbeatAge(
         typeof body.heartbeatAgeSeconds === 'number' ? body.heartbeatAgeSeconds : null,
       );
-      setRefresh(
-        (body.refresh as { all: number | null; groups: number }) ?? { all: null, groups: 0 },
-      );
+      // `channels` defaults for an older server that only counted groups.
+      const queued = body.refresh as Partial<RefreshQueue> | undefined;
+      setRefresh({
+        all: queued?.all ?? null,
+        groups: queued?.groups ?? 0,
+        channels: queued?.channels ?? 0,
+      });
       // Its own request rather than a field on /api/progress: the queue is
       // owned by a different table and a different endpoint, and folding it in
       // would make the progress payload depend on it being readable.
@@ -598,12 +615,8 @@ export function ProgressView() {
             <div className="flex flex-wrap items-center gap-3">
               <span className="text-sm text-[var(--color-muted)]">
                 Re-check every stream now instead of waiting for the freshness target.
-                {refresh.groups > 0 && (
-                  <>
-                    {' '}
-                    {n(refresh.groups)} {refresh.groups === 1 ? 'group is' : 'groups are'} already
-                    queued on {refresh.groups === 1 ? 'its' : 'their'} own.
-                  </>
+                {refresh.groups + refresh.channels > 0 && (
+                  <> {queuedOnTheirOwn(refresh.groups, refresh.channels)}</>
                 )}
               </span>
               <span className="flex-1" />
