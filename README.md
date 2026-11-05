@@ -140,6 +140,7 @@ network, and set `PODIUM_AUTH_TOKEN` if it goes anywhere else —
 | --- | --- |
 | **[Usage](docs/usage.md)** | Matching streams to channels, section qualifiers, group policy, ranking, and importing existing rules |
 | **[Reading every verdict](docs/usage.md#reading-every-verdict)** | `GET /api/verdicts`: every managed channel's streams in slot order, each with its cached verdict and latest soak, in one read-only call |
+| **[Reading probe history](docs/usage.md#reading-probe-history)** | `GET /api/probe-history`: each stream's recent verdicts, newest first, kept for 30 days and 100 per stream — for chosen streams, or everything probed since a given time |
 | **[Quality priors and the Teamarr export](docs/usage.md#exporting-what-podium-learned)** | Ranking a stream nobody has measured yet, from what its account and its name have been worth before — and exporting that as Teamarr scoring rules, or checking the rules you already run against it |
 | **[Configuration](docs/configuration.md)** | Every environment variable, who can reach it, concurrency limits, and how to keep a settled install quiet |
 | **[Metrics and Grafana](docs/configuration.md#metrics)** | Scraping `/api/metrics`, comparing providers from it, and an [example dashboard](docs/grafana/podium-provider-quality.json) to import |
