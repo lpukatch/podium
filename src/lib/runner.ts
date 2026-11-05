@@ -795,6 +795,17 @@ export interface PlannedChannel {
   maxResolution?: MaxResolution;
 }
 
+/**
+ * One re-check request as a pass tallied it: the instant it was armed at, and
+ * how many of the verdicts it retired no probe has replaced yet. A group mark
+ * (or the catalogue's, as `ALL_GROUPS`) carries `groupId`; a channel mark
+ * carries `channelId`, because the two ids share a range and must not be
+ * mistaken for one another.
+ */
+export type OutstandingMark =
+  | { groupId: number; forcedAt: number; remaining: number }
+  | { channelId: number; forcedAt: number; remaining: number };
+
 export interface OpenJobItem {
   job: ProbeJob;
   age: number;
@@ -2592,7 +2603,7 @@ export class Runner {
     keepStreamIds: Set<number>;
     planned: PlannedChannel[];
     /** Every mark this pass read, with the verdicts it still holds retired. */
-    outstandingMarks: Array<{ groupId: number; forcedAt: number; remaining: number }>;
+    outstandingMarks: OutstandingMark[];
     /**
      * Every channel this pass considers itself the steward of -- the exact
      * population the loop below iterates, held back channels included. The
@@ -2623,16 +2634,29 @@ export class Runner {
     for (const [groupId, forcedAt] of marks.byGroup) {
       outstandingMarks.set(groupId, { forcedAt, remaining: 0 });
     }
+    // Channel marks in a map of their own: a channel id and a group id are both
+    // Dispatcharr's positive integers, and one key space would let the tally
+    // for channel 7 land on group 7.
+    const outstandingChannelMarks = new Map<number, { forcedAt: number; remaining: number }>();
+    for (const [channelId, forcedAt] of marks.byChannel) {
+      outstandingChannelMarks.set(channelId, { forcedAt, remaining: 0 });
+    }
     // Counted only while a request is outstanding: a settled install must not
     // pay for this, and the held-back channels below only read their cache
     // entries when there is a mark to count them against.
-    const marked = outstandingMarks.size > 0;
-    const countRetired = (groupId: number | null | undefined, probedAt: number): void => {
+    const marked = outstandingMarks.size > 0 || outstandingChannelMarks.size > 0;
+    const countRetired = (
+      groupId: number | null | undefined,
+      channelId: number,
+      probedAt: number,
+    ): void => {
       const all = outstandingMarks.get(ALL_GROUPS);
       if (all && probedAt <= all.forcedAt) all.remaining += 1;
       const group =
         groupId === null || groupId === undefined ? undefined : outstandingMarks.get(groupId);
       if (group && probedAt <= group.forcedAt) group.remaining += 1;
+      const own = outstandingChannelMarks.get(channelId);
+      if (own && probedAt <= own.forcedAt) own.remaining += 1;
     };
     const { matcher, channelFloors, channelCeilings } = this.deps.rules.get();
     const index = passedIndex ?? matcher.buildIndex(streams, groupNames);
@@ -2714,7 +2738,7 @@ export class Runner {
             for (const entry of cachedVariants.get(streamId)?.values() ?? []) {
               if (oldest === null || entry.probedAt < oldest) oldest = entry.probedAt;
             }
-            if (oldest !== null) countRetired(channel.groupId, oldest);
+            if (oldest !== null) countRetired(channel.groupId, channel.id, oldest);
           }
           // When the gate opens, or -- for the channels the current rows cannot
           // date, which is most of them against a grid of what is airing now --
@@ -2732,7 +2756,7 @@ export class Runner {
 
       // Whatever an operator has asked to re-check covers this channel from
       // here on: any verdict older than this instant is out of service.
-      const forcedAt = forcedAtFor(marks, channel.groupId);
+      const forcedAt = forcedAtFor(marks, channel.groupId, channel.id);
       const hits: Array<[number, number]> = [];
       const freshEntries = new Map<number, Map<number, ProbeResult>>();
       const settledStreams = new Set<number>();
@@ -2792,7 +2816,7 @@ export class Runner {
         // channel covered by both a group mark and a catalogue-wide one keeps
         // each of them open independently -- and once per stream, whatever the
         // cache holds for it, because a stream is one thing still to go.
-        if (marked && oldest !== null) countRetired(channel.groupId, oldest);
+        if (marked && oldest !== null) countRetired(channel.groupId, channel.id, oldest);
         const forcedOut = oldest !== null && oldest <= forcedAt;
 
         if (freshVariants.size > 0) freshEntries.set(stream.id, freshVariants);
@@ -2884,7 +2908,10 @@ export class Runner {
       oldestProbedAt,
       keepStreamIds,
       planned,
-      outstandingMarks: [...outstandingMarks].map(([groupId, mark]) => ({ groupId, ...mark })),
+      outstandingMarks: [
+        ...[...outstandingMarks].map(([groupId, mark]) => ({ groupId, ...mark })),
+        ...[...outstandingChannelMarks].map(([channelId, mark]) => ({ channelId, ...mark })),
+      ],
       managedChannels,
     };
   }
@@ -2899,20 +2926,25 @@ export class Runner {
    * failed clear (changes = 0) is that case, or somebody already cancelled --
    * either way there is nothing to announce.
    */
-  private retireSatisfiedMarks(
-    marks: Array<{ groupId: number; forcedAt: number; remaining: number }>,
-  ): number {
+  private retireSatisfiedMarks(marks: OutstandingMark[]): number {
     const log = this.deps.log ?? (() => {});
+    const { store } = this.deps;
     let remaining = 0;
     for (const mark of marks) {
       if (mark.remaining > 0) {
         remaining += mark.remaining;
         continue;
       }
-      const label = mark.groupId === ALL_GROUPS ? 'the whole catalogue' : `group ${mark.groupId}`;
-      if (this.deps.store.clearRefreshMark(mark.groupId, mark.forcedAt) > 0) {
-        log(`re-check of ${label} finished`);
+      let label: string;
+      let cleared: number;
+      if ('channelId' in mark) {
+        label = `channel ${mark.channelId}`;
+        cleared = store.clearChannelRefreshMark(mark.channelId, mark.forcedAt);
+      } else {
+        label = mark.groupId === ALL_GROUPS ? 'the whole catalogue' : `group ${mark.groupId}`;
+        cleared = store.clearRefreshMark(mark.groupId, mark.forcedAt);
       }
+      if (cleared > 0) log(`re-check of ${label} finished`);
     }
     return remaining;
   }

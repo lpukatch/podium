@@ -523,14 +523,15 @@ is satisfied by a library measured at four this morning, which is not the same
 as being ready for something that is on tonight — and the streams a provider
 swaps out during the day are exactly the ones you find out about at kickoff.
 
-Two buttons say "look again anyway":
+Three buttons say "look again anyway":
 
 | where | scope |
 | --- | --- |
+| **Re-check this channel**, in a channel's **Check now** panel | every stream on that channel |
 | a group's page | every stream on every channel in that group |
 | **Progress** | the whole catalogue |
 
-Both **queue** work rather than doing it. They write a single timestamp, and the
+All three **queue** work rather than doing it. They write a single timestamp, and the
 planner then treats every verdict older than it as expired, so the next pass
 picks the streams up through the ordinary machinery: provider lanes at their own
 limits, the pass yielding the moment somebody starts watching, and event
@@ -543,6 +544,11 @@ The worker notices within 30 seconds, even from the middle of an idle sleep.
 Cancelling is free. Nothing was deleted from the cache to queue the work, so
 dropping the request puts the existing verdicts straight back into service, and
 whatever was already re-probed stays re-probed.
+
+The scopes overlap harmlessly: a channel is held to the latest request that
+covers it, and each request finishes on its own once its streams have been
+re-probed. Queueing the whole catalogue drops the group and channel requests
+underneath it, so cancelling it leaves nothing small still running.
 
 Two things to know before queueing the whole catalogue:
 
@@ -558,9 +564,11 @@ Two things to know before queueing the whole catalogue:
   not up yet records a dead stream and sinks it. For those, queueing the group
   an hour or two before kickoff is worth more than queueing everything at nine.
 
-For a single channel, the **Check now** panel on the channel itself is faster
-still — it probes on the spot and shows the ordering the results imply without
-writing anything. To probe all channels in a group immediately on demand, use
+For a single channel, **Probe this channel** in the same **Check now** panel is
+faster still — it probes on the spot and shows the ordering the results imply
+without writing anything. **Re-check this channel** is the patient version: it
+waits for the worker, and the new verdicts rank the channel in the ordinary
+pass. To probe all channels in a group immediately on demand, use
 the **Probe all** button on the group view.
 
 ## Ranking
