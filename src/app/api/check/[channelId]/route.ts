@@ -372,6 +372,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
           detectBlack: config.PODIUM_DETECT_BLACK,
           blackRatio: config.PODIUM_BLACK_RATIO,
           audioOnly,
+          debug: config.PODIUM_DEBUG,
         });
         // Do not pollute shared cache if channel is held back by group policy
         if (verdict.allowed) {

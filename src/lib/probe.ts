@@ -149,6 +149,8 @@ export interface ProbeOptions {
    * If false (default), missing video track marks the stream as DEAD.
    */
   audioOnly?: boolean;
+  /** When true, log extra probe diagnostics. */
+  debug?: boolean;
 }
 
 export interface FfprobeStream {
@@ -569,6 +571,7 @@ export async function probe(url: string, options: ProbeOptions = {}): Promise<Pr
     detectBlack = true,
     blackRatio = 0.8,
     audioOnly = false,
+    debug = false,
   } = options;
 
   const refusal = rejectUrl(url);
@@ -635,8 +638,13 @@ export async function probe(url: string, options: ProbeOptions = {}): Promise<Pr
     child.on('close', (code) => {
       if (code !== 0) {
         const lines = stderr.trim().split('\n').filter(Boolean);
-        const detail = lines.length > 0 ? lines[lines.length - 1]! : `exit ${code}`;
-        finish({ ...DEAD, error: detail.slice(0, 200) });
+        const detail =
+          debug && lines.length > 1
+            ? lines.slice(-3).join('; ')
+            : lines.length > 0
+              ? lines[lines.length - 1]!
+              : `exit ${code}`;
+        finish({ ...DEAD, error: detail.slice(0, 300) });
         return;
       }
       try {

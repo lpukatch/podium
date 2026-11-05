@@ -27,7 +27,7 @@ import { errorText } from './error-text';
 import type { Matcher, StreamIndex } from './matcher';
 import { resolveOrdering, withResolutionCeiling, withResolutionFloor } from './ordering';
 import { Pacer, type PacerConfig, viewersByProvider } from './pacer';
-import { type ProbeResult, probe, type SoakResult, soakStream } from './probe';
+import { deadReason, type ProbeResult, probe, type SoakResult, soakStream } from './probe';
 import {
   activityOptions,
   probeProxyBase,
@@ -2136,6 +2136,7 @@ export class Runner {
             inflight.set(job.streamId, channelNames.get(job.channelId) ?? `#${job.channelId}`);
             this.emit({ lanes: laneSnapshot() });
 
+            const stream = streamById.get(job.streamId);
             let result: ProbeResult;
             try {
               result = await probe(job.url, {
@@ -2147,6 +2148,7 @@ export class Runner {
                 detectBlack: config.PODIUM_DETECT_BLACK,
                 blackRatio: config.PODIUM_BLACK_RATIO,
                 audioOnly: job.audioOnly,
+                debug: config.PODIUM_DEBUG,
               });
             } catch (error) {
               // probe() returns DEAD rather than throwing, so this is defensive
@@ -2157,11 +2159,13 @@ export class Runner {
               laneFailed.set(key, (laneFailed.get(key) ?? 0) + 1);
               this.emit({ lanes: laneSnapshot() });
               settler.landed(job, null);
+              const prov = providerNames.get(job.providerId) ?? `provider ${job.providerId}`;
+              const name = stream?.name ?? `stream ${job.streamId}`;
+              log(`probe error: ${name} (${prov}): ${errorText(error)}`);
               throw error;
             } finally {
               inflight.delete(job.streamId);
             }
-            const stream = streamById.get(job.streamId);
             if (stream?.streamHash) {
               // Keyed on the stream, not on `job.profileId`: the login that
               // drew this stream is a scheduling detail, and keying on it would
@@ -2173,7 +2177,23 @@ export class Runner {
             // `done` advances for every verdict (alive or dead); `dead` is the
             // breakdown of the ones that came back dead.
             laneDone.set(key, (laneDone.get(key) ?? 0) + 1);
-            if (!result.alive) laneDead.set(key, (laneDead.get(key) ?? 0) + 1);
+            if (!result.alive) {
+              laneDead.set(key, (laneDead.get(key) ?? 0) + 1);
+              const prov = providerNames.get(job.providerId) ?? `provider ${job.providerId}`;
+              const name = stream?.name ?? `stream ${job.streamId}`;
+              const reason = deadReason(result.error);
+              const detail = result.error ? `: ${result.error}` : '';
+              log(
+                `probe failed: ${name} (${prov}) [${reason}]${detail} (${(result.elapsedMs / 1000).toFixed(1)}s)`,
+              );
+            } else if (config.PODIUM_DEBUG) {
+              const prov = providerNames.get(job.providerId) ?? `provider ${job.providerId}`;
+              const name = stream?.name ?? `stream ${job.streamId}`;
+              const blackInfo = result.black ? ' [black]' : '';
+              log(
+                `probe ok: ${name} (${prov}) ${result.width}x${result.height}@${result.fps}fps ${result.bitrateKbps}kbps${blackInfo} (${(result.elapsedMs / 1000).toFixed(1)}s)`,
+              );
+            }
             settler.landed(job, result);
             this.emit({
               probed: counters.probed,
