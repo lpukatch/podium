@@ -392,9 +392,26 @@ export function isHealthy(
   if (audioOnly || (!result.videoCodec && !result.height)) {
     return result.audioBitrateKbps > 0 || result.bitrateKbps > 0 || result.audioChannels > 0;
   }
-  // A measured 0 means "unknown", not "no data" -- only judge what we measured.
-  if (weights.minBitrateKbps <= 0 || result.bitrateKbps <= 0) return true;
-  return result.bitrateKbps >= weights.minBitrateKbps;
+  return !belowBitrateFloor(result, weights);
+}
+
+/**
+ * True when a stream measured under `weights.minBitrateKbps`: the bitrate half
+ * of `isHealthy`, exported so a reader that shows the verdict cannot disagree
+ * with the check that applies it.
+ *
+ * False whenever the floor has nothing to judge: a floor of 0 (turned off), a
+ * bitrate of 0 (never measured, not "delivers nothing"), and a stream with no
+ * picture or on an audio-only channel, where a video floor does not apply.
+ */
+export function belowBitrateFloor(
+  result: ProbeResult,
+  weights: Weights = DEFAULT_WEIGHTS,
+  audioOnly = false,
+): boolean {
+  if (audioOnly || (!result.videoCodec && !result.height)) return false;
+  if (weights.minBitrateKbps <= 0 || result.bitrateKbps <= 0) return false;
+  return result.bitrateKbps < weights.minBitrateKbps;
 }
 
 /**
