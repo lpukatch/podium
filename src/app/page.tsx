@@ -2680,8 +2680,8 @@ export default function Page() {
               <Editor
                 title="Exclude"
                 hint={
-                  'Reject these even if an alias matches. A name, a tail token to drop one ' +
-                  'variant — 4K, HEVC, 1080p, RAW — or ~"event only" for bracketed text.'
+                  'Reject these even if an alias or contains matches. A name, whole-word substring ' +
+                  '(e.g. nickname to drop), tail token — 4K, HEVC, 1080p, RAW — or ~"event only" for bracketed text. Plain text, not regex.'
                 }
                 value={exclude}
                 onChange={setExclude}
