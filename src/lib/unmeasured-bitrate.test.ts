@@ -13,9 +13,11 @@
 import { describe, expect, it } from 'vitest';
 import type { ProbeResult } from './probe';
 import {
+  belowBitrateFloor,
   bitrateUnknown,
   DEFAULT_STRATEGY,
   DEFAULT_WEIGHTS,
+  isHealthy,
   isUsable,
   type RankEntry,
   rank,
@@ -71,6 +73,35 @@ describe('score stays honest about what was measured', () => {
     expect(isUsable(probe({ bitrateKbps: 100 }), { ...DEFAULT_WEIGHTS, minBitrateKbps: 500 })).toBe(
       false,
     );
+  });
+});
+
+describe('belowBitrateFloor', () => {
+  const floor = { ...DEFAULT_WEIGHTS, minBitrateKbps: 500 };
+
+  it('flags a measured bitrate under the floor', () => {
+    expect(belowBitrateFloor(probe({ bitrateKbps: 499 }), floor)).toBe(true);
+    expect(belowBitrateFloor(probe({ bitrateKbps: 500 }), floor)).toBe(false);
+  });
+
+  it('does not flag what it cannot judge', () => {
+    // Unmeasured, floor switched off, a stream with no picture, and a channel
+    // that is audio-only: each one passes isHealthy's floor, so none counts as low here.
+    expect(belowBitrateFloor(unmeasured, floor)).toBe(false);
+    expect(belowBitrateFloor(probe({ bitrateKbps: 100 }), { ...floor, minBitrateKbps: 0 })).toBe(
+      false,
+    );
+    expect(belowBitrateFloor(probe({ bitrateKbps: 100, videoCodec: '', height: 0 }), floor)).toBe(
+      false,
+    );
+    expect(belowBitrateFloor(probe({ bitrateKbps: 100 }), floor, true)).toBe(false);
+  });
+
+  it('is exactly the floor isHealthy applies', () => {
+    for (const bitrateKbps of [0, 100, 499, 500, 10_000]) {
+      const result = probe({ bitrateKbps });
+      expect(isHealthy(result, floor)).toBe(!belowBitrateFloor(result, floor));
+    }
   });
 });
 
