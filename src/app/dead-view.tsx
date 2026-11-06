@@ -135,7 +135,8 @@ export function DeadView({
       try {
         const resp = await fetch('/api/settings');
         const body = (await resp.json()) as { effective?: { dryRun?: boolean } };
-        if (resp.ok && typeof body.effective?.dryRun === 'boolean') setDryRun(body.effective.dryRun);
+        if (resp.ok && typeof body.effective?.dryRun === 'boolean')
+          setDryRun(body.effective.dryRun);
       } catch {
         // Advisory only; the probe works either way.
       }

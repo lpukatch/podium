@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RequireClause } from '@/lib/setting-requirements';
 import { clampNote, unsatisfiedRequires } from '@/lib/setting-requirements';
 import { VERSION } from '@/lib/version';
@@ -202,6 +202,28 @@ export function SettingsView() {
   const [test, setTest] = useState<{ ok: boolean; text: string } | null>(null);
   const [teamarrTest, setTeamarrTest] = useState<{ ok: boolean; text: string } | null>(null);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+  /** The field a failed save wants scrolled into view; consumed by the effect below. */
+  const scrollToKeyRef = useRef<string | null>(null);
+
+  /**
+   * The scroll half of the save-error handling. It runs after the render that
+   * follows the failed save, so the un-hiding has already rendered by the time
+   * the field is scrolled to: the collapsed advanced group was opened, and the
+   * search box that matched nothing was cleared. Finding the field still
+   * hidden parks the request for the next render of these dependencies --
+   * scrollIntoView on a hidden element silently does nothing, which is why
+   * the scroll cannot simply happen in the save handler.
+   */
+  useEffect(() => {
+    const key = scrollToKeyRef.current;
+    if (!key) return;
+    const el = document.getElementById(`settings-field-${key}`);
+    if (!el) return;
+    el.closest('details')?.setAttribute('open', '');
+    if (el.offsetParent === null) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    scrollToKeyRef.current = null;
+  }, [fieldErrors, query, fields]);
 
   const load = useCallback(async () => {
     try {
@@ -285,15 +307,14 @@ export function SettingsView() {
           setFieldErrors(Object.fromEntries(errors.map((e) => [e.key, e.message])));
           setError('Some fields need attention — see the notes under them.');
           // Where the eye should go: the form is long, and the first bad
-          // field is usually far below the fold.
+          // field is usually far below the fold. The scroll itself lands in
+          // the effect above, after this render -- a collapsed advanced group
+          // or an active search hides the field, and scrollIntoView on a
+          // hidden element silently does nothing.
           const first = errors[0];
           if (first) {
-            const el = document.getElementById(`settings-field-${first.key}`);
-            // A collapsed advanced group or an active search hides the field,
-            // and scrollIntoView on a hidden element silently does nothing.
-            el?.closest('details')?.setAttribute('open', '');
-            el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            if (!el) setQuery('');
+            if (!document.getElementById(`settings-field-${first.key}`)) setQuery('');
+            scrollToKeyRef.current = first.key;
           }
           return;
         }

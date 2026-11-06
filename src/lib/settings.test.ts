@@ -2,7 +2,8 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { loadConfig } from './config';
+import { CONFIG_DEFAULTS, loadConfig } from './config';
+import { QUALITY_FIT_DEFAULTS } from './quality-fit-defaults';
 import { clampNote, unsatisfiedRequires } from './setting-requirements';
 import {
   describeSettings,
@@ -218,6 +219,16 @@ describe('the settings page groups', () => {
     const known = new Set(GROUPS.map((g) => g.id));
     const orphans = FIELDS.filter((f) => !known.has(f.group)).map((f) => f.key);
     expect(orphans).toEqual([]);
+  });
+
+  it('keeps the quality fit fallbacks level with the schema defaults', () => {
+    // QUALITY_FIT_DEFAULTS exists so profileQuery's URL fallback and the
+    // Quality tab's pre-profile copy cannot grow literals of their own -- the
+    // browser cannot import the config machinery to read the real numbers.
+    // This is the check that keeps the constant honest against the schema it
+    // claims to mirror.
+    expect(QUALITY_FIT_DEFAULTS.minSamples).toBe(CONFIG_DEFAULTS.PODIUM_QUALITY_MIN_SAMPLES);
+    expect(QUALITY_FIT_DEFAULTS.pointsPerMbps).toBe(CONFIG_DEFAULTS.PODIUM_QUALITY_POINTS_PER_MBPS);
   });
 
   it('leaves no group empty and points every group at a real section', () => {

@@ -16,6 +16,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { MinerGuard, MinerReport } from '@/lib/miner';
 import type { Effect, LabelAccuracy, QualityProfile, ScopeSummary } from '@/lib/quality';
 import { MAX_TIER_ACCOUNT_SHARE } from '@/lib/quality';
+import { QUALITY_FIT_DEFAULTS } from '@/lib/quality-fit-defaults';
 import type { StoredRuleCheckRow, StoredRuleMiss } from '@/lib/store';
 import type { RuleCheck } from '@/lib/teamarr';
 import type { MatchCoverage } from '@/lib/teamarr-match';
@@ -265,13 +266,16 @@ export function QualityView() {
   // fitted at the defaults whatever this page showed. Both paths now read the
   // settings (`PODIUM_QUALITY_MIN_SAMPLES`, `PODIUM_QUALITY_POINTS_PER_MBPS`),
   // and the server echoes what it actually used so the dimming below matches
-  // the fit rather than a local guess.
-  const fit = profile?.fit ?? { minSamples: 20, pointsPerMbps: 5 };
+  // the fit rather than a local guess. Until the profile lands, the fallback is
+  // the shared constant, not a literal that could drift from the schema.
+  const fit = profile?.fit ?? QUALITY_FIT_DEFAULTS;
 
   const load = useCallback(async (open: boolean) => {
     setLoading(true);
     try {
-      const resp = await fetch(`/api/quality-profile${open ? '?eventOnly=0&include=&exclude=' : ''}`);
+      const resp = await fetch(
+        `/api/quality-profile${open ? '?eventOnly=0&include=&exclude=' : ''}`,
+      );
       const body = await resp.json();
       if (!resp.ok || body.error) {
         setError(String(body.error ?? `HTTP ${resp.status}`));

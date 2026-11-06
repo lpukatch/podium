@@ -28,6 +28,7 @@ import { assignmentIsRule, compileGlob, type Glob, type PolicyMode } from './eli
 // Type-only, and deliberately: `miner.ts` imports real values from here, so a
 // value import in this direction would be a runtime cycle. Erased at compile.
 import type { ConsolidatedToken } from './miner';
+import { QUALITY_FIT_DEFAULTS } from './quality-fit-defaults';
 import type { StoredQualitySample } from './store';
 
 export type Tier = 'uhd' | 'fhd' | 'hd' | 'sd' | 'unknown';
@@ -608,7 +609,7 @@ export function buildProfile(
   samples: StoredQualitySample[],
   options: ProfileOptions = {},
 ): QualityProfile {
-  const minSamples = options.minSamples ?? 20;
+  const minSamples = options.minSamples ?? QUALITY_FIT_DEFAULTS.minSamples;
   const scope = options.scope ?? OPEN_SCOPE;
   const compiled = compileScope(scope);
 
@@ -1066,7 +1067,7 @@ const BITRATE_POINTS = 8;
  */
 export function profileQuery(
   params: URLSearchParams,
-  fit: { minSamples: number; pointsPerMbps: number } = { minSamples: 20, pointsPerMbps: 5 },
+  fit: { minSamples: number; pointsPerMbps: number } = QUALITY_FIT_DEFAULTS,
 ): { minSamples: number; pointsPerMbps: number } {
   const number = (key: string, fallback: number, min: number, max: number): number => {
     const raw = params.get(key);
@@ -1194,9 +1195,9 @@ function pointsFor(deltaKbps: number, pointsPerMbps: number, maxPoints: number):
  * right answer when the name is the only thing there was to go on.
  */
 export function teamarrRules(profile: QualityProfile, options: ExportOptions = {}): RulesExport {
-  const pointsPerMbps = options.pointsPerMbps ?? 5;
+  const pointsPerMbps = options.pointsPerMbps ?? QUALITY_FIT_DEFAULTS.pointsPerMbps;
   const maxPoints = options.maxPoints ?? 15;
-  const minSamples = options.minSamples ?? 20;
+  const minSamples = options.minSamples ?? QUALITY_FIT_DEFAULTS.minSamples;
   const consolidated = options.consolidated ?? [];
   const deadPoints = DEAD_POINTS;
   const bitratePoints = BITRATE_POINTS;
