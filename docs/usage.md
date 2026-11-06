@@ -1196,8 +1196,8 @@ fires on everything the demotion did not catch, which is a flat bonus for having
 been probed, and reintroduces exactly what centring the ladder removed. What
 ships is the demotion alone.
 
-`?deadPoints=` and `?bitratePoints=` tune the two; set either to `0` to
-suppress it.
+**Points per Mbps** in Settings tunes the slope of the bitrate ladder; set it
+to `0` to suppress it. Liveness penalty rules remain constant.
 
 ### Pushing straight to Teamarr
 
@@ -1603,7 +1603,7 @@ feeds that sit still long enough to probe; per-event streams appear an hour
 before kickoff and are gone by morning. The wider the gap, the more a bitrate
 rule is scoring *how a stream was attached* rather than how good it is. Centring
 the bitrate ladder on the median removes the worst of it — see above — but the
-number is worth knowing before deciding what `bitratePoints` should be.
+number is worth knowing before deciding what points per Mbps should be.
 
 #### It runs itself after the first upload
 

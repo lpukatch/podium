@@ -151,7 +151,6 @@ export async function POST(request: Request) {
         typeof (rule as { value?: unknown }).value === 'string',
     );
 
-    store = new Store(loadConfig().dbPath);
     const scope = scopeOf(url, config);
     const samples = store.qualitySamples();
     const profile = buildProfile(samples, { minSamples, scope });
