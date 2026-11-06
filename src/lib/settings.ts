@@ -19,10 +19,10 @@ import { CONFIG_DEFAULTS } from './config';
 import type { RequireClause } from './setting-requirements';
 import type { Store } from './store';
 
+export type { RequireClause } from './setting-requirements';
 // The dependency checks live in a leaf module so the settings form can use
 // them without importing this file's server-side config machinery with them.
 export { clampNote, unsatisfiedRequires } from './setting-requirements';
-export type { RequireClause } from './setting-requirements';
 
 export type FieldKind = 'string' | 'secret' | 'boolean' | 'number';
 
@@ -108,6 +108,9 @@ export interface GroupSpec {
 
 /** Displayed units from stored units. */
 function toDisplay(raw: string, field: FieldSpec): string {
+  if (field.kind === 'boolean' && raw !== '') {
+    return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase()) ? 'true' : 'false';
+  }
   if (!field.scale || raw === '') return raw;
   const n = Number(raw);
   if (!Number.isFinite(n)) return raw;
@@ -276,6 +279,7 @@ export const FIELDS: FieldSpec[] = [
     min: 0,
     max: 100,
     int: true,
+    requiresAll: [{ key: 'PODIUM_AUTO_ASSIGN', state: 'on' }],
   },
   {
     key: 'PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER',
@@ -288,6 +292,7 @@ export const FIELDS: FieldSpec[] = [
     min: 0,
     max: 100,
     int: true,
+    requiresAll: [{ key: 'PODIUM_AUTO_ASSIGN', state: 'on' }],
   },
   {
     key: 'PODIUM_AUTO_ASSIGN_PRUNE_PER_PROVIDER',
@@ -849,26 +854,24 @@ export const FIELDS: FieldSpec[] = [
     key: 'PODIUM_TEAMARR_MIN_CHANNELS',
     kind: 'number',
     label: 'Fewest channels to check against',
-    help: 'Wait until old and new rules can be compared on at least this many channels before a scheduled push.',
+    help: 'Wait until old and new rules can be compared on at least this many channels before a scheduled push or a preview.',
     more: 'It retries within the hour. Only event channels currently carrying two probed streams can be compared, so the number collapses overnight and a push landing then is effectively unchecked. Installs that never reach this many are not held back.',
     section: 'teamarr',
     group: 'teamarr-guards',
     min: 0,
     max: 10_000,
     int: true,
-    requiresAll: [{ key: 'PODIUM_TEAMARR_SYNC', state: 'on' }],
   },
   {
     key: 'PODIUM_TEAMARR_PEAK_FRACTION',
     kind: 'number',
     label: 'Push at a share of the busiest recent population',
-    help: 'Delay scheduled pushes until the checkable population reaches this fraction (0-1) of the largest of the last seven days. 0 keeps the floor absolute.',
+    help: 'Delay scheduled pushes and previews until the checkable population reaches this fraction (0-1) of the largest of the last seven days. 0 keeps the floor absolute.',
     more: "Event catalogues swing with the calendar -- a football weekend runs a hundred channels where a Tuesday runs twenty -- and a push landing at the floor has been checked on a sliver of what a day later would have compared. A fraction drifts the push towards this install's own busy spell, whenever that is. If nothing has pushed in seven days the bar falls back to the floor above, so a missed busy spell cannot stall pushes forever.",
     section: 'teamarr',
     group: 'teamarr-guards',
     min: 0,
     max: 1,
-    requiresAll: [{ key: 'PODIUM_TEAMARR_SYNC', state: 'on' }],
   },
 ];
 

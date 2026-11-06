@@ -1,9 +1,9 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { VERSION } from '@/lib/version';
-import { clampNote, unsatisfiedRequires } from '@/lib/setting-requirements';
 import type { RequireClause } from '@/lib/setting-requirements';
+import { clampNote, unsatisfiedRequires } from '@/lib/setting-requirements';
+import { VERSION } from '@/lib/version';
 import { ConnectActivityPanel } from './connect-activity';
 
 interface Field {
@@ -121,10 +121,8 @@ function groupedRows(section: { sources: Field['section'][] }, groups: Group[], 
   const out = groups
     .filter((g) => section.sources.includes(g.section))
     .map((g) => ({ group: g, rows: rows.filter((f) => f.group === g.id) }));
-  const claimed = new Set(
-    groups.filter((g) => section.sources.includes(g.section)).map((g) => g.id),
-  );
-  const remaining = rows.filter((f) => !claimed.has(f.group));
+  const placed = new Set(out.flatMap((entry) => entry.rows.map((f) => f.key)));
+  const remaining = rows.filter((f) => !placed.has(f.key));
   if (remaining.length)
     out.push({
       group: {
@@ -234,8 +232,10 @@ export function SettingsView() {
    * render its effective default or the form states the opposite of the truth
    * -- "pause while anyone is watching" showed as off while it was on.
    */
-  const checkedValue = (f: Field): boolean =>
-    (edits[f.key] ?? (f.value || f.defaultValue)) === 'true';
+  const checkedValue = (f: Field): boolean => {
+    const raw = (edits[f.key] ?? (f.value || f.defaultValue)).trim().toLowerCase();
+    return ['1', 'true', 'yes', 'on'].includes(raw);
+  };
   const dirty = Object.keys(edits).length > 0;
 
   /**
@@ -287,10 +287,14 @@ export function SettingsView() {
           // Where the eye should go: the form is long, and the first bad
           // field is usually far below the fold.
           const first = errors[0];
-          if (first)
-            document
-              .getElementById(`settings-field-${first.key}`)
-              ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          if (first) {
+            const el = document.getElementById(`settings-field-${first.key}`);
+            // A collapsed advanced group or an active search hides the field,
+            // and scrollIntoView on a hidden element silently does nothing.
+            el?.closest('details')?.setAttribute('open', '');
+            el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            if (!el) setQuery('');
+          }
           return;
         }
         setError(body.error ?? `HTTP ${resp.status}`);

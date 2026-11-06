@@ -3,16 +3,16 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from './config';
+import { clampNote, unsatisfiedRequires } from './setting-requirements';
 import {
   describeSettings,
-  FIELDS,
   FIELD_KEYS,
+  FIELDS,
   GROUPS,
   mergeForTest,
   resolveEnv,
   validateSettings,
 } from './settings';
-import { clampNote, unsatisfiedRequires } from './setting-requirements';
 import { Store } from './store';
 
 describe('resolveEnv', () => {
@@ -101,6 +101,20 @@ describe('describeSettings', () => {
     expect(views.find((f) => f.key === 'PODIUM_MAX_AGE_MS')?.defaultValue).toBe('1440');
     expect(views.find((f) => f.key === 'PODIUM_TICK_MS')?.defaultValue).toBe('1');
     expect(views.find((f) => f.key === 'PODIUM_PROBE_VIA_DISPATCHARR')?.defaultValue).toBe('false');
+  });
+
+  it('normalizes boolean values to "true" or "false" from env variations', () => {
+    const views = describeSettings(
+      {
+        PODIUM_PAUSE_WHEN_WATCHING: '1',
+        PODIUM_DETECT_BLACK: 'on',
+        PODIUM_PROBE_VIA_DISPATCHARR: 'yes',
+      },
+      {},
+    );
+    expect(views.find((f) => f.key === 'PODIUM_PAUSE_WHEN_WATCHING')?.value).toBe('true');
+    expect(views.find((f) => f.key === 'PODIUM_DETECT_BLACK')?.value).toBe('true');
+    expect(views.find((f) => f.key === 'PODIUM_PROBE_VIA_DISPATCHARR')?.value).toBe('true');
   });
 });
 

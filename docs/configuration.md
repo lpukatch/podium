@@ -261,6 +261,7 @@ It needs `PODIUM_PROBE_IDLE_PROVIDERS` on, which in turn needs
 | `PODIUM_BLACK_RATIO` | `0.8` | share of the sample that must be black for a stream to be flagged |
 | `PODIUM_LANE_STAGGER_MS` | `0` | delay between starting each parallel check; quick checks and soaks stagger on the same setting |
 | `PODIUM_USER_AGENT` | `VLC/3.0.14` | user agent for direct checks; replaced by the stream-profile agent when that switch below is on |
+| `PODIUM_DIRECT_PROFILE_USER_AGENT` | `false` | apply the stream profile's user agent to direct checks, replacing the agent above |
 | `PODIUM_PROBE_VIA_DISPATCHARR` | `false` | probe through Dispatcharr instead of directly at the provider |
 | `PODIUM_SOAK_VIA_DISPATCHARR` | `false` | soak through Dispatcharr instead of directly at the provider |
 | `PODIUM_PROBE_CLIENT_USER_AGENT` | `Podium-Probe/1` | identifies those probes in Dispatcharr activity reads |
