@@ -506,12 +506,20 @@ export class Matcher {
    * Both are kept, and neither can be mistaken for the other: a name that
    * survives normalisation never keys to a token normalisation removes.
    */
-  compileExclude(line: string): { key: string; tag: string; named: boolean; spec: AliasSpec } {
+  compileExclude(line: string): {
+    key: string;
+    tag: string;
+    named: boolean;
+    spec: AliasSpec;
+    wordMatcher?: RegExp;
+  } {
     const { key, spec } = this.compileAlias(line);
     // Always case-insensitive: "4k" and "4K" are the same tag, and a
     // case-sensitive ruleset is asking about *names*, not decoration.
     const tag = matchKey(spec.text);
-    return { key, tag, named: key !== '' || tag !== '', spec };
+    const probe = spec.text.toLowerCase().trim();
+    const wordMatcher = key !== '' && probe ? wordBoundaryMatcher(probe) : undefined;
+    return { key, tag, named: key !== '' || tag !== '', spec, wordMatcher };
   }
 
   /**
@@ -670,11 +678,15 @@ export class Matcher {
       // whichever it used: by name (`CNN`, or `CNN ~4K` for one variant of it),
       // by bare quality token (`4K` -- the variant across every name), or by
       // qualifier alone (`~"event only"` -- a variant whose only mark is text
-      // the name does not keep). An empty name key is not a name match: it means
-      // the entry named something other than a name.
+      // the name does not keep). A word or nickname in an exclude entry also
+      // matches as a whole-word substring of the normalised stream name. An
+      // empty name key is not a name match: it means the entry named something
+      // other than a name.
       const excluded = excludes.some((x) => {
         const hit = x.named
-          ? (key !== '' && x.key === key) || (x.tag !== '' && qualityKeys(norm.quality).has(x.tag))
+          ? (key !== '' &&
+              (x.key === key || Boolean(x.wordMatcher?.test(index.folded.get(stream.id) ?? '')))) ||
+            (x.tag !== '' && qualityKeys(norm.quality).has(x.tag))
           : // Qualifiers alone. An entry with nothing at all -- a blank line in
             // the box -- names nothing and must reject nothing, or one stray
             // newline empties the channel.

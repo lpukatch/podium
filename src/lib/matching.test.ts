@@ -1058,6 +1058,24 @@ describe('matcher', () => {
     ]);
   });
 
+  it('excludes a stream matching a whole-word substring or nickname in exclude', () => {
+    const m = matcherFor({ channel_id: 1, contains: ['Nationals'], exclude: ['Mets'] });
+    const index = m.buildIndex([
+      stream(10, 'US: MLB Washington Nationals vs NY Mets'),
+      stream(11, 'US: MLB Washington Nationals vs Miami Marlins'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[11, 0]]);
+  });
+
+  it('excludes multi-word substrings in exclude', () => {
+    const m = matcherFor({ channel_id: 1, contains: ['Cubs'], exclude: ['White Sox'] });
+    const index = m.buildIndex([
+      stream(10, 'US: MLB Chicago Cubs vs Chicago White Sox'),
+      stream(11, 'US: MLB Chicago Cubs vs Milwaukee Brewers'),
+    ]);
+    expect(m.match(m.rules.get(1)!, index)).toEqual([[11, 0]]);
+  });
+
   it('applies tail qualifiers to contains as well', () => {
     const m = matcherFor({ channel_id: 1, contains: ['WRC ~!4K'] });
     const index = m.buildIndex([stream(10, 'VA | NBC 4 WRC'), stream(11, 'VA | NBC 4 WRC 4K')]);
