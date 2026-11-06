@@ -27,7 +27,14 @@ import { errorText } from './error-text';
 import type { Matcher, StreamIndex } from './matcher';
 import { resolveOrdering, withResolutionCeiling, withResolutionFloor } from './ordering';
 import { Pacer, type PacerConfig, viewersByProvider } from './pacer';
-import { deadReason, type ProbeResult, probe, type SoakResult, soakStream } from './probe';
+import {
+  deadDetail,
+  deadReason,
+  type ProbeResult,
+  probe,
+  type SoakResult,
+  soakStream,
+} from './probe';
 import {
   activityOptions,
   probeProxyBase,
@@ -2182,7 +2189,10 @@ export class Runner {
               const prov = providerNames.get(job.providerId) ?? `provider ${job.providerId}`;
               const name = stream?.name ?? `stream ${job.streamId}`;
               const reason = deadReason(result.error);
-              const detail = result.error ? `: ${result.error}` : '';
+              // Through deadDetail, like the dead list: ffmpeg's stderr often
+              // echoes the input URL, and probe URLs carry credentials -- the
+              // raw line would put them in the container log.
+              const detail = result.error ? `: ${deadDetail(result.error)}` : '';
               log(
                 `probe failed: ${name} (${prov}) [${reason}]${detail} (${(result.elapsedMs / 1000).toFixed(1)}s)`,
               );
