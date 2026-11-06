@@ -1,5 +1,5 @@
 /**
- * The client loop behind both Probe-all buttons: every probeable channel in a
+ * The client loop behind both Check-all buttons: every probeable channel in a
  * group (the Groups tab) and every channel carrying a dead or black stream
  * (the Dead tab).
  *
@@ -184,7 +184,7 @@ export async function probeChannels(
 }
 
 /**
- * The one-line summary both tabs show under their Probe-all button.
+ * The one-line summary both tabs show under their Check-all button.
  *
  * `dryRun` is the effective setting, passed by a view that read it from
  * `/api/settings`. Under a dry run the server refuses every apply -- by
@@ -197,17 +197,17 @@ export function probeNote(
   out: ProbeOutcome,
   opts: { dryRun?: boolean } = {},
 ): { text: string; bad: boolean } {
-  const stats = `${out.probed} streams probed, ${out.dead} dead`;
+  const stats = `${out.probed} streams checked, ${out.dead} dead`;
   const applied = out.applied > 0 ? ` · ${out.applied} applied` : '';
   if (out.capacityStopped) {
     return {
-      text: `Probe stopped after ${out.completed} of ${out.total} channel(s): no spare provider capacity (${stats}${applied}). Try again once the watched stream ends or the worker's pass finishes.`,
+      text: `Check stopped after ${out.completed} of ${out.total} channel(s): no spare provider capacity (${stats}${applied}). Try again once the watched stream ends or the worker's pass finishes.`,
       bad: false,
     };
   }
   if (out.aborted) {
     return {
-      text: `Probe cancelled after ${out.completed} of ${out.total} channel(s) (${stats}${applied}).`,
+      text: `Check cancelled after ${out.completed} of ${out.total} channel(s) (${stats}${applied}).`,
       bad: false,
     };
   }
@@ -221,7 +221,7 @@ export function probeNote(
       : '') +
     (out.errors > 0 ? ` · ${out.errors} skipped or failed` : '');
   return {
-    text: `Finished probing ${out.completed} channel(s) (${stats})${segments}.`,
+    text: `Finished checking ${out.completed} channel(s) (${stats})${segments}.`,
     bad:
       (out.errors > 0 && out.completed === 0) ||
       (out.applyFailed > 0 && out.applied === 0 && !opts.dryRun),

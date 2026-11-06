@@ -288,7 +288,7 @@ Proxy probes identify themselves with `PODIUM_PROBE_CLIENT_USER_AGENT`. Keep its
 
 `PODIUM_STABILITY` watches Dispatcharr's live sessions and records which stream
 served, for how long, and when it failed over — the failure a five-second probe
-cannot see. See [Stability](usage.md#stability-the-failure-a-probe-cannot-see)
+cannot see. See [Stability](usage.md#stability-the-failure-a-check-cannot-see)
 for what it does with that.
 
 On by default, and cheap to be: it is one small GET against `/proxy/ts/status`,
@@ -357,7 +357,7 @@ describes a channel whose legs have moved on, and folding it late would close a
 leg that is serving fine now. The failures it named are lost to the ledger,
 which is the same undercount a sample that could not read the channel makes.
 
-**Settings → Measure streams → Dispatcharr live event activity** shows the
+**Settings → Checking streams → Dispatcharr live event activity** shows the
 subscription check status, last accepted event, accepted delivery and receiver
 error totals, subscription sync errors, and pending queue size. It refreshes
 every ten seconds. A configured subscription is not proof of delivery; quiet
@@ -524,7 +524,7 @@ carrying streams nobody can watch, and nothing else will ever clear them.
 must fail before a pass unassigns it. Off by default.
 
 **Checks, not hours**, because the checks are already spaced out for you: a dead
-verdict is re-probed after 3 hours, then 6, 12 and 24, so waiting for the count
+verdict is re-checked after 3 hours, then 6, 12 and 24, so waiting for the count
 costs a provider nothing extra.
 
 | checks | roughly how long it has been dead |
@@ -574,7 +574,7 @@ Three things it will not do:
 Every removal is logged with the stream ids and their providers, counted in the
 pass summary line, and recorded against the run in the database — `removed` on
 the run row, and `podium_streams_removed_total` in the metrics, so the count
-outlives the logs. Nothing happens under `PODIUM_DRY_RUN`, and a measure-only
+outlives the logs. Nothing happens under `PODIUM_DRY_RUN`, and a check-only
 group is never written to at all.
 
 Removal still has no undo: an assignment is something a channel remembers, not
@@ -681,7 +681,7 @@ cache, so a minute is plenty.
 
 ### Stability series
 
-Four gauges summarise the [stability ledger](usage.md#stability-the-failure-a-probe-cannot-see):
+Four gauges summarise the [stability ledger](usage.md#stability-the-failure-a-check-cannot-see):
 
 | Series | Meaning |
 | --- | --- |
