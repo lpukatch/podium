@@ -177,6 +177,44 @@ export function pendingChange(
   return { dropPending, nothingToChange: result.identical && !dropPending };
 }
 
+export interface PairwisePair {
+  a: number;
+  b: number;
+  similarity: number;
+  /** Canonical "low:high" key, stable for React lists. */
+  key: string;
+}
+
+/**
+ * The report's pairwise map is mirrored (`a:b` and `b:a`) and unordered; the
+ * panel wants each pair once, strongest first.
+ *
+ * The threshold the scores are judged against lives in
+ * `lib/consensus.ts` (`MATCH_THRESHOLD`); it is restated here rather than
+ * imported because that module also pulls in ffmpeg's child_process, which
+ * must not reach the browser bundle.
+ */
+export function pairwisePairs(pairwise: Record<string, number>): PairwisePair[] {
+  const pairs: PairwisePair[] = [];
+  const seen = new Set<string>();
+  for (const [rawKey, similarity] of Object.entries(pairwise)) {
+    const ids = rawKey.split(':').map(Number);
+    if (ids.length !== 2 || ids.some((n) => !Number.isInteger(n))) continue;
+    const a = Math.min(ids[0]!, ids[1]!);
+    const b = Math.max(ids[0]!, ids[1]!);
+    const key = `${a}:${b}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    pairs.push({ a, b, similarity, key });
+  }
+  return pairs.sort((x, y) => y.similarity - x.similarity);
+}
+
+/** A stream's display name from the probed rows, or `Stream #id` when unknown. */
+function streamLabel(rows: Row[] | undefined, id: number): string {
+  return rows?.find((row) => row.id === id)?.name || `Stream #${id}`;
+}
+
 /**
  * Probe this channel now and compare the resulting order with what Dispatcharr
  * already has -- the A/B view against whatever produced the current order.
@@ -410,14 +448,18 @@ export function CheckPanel({
                 className={`${pill} ${
                   result.consensus.outliers.length > 0
                     ? 'bg-[var(--color-bad)] text-[var(--color-on-bad)]'
-                    : 'bg-[var(--color-accent-soft)] text-[var(--color-accent)]'
+                    : result.consensus.status === 'partial'
+                      ? 'bg-[var(--color-warn)] text-[var(--color-on-warn)]'
+                      : 'bg-[var(--color-accent-soft)] text-[var(--color-accent)]'
                 }`}
               >
                 {result.consensus.outliers.length > 0
                   ? `${result.consensus.outliers.length} audio outlier(s)`
                   : result.consensus.status === 'confirmed'
                     ? 'audio consensus confirmed'
-                    : 'audio comparison inconclusive'}
+                    : result.consensus.status === 'partial'
+                      ? `${result.consensus.consensusCluster.length} of ${result.consensus.analyzedCount} feeds share audio`
+                      : 'audio comparison inconclusive'}
               </span>
             )}
             {nothingToChange ? (
@@ -484,6 +526,50 @@ export function CheckPanel({
               </ul>
             </div>
           )}
+
+          {result.consensus?.status === 'partial' && (
+            <div className="mt-3 rounded-lg border border-[var(--color-warn)] bg-[var(--color-panel)] p-3 text-sm">
+              <div className="font-semibold text-[var(--color-warn)]">
+                Feeds agree without a majority
+              </div>
+              <p className="mt-1 text-xs text-[var(--color-muted)]">
+                {result.consensus.consensusCluster.length} of {result.consensus.analyzedCount}{' '}
+                sampled feeds carry matching audio. Only those feeds are verified -- the rest are
+                not proven to carry the broadcast. Regional playouts, local ad breaks, and delays
+                beyond two seconds can all split a channel like this.
+              </p>
+              <ul className="mt-2 list-disc list-inside text-xs space-y-1">
+                {result.consensus.consensusCluster.map((sid) => (
+                  <li key={sid}>
+                    <span className="font-mono">{streamLabel(result.rows, sid)}</span>: audio
+                    matches across the cluster
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {result.consensus &&
+            (result.consensus.status === 'partial' || result.consensus.status === 'inconclusive') &&
+            pairwisePairs(result.consensus.pairwise).length > 0 && (
+              <div className="mt-3 text-xs">
+                <div className="text-[var(--color-muted)]">
+                  Audio similarity between sampled feeds -- a match needs &ge; 0.65:
+                </div>
+                <ul className="mt-1 space-y-0.5">
+                  {pairwisePairs(result.consensus.pairwise).map((p) => (
+                    <li key={p.key} className="flex items-baseline gap-2">
+                      <span className={p.similarity >= 0.65 ? '' : 'text-[var(--color-muted)]'}>
+                        {streamLabel(result.rows, p.a)} &harr; {streamLabel(result.rows, p.b)}
+                      </span>
+                      <span className="ml-auto shrink-0 font-mono tabular-nums">
+                        {p.similarity.toFixed(2)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
           {result.consensus && result.consensus.failures.length > 0 && (
             <p className="mt-3 text-sm text-[var(--color-muted)]">

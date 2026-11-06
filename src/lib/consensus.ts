@@ -41,10 +41,18 @@ export interface StreamConsensusInput {
 }
 
 export interface ConsensusReport {
-  status: 'confirmed' | 'divergent' | 'inconclusive';
+  /**
+   * `confirmed`: every sampled feed agreed with no extraction failures.
+   * `divergent`: a majority cluster with at least one feed clearly outside it.
+   * `partial`: a unique agreeing clique that is not a majority (two of four,
+   * say) -- the agreement is real, the remaining feeds are just unverified.
+   * `inconclusive`: nothing verifiable was learned.
+   */
+  status: 'confirmed' | 'divergent' | 'partial' | 'inconclusive';
   failures: Array<{ streamId: number; name?: string; reason: string }>;
   analyzedCount: number;
-  /** Stream IDs in majority audio agreement (among the sampled feeds). */
+  /** Stream IDs in verified audio agreement: the majority for
+   * `confirmed`/`divergent`, the agreeing clique alone for `partial`. */
   consensusCluster: number[];
   /** Stream IDs with divergent audio (e.g. 24/7 FAST news loops). */
   outliers: Array<{
@@ -358,13 +366,32 @@ export function evaluateConsensus(
   const largest = clusters[0] ?? [];
   const hasMajority = largest.length >= 2 && largest.length > valid.length / 2;
   const unique = largest.length > (clusters[1]?.length ?? 0);
-  const consensusCluster = hasMajority && unique ? largest : [];
+  // A unique clique is a finding even when it is not a majority. Two of four
+  // sampled feeds agreeing is the common shape of a multi-provider channel --
+  // regional playouts and local ad breaks split the field -- and hiding it
+  // behind an empty cluster threw away the one solid fact the run had
+  // produced: those feeds demonstrably share audio.
+  const consensusCluster = unique ? largest : [];
   if (consensusCluster.length === 0) {
     return {
       status: 'inconclusive',
       failures,
       analyzedCount: valid.length,
       consensusCluster: [],
+      outliers: [],
+      pairwise,
+    };
+  }
+  // Without a majority there is no "rest of the channel" to judge divergent --
+  // two agreeing feeds cannot outvote anything -- so a partial verdict stops
+  // at naming who agrees, and outlier classification stays a
+  // majority-cluster finding.
+  if (!hasMajority) {
+    return {
+      status: 'partial',
+      failures,
+      analyzedCount: valid.length,
+      consensusCluster,
       outliers: [],
       pairwise,
     };
@@ -406,6 +433,56 @@ export function evaluateConsensus(
     outliers,
     pairwise,
   };
+}
+
+/**
+ * The highest pairwise score in a report, with mirrored keys read once.
+ *
+ * A summary wants the one number that says how close a run came to agreement;
+ * picking it out of a four-feed map's twelve entries (half of them mirrors) is
+ * work every caller would otherwise repeat.
+ */
+export function strongestPair(
+  pairwise: ConsensusReport['pairwise'],
+): { a: number; b: number; similarity: number } | null {
+  let best: { a: number; b: number; similarity: number } | null = null;
+  const seen = new Set<string>();
+  for (const [rawKey, similarity] of Object.entries(pairwise)) {
+    const ids = rawKey.split(':').map(Number);
+    if (ids.length !== 2 || ids.some((n) => !Number.isInteger(n))) continue;
+    const a = Math.min(ids[0]!, ids[1]!);
+    const b = Math.max(ids[0]!, ids[1]!);
+    const key = `${a}:${b}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (!best || similarity > best.similarity) best = { a, b, similarity };
+  }
+  return best;
+}
+
+/**
+ * One loggable line for a report: the verdict, who agreed, how close it came.
+ *
+ * Consensus runs nowhere else in the worker, so without a line like this an
+ * operator cannot tell from the container logs whether any of it ever ran.
+ */
+export function describeConsensus(report: ConsensusReport): string {
+  const best = strongestPair(report.pairwise);
+  const pair = best
+    ? `best pair ${best.a}:${best.b} at ${best.similarity.toFixed(3)}`
+    : 'no pair scored';
+  const failed = report.failures.length > 0 ? `, ${report.failures.length} failed extraction` : '';
+  const cluster = report.consensusCluster.length;
+  switch (report.status) {
+    case 'confirmed':
+      return `confirmed -- all ${report.analyzedCount} feeds agree (${pair})`;
+    case 'divergent':
+      return `divergent -- ${report.outliers.length} outlier(s) against a ${cluster}-feed majority (${pair})${failed}`;
+    case 'partial':
+      return `partial -- ${cluster} of ${report.analyzedCount} feeds agree, rest unverified (${pair})${failed}`;
+    case 'inconclusive':
+      return `inconclusive -- no agreement among ${report.analyzedCount} feeds (${pair})${failed}`;
+  }
 }
 
 /**

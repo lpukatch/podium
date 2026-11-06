@@ -4,9 +4,11 @@ import {
   checkStreamConsensus,
   compareFingerprints,
   computeAudioFingerprint,
+  describeConsensus,
   evaluateConsensus,
   FRAME_SIZE,
   SAMPLE_RATE,
+  strongestPair,
 } from './consensus';
 
 /** Generate synthetic 16-bit mono PCM buffer with an amplitude-modulated tone. */
@@ -338,6 +340,53 @@ describe('conservative consensus decisions', () => {
         { streamId: 3, fingerprint: b },
       ]),
     ).toMatchObject({ status: 'divergent', outliers: [{ streamId: 3 }] });
+  });
+  it('reports a partial verdict when one pair agrees among four', () => {
+    // The shape a multi-provider channel actually produces live: two feeds
+    // share a broadcast and the other two agree with nobody. The old
+    // all-or-nothing rule returned an empty cluster here, and the run's one
+    // solid finding vanished behind "inconclusive".
+    const c = features(77);
+    expect(
+      evaluateConsensus([
+        { streamId: 1, fingerprint: a },
+        { streamId: 2, fingerprint: a },
+        { streamId: 3, fingerprint: b },
+        { streamId: 4, fingerprint: c },
+      ]),
+    ).toMatchObject({ status: 'partial', consensusCluster: [1, 2], outliers: [] });
+  });
+  it('reads the strongest pair once despite mirrored keys', () => {
+    expect(strongestPair({ '3:4': 0.2, '4:3': 0.2, '1:2': 0.984, '2:1': 0.984 })).toEqual({
+      a: 1,
+      b: 2,
+      similarity: 0.984,
+    });
+    expect(strongestPair({})).toBeNull();
+  });
+  it('describes a report in one loggable line', () => {
+    expect(
+      describeConsensus({
+        status: 'partial',
+        failures: [],
+        analyzedCount: 4,
+        consensusCluster: [1, 2],
+        outliers: [],
+        pairwise: { '1:2': 0.984, '2:1': 0.984 },
+      }),
+    ).toBe('partial -- 2 of 4 feeds agree, rest unverified (best pair 1:2 at 0.984)');
+    expect(
+      describeConsensus({
+        status: 'divergent',
+        failures: [{ streamId: 4, reason: 'timeout' }],
+        analyzedCount: 3,
+        consensusCluster: [1, 2],
+        outliers: [{ streamId: 3, similarityToCluster: 0.2, reason: 'divergent' }],
+        pairwise: { '1:2': 0.9, '2:1': 0.9 },
+      }),
+    ).toBe(
+      'divergent -- 1 outlier(s) against a 2-feed majority (best pair 1:2 at 0.900), 1 failed extraction',
+    );
   });
 });
 

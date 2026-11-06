@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { requireCredentials } from '@/lib/config';
-import { type ConsensusReport, checkStreamConsensus } from '@/lib/consensus';
+import { type ConsensusReport, checkStreamConsensus, describeConsensus } from '@/lib/consensus';
 import { DispatcharrClient } from '@/lib/dispatcharr';
 import {
   assignmentIsRule,
@@ -8,7 +8,7 @@ import {
   describeVerdict,
   Eligibility,
 } from '@/lib/eligibility';
-import { responseErrorText } from '@/lib/error-text';
+import { errorText, responseErrorText } from '@/lib/error-text';
 import { Mutex } from '@/lib/mutex';
 import { resolveOrdering, withResolutionCeiling, withResolutionFloor } from '@/lib/ordering';
 import { isInterlaced, type ProbeResult, probe } from '@/lib/probe';
@@ -489,15 +489,34 @@ export async function POST(request: Request, context: { params: Promise<{ channe
           // everything. Badging the cluster green while the response also
           // carries the inconclusive note ("agreement ... does not verify
           // those feeds") hands the operator two opposite answers to the same
-          // question, so the badge is earned only by a verdict.
-          if (consensusReport.status === 'confirmed' || consensusReport.status === 'divergent') {
+          // question, so the badge is earned only by a verdict. `partial` is
+          // one: it verifies exactly the cluster and the panel says so
+          // outright, so the badge and the pill tell one story.
+          if (
+            consensusReport.status === 'confirmed' ||
+            consensusReport.status === 'divergent' ||
+            consensusReport.status === 'partial'
+          ) {
             for (const cId of consensusReport.consensusCluster) {
               consensusMatchSet.add(cId);
             }
           }
-        } catch {
-          // Consensus error is non-fatal: probe report proceeds
+        } catch (error) {
+          // Consensus error is non-fatal: probe report proceeds. Swallowed
+          // silently before, which made a broken run indistinguishable from a
+          // skipped one.
+          console.warn(
+            `${new Date().toISOString()} channel ${id} (${channel.name}): audio consensus failed -- ${errorText(error)}`,
+          );
         }
+      }
+
+      if (consensusReport) {
+        // Nothing in the worker runs consensus, so absent a line here the
+        // container logs carry no trace of it at all.
+        console.log(
+          `${new Date().toISOString()} channel ${id} (${channel.name}): audio consensus ${describeConsensus(consensusReport)}`,
+        );
       }
     }
 

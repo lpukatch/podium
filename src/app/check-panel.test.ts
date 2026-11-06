@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { orderToApply, pendingChange, reconcileSoaks } from './check-panel';
+import { orderToApply, pairwisePairs, pendingChange, reconcileSoaks } from './check-panel';
 
 /**
  * A channel whose rule claims three of its five streams, with the ranking
@@ -124,5 +124,20 @@ describe('reconciling the soak queue with what the panel shows', () => {
   it('returns the same object when nothing moved, so no render is wasted', () => {
     const prev = { 7: { phase: 'done' as const, error: '' }, 8: queued() };
     expect(reconcileSoaks(prev, new Set([8]))).toBe(prev);
+  });
+});
+
+describe('pairwise audio similarities', () => {
+  it('reads mirrored keys once and sorts strongest first', () => {
+    // The report carries every pair twice (`a:b` and `b:a`); the panel shows
+    // six pairs for four feeds, not twelve.
+    expect(pairwisePairs({ '5:9': 0.4, '9:5': 0.4, '2:3': 0.9 })).toEqual([
+      { a: 2, b: 3, similarity: 0.9, key: '2:3' },
+      { a: 5, b: 9, similarity: 0.4, key: '5:9' },
+    ]);
+  });
+
+  it('keeps the canonical low:high key whatever way round the report wrote it', () => {
+    expect(pairwisePairs({ '9:5': 0.4 })).toEqual([{ a: 5, b: 9, similarity: 0.4, key: '5:9' }]);
   });
 });
