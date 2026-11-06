@@ -61,12 +61,15 @@ export function GET(request: Request) {
   let store: Store | null = null;
   try {
     const url = new URL(request.url);
-    const { minSamples, pointsPerMbps, deadPoints, bitratePoints } = profileQuery(url.searchParams);
     store = new Store(loadConfig().dbPath);
     // Settings-resolved, not the raw environment: the scope is edited in the UI
     // and stored, and reading it from `process.env` would report the gate the
     // container booted with rather than the one in force.
     const config = loadConfig(resolveEnv(process.env, store.settings()));
+    const { minSamples, pointsPerMbps } = profileQuery(url.searchParams, {
+      minSamples: config.PODIUM_QUALITY_MIN_SAMPLES,
+      pointsPerMbps: config.PODIUM_QUALITY_POINTS_PER_MBPS,
+    });
     const scope = scopeOf(url, config);
     const samples = store.qualitySamples();
     const profile = buildProfile(samples, { minSamples, scope });
@@ -79,14 +82,20 @@ export function GET(request: Request) {
     );
 
     if (url.searchParams.get('format') !== 'teamarr') {
-      return NextResponse.json({ ...profile, miner });
+      // `fit` travels with the profile so the Quality tab can dim buckets
+      // against the floor that was actually applied, rather than a number the
+      // page happened to be holding -- which is how the two could disagree
+      // before the fit settings existed.
+      return NextResponse.json({
+        ...profile,
+        miner,
+        fit: { minSamples, pointsPerMbps },
+      });
     }
 
     const body = teamarrRules(profile, {
       minSamples,
       pointsPerMbps,
-      deadPoints,
-      bitratePoints,
       consolidated: miner.passB.consolidated,
     });
     return new NextResponse(JSON.stringify(body, null, 2), {
@@ -116,7 +125,12 @@ export async function POST(request: Request) {
   let store: Store | null = null;
   try {
     const url = new URL(request.url);
-    const { minSamples, pointsPerMbps, deadPoints, bitratePoints } = profileQuery(url.searchParams);
+    store = new Store(loadConfig().dbPath);
+    const config = loadConfig(resolveEnv(process.env, store.settings()));
+    const { minSamples, pointsPerMbps } = profileQuery(url.searchParams, {
+      minSamples: config.PODIUM_QUALITY_MIN_SAMPLES,
+      pointsPerMbps: config.PODIUM_QUALITY_POINTS_PER_MBPS,
+    });
 
     const parsed = (await request.json()) as unknown;
     const container = parsed as { rules?: unknown };
@@ -137,8 +151,6 @@ export async function POST(request: Request) {
         typeof (rule as { value?: unknown }).value === 'string',
     );
 
-    store = new Store(loadConfig().dbPath);
-    const config = loadConfig(resolveEnv(process.env, store.settings()));
     const scope = scopeOf(url, config);
     const samples = store.qualitySamples();
     const profile = buildProfile(samples, { minSamples, scope });
@@ -150,8 +162,6 @@ export async function POST(request: Request) {
     const generated = teamarrRules(profile, {
       minSamples,
       pointsPerMbps,
-      deadPoints,
-      bitratePoints,
       consolidated: miner.passB.consolidated,
     });
     const merged = mergeTeamarrRules(rules, generated.rules);

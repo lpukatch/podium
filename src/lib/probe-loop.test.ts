@@ -88,6 +88,29 @@ describe('probeChannels', () => {
     expect(note.bad).toBe(true);
   });
 
+  it('names a dry-run refusal as the setting working, not as a failure', async () => {
+    // The same 409s as the test above, read by a view that knows the dry run
+    // is on. Refusing every apply is precisely what a dry-run install is
+    // configured to do, so the note must not present it as a breakage -- but
+    // the refusals are still counted, because "nothing happened" would hide
+    // the run behind the setting.
+    vi.stubGlobal('fetch', async (url: string) =>
+      url.includes('/api/check/')
+        ? respond(completeCheck)()
+        : respond({ error: 'PODIUM_DRY_RUN is set; refusing to write' }, 409)(),
+    );
+    const out = await probeChannels([{ id: 5, name: 'A' }], {
+      signal: new AbortController().signal,
+      autoApply: true,
+    });
+    const note = probeNote(out, { dryRun: true });
+    expect(note.text).toContain('1 left as-is (dry run)');
+    expect(note.text).not.toContain('apply failed');
+    expect(note.bad).toBe(false);
+    // Without the flag the same outcome is still a failure worth red text.
+    expect(probeNote(out).bad).toBe(true);
+  });
+
   it('stops after two capacity refusals in a row', async () => {
     let checks = 0;
     vi.stubGlobal('fetch', async (url: string) => {

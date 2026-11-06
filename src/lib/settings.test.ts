@@ -201,8 +201,10 @@ describe('validateSettings', () => {
     expect(validateSettings({ PODIUM_MIN_FREE_SLOTS: '0.5' }).errors).toHaveLength(1);
     expect(validateSettings({ PODIUM_MEASURE_SECONDS: '2.5' }).errors).toHaveLength(1);
     expect(validateSettings({ PODIUM_MIN_BITRATE_KBPS: '500.5' }).errors).toHaveLength(1);
+    expect(validateSettings({ PODIUM_QUALITY_MIN_SAMPLES: '20.5' }).errors).toHaveLength(1);
     // ...while a genuine quantity keeps its decimals.
     expect(validateSettings({ PODIUM_BLACK_RATIO: '0.5' }).errors).toHaveLength(0);
+    expect(validateSettings({ PODIUM_QUALITY_POINTS_PER_MBPS: '2.5' }).errors).toHaveLength(0);
   });
 });
 
@@ -260,6 +262,19 @@ describe('the settings page groups', () => {
       'PODIUM_METRICS_CHANNELS',
     ]) {
       expect(FIELD_KEYS).toContain(key);
+    }
+  });
+
+  it('puts the quality fit knobs on the page, in the learning group', () => {
+    // These were boxes on the Quality tab, which was worse than env-only: the
+    // scheduled push to Teamarr never saw the tab, so what an operator
+    // previewed and what the nightly push fitted were different rule sets.
+    // Promoted to settings so both paths read one value, and pinned here so
+    // they stay.
+    for (const key of ['PODIUM_QUALITY_MIN_SAMPLES', 'PODIUM_QUALITY_POINTS_PER_MBPS']) {
+      const f = FIELDS.find((entry) => entry.key === key);
+      expect(f?.group).toBe('learn-scope');
+      expect(f?.section).toBe('quality');
     }
   });
 });

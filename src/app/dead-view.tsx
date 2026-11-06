@@ -90,6 +90,9 @@ export function DeadView({
     null,
   );
   const [autoApply, setAutoApply] = useState(true);
+  // The effective dry run, read once from `/api/settings`. Null until known,
+  // so a slow answer never shows a promise the page cannot keep.
+  const [dryRun, setDryRun] = useState<boolean | null>(null);
   const probeAbortRef = useRef<AbortController | null>(null);
 
   // Soaking state for the channels carrying dead streams
@@ -121,6 +124,23 @@ export function DeadView({
   useEffect(() => {
     void load();
   }, [load]);
+
+  // "Apply reorders" is inert under a dry run -- the server refuses every
+  // apply -- and saying nothing made the checkbox a lie of omission: the
+  // operator ticks it, runs the list, and the only report is an apply-failed
+  // count that looks like a breakage. The effective value, not the booted one:
+  // Settings can have turned the dry run off since boot.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const resp = await fetch('/api/settings');
+        const body = (await resp.json()) as { effective?: { dryRun?: boolean } };
+        if (resp.ok && typeof body.effective?.dryRun === 'boolean') setDryRun(body.effective.dryRun);
+      } catch {
+        // Advisory only; the probe works either way.
+      }
+    })();
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -156,7 +176,7 @@ export function DeadView({
       autoApply,
       onProgress: setProbeProgress,
     });
-    setProbeResultNote(probeNote(outcome));
+    setProbeResultNote(probeNote(outcome, { dryRun: dryRun === true }));
 
     setProbing(false);
     setProbeProgress(null);
@@ -377,6 +397,13 @@ export function DeadView({
                 )}
               </div>
             </div>
+            {dryRun && autoApply && (
+              <p className="mt-2 text-sm text-[var(--color-warn)]">
+                Dry run is on in Settings, so nothing here will be written: Apply reorders will be
+                refused on every channel and only the verdicts will refresh. Turn it off in Settings
+                first if you want the reorders applied.
+              </p>
+            )}
             {probeResultNote && (
               <p
                 className={`mt-2 text-sm ${
