@@ -2,11 +2,20 @@ import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
 import { Eligibility } from '@/lib/eligibility';
 import { responseErrorText } from '@/lib/error-text';
+import { type CachedVerdict, lastProbeFields } from '@/lib/last-probe';
 import type { ChannelRule } from '@/lib/matcher';
-import type { ProbeResult } from '@/lib/probe';
+import { resolveOrdering } from '@/lib/ordering';
 import { groupFilter } from '@/lib/provider-groups';
 import { parseProviders } from '@/lib/rules';
-import { groupPatterns, index, matcher, policies, snapshot } from '@/lib/server/state';
+import {
+  config,
+  groupPatterns,
+  index,
+  matcher,
+  ordering,
+  policies,
+  snapshot,
+} from '@/lib/server/state';
 import { Store } from '@/lib/store';
 
 export const dynamic = 'force-dynamic';
@@ -134,11 +143,11 @@ export async function POST(request: Request) {
 
     const channel = snap.channels.find((c) => c.id === body.channelId);
     const channelGroupName = snap.groups.find((g) => g.id === channel?.groupId)?.name;
-    const inherited = new Eligibility(policies(), undefined, groupPatterns()).policyFor(
+    const groupPolicy = new Eligibility(policies(), undefined, groupPatterns()).policyFor(
       channel?.groupId,
       channelGroupName,
-    ).groupFilter;
-    const hits = m.match(rule, idx, inherited);
+    );
+    const hits = m.match(rule, idx, groupPolicy.groupFilter);
     const matchedIds = new Set(hits.map(([id]) => id));
     const assigned = new Set(channel?.streams ?? []);
     // Dispatcharr's array is ordered; position is what a viewer actually gets.
@@ -146,7 +155,7 @@ export async function POST(request: Request) {
 
     // Last probe result per stream, so the editor can show what is known
     // without having to probe again.
-    let verdicts = new Map<number, { probedAt: number; alive: boolean; result: ProbeResult }>();
+    let verdicts = new Map<number, CachedVerdict>();
     let soakResults = new Map<
       number,
       {
@@ -171,6 +180,14 @@ export async function POST(request: Request) {
     const streamById = new Map(snap.streams.map((s) => [s.id, s]));
     const providerNames = new Map(snap.providers.map((p) => [p.id, p.name]));
     const groupNames = new Map(snap.groups.map((g) => [g.id, g.name]));
+    // The floor this channel is ranked under (a rules-file override wins over
+    // the env knob), so `lastLowBitrate` agrees with the check rather than
+    // quoting a threshold of its own.
+    const { weights } = resolveOrdering(
+      ordering(),
+      providerNames,
+      config().PODIUM_MIN_BITRATE_KBPS,
+    );
 
     const describe = (id: number, step: number | null) => {
       const stream = streamById.get(id);
@@ -191,11 +208,7 @@ export async function POST(request: Request) {
         assigned: assigned.has(id),
         matched: matchedIds.has(id),
         currentRank: currentOrder.get(id) ?? null,
-        lastProbedAt: verdicts.get(id)?.probedAt ?? null,
-        lastAlive: verdicts.get(id)?.alive ?? null,
-        lastHeight: verdicts.get(id)?.result.height ?? null,
-        lastBitrateKbps: verdicts.get(id)?.result.bitrateKbps ?? null,
-        lastBlack: verdicts.get(id)?.result.black ?? null,
+        ...lastProbeFields(verdicts.get(id), weights, groupPolicy.audioOnly),
         lastSoak: soakResults.get(id) ?? null,
       };
     };

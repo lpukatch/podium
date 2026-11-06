@@ -1034,6 +1034,199 @@ Mode and weights live in **Settings → Ranking**. Preferred providers
 only apply in `provider` mode; in `quality` mode the best measured source wins
 outright, whoever carries it.
 
+## Reading every verdict
+
+    GET /api/verdicts
+
+Returns what Podium knows about every stream on every channel it manages, in
+one call: each channel's streams in slot order, and each stream's cached
+verdict and latest soak. It is what the channel editor shows for one channel at
+a time, for the whole catalogue, and it describes a stream with the same fields,
+read by the same code. The one that can differ is `lastLowBitrate` for a stream
+on several channels, below.
+
+It reads only what is already held: the catalogue the worker records each
+pass, the probe cache and the soak results. It probes nothing, and it asks
+Dispatcharr nothing beyond the snapshot every other page already reads.
+
+```jsonc
+{
+  "fetchedAt": 1793900000000,          // when the snapshot was taken
+  "catalogueWrittenAt": 1793899000000, // when the worker last recorded the catalogue, or null
+  "cacheUnavailable": false,           // true when the cache could not be read
+  "groups": [{ "id": 643, "name": "Sports" }],
+  "channels": [
+    { "id": 462, "name": "Sports One", "groupId": 643, "streams": [7653, 8135] } // slot order
+  ],
+  "streams": [
+    {
+      "id": 7653,
+      "name": "UK: Sports One FHD",
+      "provider": "Provider A",
+      "providerGroup": "UK | Sport",
+      "lastProbedAt": 1793890000000,
+      "lastAlive": true,
+      "lastBlack": false,
+      "lastLowBitrate": false,
+      "lastHeight": 1080,
+      "lastWidth": 1920,
+      "lastFps": 50,
+      "lastVideoCodec": "h264",
+      "lastHdrFormat": null,
+      "lastBitrateKbps": 6400,
+      "lastAudioCodec": "aac",
+      "lastAudioChannels": 2,
+      "lastChannelLayout": "stereo",
+      "lastAudioBitrateKbps": 128,
+      "lastAudioSampleRate": 48000,
+      "deadStreak": 0,
+      "lastSoak": {
+        "streamId": 7653,
+        "completedAt": 1793860000000,
+        "heldMs": 180000,
+        "drops": 0,
+        "failedDials": 0,
+        "unreachable": false
+      }
+    }
+  ]
+}
+```
+
+A few things worth knowing when reading it:
+
+- **Each stream appears once** in `streams`, however many channels carry it;
+  `channels[].streams` refer to it by id. Only streams on managed channels are
+  listed, not the provider's whole catalogue.
+- **`null` means unknown.** A stream nothing has probed has every `last*` field
+  and `deadStreak` `null`; `lastSoak` is `null` until a soak has finished. A
+  stream that has left the provider since the catalogue was recorded keeps its
+  verdict, but its `name` and `providerGroup` are `null`.
+- **`lastLowBitrate` is judged per channel.** A video floor does not apply on an
+  audio-only channel, so a stream carried by several channels reads as low when
+  any channel carrying it would call it low.
+- **`deadStreak`** is the number of consecutive dead verdicts, the count
+  [`PODIUM_REMOVE_DEAD_AFTER_CHECKS`](configuration.md#removing-dead-streams)
+  is measured against; it is `0` for anything currently alive.
+- **When the database cannot be opened**, the answer is still a `200`, with
+  `cacheUnavailable: true` and empty `channels` and `streams` — the catalogue
+  lives in the same database, so without it there is no managed set to list.
+  If the catalogue was read but the verdicts could not be, the channels come
+  back with every verdict unknown and the same flag set. An empty list with the
+  flag clear really does mean nothing is managed yet.
+
+### Fetching only what changed
+
+    GET /api/verdicts?since=1793890000000
+
+Keeps only the streams whose verdict or soak landed after that moment (epoch
+milliseconds): `lastProbedAt` or `lastSoak.completedAt` later than `since`.
+Channels always come back whole, so a poller can pass the previous response's
+`fetchedAt` and merge the few streams that moved into what it already holds.
+Anything other than a whole, non-negative number is refused with a `400`.
+
+A failure to read the snapshot from Dispatcharr is a `500` with `error` and
+`detail`, as on the other read endpoints.
+
+## Reading probe history
+
+    GET /api/probe-history?stream=7653&stream=8135
+
+Returns each stream's recent verdicts, newest first. The probe cache keeps only
+the latest, so `/api/verdicts` can say what a stream is now but not when it went
+dead or how long its bitrate has been sagging; Podium also keeps every verdict it
+records for a while, and this reads them back. Each entry describes its probe
+with the same fields `/api/verdicts` gives the latest one, read by the same code
+and without the `last` prefix, plus the probe's `error`.
+
+It reads only what is already held. It probes nothing, and it asks Dispatcharr
+nothing beyond the snapshot every other page already reads.
+
+```jsonc
+{
+  "fetchedAt": 1793900000000,         // when the history was read
+  "cacheUnavailable": false,          // true when the database could not be read
+  "retention": { "maxAgeMs": 2592000000, "perStream": 100 },
+  "streams": [                        // by id
+    {
+      "id": 7653,
+      "probes": [                     // newest first
+        {
+          "probedAt": 1793890000000,
+          "alive": true,
+          "black": false,
+          "lowBitrate": false,
+          "width": 1920,
+          "height": 1080,
+          "fps": 50,
+          "videoCodec": "h264",
+          "hdrFormat": null,
+          "bitrateKbps": 6400,
+          "audioCodec": "aac",
+          "audioChannels": 2,
+          "channelLayout": "stereo",
+          "audioBitrateKbps": 128,
+          "audioSampleRate": 48000,
+          "error": null              // why a dead probe failed, e.g. "timeout"; null when alive
+        }
+      ]
+    }
+  ]
+}
+```
+
+A few things worth knowing when reading it:
+
+- **`stream` picks the streams**, repeated for several, up to 500. Without it,
+  every stream with history in range comes back. A stream with none in range is
+  left out rather than listed with an empty `probes`, whether you asked for it
+  by id or not.
+- **`limit` is probes per stream**, newest first: `20` unless you say, from `1`
+  up to `100`.
+- **How much is kept.** Every verdict, dead ones included, whether a pass or an
+  on-demand check recorded it: up to 100 per stream, for up to 30 days, whichever
+  runs out first. `retention` gives the numbers in force. History starts with
+  the upgrade that added it; earlier verdicts are not backfilled. It goes with
+  the stream, too: when a stream stops being managed its history is dropped
+  along with its cached verdict, and **Reset data** clears it.
+- **The newest entry is the latest probe, which is usually the latest verdict.**
+  Both are written in one transaction with the same `probedAt`. The exception is
+  a stream whose hash has changed: `/api/verdicts` folds every row the cache
+  holds for it, and an older hash's alive verdict can win there while the
+  newest probe here is dead.
+- **`lowBitrate` reflects the floor in force now**, not the one when the probe
+  ran, judged per channel the way [`lastLowBitrate`](#reading-every-verdict) is.
+  Change the floor and the whole history is re-read against it, so the same
+  probe reads the same here and on `/api/verdicts`. A probed stream on no managed
+  channel is judged against the floor as it stands.
+- **When the database cannot be opened**, the answer is still a `200`, with
+  `cacheUnavailable: true` and empty `streams`. An empty list with the flag
+  clear really does mean nothing in range has been recorded.
+
+### Fetching only new probes
+
+    GET /api/probe-history?since=1793890000000&limit=100
+
+Keeps only the probes recorded strictly after that moment (epoch milliseconds),
+so a poller can leave out `stream` and fetch roughly what is new since its last
+call. Two things keep it from being exact:
+
+- A verdict is stamped just before it is committed, so one stamped in the same
+  millisecond as a read, or committed a moment late, can land after that read
+  with a `probedAt` no later than its `fetchedAt`. Pass back a `since` a few
+  seconds before the previous `fetchedAt` and drop entries you already hold by
+  stream `id` and `probedAt`.
+- `limit` still applies: a stream probed more often than that since `since`
+  comes back with only its newest. Ask for `limit=100` and poll often enough
+  that no stream is probed more than that in between.
+
+Anything other than a whole number in `stream`, `since` or `limit`, or a `limit`
+outside 1 to 100, or more than 500 streams, is refused with a `400`.
+
+A failure to read the snapshot from Dispatcharr, which supplies the channel
+groups behind `lowBitrate`, is a `500` with `error` and `detail`, as on the
+other read endpoints.
+
 ## Exporting what Podium learned
 
 Podium ranks a stream by measuring it. Some streams cannot be measured in time

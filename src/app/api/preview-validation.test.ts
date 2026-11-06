@@ -15,6 +15,8 @@ const state = vi.hoisted(() => ({
   snapshot: vi.fn(),
   index: vi.fn(),
   matcher: vi.fn(),
+  ordering: () => ({ mode: 'quality', providerPreference: [], weights: {} }),
+  config: () => ({ PODIUM_MIN_BITRATE_KBPS: 500 }),
   policies: () => new Map(),
   groupPatterns: () => [],
 }));
