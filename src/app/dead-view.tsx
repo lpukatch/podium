@@ -90,6 +90,13 @@ export function DeadView({
     null,
   );
   const [autoApply, setAutoApply] = useState(true);
+  // The effective dry run, read once from `/api/settings`. Null until known,
+  // so a slow answer never shows a promise the page cannot keep.
+  const [dryRun, setDryRun] = useState<boolean | null>(null);
+  // Arms the inline confirm for Check all while "Apply reorders" is on. The
+  // check-only path never arms it, and unchecking the box disarms whatever is
+  // showing -- the confirm's own sentence points there.
+  const [confirmingProbe, setConfirmingProbe] = useState(false);
   const probeAbortRef = useRef<AbortController | null>(null);
 
   // Soaking state for the channels carrying dead streams
@@ -121,6 +128,24 @@ export function DeadView({
   useEffect(() => {
     void load();
   }, [load]);
+
+  // "Apply reorders" is inert under a dry run -- the server refuses every
+  // apply -- and saying nothing made the checkbox a lie of omission: the
+  // operator ticks it, runs the list, and the only report is an apply-failed
+  // count that looks like a breakage. The effective value, not the booted one:
+  // Settings can have turned the dry run off since boot.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const resp = await fetch('/api/settings');
+        const body = (await resp.json()) as { effective?: { dryRun?: boolean } };
+        if (resp.ok && typeof body.effective?.dryRun === 'boolean')
+          setDryRun(body.effective.dryRun);
+      } catch {
+        // Advisory only; the probe works either way.
+      }
+    })();
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -156,7 +181,7 @@ export function DeadView({
       autoApply,
       onProgress: setProbeProgress,
     });
-    setProbeResultNote(probeNote(outcome));
+    setProbeResultNote(probeNote(outcome, { dryRun: dryRun === true }));
 
     setProbing(false);
     setProbeProgress(null);
@@ -198,7 +223,7 @@ export function DeadView({
         text:
           `Queued ${body.queued} stream(s) to soak` +
           ((body.skippedDead ?? 0) > 0
-            ? `; left out ${body.skippedDead} that were dead at their last probe`
+            ? `; left out ${body.skippedDead} that were dead at their last check`
             : '') +
           ' (runs when worker has spare capacity).',
         bad: false,
@@ -251,7 +276,7 @@ export function DeadView({
           </button>
         </div>
         <p className="mt-1.5 text-sm text-[var(--color-muted)]">
-          Streams whose last probe came back dead or a black screen — the same verdict the channel
+          Streams whose last check came back dead or a black screen — the same verdict the channel
           editor shows, collected across the catalogue. Dead streams are rechecked on the backoff
           schedule, so a stream dead for many checks is waiting longer between looks on purpose.
         </p>
@@ -306,7 +331,7 @@ export function DeadView({
                 </h3>
                 <p className="mt-1 text-sm text-[var(--color-muted)]">
                   {totals.channelsAffected > 0
-                    ? "Every channel carrying a dead or black-screened stream. A probe re-checks all of a channel's streams, so this refreshes every dead verdict in the list."
+                    ? "Every channel carrying a dead or black-screened stream. A check re-checks all of a channel's streams, so this refreshes every dead verdict in the list."
                     : 'No channel is currently carrying a dead or black-screened stream.'}
                 </p>
               </div>
@@ -318,7 +343,7 @@ export function DeadView({
                       onClick={cancelProbe}
                       className={`${btn} border-[var(--color-bad)] text-[var(--color-bad)]`}
                     >
-                      Cancel probe
+                      Cancel check
                     </button>
                     <span className="flex items-center gap-2 text-sm text-[var(--color-muted)]">
                       <LoaderCircle
@@ -326,12 +351,17 @@ export function DeadView({
                         aria-hidden="true"
                       />
                       {probeProgress
-                        ? `Probing channel ${probeProgress.current} of ${probeProgress.total}: ${probeProgress.channelName} (${probeProgress.probed} probed${probeProgress.dead > 0 ? `, ${probeProgress.dead} dead` : ''}${probeProgress.applied > 0 ? `, ${probeProgress.applied} applied` : ''})…`
-                        : 'Preparing to probe…'}
+                        ? `Checking channel ${probeProgress.current} of ${probeProgress.total}: ${probeProgress.channelName} (${probeProgress.probed} checked${probeProgress.dead > 0 ? `, ${probeProgress.dead} dead` : ''}${probeProgress.applied > 0 ? `, ${probeProgress.applied} applied` : ''})…`
+                        : 'Preparing to check…'}
                     </span>
                   </>
                 ) : (
                   <>
+                    {/* The checkbox stays rendered through the two-step confirm
+                       below: the confirm's escape hatch is "untick Apply
+                       reorders", and an instruction to untick a box that the
+                       confirm hid is not an escape hatch. Unticking collapses
+                       the confirm back to the plain button. */}
                     <label className="flex cursor-pointer items-center gap-1.5 text-sm text-[var(--color-muted)]">
                       <input
                         type="checkbox"
@@ -341,42 +371,92 @@ export function DeadView({
                       />
                       Apply reorders
                     </label>
-                    <button
-                      type="button"
-                      disabled={totals.channelsAffected === 0 || soaking}
-                      onClick={() => void startProbe()}
-                      className={btn}
-                      title={
-                        totals.channelsAffected === 0
-                          ? 'No channel has a dead or black stream'
-                          : `Probe all ${totals.channelsAffected} channel(s) carrying dead or black streams`
-                      }
-                    >
-                      Probe all ({n(totals.channelsAffected)})
-                    </button>
-                    <button
-                      type="button"
-                      disabled={totals.channelsAffected === 0 || soaking}
-                      onClick={() => void queueSoak()}
-                      className={btn}
-                      title={
-                        totals.channelsAffected === 0
-                          ? 'No channel has a dead or black stream'
-                          : `Queue soaks for streams on ${totals.channelsAffected} channel(s)`
-                      }
-                    >
-                      {soaking && (
-                        <LoaderCircle
-                          className="mr-1 inline h-4 w-4 animate-spin"
-                          aria-hidden="true"
-                        />
-                      )}
-                      {soaking ? 'Queueing soak…' : `Soak all (${n(totals.channelsAffected)})`}
-                    </button>
+                    {confirmingProbe && autoApply ? (
+                      /* One click was one click too few for this button. With
+                         "Apply reorders" ticked -- the default -- Check all both
+                         checks every channel and writes each verdict's order to
+                         Dispatcharr, and the apply API's own documentation reads
+                         "overwrites the channel's stream array with no undo". So
+                         it gets the same inline two-step the Danger Zone, the
+                         soak card and the Teamarr push use, naming what it
+                         writes. Untick the box and checking is safe and
+                         repeatable, which is what the button says it is again. */
+                      <>
+                        <span className="max-w-[60ch] text-sm text-[var(--color-muted)]">
+                          Check all {totals.channelsAffected} channel(s) and write each verdict's
+                          order to Dispatcharr? Applying overwrites the channel's stream order and
+                          there is no undo. Untick <b>Apply reorders</b> to check without writing
+                          anything.
+                        </span>
+                        <button
+                          type="button"
+                          className={`${btn} !border-[var(--color-bad)] !bg-[var(--color-bad)] !text-[var(--color-on-bad)]`}
+                          onClick={() => {
+                            setConfirmingProbe(false);
+                            void startProbe();
+                          }}
+                        >
+                          Check and apply
+                        </button>
+                        <button
+                          type="button"
+                          className={btn}
+                          onClick={() => setConfirmingProbe(false)}
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          disabled={totals.channelsAffected === 0 || soaking}
+                          onClick={() =>
+                            void (autoApply && totals.channelsAffected > 0
+                              ? setConfirmingProbe(true)
+                              : startProbe())
+                          }
+                          className={btn}
+                          title={
+                            totals.channelsAffected === 0
+                              ? 'No channel has a dead or black stream'
+                              : `Check all ${totals.channelsAffected} channel(s) carrying dead or black streams`
+                          }
+                        >
+                          Check all ({n(totals.channelsAffected)})
+                        </button>
+                        <button
+                          type="button"
+                          disabled={totals.channelsAffected === 0 || soaking}
+                          onClick={() => void queueSoak()}
+                          className={btn}
+                          title={
+                            totals.channelsAffected === 0
+                              ? 'No channel has a dead or black stream'
+                              : `Queue soaks for streams on ${totals.channelsAffected} channel(s)`
+                          }
+                        >
+                          {soaking && (
+                            <LoaderCircle
+                              className="mr-1 inline h-4 w-4 animate-spin"
+                              aria-hidden="true"
+                            />
+                          )}
+                          {soaking ? 'Queueing soak…' : `Soak all (${n(totals.channelsAffected)})`}
+                        </button>
+                      </>
+                    )}
                   </>
                 )}
               </div>
             </div>
+            {dryRun && autoApply && (
+              <p className="mt-2 text-sm text-[var(--color-warn)]">
+                Dry run is on in Settings, so nothing here will be written: Apply reorders will be
+                refused on every channel and only the verdicts will refresh. Turn it off in Settings
+                first if you want the reorders applied.
+              </p>
+            )}
             {probeResultNote && (
               <p
                 className={`mt-2 text-sm ${

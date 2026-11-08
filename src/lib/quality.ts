@@ -28,6 +28,7 @@ import { assignmentIsRule, compileGlob, type Glob, type PolicyMode } from './eli
 // Type-only, and deliberately: `miner.ts` imports real values from here, so a
 // value import in this direction would be a runtime cycle. Erased at compile.
 import type { ConsolidatedToken } from './miner';
+import { QUALITY_FIT_DEFAULTS } from './quality-fit-defaults';
 import type { StoredQualitySample } from './store';
 
 export type Tier = 'uhd' | 'fhd' | 'hd' | 'sd' | 'unknown';
@@ -608,7 +609,7 @@ export function buildProfile(
   samples: StoredQualitySample[],
   options: ProfileOptions = {},
 ): QualityProfile {
-  const minSamples = options.minSamples ?? 20;
+  const minSamples = options.minSamples ?? QUALITY_FIT_DEFAULTS.minSamples;
   const scope = options.scope ?? OPEN_SCOPE;
   const compiled = compileScope(scope);
 
@@ -987,7 +988,7 @@ export interface ExportOptions extends ProfileOptions {
    * stream carrying a good account, a good group and a good tier has three
    * independent reasons to be worth trying, and that is a different claim from
    * any one of them. The invariant that has to hold whatever they stack to is
-   * the liveness one, and `deadPoints` is sized for it.
+   * the liveness one, and `DEAD_POINTS` is sized for it.
    */
   maxPoints?: number;
   /**
@@ -998,41 +999,48 @@ export interface ExportOptions extends ProfileOptions {
    * identically when it did not.
    */
   consolidated?: ConsolidatedToken[];
-  /**
-   * What a stream measured dead, or measured as a black screen, gives up.
-   *
-   * Deliberately outside `maxPoints`, which is the one place in this export
-   * where that cap is wrong to apply. The cap exists so that a *prior* can
-   * never outrank a *measurement* -- and this is the measurement. Capping it at
-   * 15 would put a dead stream one account-rule away from winning its channel,
-   * which is the failure the rule exists to stop.
-   *
-   * Large enough to sink beneath any plausible stack of priors: three generated
-   * rules at the ±15 cap, plus whatever an operator has hand-written. Teamarr
-   * clamps a score to ±(BAND_STRIDE/2 - 1), so there is a great deal of room
-   * and no reason to be shy with it.
-   *
-   * Set to 0 to suppress both liveness rules.
-   */
-  deadPoints?: number;
-  /**
-   * What each step of the bitrate ladder is worth.
-   *
-   * Flat per step, so the ladder is a step function centred on the median: one
-   * step down below it, one step up per quartile above. At the default that
-   * spans −8 to +16, putting a top-decile stream 24 points clear of a
-   * bottom-half one -- more than any single prior can move it, which is the
-   * point, and still short of the liveness penalty, which is also the point.
-   *
-   * The span is the same as it was when all three steps were promotions; what
-   * changed is where zero sits in it. Zero is the score of a stream carrying no
-   * `stream_stats`, and it now means "a median stream" rather than "the worst
-   * stream in the catalogue".
-   *
-   * Set to 0 to suppress the ladder.
-   */
-  bitratePoints?: number;
 }
+
+/**
+ * What a stream measured dead, or measured as a black screen, gives up.
+ *
+ * Deliberately outside `maxPoints`, which is the one place in this export
+ * where that cap is wrong to apply. The cap exists so that a *prior* can
+ * never outrank a *measurement* -- and this is the measurement. Capping it at
+ * 15 would put a dead stream one account-rule away from winning its channel,
+ * which is the failure the rule exists to stop.
+ *
+ * Large enough to sink beneath any plausible stack of priors: three generated
+ * rules at the ±15 cap, plus whatever an operator has hand-written. Teamarr
+ * clamps a score to ±(BAND_STRIDE/2 - 1), so there is a great deal of room
+ * and no reason to be shy with it.
+ *
+ * A constant rather than an option: it arrived in the query string alongside
+ * `pointsPerMbps` in the first cut of the export, but nothing ever passed it --
+ * not the UI, not the docs' curl, not the scheduled push. A knob nobody
+ * touches is not a knob, it is an invitation to guess at the default; the
+ * numbers live here, sized, where the reasoning sits beside them.
+ */
+const DEAD_POINTS = -100;
+
+/**
+ * What each step of the bitrate ladder is worth.
+ *
+ * Flat per step, so the ladder is a step function centred on the median: one
+ * step down below it, one step up per quartile above. At this value the span
+ * is −8 to +16, putting a top-decile stream 24 points clear of a bottom-half
+ * one -- more than any single prior can move it, which is the point, and still
+ * short of the liveness penalty, which is also the point.
+ *
+ * The span is the same as it was when all three steps were promotions; what
+ * changed is where zero sits in it. Zero is the score of a stream carrying no
+ * `stream_stats`, and it now means "a median stream" rather than "the worst
+ * stream in the catalogue".
+ *
+ * Independent of `pointsPerMbps`, which slopes the *prior* rules (account,
+ * group, tier, mined name); this weights the measured ladder itself.
+ */
+const BITRATE_POINTS = 8;
 
 /**
  * The profile knobs as a URL carries them, clamped.
@@ -1046,13 +1054,21 @@ export interface ExportOptions extends ProfileOptions {
  * worth nothing; the profile meanwhile fitted at `minSamples` 1, over buckets
  * holding a single probe. The UI passes both explicitly, which is why the paths
  * people click were right while the ones they curl were not.
+ *
+ * The defaults come from the caller's resolved config -- `PODIUM_QUALITY_MIN_SAMPLES`
+ * and `PODIUM_QUALITY_POINTS_PER_MBPS` -- rather than literals here. These two
+ * started life as boxes on the Quality tab, which meant the rules previewed in
+ * the browser were not the rules a scheduled push fitted: the push ran at the
+ * literals. One value now feeds both paths, and a request that still names them
+ * can sweep, for a fit experiment that stays in the URL. The old
+ * `deadPoints`/`bitratePoints` pair is gone from the query entirely: nothing
+ * ever passed it, so it is two constants below `teamarrRules`, where the
+ * sizing rationale can sit next to the numbers it argues for.
  */
-export function profileQuery(params: URLSearchParams): {
-  minSamples: number;
-  pointsPerMbps: number;
-  deadPoints: number;
-  bitratePoints: number;
-} {
+export function profileQuery(
+  params: URLSearchParams,
+  fit: { minSamples: number; pointsPerMbps: number } = QUALITY_FIT_DEFAULTS,
+): { minSamples: number; pointsPerMbps: number } {
   const number = (key: string, fallback: number, min: number, max: number): number => {
     const raw = params.get(key);
     // Blank as well as missing: `?pointsPerMbps=` is a parameter somebody meant
@@ -1063,12 +1079,8 @@ export function profileQuery(params: URLSearchParams): {
     return Math.max(min, Math.min(max, value));
   };
   return {
-    minSamples: Math.round(number('minSamples', 20, 1, 100_000)),
-    pointsPerMbps: number('pointsPerMbps', 5, 0, 10_000),
-    // Clamped to zero or below: this is a demotion, and a positive value would
-    // reward a stream for having measured dead. `0` suppresses it.
-    deadPoints: Math.round(number('deadPoints', -100, -100_000, 0)),
-    bitratePoints: Math.round(number('bitratePoints', 8, 0, 10_000)),
+    minSamples: Math.round(number('minSamples', fit.minSamples, 1, 100_000)),
+    pointsPerMbps: number('pointsPerMbps', fit.pointsPerMbps, 0, 10_000),
   };
 }
 
@@ -1183,12 +1195,12 @@ function pointsFor(deltaKbps: number, pointsPerMbps: number, maxPoints: number):
  * right answer when the name is the only thing there was to go on.
  */
 export function teamarrRules(profile: QualityProfile, options: ExportOptions = {}): RulesExport {
-  const pointsPerMbps = options.pointsPerMbps ?? 5;
+  const pointsPerMbps = options.pointsPerMbps ?? QUALITY_FIT_DEFAULTS.pointsPerMbps;
   const maxPoints = options.maxPoints ?? 15;
-  const minSamples = options.minSamples ?? 20;
+  const minSamples = options.minSamples ?? QUALITY_FIT_DEFAULTS.minSamples;
   const consolidated = options.consolidated ?? [];
-  const deadPoints = options.deadPoints ?? -100;
-  const bitratePoints = options.bitratePoints ?? 8;
+  const deadPoints = DEAD_POINTS;
+  const bitratePoints = BITRATE_POINTS;
 
   const rules: TeamarrRule[] = [];
 
@@ -1201,22 +1213,20 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
   // else, which is the right answer when nobody has looked at it. A positive
   // "alive" rule would instead push every unprobed stream below every probed
   // one, and at kickoff the unprobed streams are most of them.
-  if (deadPoints !== 0) {
-    rules.push({
-      type: 'stats_metric',
-      value: 'alive|=|0',
-      priority: 99,
-      mode: 'score',
-      points: deadPoints,
-    });
-    rules.push({
-      type: 'stats_metric',
-      value: 'blank_detected|=|1',
-      priority: 99,
-      mode: 'score',
-      points: deadPoints,
-    });
-  }
+  rules.push({
+    type: 'stats_metric',
+    value: 'alive|=|0',
+    priority: 99,
+    mode: 'score',
+    points: deadPoints,
+  });
+  rules.push({
+    type: 'stats_metric',
+    value: 'blank_detected|=|1',
+    priority: 99,
+    mode: 'score',
+    points: deadPoints,
+  });
 
   // The ladder, at this install's own quartiles, centred on the median.
   //
@@ -1236,7 +1246,7 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
   // `>=` at the floor is not a discrimination at all: it fires on everything
   // the floor did not demote, which is a flat bonus for having been probed,
   // reintroducing exactly what the floor was added to remove.
-  if (bitratePoints !== 0) {
+  {
     const { floorKbps, rungsKbps } = profile.bitrateLadder;
     if (floorKbps > 0) {
       rules.push({
@@ -1352,19 +1362,17 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
         'megabits, times pointsPerMbps. `group` values are Dispatcharr group ' +
         'names; Teamarr matches them against its own Event Group names, so a ' +
         'group rule scores only where the two are spelled the same.' +
-        (deadPoints !== 0 || bitratePoints !== 0
-          ? ' `stats_metric` rules read the stream_stats Podium publishes to ' +
-            'Dispatcharr, so they score a measurement of the stream itself ' +
-            'rather than a prior about where it came from. The bitrate ladder ' +
-            "is centred on this catalogue's median: a stream measured below " +
-            'it is demoted, one measured above the upper quartile is promoted, ' +
-            'and a stream with no stream_stats scores 0 and so sits level with ' +
-            'a median one -- absent stats are not a low reading. Merging ' +
-            'REPLACES any existing single-condition stats_metric rule on the ' +
-            'same metric and comparator, whatever its threshold -- a ' +
-            'recalibrated ladder has different rungs, and keeping the old ones ' +
-            'would score the same bitrate twice. See podium.measured.'
-          : '') +
+        ' `stats_metric` rules read the stream_stats Podium publishes to ' +
+        'Dispatcharr, so they score a measurement of the stream itself ' +
+        'rather than a prior about where it came from. The bitrate ladder ' +
+        "is centred on this catalogue's median: a stream measured below " +
+        'it is demoted, one measured above the upper quartile is promoted, ' +
+        'and a stream with no stream_stats scores 0 and so sits level with ' +
+        'a median one -- absent stats are not a low reading. Merging ' +
+        'REPLACES any existing single-condition stats_metric rule on the ' +
+        'same metric and comparator, whatever its threshold -- a ' +
+        'recalibrated ladder has different rungs, and keeping the old ones ' +
+        'would score the same bitrate twice. See podium.measured.' +
         (consolidated.length > 0
           ? ` ${consolidated.length} regex rule(s) were mined from stream names and ` +
             'REPLACE the group rules they subsume -- those groups are re-emitted at ' +

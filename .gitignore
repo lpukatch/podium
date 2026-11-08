@@ -27,3 +27,6 @@ dist/
 *.swp
 *.swo
 *~
+
+# Playwright MCP state
+.playwright-mcp/

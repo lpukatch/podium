@@ -346,9 +346,17 @@ export async function syncToTeamarr(
     if (thin) return { at, pushed: false, deferred: true, reason: `deferred: ${thin}` };
   }
 
-  const profile = buildProfile(samples, { scope });
-  const miner = mineNames(scoped, profile.groups);
-  const generated = teamarrRules(profile, { consolidated: miner.passB.consolidated });
+  // The scheduled fit reads the same fit settings the Quality tab does, so a
+  // push cannot quietly disagree with what an operator previewed -- which was
+  // exactly the situation while those two numbers were boxes on the tab: the
+  // preview honoured what was typed, the push ran at the literals.
+  const fit = {
+    minSamples: config.PODIUM_QUALITY_MIN_SAMPLES,
+    pointsPerMbps: config.PODIUM_QUALITY_POINTS_PER_MBPS,
+  };
+  const profile = buildProfile(samples, { scope, minSamples: fit.minSamples });
+  const miner = mineNames(scoped, profile.groups, { minCarrierSamples: fit.minSamples });
+  const generated = teamarrRules(profile, { ...fit, consolidated: miner.passB.consolidated });
   if (generated.rules.length === 0) {
     return fail('the profile produced no rules worth pushing');
   }

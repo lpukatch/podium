@@ -6,15 +6,23 @@
  * behaving exactly as before, and a change made in the UI actually takes
  * effect rather than being silently overridden on the next boot.
  *
- * Only fields that are safe and useful to change at runtime are exposed.
- * Anything that decides where data lives (PODIUM_DATA_DIR, PODIUM_RULES) stays
- * environment-only -- moving the database out from under a running process is
- * not a settings change.
+ * Nearly everything the worker reads per pass is exposed here, so the whole
+ * runtime shape of Podium is editable from the settings page; seeding from the
+ * environment is what keeps a compose-configured install working untouched.
+ * What stays environment-only decides where data lives (PODIUM_DATA_DIR,
+ * PODIUM_RULES) or how the processes come up -- moving the database out from
+ * under a running process is not a settings change.
  */
 
 import { baseUrlProblem, normaliseBaseUrl } from './base-url';
 import { CONFIG_DEFAULTS } from './config';
+import type { RequireClause } from './setting-requirements';
 import type { Store } from './store';
+
+export type { RequireClause } from './setting-requirements';
+// The dependency checks live in a leaf module so the settings form can use
+// them without importing this file's server-side config machinery with them.
+export { clampNote, unsatisfiedRequires } from './setting-requirements';
 
 export type FieldKind = 'string' | 'secret' | 'boolean' | 'number';
 
@@ -33,6 +41,31 @@ export interface FieldSpec {
   more?: string;
   /** Grouping for the settings page. */
   section: 'dispatcharr' | 'behaviour' | 'probing' | 'quality' | 'teamarr';
+  /**
+   * Which named group of the settings page this renders in, by `GroupSpec` id.
+   *
+   * Carried on the field rather than kept as a side list in the form: the form
+   * used to hand-write its own taxonomy of keys, and the first field added
+   * without it silently fell into "Other settings". A field with no group here
+   * is a bug -- see the group integrity test.
+   */
+  group: string;
+  /**
+   * Other fields that must *all* hold for this one to have any effect.
+   *
+   * Shown in the form as a note rather than an error: the value itself is fine
+   * to store, it is just that nothing reads it while the dependency is unmet.
+   */
+  requiresAll?: RequireClause[];
+  /** As requiresAll, but satisfied when any one clause holds. */
+  requiresAny?: RequireClause[];
+  /**
+   * The code bounds this value against another field rather than erroring --
+   * a lifetime capped by another, a back-off floored by the wait it backs off
+   * from. Saving the out-of-bounds value is allowed; the form notes what will
+   * actually take effect.
+   */
+  clampedBy?: { key: string; direction: 'max' | 'min' };
   /**
    * Stored units per displayed unit.
    *
@@ -55,8 +88,29 @@ export interface FieldSpec {
   int?: boolean;
 }
 
+/**
+ * A named block of the settings page, rendered under its section heading.
+ *
+ * `advanced` groups are real knobs that are rarely revisited once set, so the
+ * form starts them collapsed -- the page opens showing the decisions a new
+ * install actually makes, not every dial it will ever turn.
+ */
+export interface GroupSpec {
+  id: string;
+  /** Which page section the group renders under. */
+  section: FieldSpec['section'];
+  title: string;
+  /** One sentence under the group heading. */
+  description: string;
+  /** Rendered collapsed by default. */
+  advanced?: boolean;
+}
+
 /** Displayed units from stored units. */
 function toDisplay(raw: string, field: FieldSpec): string {
+  if (field.kind === 'boolean' && raw !== '') {
+    return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase()) ? 'true' : 'false';
+  }
   if (!field.scale || raw === '') return raw;
   const n = Number(raw);
   if (!Number.isFinite(n)) return raw;
@@ -71,6 +125,98 @@ function defaultFor(field: FieldSpec): string {
   return toDisplay(String(value), field);
 }
 
+/**
+ * The settings page, top to bottom, by group.
+ *
+ * Fields render in `FIELDS` order within their group; groups render in this
+ * order within their section.
+ */
+export const GROUPS: GroupSpec[] = [
+  {
+    id: 'server',
+    section: 'dispatcharr',
+    title: 'Server',
+    description: 'Where Dispatcharr lives.',
+  },
+  {
+    id: 'signin',
+    section: 'dispatcharr',
+    title: 'Signing in',
+    description: 'An API key, or a username and password.',
+  },
+  {
+    id: 'channel-changes',
+    section: 'behaviour',
+    title: 'Changes to channels',
+    description: 'Assigning, reordering and removing -- dry run previews every write.',
+  },
+  {
+    id: 'publishing',
+    section: 'behaviour',
+    title: 'Publishing measurements',
+    description: 'Where Podium reports what it measured.',
+  },
+  {
+    id: 'watching',
+    section: 'behaviour',
+    title: 'While someone is watching',
+    description: 'Keeping checks off the provider connections a viewer is using.',
+  },
+  {
+    id: 'timing',
+    section: 'behaviour',
+    title: 'Timing and cached verdicts',
+    description: 'How often Podium works, and when a result is too old to trust.',
+    advanced: true,
+  },
+  {
+    id: 'quick-checks',
+    section: 'probing',
+    title: 'Quick checks',
+    description: 'The five-second check: how hard it works and what it counts as working.',
+  },
+  {
+    id: 'connect-events',
+    section: 'probing',
+    title: 'Live stream events',
+    description: 'Having Dispatcharr report switches and failures as they happen.',
+  },
+  {
+    id: 'stability-soak',
+    section: 'probing',
+    title: 'Stability and long checks',
+    description: 'Finding streams that fail only after they have played a while.',
+    advanced: true,
+  },
+  {
+    id: 'connect-method',
+    section: 'probing',
+    title: 'Connecting to streams',
+    description: 'Direct to the provider or through Dispatcharr, and presenting as whom.',
+    advanced: true,
+  },
+  {
+    id: 'learn-scope',
+    section: 'quality',
+    title: 'Which results to learn from',
+    description:
+      'Scoping the samples that fit quality rules. Excluded history is kept, not deleted.',
+  },
+  {
+    id: 'teamarr-push',
+    section: 'teamarr',
+    title: 'Sending rules to Teamarr',
+    description: 'Where to push rules, and how often.',
+  },
+  {
+    id: 'teamarr-guards',
+    section: 'teamarr',
+    title: 'Push safeguards',
+    description: 'Floors a push must clear before rules are sent.',
+    advanced: true,
+  },
+];
+
 export const FIELDS: FieldSpec[] = [
   {
     key: 'DISPATCHARR_URL',
@@ -79,6 +225,7 @@ export const FIELDS: FieldSpec[] = [
     help: 'The base URL of your Dispatcharr server, for example http://dispatcharr:9191.',
     more: 'If both apps run in the same cluster, use the internal service address instead of routing through an Ingress.',
     section: 'dispatcharr',
+    group: 'server',
   },
   {
     key: 'DISPATCHARR_API_KEY',
@@ -86,6 +233,7 @@ export const FIELDS: FieldSpec[] = [
     label: 'API key',
     help: 'Recommended way to sign in. Leave username and password empty if you use a key.',
     section: 'dispatcharr',
+    group: 'signin',
   },
   {
     key: 'DISPATCHARR_USERNAME',
@@ -93,6 +241,7 @@ export const FIELDS: FieldSpec[] = [
     label: 'Username',
     help: 'Use with a password instead of an API key.',
     section: 'dispatcharr',
+    group: 'signin',
   },
   {
     key: 'DISPATCHARR_PASSWORD',
@@ -100,6 +249,7 @@ export const FIELDS: FieldSpec[] = [
     label: 'Password',
     help: 'Used with the username to sign in to Dispatcharr.',
     section: 'dispatcharr',
+    group: 'signin',
   },
   {
     key: 'PODIUM_DRY_RUN',
@@ -107,69 +257,7 @@ export const FIELDS: FieldSpec[] = [
     label: 'Dry run',
     help: 'Check and rank streams without changing their order in Dispatcharr. On by default; reordering cannot be undone.',
     section: 'behaviour',
-  },
-  {
-    key: 'PODIUM_PAUSE_WHEN_WATCHING',
-    kind: 'boolean',
-    label: 'Pause while anyone is watching',
-    help: 'Stop all checks while someone is watching, so checks do not use their provider connections.',
-    section: 'behaviour',
-  },
-  {
-    key: 'PODIUM_PROBE_IDLE_PROVIDERS',
-    kind: 'boolean',
-    label: 'Keep probing providers nobody is watching',
-    help: 'While someone is watching, keep checking providers they are not using. Requires the pause setting above.',
-    more: 'If Podium cannot tell which provider a viewer is on, it still pauses everything. Costs a full catalogue fetch on each pass while someone is watching. Does nothing unless the pause above is on.',
-    section: 'behaviour',
-  },
-  {
-    key: 'PODIUM_PROBE_WATCHED_PROVIDER',
-    kind: 'boolean',
-    label: 'Also probe the provider being watched',
-    help: 'Also check the provider in use if it has spare connections beyond the reserve below.',
-    more: 'Meant for a provider with several connections — the one sorted top is usually both the best and the one being watched, so yielding it whole costs ranking exactly where it matters. An account with nothing spare, a single-connection one above all, still yields. Does nothing unless the setting above is on.',
-    section: 'behaviour',
-  },
-  {
-    key: 'PODIUM_WATCHED_FREE_SLOTS',
-    kind: 'number',
-    label: 'Connections to keep free on the watched provider',
-    help: 'Extra connections reserved for viewers, in addition to those already in use.',
-    more: 'Two, not one: changing channel needs a slot for the new stream before the provider releases the old one, and a provider may hold a dead connection open for another half minute. Podium only knows the cap Dispatcharr was told about — another app on the same credentials is invisible to it, so raise this if anything else uses the account.',
-    section: 'behaviour',
-    min: 0,
-    max: 20,
-  },
-  {
-    key: 'PODIUM_REMOVE_UNMATCHED',
-    kind: 'boolean',
-    label: 'Remove unmatched streams',
-    help: 'Unassign streams that match no channel rule. Off keeps them, ranked last. Unassigning cannot be undone.',
-    more: 'A stream Dispatcharr has marked stale is never removed however long it stays that way — during a provider outage its whole catalogue goes stale, and unassigning it would survive the outage even though the streams come back.',
-    section: 'behaviour',
-  },
-  {
-    key: 'PODIUM_REMOVE_UNMATCHED_AFTER_MS',
-    kind: 'number',
-    label: 'Wait before removing an unmatched stream (hours)',
-    help: 'How long a stream must remain unmatched before it can be unassigned. 0 means immediately. Requires the setting above.',
-    more: 'The clock restarts the moment a rule claims it again, so a stream that looks unclaimed for one pass — a rule saved mid-edit, a provider group renamed upstream, a catalogue fetch that came back short — is never removed on the strength of it. 0 is how earlier versions behaved. Checking a channel by hand and ticking the drop box ignores this.',
-    section: 'behaviour',
-    scale: 3_600_000,
-    min: 0,
-    max: 720,
-  },
-  {
-    key: 'PODIUM_REMOVE_DEAD_AFTER_CHECKS',
-    kind: 'number',
-    label: 'Remove a dead stream after this many checks',
-    help: 'Unassign a stream after this many consecutive dead results. 0 turns this off. Unassigning cannot be undone.',
-    more: 'Checks, not hours: a dead stream is re-probed after 3h, then 6, 12 and 24, so 5 checks is about two days. Any live verdict resets the count, and a stream that is merely black-screened or under the bitrate floor is alive — it sinks, but is never removed. A provider whose catalogue has mostly gone dead is left alone entirely, so an outage cannot strip its streams off every channel.',
-    section: 'behaviour',
-    min: 0,
-    max: 100,
-    int: true,
+    group: 'channel-changes',
   },
   {
     key: 'PODIUM_AUTO_ASSIGN',
@@ -178,6 +266,7 @@ export const FIELDS: FieldSpec[] = [
     help: 'Add healthy streams that match a channel rule. Off only reorders streams already assigned.',
     more: 'A new provider’s streams then join by themselves. Never more than the cap below, and nothing is ever removed. A loose alias will write, so check a channel first — with dry run on, the log names what it would assign.',
     section: 'behaviour',
+    group: 'channel-changes',
   },
   {
     key: 'PODIUM_AUTO_ASSIGN_MAX',
@@ -186,8 +275,11 @@ export const FIELDS: FieldSpec[] = [
     help: 'Maximum matched streams per channel, including those already assigned. 0 means no limit. Requires the setting above.',
     more: 'Lowering this limit does not remove streams already assigned to a channel.',
     section: 'behaviour',
+    group: 'channel-changes',
     min: 0,
     max: 100,
+    int: true,
+    requiresAll: [{ key: 'PODIUM_AUTO_ASSIGN', state: 'on' }],
   },
   {
     key: 'PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER',
@@ -196,9 +288,11 @@ export const FIELDS: FieldSpec[] = [
     help: 'Maximum matched streams one provider may contribute to a channel, inside the channel cap above. 0 means no per-provider limit.',
     more: 'A provider is a Dispatcharr M3U account — the same upstream added twice as two accounts counts as two. Only usable streams count, so a provider with nothing healthy to offer contributes nothing rather than filling its slots with junk.',
     section: 'behaviour',
+    group: 'channel-changes',
     min: 0,
     max: 100,
     int: true,
+    requiresAll: [{ key: 'PODIUM_AUTO_ASSIGN', state: 'on' }],
   },
   {
     key: 'PODIUM_AUTO_ASSIGN_PRUNE_PER_PROVIDER',
@@ -207,13 +301,115 @@ export const FIELDS: FieldSpec[] = [
     help: 'Also unassign the worst-ranked streams a provider holds beyond the per-provider cap. Off means the cap only stems new additions.',
     more: 'Never takes a provider below the cap, never touches a stream that is merely dead or sub-floor, and records no block — a pruned stream can return when a slot opens. Unassigning cannot be undone. Requires the per-provider cap above and assignment on.',
     section: 'behaviour',
+    group: 'channel-changes',
+    requiresAll: [
+      { key: 'PODIUM_AUTO_ASSIGN', state: 'on' },
+      { key: 'PODIUM_AUTO_ASSIGN_MAX_PER_PROVIDER', state: 'gt0' },
+    ],
+  },
+  {
+    key: 'PODIUM_REMOVE_UNMATCHED',
+    kind: 'boolean',
+    label: 'Remove unmatched streams',
+    help: 'Unassign streams that match no channel rule. Off keeps them, ranked last. Unassigning cannot be undone.',
+    more: 'A stream Dispatcharr has marked stale is never removed however long it stays that way — during a provider outage its whole catalogue goes stale, and unassigning it would survive the outage even though the streams come back.',
+    section: 'behaviour',
+    group: 'channel-changes',
+  },
+  {
+    key: 'PODIUM_REMOVE_UNMATCHED_AFTER_MS',
+    kind: 'number',
+    label: 'Wait before removing an unmatched stream (hours)',
+    help: 'How long a stream must remain unmatched before it can be unassigned. 0 means immediately. Requires the setting above.',
+    more: 'The clock restarts the moment a rule claims it again, so a stream that looks unclaimed for one pass — a rule saved mid-edit, a provider group renamed upstream, a catalogue fetch that came back short — is never removed on the strength of it. 0 is how earlier versions behaved. Checking a channel by hand and ticking the drop box ignores this.',
+    section: 'behaviour',
+    group: 'channel-changes',
+    scale: 3_600_000,
+    min: 0,
+    max: 720,
+    requiresAll: [{ key: 'PODIUM_REMOVE_UNMATCHED', state: 'on' }],
+  },
+  {
+    key: 'PODIUM_REMOVE_DEAD_AFTER_CHECKS',
+    kind: 'number',
+    label: 'Remove a dead stream after this many checks',
+    help: 'Unassign a stream after this many consecutive dead results. 0 turns this off. Unassigning cannot be undone.',
+    more: 'Checks, not hours: a dead stream is re-checked after 3h, then 6, 12 and 24, so 5 checks is about two days. Any live verdict resets the count, and a stream that is merely black-screened or under the bitrate floor is live — it sinks, but is never removed. A provider whose catalogue has mostly gone dead is left alone entirely, so an outage cannot strip its streams off every channel.',
+    section: 'behaviour',
+    group: 'channel-changes',
+    min: 0,
+    max: 100,
+    int: true,
   },
   {
     key: 'PODIUM_WRITE_STATS',
     kind: 'boolean',
     label: 'Publish stats to Dispatcharr',
-    help: "Write probe results into each stream's stream_stats field.",
+    help: "Write check results into each stream's stream_stats field.",
     section: 'behaviour',
+    group: 'publishing',
+  },
+  {
+    key: 'PODIUM_METRICS_CHANNELS',
+    kind: 'boolean',
+    label: 'Per-channel metrics',
+    help: 'Expose one metrics series per managed channel on /api/metrics. Off keeps the export small.',
+    more: 'Each channel adds a series to the Prometheus export, so a 449-channel install means 449 more series on every scraper grab. The per-provider and per-state totals stay on either way; this is the raw per-channel detail underneath them.',
+    section: 'behaviour',
+    group: 'publishing',
+  },
+  {
+    key: 'PODIUM_PAUSE_WHEN_WATCHING',
+    kind: 'boolean',
+    label: 'Pause while anyone is watching',
+    help: 'Stop all checks while someone is watching, so checks do not use their provider connections.',
+    section: 'behaviour',
+    group: 'watching',
+  },
+  {
+    key: 'PODIUM_MIN_FREE_SLOTS',
+    kind: 'number',
+    label: 'Connections to keep free on the viewer’s provider',
+    help: 'While someone is watching, checks leave this many of that provider’s connections untouched -- a courtesy for a second person tuning in.',
+    more: 'The reserve only asks something of providers carrying a viewer, and of all of them only when Podium cannot tell which provider the viewer is on. It applies whenever checks run during viewing at all -- the pause above, or the yield settings below. The watched provider has a separate, larger reserve for the checking it may do.',
+    section: 'behaviour',
+    group: 'watching',
+    int: true,
+    min: 0,
+    max: 20,
+  },
+  {
+    key: 'PODIUM_PROBE_IDLE_PROVIDERS',
+    kind: 'boolean',
+    label: 'Keep probing providers nobody is watching',
+    help: 'While someone is watching, keep checking providers they are not using. Requires the pause setting above.',
+    more: 'If Podium cannot tell which provider a viewer is on, it still pauses everything. Costs a full catalogue fetch on each pass while someone is watching. Does nothing unless the pause above is on.',
+    section: 'behaviour',
+    group: 'watching',
+    requiresAll: [{ key: 'PODIUM_PAUSE_WHEN_WATCHING', state: 'on' }],
+  },
+  {
+    key: 'PODIUM_PROBE_WATCHED_PROVIDER',
+    kind: 'boolean',
+    label: 'Also check the provider being watched',
+    help: 'Also check the provider in use if it has spare connections beyond the reserve below.',
+    more: 'Meant for a provider with several connections — the one sorted top is usually both the best and the one being watched, so yielding it whole costs ranking exactly where it matters. An account with nothing spare, a single-connection one above all, still yields. Does nothing unless the setting above is on.',
+    section: 'behaviour',
+    group: 'watching',
+    requiresAll: [{ key: 'PODIUM_PROBE_IDLE_PROVIDERS', state: 'on' }],
+  },
+  {
+    key: 'PODIUM_WATCHED_FREE_SLOTS',
+    kind: 'number',
+    label: 'Connections to keep free on the watched provider',
+    help: 'Extra connections reserved for viewers, in addition to those already in use.',
+    more: 'Two, not one: changing channel needs a slot for the new stream before the provider releases the old one, and a provider may hold a dead connection open for another half minute. Podium only knows the cap Dispatcharr was told about — another app on the same credentials is invisible to it, so raise this if anything else uses the account.',
+    section: 'behaviour',
+    group: 'watching',
+    min: 0,
+    max: 20,
+    int: true,
+    requiresAll: [{ key: 'PODIUM_PROBE_WATCHED_PROVIDER', state: 'on' }],
   },
   {
     key: 'PODIUM_MAX_AGE_MS',
@@ -222,6 +418,7 @@ export const FIELDS: FieldSpec[] = [
     help: 'Aim to check every channel within this many minutes. 1440 is one day.',
     more: 'This is a freshness target, not a fixed schedule. Podium sizes each pass to keep up with it.',
     section: 'behaviour',
+    group: 'timing',
     scale: 60_000,
     min: 5,
     max: 43_200,
@@ -232,6 +429,7 @@ export const FIELDS: FieldSpec[] = [
     label: 'Check interval (minutes)',
     help: 'How often Podium looks for work to do. Each pass checks only what is needed to meet the freshness target.',
     section: 'behaviour',
+    group: 'timing',
     scale: 60_000,
     min: 1,
     max: 1_440,
@@ -242,6 +440,7 @@ export const FIELDS: FieldSpec[] = [
     label: 'Idle back-off (minutes)',
     help: 'Longest Podium waits when nothing needs checking. Shorter waits notice newly added streams sooner.',
     section: 'behaviour',
+    group: 'timing',
     scale: 60_000,
     min: 1,
     max: 1_440,
@@ -253,6 +452,7 @@ export const FIELDS: FieldSpec[] = [
     help: 'How long to reuse the programme guide before fetching it again. 0 turns caching off.',
     more: 'Podium still calculates what is airing now on every pass. An hour or two is usually fine unless the guide only lists a short window ahead.',
     section: 'behaviour',
+    group: 'timing',
     scale: 60_000,
     min: 0,
     max: 1_440,
@@ -263,6 +463,7 @@ export const FIELDS: FieldSpec[] = [
     label: 'Live verdict lifetime (minutes)',
     help: 'How long a working stream stays trusted before another check. The main control for check frequency.',
     section: 'behaviour',
+    group: 'timing',
     scale: 60_000,
     min: 5,
     max: 43_200,
@@ -273,6 +474,7 @@ export const FIELDS: FieldSpec[] = [
     label: 'Dead verdict lifetime (minutes)',
     help: 'How soon to recheck a stream after its first failed check.',
     section: 'behaviour',
+    group: 'timing',
     scale: 60_000,
     min: 5,
     max: 43_200,
@@ -283,9 +485,11 @@ export const FIELDS: FieldSpec[] = [
     label: 'Dead verdict lifetime, backed off (minutes)',
     help: 'Longest wait between checks of a stream that keeps failing. Match the first-failure wait to turn back-off off.',
     section: 'behaviour',
+    group: 'timing',
     scale: 60_000,
     min: 5,
     max: 43_200,
+    clampedBy: { key: 'PODIUM_DEAD_TTL_MS', direction: 'min' },
   },
   {
     key: 'PODIUM_UNKNOWN_BITRATE_TTL_MS',
@@ -294,9 +498,11 @@ export const FIELDS: FieldSpec[] = [
     help: 'How soon to recheck a working stream with no bitrate reading. 0 uses the usual expiry time.',
     more: 'Ranking puts these behind every stream it has real data for, so a short lifetime stops a possibly-good stream sitting at the bottom of its channel all day. Never longer than the live lifetime.',
     section: 'behaviour',
+    group: 'timing',
     scale: 60_000,
     min: 0,
     max: 43_200,
+    clampedBy: { key: 'PODIUM_LIVE_TTL_MS', direction: 'max' },
   },
   {
     key: 'PODIUM_MAX_SLICE',
@@ -304,107 +510,122 @@ export const FIELDS: FieldSpec[] = [
     label: 'Max streams per pass',
     help: 'Maximum streams checked in one pass, even when Podium is behind its freshness target.',
     section: 'behaviour',
+    group: 'timing',
     min: 1,
     max: 10_000,
-  },
-  {
-    key: 'PODIUM_TEAMARR_URL',
-    kind: 'string',
-    label: 'Teamarr URL',
-    help: 'The base URL of your Teamarr server, for example http://teamarr:9195. Leave empty to download rules instead.',
-    more: 'A plain http(s) base, with no path fragment, query or credentials in it. Use in-cluster service DNS where possible.',
-    section: 'teamarr',
-  },
-  {
-    key: 'PODIUM_TEAMARR_SYNC',
-    kind: 'boolean',
-    label: 'Push on a schedule',
-    help: 'Send learned rules automatically on the interval below. Off means you push manually from Quality.',
-    more: 'Every push is checked first and refused if Podium cannot show that the new rules will preserve or improve the ordering.',
-    section: 'teamarr',
-  },
-  {
-    key: 'PODIUM_TEAMARR_SYNC_MS',
-    kind: 'number',
-    label: 'Push every (hours)',
-    help: 'Time between automatic pushes. 24 means once a day. Requires scheduled pushes above.',
-    more: 'Rule scores change slowly from day to day, so pushing more often usually achieves little.',
-    section: 'teamarr',
-    scale: 3_600_000,
-    min: 1,
-    max: 720,
-  },
-  {
-    key: 'PODIUM_TEAMARR_MIN_SAMPLES',
-    kind: 'number',
-    label: 'Fewest samples to push from',
-    help: 'Do not push until at least this many eligible results have been collected.',
-    more: 'Protects a new or cleared database from producing confident-looking rules from only a few hours of data.',
-    section: 'teamarr',
-    min: 0,
-    max: 1_000_000,
-  },
-  {
-    key: 'PODIUM_TEAMARR_MIN_CHANNELS',
-    kind: 'number',
-    label: 'Fewest channels to check against',
-    help: 'Wait until old and new rules can be compared on at least this many channels.',
-    more: 'It retries within the hour. Only event channels currently carrying two probed streams can be compared, so the number collapses overnight and a push landing then is effectively unchecked. Installs that never reach this many are not held back.',
-    section: 'teamarr',
-    min: 0,
-    max: 10_000,
-  },
-  {
-    key: 'PODIUM_TEAMARR_PEAK_FRACTION',
-    kind: 'number',
-    label: 'Push at a share of the busiest recent population',
-    help: 'Delay scheduled pushes until the checkable population reaches this fraction (0-1) of the largest of the last seven days. 0 keeps the floor absolute.',
-    more: "Event catalogues swing with the calendar -- a football weekend runs a hundred channels where a Tuesday runs twenty -- and a push landing at the floor has been checked on a sliver of what a day later would have compared. A fraction drifts the push towards this install's own busy spell, whenever that is. If nothing has pushed in seven days the bar falls back to the floor above, so a missed busy spell cannot stall pushes forever.",
-    section: 'teamarr',
-    min: 0,
-    max: 1,
-  },
-  {
-    key: 'PODIUM_QUALITY_EVENT_ONLY',
-    kind: 'boolean',
-    label: 'Learn only from event channels',
-    help: 'Use only channels in groups set to After kickoff or Assigned when learning quality rules.',
-    more: 'On by default, because the exported rules are evaluated at kickoff and a catalogue is mostly VOD and filler. Samples taken before this setting existed carry no policy and show as unrecorded until the patterns below claim them.',
-    section: 'quality',
-  },
-  {
-    key: 'PODIUM_QUALITY_INCLUDE_GROUPS',
-    kind: 'string',
-    label: 'Always learn from groups matching',
-    help: 'Always include matching provider or channel groups. Use comma-separated patterns, e.g. “*SPORT*, *PPV*”.',
-    more: 'Admits a group whatever its policy says, and it is the only setting that reaches backwards: naming the groups your existing history came from puts those samples in scope immediately.',
-    section: 'quality',
-  },
-  {
-    key: 'PODIUM_QUALITY_EXCLUDE_GROUPS',
-    kind: 'string',
-    label: 'Never learn from groups matching',
-    help: 'Exclude matching provider or channel groups, even if included above. Use comma-separated patterns, e.g. “*VOD*, *MOVIE*”.',
-    more: 'Excluded results are kept. Changing the patterns later can bring them back into scope.',
-    section: 'quality',
+    int: true,
   },
   {
     key: 'PODIUM_MAX_CONCURRENT_PROBES',
     kind: 'number',
-    label: 'Max probes at once',
+    label: 'Max checks at once',
     help: 'Maximum checks running at once across all providers. 0 means no overall limit.',
     more: 'Provider limits protect accounts; this limit protects the machine. Each active check runs ffprobe and ffmpeg.',
     section: 'probing',
+    group: 'quick-checks',
     min: 0,
     max: 64,
+    int: true,
+  },
+  {
+    key: 'PODIUM_ANALYZE_SECONDS',
+    kind: 'number',
+    label: 'Analyze seconds',
+    help: 'How many seconds of stream data ffprobe examines to detect codecs and resolution.',
+    more: 'Six seconds is usually enough to reliably determine streams and frame rates. Below about three seconds, healthy streams may be marked dead. Total wall-clock budget is bounded by Check timeout above.',
+    section: 'probing',
+    group: 'quick-checks',
+    min: 1,
+    max: 60,
+  },
+  {
+    key: 'PODIUM_PROBE_TIMEOUT_MS',
+    kind: 'number',
+    label: 'Check timeout (seconds)',
+    help: 'How long one check may run before it is called dead. The clock covers connecting, analysing and the bitrate sample together.',
+    more: 'A timeout is a dead verdict, and a dead verdict is what sends a stream to the slower recheck clock -- so a tight timeout does not just slow ranking, it benches streams that are merely slow to start. Raise it on 4K-heavy line-ups and slow providers, where the first bytes alone can take seconds.',
+    section: 'probing',
+    group: 'quick-checks',
+    scale: 1_000,
+    min: 5,
+    max: 120,
+  },
+  {
+    key: 'PODIUM_MEASURE_BITRATE',
+    kind: 'boolean',
+    label: 'Measure bitrate',
+    help: 'Sample each stream to read its bitrate. Live streams rarely declare one, and ranking uses the reading.',
+    more: 'Without it, streams are ranked on declared resolution and whatever bitrate the provider claims, and the bitrate floor below has nothing to bite on. The sample is the extra ffmpeg run inside every check, so turning it off makes checks cheaper and blinder at once. Black-screen detection shares the same sample, so the sample stays while that is on.',
+    section: 'probing',
+    group: 'quick-checks',
+  },
+  {
+    key: 'PODIUM_MEASURE_SECONDS',
+    kind: 'number',
+    label: 'Sample length (seconds)',
+    help: 'How long the bitrate sample runs -- the same window black-screen detection watches.',
+    more: 'One sample serves both, so one knob sets both. Five seconds reads a bitrate fine; black detection wants a window long enough that a stream caught mid-slate does not fill all of it, which is what the black ratio below judges. Only read while measuring or black detection is on.',
+    section: 'probing',
+    group: 'quick-checks',
+    int: true,
+    min: 1,
+    max: 60,
+    requiresAny: [
+      { key: 'PODIUM_MEASURE_BITRATE', state: 'on' },
+      { key: 'PODIUM_DETECT_BLACK', state: 'on' },
+    ],
+  },
+  {
+    key: 'PODIUM_MIN_BITRATE_KBPS',
+    kind: 'number',
+    label: 'Minimum bitrate (kbps)',
+    help: 'Treat a stream below this bitrate as unusable, even if it is still playing.',
+    section: 'probing',
+    group: 'quick-checks',
+    min: 0,
+    max: 100_000,
+    int: true,
+  },
+  {
+    key: 'PODIUM_DETECT_BLACK',
+    kind: 'boolean',
+    label: 'Detect black screens',
+    help: 'Flag streams that play a black screen or slate instead of video.',
+    section: 'probing',
+    group: 'quick-checks',
+  },
+  {
+    key: 'PODIUM_BLACK_RATIO',
+    kind: 'number',
+    label: 'Black ratio',
+    help: 'Share of the sample that must be black for a stream to be flagged. 0.8 means four fifths.',
+    more: 'The room for doubt: broadcast slates and between-programme gaps are black for a few seconds, so a stream sampled mid-break otherwise looks dead. Lower it and more streams get flagged, including ones that were merely sampled during a gap.',
+    section: 'probing',
+    group: 'quick-checks',
+    min: 0,
+    max: 1,
+    requiresAll: [{ key: 'PODIUM_DETECT_BLACK', state: 'on' }],
+  },
+  {
+    key: 'PODIUM_LANE_STAGGER_MS',
+    kind: 'number',
+    label: 'Lane stagger (seconds)',
+    help: 'Delay between starting each parallel check, so the provider does not see every connection open at once. 0 starts them together.',
+    more: 'Most providers accept a burst. One that closes connections when several open in the same instant -- some police connects per second rather than slots -- wants a second or two here. Quick checks and long checks stagger on the same setting.',
+    section: 'probing',
+    group: 'quick-checks',
+    scale: 1_000,
+    min: 0,
+    max: 60,
   },
   {
     key: 'PODIUM_STABILITY',
     kind: 'boolean',
     label: 'Record how long streams hold',
     help: 'Record how long each stream plays before it fails or switches over.',
-    more: 'Answers the failure a probe cannot see: a feed that measures perfectly for five seconds and then dies every forty. It costs one small request every few seconds against an endpoint the worker already calls, and writes a row only when a viewing ends — an install nobody is watching writes nothing at all. Collecting is separate from acting on it: the Stability weight on the Ranking page is what decides whether any of this changes an order, and it starts at zero on an existing install. Leave this on even if you have not turned that weight up, or the ledger will be empty on the day you do.',
+    more: 'Answers the failure a check cannot see: a feed that measures perfectly for five seconds and then dies every forty. It costs one small request every few seconds against an endpoint the worker already calls, and writes a row only when a viewing ends — an install nobody is watching writes nothing at all. Collecting is separate from acting on it: the Stability weight on the Ranking page is what decides whether any of this changes an order, and it starts at zero on an existing install. Leave this on even if you have not turned that weight up, or the ledger will be empty on the day you do.',
     section: 'probing',
+    group: 'stability-soak',
   },
   {
     key: 'PODIUM_STABILITY_POLL_MS',
@@ -413,17 +634,24 @@ export const FIELDS: FieldSpec[] = [
     help: 'How often to check live playback sessions. Very short failures may be missed between samples.',
     more: 'A resolution, not a load setting. The failure worth catching runs in tens of seconds, so sampling much slower than ten misses the legs it is meant to measure, and sampling much faster buys precision on a figure that is reported per hour. Takes effect the next time the worker takes its lock.',
     section: 'probing',
+    group: 'stability-soak',
     scale: 1_000,
     min: 1,
     max: 300,
+    requiresAll: [{ key: 'PODIUM_STABILITY', state: 'on' }],
   },
   {
     key: 'PODIUM_CONNECT_EVENTS',
     kind: 'boolean',
     label: "Use Dispatcharr's live stream events",
     help: 'Let Dispatcharr report stream failures as they happen instead of inferring them from samples.',
-    more: "Needs a Dispatcharr new enough to put the stream id on its Connect events, and the address below. What changes: a failover closes its leg the instant it happens and an operator's manual switch is no longer billed as a failure — and, the reason this exists, a stream Dispatcharr gives up on is charged to the stream that died, which sampling cannot see because the channel simply vanishes. Sampling stays on underneath; events say when, samples say how long. Off keeps the old behaviour.",
+    more: "Needs a Dispatcharr new enough to put the stream id on its Connect events, the address below, and the stability sampler above: events stamp *when* a failure happened, and the sampler is what times how long the stream ran before it -- either one missing and events change nothing. What changes when it works: a failover closes its leg the instant it happens and an operator's manual switch is no longer billed as a failure — and, the reason this exists, a stream Dispatcharr gives up on is charged to the stream that died, which sampling cannot see because the channel simply vanishes. Sampling stays on underneath; events say when, samples say how long. Off keeps the old behaviour.",
     section: 'probing',
+    group: 'connect-events',
+    requiresAll: [
+      { key: 'PODIUM_CONNECT_URL', state: 'set' },
+      { key: 'PODIUM_STABILITY', state: 'on' },
+    ],
   },
   {
     key: 'PODIUM_CONNECT_URL',
@@ -432,14 +660,16 @@ export const FIELDS: FieldSpec[] = [
     help: 'The base URL Dispatcharr reaches this install at, e.g. “http://podium:3456”. Empty turns the events off.',
     more: 'Podium subscribes itself — two webhooks under this address, one for stream switches and one for a channel giving up on a stream — and repairs that subscription whenever it drifts. The address must be one Dispatcharr can resolve; inside Kubernetes that is usually the service DNS or a pod address, not the name you type into a browser.',
     section: 'probing',
+    group: 'connect-events',
   },
   {
     key: 'PODIUM_SOAK_WINDOW',
     kind: 'string',
     label: 'Soak during these hours',
     help: 'Hours for automatic long checks, e.g. “03:00-06:00”. Empty turns automatic checks off.',
-    more: 'A soak holds one stream open for minutes to find out how long it lasts — the failure a five-second probe cannot see. That costs a provider connection for the whole time, and most accounts have only a handful, so the sweep is confined to hours you name. It still stops the moment somebody starts watching, like every other kind of work here. This governs the automatic sweep only: a soak you ask for with a button is queued and runs as soon as there is spare capacity, whatever the hour.',
+    more: 'A soak holds one stream open for minutes to find out how long it lasts — the failure a five-second check cannot see. That costs a provider connection for the whole time, and most accounts have only a handful, so the sweep is confined to hours you name. It still stops the moment somebody starts watching, like every other kind of work here. This governs the automatic sweep only: a soak you ask for with a button is queued and runs as soon as there is spare capacity, whatever the hour.',
     section: 'probing',
+    group: 'stability-soak',
   },
   {
     key: 'PODIUM_SOAK_SECONDS',
@@ -448,6 +678,7 @@ export const FIELDS: FieldSpec[] = [
     help: 'How long each long check keeps a stream open.',
     more: 'Three minutes by default. The failure worth finding takes tens of seconds to appear, so a shorter soak mostly reports that nothing has gone wrong yet — which is the answer that misleads. Longer buys little: by three minutes a flapping feed has dropped several times and a steady one has proved itself.',
     section: 'probing',
+    group: 'stability-soak',
     int: true,
     min: 10,
     max: 900,
@@ -456,23 +687,27 @@ export const FIELDS: FieldSpec[] = [
     key: 'PODIUM_SOAK_MAX_PER_CHANNEL',
     kind: 'number',
     label: 'Soak the top N streams per channel',
-    help: 'How many top-ranked streams per channel get a long check. 0 checks all matched streams.',
+    help: 'How many top-ranked streams per channel get a long check in the automatic sweep. 0 checks all matched streams.',
     more: 'A stream ranked fifth of six will never be served to anybody, so whether it holds changes nothing — and measuring it is three minutes of a connection you cannot spend elsewhere. Keeping to the top few is what lets the sweep finish: on a 449-channel install, every matched stream is about 166 hours of connection time, where the top three per channel is roughly three nights of a three-hour window.',
     section: 'probing',
+    group: 'stability-soak',
     int: true,
     min: 0,
     max: 50,
+    requiresAll: [{ key: 'PODIUM_SOAK_WINDOW', state: 'set' }],
   },
   {
     key: 'PODIUM_SOAK_MAX_AGE_MS',
     kind: 'number',
     label: 'Re-soak after (days)',
-    help: 'Skip streams that passed a long check within this many days.',
+    help: 'Skip streams that passed a long check within this many days, in the automatic sweep.',
     more: 'Defaults to the fortnight the ledger remembers, so the sweep re-measures a stream as its evidence is about to age out rather than churning through whatever happens to be oldest.',
     section: 'probing',
+    group: 'stability-soak',
     scale: 86_400_000,
     min: 1,
     max: 365,
+    requiresAll: [{ key: 'PODIUM_SOAK_WINDOW', state: 'set' }],
   },
   {
     key: 'PODIUM_SOAK_COOLDOWN_MS',
@@ -481,6 +716,7 @@ export const FIELDS: FieldSpec[] = [
     help: 'Pause between long-check connections so providers can release the previous slot.',
     more: 'Many providers keep a closed connection counted for a few seconds. Open the next one too soon and the provider sees one connection too many and closes another soak — which reconnects, and the account churns. Ten seconds clears that comfortably. Raise it if soaks on one account keep being cut off.',
     section: 'probing',
+    group: 'stability-soak',
     scale: 1_000,
     min: 0,
     max: 120,
@@ -492,66 +728,174 @@ export const FIELDS: FieldSpec[] = [
     help: 'Provider connections reserved for viewers while long checks run.',
     more: 'An account with five connections soaks four at a time at the default of one. A single-connection account still soaks one at a time. 0 runs soaks at the full limit, which is fastest and the most likely to have the provider start closing connections.',
     section: 'probing',
+    group: 'stability-soak',
     int: true,
     min: 0,
     max: 10,
   },
   {
-    key: 'PODIUM_MIN_BITRATE_KBPS',
-    kind: 'number',
-    label: 'Minimum bitrate (kbps)',
-    help: 'Treat a stream below this bitrate as unusable, even if it is still playing.',
-    section: 'probing',
-    min: 0,
-    max: 100_000,
-  },
-  {
-    key: 'PODIUM_DETECT_BLACK',
-    kind: 'boolean',
-    label: 'Detect black screens',
-    help: 'Flag streams that play a black screen or slate instead of video.',
-    section: 'probing',
-  },
-  {
     key: 'PODIUM_PROBE_VIA_DISPATCHARR',
     kind: 'boolean',
-    label: 'Probe through Dispatcharr',
+    label: 'Check through Dispatcharr',
     help: 'Check the playback path viewers use in Dispatcharr instead of the provider URL.',
-    more: 'This measures the proxy mode, account user agent and any transcode a viewer receives. It makes each probe a real Dispatcharr client and consumes a provider slot while it runs, so leave it off unless that playback path is what you need to rank.',
+    more: 'This measures the proxy mode, account user agent and any transcode a viewer receives. It makes each check a real Dispatcharr client and consumes a provider slot while it runs, so leave it off unless that playback path is what you need to rank.',
     section: 'probing',
+    group: 'connect-method',
   },
   {
     key: 'PODIUM_DIRECT_PROFILE_USER_AGENT',
     kind: 'boolean',
-    label: 'Use stream profile user agent for direct probes',
+    label: 'Use stream profile user agent for direct checks',
     help: 'Use the Dispatcharr stream profile’s user agent for direct provider checks.',
-    more: 'This mirrors request identity only. It does not run the profile command, proxy mode or any transcode; use proxy probes when those are what you need to measure.',
+    more: 'This mirrors request identity only. It does not run the profile command, proxy mode or any transcode; use proxy checks when those are what you need to measure.',
     section: 'probing',
+    group: 'connect-method',
   },
   {
     key: 'PODIUM_SOAK_VIA_DISPATCHARR',
     kind: 'boolean',
     label: 'Soak through Dispatcharr',
     help: 'Run long checks through Dispatcharr instead of connecting directly to the provider.',
-    more: 'This uses the stream profile, proxy mode, account user agent and any transcode a viewer receives. It is off by default to preserve direct soak behaviour. Like proxy probes, it becomes a real Dispatcharr client and consumes a provider slot for the full soak.',
+    more: 'This uses the stream profile, proxy mode, account user agent and any transcode a viewer receives. It is off by default to preserve direct soak behaviour. Like proxy checks, it becomes a real Dispatcharr client and consumes a provider slot for the full soak.',
     section: 'probing',
+    group: 'connect-method',
   },
   {
     key: 'PODIUM_PROBE_CLIENT_USER_AGENT',
     kind: 'string',
-    label: 'Dispatcharr probe user agent',
+    label: 'Dispatcharr check user agent',
     help: 'User agent for checks through Dispatcharr, so Podium can tell them apart from viewers.',
     section: 'probing',
+    group: 'connect-method',
+    requiresAny: [
+      { key: 'PODIUM_PROBE_VIA_DISPATCHARR', state: 'on' },
+      { key: 'PODIUM_SOAK_VIA_DISPATCHARR', state: 'on' },
+    ],
   },
   {
-    key: 'PODIUM_ANALYZE_SECONDS',
-    kind: 'number',
-    label: 'Analyze seconds',
-    help: 'How many seconds to sample each stream. Shorter checks are faster but may misjudge working streams.',
-    more: 'Six seconds is usually enough. Below about three seconds, healthy streams may be marked dead.',
+    key: 'PODIUM_USER_AGENT',
+    kind: 'string',
+    label: 'Direct check user agent',
+    help: 'The user agent direct checks present to the provider. Some providers only serve real streams to a client they recognise.',
+    more: 'The default borrows VLC’s, which most providers accept -- a mismatch can look exactly like a dead stream, so this is the first thing to try when every direct check fails. With “use the stream profile’s user agent for direct checks” on, that agent replaces this one.',
     section: 'probing',
+    group: 'connect-method',
+  },
+  {
+    key: 'PODIUM_QUALITY_EVENT_ONLY',
+    kind: 'boolean',
+    label: 'Learn only from event channels',
+    help: 'Use only channels in groups set to After kickoff or Assigned when learning quality rules.',
+    more: 'On by default, because the exported rules are evaluated at kickoff and a catalogue is mostly VOD and filler. Samples taken before this setting existed carry no policy and show as unrecorded until the patterns below claim them.',
+    section: 'quality',
+    group: 'learn-scope',
+  },
+  {
+    key: 'PODIUM_QUALITY_INCLUDE_GROUPS',
+    kind: 'string',
+    label: 'Always learn from groups matching',
+    help: 'Always include matching provider or channel groups. Use comma-separated patterns, e.g. “*SPORT*, *PPV*”.',
+    more: 'Admits a group whatever its policy says, and it is the only setting that reaches backwards: naming the groups your existing history came from puts those samples in scope immediately.',
+    section: 'quality',
+    group: 'learn-scope',
+  },
+  {
+    key: 'PODIUM_QUALITY_EXCLUDE_GROUPS',
+    kind: 'string',
+    label: 'Never learn from groups matching',
+    help: 'Exclude matching provider or channel groups, even if included above. Use comma-separated patterns, e.g. “*VOD*, *MOVIE*”.',
+    more: 'Excluded results are kept. Changing the patterns later can bring them back into scope.',
+    section: 'quality',
+    group: 'learn-scope',
+  },
+  {
+    key: 'PODIUM_QUALITY_MIN_SAMPLES',
+    kind: 'number',
+    label: 'Minimum samples for a rule',
+    help: 'How many measurements a stream name needs before it earns its own quality rule. Under-sampled names still show on the Quality tab, dimmed; they just do not vote.',
+    more: 'Raising it makes the fitted rules more conservative; lowering it admits names seen only a handful of times. This used to be a box on the Quality tab, which meant the rules you previewed were not the rules the scheduled push fitted -- the push always ran at this number. It lives here now so both paths read the same value.',
+    section: 'quality',
+    group: 'learn-scope',
     min: 1,
-    max: 60,
+    max: 100_000,
+    int: true,
+  },
+  {
+    key: 'PODIUM_QUALITY_POINTS_PER_MBPS',
+    kind: 'number',
+    label: 'Points per Mbps of bitrate',
+    help: 'How much a measured Mbps above the median is worth in a pushed rule, and how much a Mbps below costs. 0 drops the account, group and name priors, leaving the measured bitrate ladder on its own.',
+    more: 'Only the ratio against your own rules matters; raise it if yours use larger numbers. Generated account, group and name rules are capped at ±15 so they cannot outrank a direct measurement of the stream. The ladder is centred on your median, so a stream Teamarr has no stats for scores 0 and sits level with a median one. Also a Quality-tab box once, for the same reason as the sample floor above.',
+    section: 'quality',
+    group: 'learn-scope',
+    min: 0,
+    max: 10_000,
+  },
+  {
+    key: 'PODIUM_TEAMARR_URL',
+    kind: 'string',
+    label: 'Teamarr URL',
+    help: 'The base URL of your Teamarr server, for example http://teamarr:9195. Empty turns pushing off.',
+    more: 'A plain http(s) base, with no path fragment, query or credentials in it. Use in-cluster service DNS where possible.',
+    section: 'teamarr',
+    group: 'teamarr-push',
+  },
+  {
+    key: 'PODIUM_TEAMARR_SYNC',
+    kind: 'boolean',
+    label: 'Push on a schedule',
+    help: 'Send learned rules automatically on the interval below. Off means you push manually from Quality.',
+    more: 'Every push is checked first and refused if Podium cannot show that the new rules will preserve or improve the ordering.',
+    section: 'teamarr',
+    group: 'teamarr-push',
+  },
+  {
+    key: 'PODIUM_TEAMARR_SYNC_MS',
+    kind: 'number',
+    label: 'Push every (hours)',
+    help: 'Time between automatic pushes. 24 means once a day. Requires scheduled pushes above.',
+    more: 'Rule scores change slowly from day to day, so pushing more often usually achieves little.',
+    section: 'teamarr',
+    group: 'teamarr-push',
+    scale: 3_600_000,
+    min: 1,
+    max: 720,
+    requiresAll: [{ key: 'PODIUM_TEAMARR_SYNC', state: 'on' }],
+  },
+  {
+    key: 'PODIUM_TEAMARR_MIN_SAMPLES',
+    kind: 'number',
+    label: 'Fewest samples to push from',
+    help: 'Do not push until at least this many eligible results have been collected.',
+    more: 'Protects a new or cleared database from producing confident-looking rules from only a few hours of data. Applies to every push, manual ones included.',
+    section: 'teamarr',
+    group: 'teamarr-guards',
+    min: 0,
+    max: 1_000_000,
+    int: true,
+  },
+  {
+    key: 'PODIUM_TEAMARR_MIN_CHANNELS',
+    kind: 'number',
+    label: 'Fewest channels to check against',
+    help: 'Wait until old and new rules can be compared on at least this many channels before a scheduled push.',
+    more: 'It retries within the hour. Only event channels currently carrying two checked streams can be compared, so the number collapses overnight and a push landing then is effectively unchecked. Installs that never reach this many are not held back.',
+    section: 'teamarr',
+    group: 'teamarr-guards',
+    min: 0,
+    max: 10_000,
+    int: true,
+  },
+  {
+    key: 'PODIUM_TEAMARR_PEAK_FRACTION',
+    kind: 'number',
+    label: 'Push at a share of the busiest recent population',
+    help: 'Delay scheduled pushes and previews until the checkable population reaches this fraction (0-1) of the largest of the last seven days. 0 keeps the floor absolute.',
+    more: "Event catalogues swing with the calendar -- a football weekend runs a hundred channels where a Tuesday runs twenty -- and a push landing at the floor has been checked on a sliver of what a day later would have compared. A fraction drifts the push towards this install's own busy spell, whenever that is. If nothing has pushed in seven days the bar falls back to the floor above, so a missed busy spell cannot stall pushes forever.",
+    section: 'teamarr',
+    group: 'teamarr-guards',
+    min: 0,
+    max: 1,
   },
 ];
 

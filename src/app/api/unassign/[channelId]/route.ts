@@ -30,7 +30,10 @@ export async function POST(request: Request, context: { params: Promise<{ channe
 
   let store: Store | null = null;
   try {
-    const body = (await request.json()) as { streamId?: number };
+    const body = (await request.json().catch(() => null)) as { streamId?: number } | null;
+    if (body === null) {
+      return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
+    }
     const streamId = Number(body.streamId);
     if (!Number.isInteger(streamId)) {
       return NextResponse.json({ error: 'streamId must be an integer' }, { status: 400 });

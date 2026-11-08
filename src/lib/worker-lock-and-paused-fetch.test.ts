@@ -197,6 +197,77 @@ describe('the dry-run banner', () => {
   });
 });
 
+describe('a settings save wakes the sleeping loop', () => {
+  let dir: string;
+  let stop: (() => void) | null = null;
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'podium-wake-'));
+    writeFileSync(join(dir, 'rules.json'), JSON.stringify({ schema: 2, channels: [] }), 'utf8');
+    // Same reasoning as the dry-run banner tests: the pass itself is not what
+    // is under test, and a failing one is the cheapest to observe.
+    globalThis.fetch = vi.fn(async () => {
+      throw new Error('offline');
+    }) as unknown as typeof fetch;
+    vi.useFakeTimers();
+  });
+
+  afterEach(async () => {
+    await stop?.();
+    stop = null;
+    globalThis.fetch = originalFetch;
+    vi.useRealTimers();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** The environment-only config `entry.ts` builds before any setting is read. */
+  const bootConfig = () => loadConfig({ PODIUM_DATA_DIR: dir, DISPATCHARR_API_KEY: 'k' });
+
+  const storeSettings = (config: ReturnType<typeof loadConfig>, values: Record<string, string>) => {
+    const s = new Store(config.dbPath);
+    s.setSettings(values);
+    s.close();
+  };
+
+  it('starts a pass within one beat of a save, without waiting out the idle back-off', async () => {
+    // A pass reads its config at the top, so before this existed a save waited
+    // for the natural next pass -- on a settled install, the idle back-off
+    // away. "Pause while anyone is watching" saved at 9am could sit until the
+    // worker next happened to wake, which is the opposite of what the person
+    // at the form asked for.
+    const config = bootConfig();
+    const lines: string[] = [];
+    stop = await startWorker(config, (m) => lines.push(m));
+
+    // Let the boot pass settle into its wait. Two heartbeats pass first, and
+    // neither may start a pass: acquire() recorded the version already on the
+    // table, so nothing has moved.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(lines.join('\n')).not.toContain('settings changed; starting a pass now');
+
+    // A save from the UI: any stored write moves settingsVersion().
+    storeSettings(config, { PODIUM_MAX_SLICE: '77' });
+
+    // One heartbeat is all it should take.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(lines.join('\n')).toContain('settings changed; starting a pass now');
+  });
+
+  it('records the version at acquire, so what is stored then is not a wake-up', async () => {
+    // Settings stored before the worker starts are its boot config, not news;
+    // waking on them would buy a pointless second pass every boot.
+    const config = bootConfig();
+    storeSettings(config, { PODIUM_MAX_SLICE: '77' });
+
+    const lines: string[] = [];
+    stop = await startWorker(config, (m) => lines.push(m));
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(lines.join('\n')).not.toContain('starting a pass now');
+  });
+});
+
 describe('a pass that will pause does not fetch the catalogue', () => {
   let dir: string;
   let store: Store;

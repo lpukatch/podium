@@ -16,12 +16,17 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { MinerGuard, MinerReport } from '@/lib/miner';
 import type { Effect, LabelAccuracy, QualityProfile, ScopeSummary } from '@/lib/quality';
 import { MAX_TIER_ACCOUNT_SHARE } from '@/lib/quality';
+import { QUALITY_FIT_DEFAULTS } from '@/lib/quality-fit-defaults';
 import type { StoredRuleCheckRow, StoredRuleMiss } from '@/lib/store';
 import type { RuleCheck } from '@/lib/teamarr';
 import type { MatchCoverage } from '@/lib/teamarr-match';
 
 /** What `/api/quality-profile` returns: the profile, with the miner's findings. */
-type Profile = QualityProfile & { miner?: MinerReport };
+type Profile = QualityProfile & {
+  miner?: MinerReport;
+  /** The fit the server actually applied, from the settings. */
+  fit?: { minSamples: number; pointsPerMbps: number };
+};
 
 /** What `GET /api/rule-check` returns. */
 interface CheckHistory {
@@ -154,8 +159,6 @@ function SyncReport({ outcome }: { outcome: SyncOutcome }) {
 const card = 'rounded-xl border border-[var(--color-line)] bg-[var(--color-panel)]';
 const btn =
   'rounded-lg border border-[var(--color-line)] bg-[var(--color-panel)] px-4 py-2 text-[15px] hover:border-[var(--color-accent)] disabled:opacity-50';
-const input =
-  'w-full rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2 outline-none focus:border-[var(--color-accent)]';
 const muted = 'text-[var(--color-muted)]';
 
 /** kbps as the operator thinks of it: Mbps once it stops being a small number. */
@@ -193,7 +196,7 @@ export function describeScope(scope: ScopeSummary): string {
   const parts: string[] = [];
   if (scope.eventOnly) parts.push('channels in groups set to after EPG start or assigned');
   if (scope.include.length > 0) parts.push(`groups matching ${scope.include.join(', ')}`);
-  const admitted = parts.length > 0 ? parts.join(', or ') : 'every probe';
+  const admitted = parts.length > 0 ? parts.join(', or ') : 'every check';
   return scope.exclude.length > 0
     ? `Learning from ${admitted} — except groups matching ${scope.exclude.join(', ')}.`
     : `Learning from ${admitted}.`;
@@ -205,7 +208,7 @@ export function scopeDrops(scope: ScopeSummary): Array<{ label: string; count: n
     { label: 'excluded by pattern', count: scope.excluded },
     { label: 'not an event channel', count: scope.notEvent },
     { label: 'matched no include pattern', count: scope.notIncluded },
-    { label: 'probed before the scope was recorded', count: scope.unrecorded },
+    { label: 'checked before the scope was recorded', count: scope.unrecorded },
   ].filter((row) => row.count > 0);
 }
 
@@ -243,8 +246,6 @@ export function QualityView() {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [minSamples, setMinSamples] = useState(20);
-  const [pointsPerMbps, setPointsPerMbps] = useState(5);
   const [showAudio, setShowAudio] = useState(false);
   const [showThin, setShowThin] = useState(false);
   // A preview, never a saved setting. The cost of a scope that is too narrow is
@@ -254,16 +255,27 @@ export function QualityView() {
   const [merging, setMerging] = useState(false);
   const [merged, setMerged] = useState('');
   const [syncing, setSyncing] = useState(false);
+  const [confirmingSync, setConfirmingSync] = useState(false);
   const [sync, setSync] = useState<SyncStatus | null>(null);
   const [checking, setChecking] = useState(false);
   const [check, setCheck] = useState<RuleCheck | null>(null);
   const [history, setHistory] = useState<CheckHistory | null>(null);
 
-  const load = useCallback(async (min: number, open: boolean) => {
+  // The fit numbers arrive with the profile rather than being typed here. They
+  // were boxes on this tab once, and the trouble was not that people typed into
+  // them -- it was that the scheduled push to Teamarr never saw the typing: it
+  // fitted at the defaults whatever this page showed. Both paths now read the
+  // settings (`PODIUM_QUALITY_MIN_SAMPLES`, `PODIUM_QUALITY_POINTS_PER_MBPS`),
+  // and the server echoes what it actually used so the dimming below matches
+  // the fit rather than a local guess. Until the profile lands, the fallback is
+  // the shared constant, not a literal that could drift from the schema.
+  const fit = profile?.fit ?? QUALITY_FIT_DEFAULTS;
+
+  const load = useCallback(async (open: boolean) => {
     setLoading(true);
     try {
       const resp = await fetch(
-        `/api/quality-profile?minSamples=${min}${open ? '&eventOnly=0&include=&exclude=' : ''}`,
+        `/api/quality-profile${open ? '?eventOnly=0&include=&exclude=' : ''}`,
       );
       const body = await resp.json();
       if (!resp.ok || body.error) {
@@ -280,8 +292,8 @@ export function QualityView() {
   }, []);
 
   useEffect(() => {
-    void load(minSamples, ungated);
-  }, [load, minSamples, ungated]);
+    void load(ungated);
+  }, [load, ungated]);
 
   const loadHistory = useCallback(async () => {
     try {
@@ -301,9 +313,9 @@ export function QualityView() {
   // The export carries the scope being previewed, so the file always describes
   // the table it was downloaded from. Handing over rules fitted on a population
   // the page was not showing is the one way this feature could lie outright.
-  const query =
-    `minSamples=${minSamples}&pointsPerMbps=${pointsPerMbps}` +
-    (ungated ? '&eventOnly=0&include=&exclude=' : '');
+  // The fit numbers are deliberately not sent: the settings are the single
+  // source, so what is downloaded is what a push would push.
+  const query = ungated ? 'eventOnly=0&include=&exclude=' : '';
 
   const loadSync = useCallback(async () => {
     try {
@@ -360,7 +372,7 @@ export function QualityView() {
     setMerging(true);
     setMerged('');
     try {
-      const resp = await fetch(`/api/quality-profile?${query}`, {
+      const resp = await fetch(`/api/quality-profile${query ? `?${query}` : ''}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: await file.text(),
@@ -431,14 +443,14 @@ export function QualityView() {
     // probed once -- and listing them all buries the forty that count under
     // three hundred that do not.
     return profile.buckets.filter(
-      (b) => (showAudio || !b.audioOnly) && (showThin || b.samples >= minSamples),
+      (b) => (showAudio || !b.audioOnly) && (showThin || b.samples >= fit.minSamples),
     );
-  }, [profile, showAudio, showThin, minSamples]);
+  }, [profile, showAudio, showThin, fit.minSamples]);
 
   const hidden = (profile?.buckets.length ?? 0) - buckets.length;
 
   const counted =
-    profile?.buckets.filter((b) => b.samples >= minSamples && !b.audioOnly).length ?? 0;
+    profile?.buckets.filter((b) => b.samples >= fit.minSamples && !b.audioOnly).length ?? 0;
 
   const drops = profile ? scopeDrops(profile.scope) : [];
 
@@ -474,8 +486,8 @@ export function QualityView() {
           them. {describeScope(profile.scope)}{' '}
           {profile.scope.unrecorded > 0 && (
             <>
-              {profile.scope.unrecorded.toLocaleString()} were probed before Podium recorded which
-              channel a probe was for, so their policy cannot be read. Name their groups under{' '}
+              {profile.scope.unrecorded.toLocaleString()} were checked before Podium recorded which
+              channel a check was for, so their policy cannot be read. Name their groups under{' '}
               <strong>Always learn from groups matching</strong> in Settings to use them, or let new
               passes accumulate.
             </>
@@ -653,7 +665,7 @@ export function QualityView() {
                 <th className="py-2 pr-3 font-normal">Group</th>
                 <th className="py-2 pr-3 font-normal">Tier</th>
                 <th className="py-2 pr-3 text-right font-normal">Samples</th>
-                <th className="py-2 pr-3 text-right font-normal">Alive</th>
+                <th className="py-2 pr-3 text-right font-normal">Live</th>
                 <th className="py-2 pr-3 text-right font-normal">Black</th>
                 <th className="py-2 pr-3 text-right font-normal">Median</th>
                 <th className="py-2 pr-3 text-right font-normal">p90</th>
@@ -666,7 +678,7 @@ export function QualityView() {
                 <tr
                   key={`${b.providerId}:${b.groupId ?? ''}:${b.tier}:${b.audioOnly}`}
                   className={`border-b border-[var(--color-line)] ${
-                    b.samples < minSamples ? 'opacity-50' : ''
+                    b.samples < fit.minSamples ? 'opacity-50' : ''
                   }`}
                 >
                   <td className="py-2 pr-3">{b.providerName}</td>
@@ -695,7 +707,7 @@ export function QualityView() {
         </div>
         <p className={`mt-3 text-sm ${muted}`}>
           Only measured bitrates count — declared figures, dead streams and slates are excluded. The
-          Alive and Black columns say how often those happen. Faded rows are below the sample floor
+          Live and Black columns say how often those happen. Faded rows are below the sample floor
           and contribute nothing.
         </p>
       </section>
@@ -708,49 +720,18 @@ export function QualityView() {
         <h3 className="text-base">Teamarr</h3>
         <p className={`mt-1 max-w-[70ch] text-sm ${muted}`}>
           Turn what Podium measured into Teamarr scoring rules, then score the rules Teamarr is
-          running against the same measurements.
+          running against the same measurements. The fit has two numbers — the sample floor a name
+          must clear before it earns a rule, and what each Mbps away from your median is worth — and
+          both live in Settings, under Quality, next to the scope. This page and the scheduled push
+          read the same ones, so what you preview here is what a push would push. Right now:{' '}
+          {fit.minSamples} samples per rule, {fit.pointsPerMbps} points per Mbps.
         </p>
 
-        <h4 className="mt-5 text-sm font-medium">1 · Rule settings</h4>
-        <div className="mt-2 grid gap-4 sm:grid-cols-2">
-          <label className="block">
-            <span className={`text-sm ${muted}`}>Minimum samples per bucket</span>
-            <input
-              type="number"
-              min={1}
-              value={minSamples}
-              onChange={(e) => setMinSamples(Math.max(1, Number(e.target.value) || 1))}
-              className={`mt-1 ${input}`}
-            />
-            <span className={`mt-1 block text-xs ${muted}`}>
-              Buckets below this are still measured but do not contribute to any rule.
-            </span>
-          </label>
-          <label className="block">
-            <span className={`text-sm ${muted}`}>Points per Mbps</span>
-            <input
-              type="number"
-              min={0}
-              value={pointsPerMbps}
-              onChange={(e) => setPointsPerMbps(Math.max(0, Number(e.target.value) || 0))}
-              className={`mt-1 ${input}`}
-            />
-            <span className={`mt-1 block text-xs ${muted}`}>
-              Only the ratio against your own rules matters; raise it if yours use larger numbers.
-              Generated account, group and name rules are capped at ±15 so they cannot outrank a
-              direct measurement of the stream. <code>stats_metric</code> rules are exempt — they
-              are the measurement. The bitrate ladder is centred on your median, so a stream Teamarr
-              has no stats for scores 0 and sits level with a median one rather than beneath every
-              stream Podium happens to have probed.
-            </span>
-          </label>
-        </div>
-
-        <h4 className="mt-5 text-sm font-medium">2 · Send them</h4>
+        <h4 className="mt-5 text-sm font-medium">1 · Send them</h4>
 
         {ungated && (
           <p className="mt-2 max-w-[70ch] text-sm text-[var(--color-bad)]">
-            The scope is off, so these rules would be fitted on every probe this install has taken,
+            The scope is off, so these rules would be fitted on every check this install has taken,
             VOD and filler included. Turn it back on above before exporting unless you mean that.
           </p>
         )}
@@ -779,14 +760,50 @@ export function QualityView() {
               >
                 {syncing ? 'Working…' : 'Preview a push'}
               </button>
-              <button
-                type="button"
-                className={btn}
-                disabled={syncing}
-                onClick={() => void pushToTeamarr(false)}
-              >
-                {syncing ? 'Working…' : 'Sync to Teamarr now'}
-              </button>
+              {/* The same two-step confirm the Danger Zone and the soak card
+                  use. The push rewrites the rule set on the Teamarr instance;
+                  the scoring refusal catches a worse ordering, not a merely
+                  different one, and the write happens the moment the button
+                  is clicked. The dry-run twin one row up is the cheap way to
+                  see the same result without writing -- the confirm is where
+                  that pointer belongs, not buried in help text. */}
+              {confirmingSync ? (
+                <>
+                  <span className={`max-w-[60ch] text-sm ${muted}`}>
+                    Write Podium's merged rules to Teamarr now? A pass replaces the rule set on the
+                    instance. Refusals catch a worse ordering, not a different one —{' '}
+                    <b>Preview a push</b> runs this exact check and writes nothing.
+                  </span>
+                  <button
+                    type="button"
+                    disabled={syncing}
+                    className={`${btn} !border-[var(--color-bad)] !bg-[var(--color-bad)] !text-[var(--color-on-bad)]`}
+                    onClick={() => {
+                      setConfirmingSync(false);
+                      void pushToTeamarr(false);
+                    }}
+                  >
+                    Sync now
+                  </button>
+                  <button
+                    type="button"
+                    className={btn}
+                    disabled={syncing}
+                    onClick={() => setConfirmingSync(false)}
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className={btn}
+                  disabled={syncing}
+                  onClick={() => setConfirmingSync(true)}
+                >
+                  {syncing ? 'Working…' : 'Sync to Teamarr now'}
+                </button>
+              )}
             </div>
             {sync.last && <SyncReport outcome={sync.last} />}
 
@@ -810,12 +827,12 @@ export function QualityView() {
         )}
 
         <h4 className="mt-6 border-t border-[var(--color-line)] pt-4 text-sm font-medium">
-          3 · Score the rules you are running
+          2 · Score the rules you are running
         </h4>
         <p className={`mt-1 max-w-[75ch] text-sm ${muted}`}>
           Upload the rules Teamarr is running and Podium scores them against every channel it has
           measured that Teamarr orders — the stream your rules put first, beside the stream the
-          measurements say should be first. Nothing is written and nothing is probed, so run it
+          measurements say should be first. Nothing is written and nothing is checked, so run it
           after every edit. The set is kept and re-scored on every later pass, which is the only way
           a fixture channel gets checked at all.
         </p>
@@ -1117,7 +1134,11 @@ function FileExport({
   return (
     <>
       <div className="mt-3 flex flex-wrap items-center gap-3">
-        <a className={btn} href={`/api/quality-profile?format=teamarr&${query}`} download>
+        <a
+          className={btn}
+          href={`/api/quality-profile?format=teamarr${query ? `&${query}` : ''}`}
+          download
+        >
           Download rules
         </a>
         <label className={`${btn} cursor-pointer`}>

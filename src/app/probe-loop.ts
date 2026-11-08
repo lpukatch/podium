@@ -1,5 +1,5 @@
 /**
- * The client loop behind both Probe-all buttons: every probeable channel in a
+ * The client loop behind both Check-all buttons: every probeable channel in a
  * group (the Groups tab) and every channel carrying a dead or black stream
  * (the Dead tab).
  *
@@ -183,29 +183,47 @@ export async function probeChannels(
   return out;
 }
 
-/** The one-line summary both tabs show under their Probe-all button. */
-export function probeNote(out: ProbeOutcome): { text: string; bad: boolean } {
-  const stats = `${out.probed} streams probed, ${out.dead} dead`;
+/**
+ * The one-line summary both tabs show under their Check-all button.
+ *
+ * `dryRun` is the effective setting, passed by a view that read it from
+ * `/api/settings`. Under a dry run the server refuses every apply -- by
+ * design -- so a bare "N apply failed" in red reads as a breakage when it is
+ * the install doing exactly what it was configured to do. The refusals are
+ * still counted and still reported; they are just named for what they are,
+ * and the line stays green.
+ */
+export function probeNote(
+  out: ProbeOutcome,
+  opts: { dryRun?: boolean } = {},
+): { text: string; bad: boolean } {
+  const stats = `${out.probed} streams checked, ${out.dead} dead`;
   const applied = out.applied > 0 ? ` · ${out.applied} applied` : '';
   if (out.capacityStopped) {
     return {
-      text: `Probe stopped after ${out.completed} of ${out.total} channel(s): no spare provider capacity (${stats}${applied}). Try again once the watched stream ends or the worker's pass finishes.`,
+      text: `Check stopped after ${out.completed} of ${out.total} channel(s): no spare provider capacity (${stats}${applied}). Try again once the watched stream ends or the worker's pass finishes.`,
       bad: false,
     };
   }
   if (out.aborted) {
     return {
-      text: `Probe cancelled after ${out.completed} of ${out.total} channel(s) (${stats}${applied}).`,
+      text: `Check cancelled after ${out.completed} of ${out.total} channel(s) (${stats}${applied}).`,
       bad: false,
     };
   }
   const segments =
     applied +
     (out.partial > 0 ? ` · ${out.partial} not applied (partial verdicts)` : '') +
-    (out.applyFailed > 0 ? ` · ${out.applyFailed} apply failed` : '') +
+    (out.applyFailed > 0
+      ? opts.dryRun
+        ? ` · ${out.applyFailed} left as-is (dry run)`
+        : ` · ${out.applyFailed} apply failed`
+      : '') +
     (out.errors > 0 ? ` · ${out.errors} skipped or failed` : '');
   return {
-    text: `Finished probing ${out.completed} channel(s) (${stats})${segments}.`,
-    bad: (out.errors > 0 && out.completed === 0) || (out.applyFailed > 0 && out.applied === 0),
+    text: `Finished checking ${out.completed} channel(s) (${stats})${segments}.`,
+    bad:
+      (out.errors > 0 && out.completed === 0) ||
+      (out.applyFailed > 0 && out.applied === 0 && !opts.dryRun),
   };
 }

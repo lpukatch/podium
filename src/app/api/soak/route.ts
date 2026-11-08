@@ -246,7 +246,7 @@ export async function POST(request: Request) {
         {
           error:
             skippedDead > 0
-              ? `every stream on ${resolved.label} was dead at its last probe`
+              ? `every stream on ${resolved.label} was dead at its last check`
               : `nothing to soak for ${resolved.label}`,
         },
         { status: 404 },
