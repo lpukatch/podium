@@ -1,0 +1,6 @@
+# Accepted image vulnerabilities, one trivy ID per line (CVE-... or
+# TRIVY-...), each with the reason it is accepted and the date it went in.
+# Delete the line once a fixed release exists -- an entry here is a debt,
+# not a decision.
+#
+# An empty list below this comment is the passing state.
