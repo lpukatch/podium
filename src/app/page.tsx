@@ -19,6 +19,7 @@ import { SettingsView } from './settings-view';
 import { StatsView } from './stats-view';
 import { StreamGroupsView } from './stream-groups-view';
 import { StreamSearch } from './stream-search';
+import { ThemeToggle } from './theme-toggle';
 
 type Mode = 'always' | 'never' | 'after_epg_start' | 'assigned';
 type Tab = 'groups' | 'all' | 'dead' | 'rules' | 'progress' | 'stats' | 'quality' | 'settings';
@@ -1223,6 +1224,7 @@ export default function Page() {
           {/* Always visible, on every tab -- the totals line below only renders
               on the channels root, and a version you can only find on one tab
               is a version nobody finds. */}
+          <ThemeToggle />
           <span className="flex-none text-xs tabular-nums text-[var(--color-muted)]">
             v{VERSION}
           </span>
