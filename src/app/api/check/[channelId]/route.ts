@@ -372,6 +372,15 @@ export async function POST(request: Request, context: { params: Promise<{ channe
           detectBlack: config.PODIUM_DETECT_BLACK,
           blackRatio: config.PODIUM_BLACK_RATIO,
           audioOnly,
+          // Debug context for failed checks, same as the worker's "probe
+          // stderr" line. console is the route's only logger, and the stored
+          // verdict keeps the last line alone either way.
+          onStderrTail: config.PODIUM_DEBUG
+            ? (tail) =>
+                console.log(
+                  `${new Date().toISOString()} channel ${id} (${channel.name}): check stderr: ${tail}`,
+                )
+            : undefined,
         });
         // Do not pollute shared cache if channel is held back by group policy
         if (verdict.allowed) {

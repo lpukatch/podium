@@ -70,6 +70,22 @@ export const configSchema = z.object({
   PODIUM_DETECT_BLACK: bool(true),
   PODIUM_BLACK_RATIO: num(0.8),
   /**
+   * Verbose debug logging for stream probing and worker passes.
+   * Can be enabled via PODIUM_DEBUG or standard DEBUG env var.
+   */
+  PODIUM_DEBUG: z.preprocess((raw) => {
+    if (raw !== undefined && raw !== '') {
+      return ['1', 'true', 'yes', 'on'].includes(String(raw).trim().toLowerCase());
+    }
+    const debug = process.env.DEBUG;
+    if (debug !== undefined && debug !== '') {
+      return ['1', 'true', 'yes', 'on', 'podium', 'podium:*'].includes(
+        String(debug).trim().toLowerCase(),
+      );
+    }
+    return false;
+  }, z.boolean().default(false)),
+  /**
    * Publish probe results back to Dispatcharr's stream_stats.
    *
    * On by default, on the assumption Podium is the only thing writing the

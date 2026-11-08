@@ -346,6 +346,95 @@ describe('a sample cut short keeps what it read', () => {
   });
 });
 
+describe('a failed check stores one line and hands the tail to the log', () => {
+  const usable = process.platform !== 'win32';
+  let dir: string;
+  let fakeFfprobe: string;
+
+  beforeAll(() => {
+    if (!usable) return;
+    dir = mkdtempSync(join(tmpdir(), 'podium-stderr-tail-'));
+    fakeFfprobe = join(dir, 'failing-ffprobe');
+    // Multi-line stderr: the shape ffprobe actually produces on a live
+    // failure -- the input URL (credentials and all) echoed back, then the
+    // reason. The last line is the one `deadReason` classifies.
+    writeFileSync(
+      fakeFfprobe,
+      [
+        '#!/bin/sh',
+        "printf 'http://user:pass@provider.example/live/ch.ts: Connection refused\\n' >&2",
+        "printf 'Unable to open connection to provider.example\\n' >&2",
+        "printf 'Server returned 403 Forbidden\\n' >&2",
+        'exit 1',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+  });
+
+  afterAll(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
+  const url = 'http://user:pass@provider.example/live/ch.ts';
+
+  it.runIf(usable)('stores the last stderr line only, however many lines the log got', async () => {
+    const result = await probe(url, {
+      ffprobePath: fakeFfprobe,
+      onStderrTail: () => {},
+    });
+    // The stored verdict is the last line alone -- identical to what a probe
+    // without any debug logging stores -- so a verdict probed under debug
+    // classifies the same after the flag is turned off.
+    expect(result.error).toBe('Server returned 403 Forbidden');
+    expect(result.alive).toBe(false);
+    expect(deadReason(result.error)).toBe('auth');
+  });
+
+  it.runIf(usable)('hands the log a redacted multi-line tail', async () => {
+    const tails: string[] = [];
+    await probe(url, { ffprobePath: fakeFfprobe, onStderrTail: (t) => tails.push(t) });
+    expect(tails).toHaveLength(1);
+    expect(tails[0]).toContain('Connection refused');
+    expect(tails[0]).toContain('403 Forbidden');
+    // The URL and its credentials rode in on the first stderr line; neither
+    // may reach the container log. A bare hostname in ffprobe's own prose
+    // passes through -- that is `deadDetail`'s long-standing contract, shared
+    // with the dead list.
+    expect(tails[0]).not.toContain('://');
+    expect(tails[0]).not.toContain('user:pass');
+  });
+
+  it.runIf(usable)('stores the same verdict with no callback wired', async () => {
+    const result = await probe(url, { ffprobePath: fakeFfprobe });
+    expect(result.error).toBe('Server returned 403 Forbidden');
+  });
+
+  it.runIf(usable)('caps both the stored line and the tail', async () => {
+    const long = 'x'.repeat(400);
+    if (dir) {
+      writeFileSync(
+        fakeFfprobe,
+        [
+          '#!/bin/sh',
+          "printf 'http://provider.example/live/ch.ts: first line\\n' >&2",
+          `printf '${long}\\n' >&2`,
+          'exit 1',
+          '',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+    }
+    const tails: string[] = [];
+    const result = await probe(url, {
+      ffprobePath: fakeFfprobe,
+      onStderrTail: (t) => tails.push(t),
+    });
+    expect(result.error).toHaveLength(200);
+    expect(tails[0]!.length).toBeLessThanOrEqual(200);
+  });
+});
+
 describe('deadReason', () => {
   // The left column is real ffmpeg stderr, as `probe` stores it.
   const cases: Array<[string, string]> = [

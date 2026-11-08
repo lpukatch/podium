@@ -170,6 +170,12 @@ export const GROUPS: GroupSpec[] = [
     advanced: true,
   },
   {
+    id: 'diagnostics',
+    section: 'behaviour',
+    title: 'Diagnostics',
+    description: 'Extra logging in the container log for investigating what a check saw.',
+  },
+  {
     id: 'quick-checks',
     section: 'probing',
     title: 'Quick checks',
@@ -514,6 +520,15 @@ export const FIELDS: FieldSpec[] = [
     min: 1,
     max: 10_000,
     int: true,
+  },
+  {
+    key: 'PODIUM_DEBUG',
+    kind: 'boolean',
+    label: 'Debug logging',
+    help: 'Log detailed check results and diagnostics to the container log.',
+    more: 'When enabled, every check attempt (successful and failed) is logged with resolution, bitrate and timing detail, and a failed check also logs the last lines of the checker’s error output with connection URLs and credentials removed. Can also be set via the PODIUM_DEBUG or DEBUG environment variables — but once a value is saved here, the saved one wins and the environment is ignored.',
+    section: 'behaviour',
+    group: 'diagnostics',
   },
   {
     key: 'PODIUM_MAX_CONCURRENT_PROBES',
