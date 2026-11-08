@@ -53,7 +53,10 @@ export function GET() {
 export async function POST(request: Request) {
   let store: Store | null = null;
   try {
-    const parsed = (await request.json()) as unknown;
+    const parsed = (await request.json().catch(() => null)) as unknown;
+    if (parsed === null) {
+      return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
+    }
     const container = parsed as { rules?: unknown };
     const raw = Array.isArray(parsed) ? parsed : container?.rules;
     if (!Array.isArray(raw)) {

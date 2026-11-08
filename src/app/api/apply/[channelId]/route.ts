@@ -32,13 +32,16 @@ export async function POST(request: Request, context: { params: Promise<{ channe
 
   let store: Store | null = null;
   try {
-    const body = (await request.json()) as {
+    const body = (await request.json().catch(() => null)) as {
       order?: number[];
       removeUnmatched?: boolean;
       force?: boolean;
       allowAssign?: boolean;
       pruned?: number[];
-    };
+    } | null;
+    if (body === null) {
+      return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
+    }
     const order = body.order ?? [];
     if (order.length === 0 || order.some((n) => !Number.isInteger(n))) {
       return NextResponse.json({ error: 'order must be a non-empty list of ids' }, { status: 400 });

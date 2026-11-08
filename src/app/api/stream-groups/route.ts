@@ -78,7 +78,10 @@ export async function GET() {
 /** Replace the exclusion list wholesale -- the UI always sends the full set. */
 export async function PUT(request: Request) {
   try {
-    const body = (await request.json()) as { excludeGroups?: string[] };
+    const body = (await request.json().catch(() => null)) as { excludeGroups?: string[] } | null;
+    if (body === null) {
+      return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
+    }
     const clean = [...new Set((body.excludeGroups ?? []).map((g) => g.trim()).filter(Boolean))];
 
     const doc = readRulesDoc();

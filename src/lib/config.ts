@@ -357,6 +357,26 @@ export const configSchema = z.object({
    * to the prior otherwise.
    */
   PODIUM_QUALITY_EXCLUDE_GROUPS: z.string().default(''),
+  /**
+   * The smallest population a name needs before it earns its own quality rule.
+   *
+   * Buckets under the floor still show on the Quality tab, dimmed; they just do
+   * not vote. This used to be a number typed into the Quality tab, which meant
+   * the rules you previewed were not the rules a scheduled push fitted -- the
+   * push always ran at this default. As a setting, both paths read the same
+   * value and the preview is what you push.
+   */
+  PODIUM_QUALITY_MIN_SAMPLES: num(20),
+  /**
+   * Score weight per Mbps away from the profile's median bitrate.
+   *
+   * The ladder the rules push is built from this: every measured Mbps above the
+   * median is worth this many points, every Mbps below costs the same. 0
+   * suppresses the ladder entirely and leaves the liveness and name rules.
+   * Same story as the sample floor above: a Quality-tab field meant the
+   * scheduled push quietly disagreed with what had been previewed.
+   */
+  PODIUM_QUALITY_POINTS_PER_MBPS: num(5),
 
   PODIUM_LANE_STAGGER_MS: num(0),
   /**
@@ -554,7 +574,6 @@ export const configSchema = z.object({
    * x slots x four families, where every other family here is per provider).
    */
   PODIUM_METRICS_CHANNELS: bool(true),
-  LOG_LEVEL: z.string().default('info'),
 });
 
 export type RawConfig = z.infer<typeof configSchema>;

@@ -15,10 +15,24 @@ const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
 
 test('the scan gate keeps its exit code through the report handling', () => {
   const build = read('.woodpecker/build.yml');
+  assert.match(build, /--exit-code 1 --severity/);
   assert.match(build, /--format table --output trivy-report\.txt/);
   assert.match(build, /\|\| RC=\$\$\?/);
   assert.match(build, /cat trivy-report\.txt/);
   assert.match(build, /exit \$\$\{RC:-0\}/);
+});
+
+test('no command scalar ends with a backslash continuation', () => {
+  // YAML folds multi-line plain scalars into one line, turning a trailing
+  // "\" into "\" + space: a stray positional argument (trivy aborted with
+  // "multiple targets cannot be specified" on exactly this). Commands must
+  // be one physical line each.
+  for (const line of read('.woodpecker/build.yml').split('\n')) {
+    const s = line.trim();
+    if (s.startsWith('- ')) {
+      assert.ok(!s.endsWith('\\'), `continuation folds into a stray arg: ${s}`);
+    }
+  }
 });
 
 test('save-scan-report runs after a failed gate but cannot gate itself', () => {

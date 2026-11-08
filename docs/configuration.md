@@ -159,7 +159,7 @@ proxy as one worth rotating.
 | `PODIUM_DEAD_TTL_MS` | `10800000` | how soon a stream that *just* died is rechecked |
 | `PODIUM_DEAD_TTL_MAX_MS` | `86400000` | ceiling once that has backed off; [see below](#when-there-is-nothing-to-do) |
 | `PODIUM_UNKNOWN_BITRATE_TTL_MS` | `1800000` | how soon an alive-but-unmeasured stream is tried again; [see below](#streams-whose-bitrate-never-resolved) |
-| `PODIUM_MIN_FREE_SLOTS` | `1` | connections held back on a provider somebody is streaming from (environment-only); [see below](#when-one-viewer-stops-everything) |
+| `PODIUM_MIN_FREE_SLOTS` | `1` | connections held back on a provider somebody is streaming from; [see below](#when-one-viewer-stops-everything) |
 | `PODIUM_PAUSE_WHEN_WATCHING` | `true` | stop while anyone is streaming |
 | `PODIUM_PROBE_IDLE_PROVIDERS` | `false` | narrow that pause to the provider being watched; [see below](#when-one-viewer-stops-everything) |
 | `PODIUM_PROBE_WATCHED_PROVIDER` | `false` | probe that provider too, on its spare connections; [see below](#sharing-the-provider-being-watched) |
@@ -253,8 +253,15 @@ It needs `PODIUM_PROBE_IDLE_PROVIDERS` on, which in turn needs
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `PODIUM_ANALYZE_SECONDS` | `6` | biggest lever on run time |
+| `PODIUM_PROBE_TIMEOUT_MS` | `20000` | whole-check budget: connecting, analysing and the sample together |
+| `PODIUM_MEASURE_BITRATE` | `true` | sample each stream for a bitrate; off leaves ranking to declared resolution and claimed numbers |
+| `PODIUM_MEASURE_SECONDS` | `5` | length of that sample; black-screen detection watches the same window |
 | `PODIUM_MIN_BITRATE_KBPS` | `500` | below this counts as dead |
 | `PODIUM_DETECT_BLACK` | `true` | black-screen detection |
+| `PODIUM_BLACK_RATIO` | `0.8` | share of the sample that must be black for a stream to be flagged |
+| `PODIUM_LANE_STAGGER_MS` | `0` | delay between starting each parallel check; quick checks and soaks stagger on the same setting |
+| `PODIUM_USER_AGENT` | `VLC/3.0.14` | user agent for direct checks; replaced by the stream-profile agent when that switch below is on |
+| `PODIUM_DIRECT_PROFILE_USER_AGENT` | `false` | apply the stream profile's user agent to direct checks, replacing the agent above |
 | `PODIUM_PROBE_VIA_DISPATCHARR` | `false` | probe through Dispatcharr instead of directly at the provider |
 | `PODIUM_SOAK_VIA_DISPATCHARR` | `false` | soak through Dispatcharr instead of directly at the provider |
 | `PODIUM_PROBE_CLIENT_USER_AGENT` | `Podium-Probe/1` | identifies those probes in Dispatcharr activity reads |
@@ -281,7 +288,7 @@ Proxy probes identify themselves with `PODIUM_PROBE_CLIENT_USER_AGENT`. Keep its
 
 `PODIUM_STABILITY` watches Dispatcharr's live sessions and records which stream
 served, for how long, and when it failed over — the failure a five-second probe
-cannot see. See [Stability](usage.md#stability-the-failure-a-probe-cannot-see)
+cannot see. See [Stability](usage.md#stability-the-failure-a-check-cannot-see)
 for what it does with that.
 
 On by default, and cheap to be: it is one small GET against `/proxy/ts/status`,
@@ -350,7 +357,7 @@ describes a channel whose legs have moved on, and folding it late would close a
 leg that is serving fine now. The failures it named are lost to the ledger,
 which is the same undercount a sample that could not read the channel makes.
 
-**Settings → Measure streams → Dispatcharr live event activity** shows the
+**Settings → Checking streams → Dispatcharr live event activity** shows the
 subscription check status, last accepted event, accepted delivery and receiver
 error totals, subscription sync errors, and pending queue size. It refreshes
 every ten seconds. A configured subscription is not proof of delivery; quiet
@@ -387,6 +394,12 @@ word.
 | `PODIUM_QUALITY_EVENT_ONLY` | `true` | count a probe only when its channel sat in a group set to `after_epg_start` or `assigned` |
 | `PODIUM_QUALITY_INCLUDE_GROUPS` | *(empty)* | globs — `* SPORT*, *PPV*` — that admit a group whatever its policy says |
 | `PODIUM_QUALITY_EXCLUDE_GROUPS` | *(empty)* | globs — `*VOD*, *MOVIE*, *24/7*` — that drop a sample however it was admitted |
+| `PODIUM_QUALITY_MIN_SAMPLES` | `20` | fewest samples a stream name needs before it earns its own quality rule; the Quality tab still lists under-sampled names, dimmed |
+| `PODIUM_QUALITY_POINTS_PER_MBPS` | `5` | what a measured Mbps above the median is worth in a pushed rule, and what a Mbps below costs; `0` drops the account, group and name priors, leaving the measured bitrate ladder on its own |
+
+The last two were Quality-tab boxes once, which meant the rules previewed in
+the browser were not the rules the scheduled push fitted — the push always ran
+at the defaults. They are settings now, and both paths read the same value.
 
 ## Pushing rules to Teamarr
 
@@ -511,7 +524,7 @@ carrying streams nobody can watch, and nothing else will ever clear them.
 must fail before a pass unassigns it. Off by default.
 
 **Checks, not hours**, because the checks are already spaced out for you: a dead
-verdict is re-probed after 3 hours, then 6, 12 and 24, so waiting for the count
+verdict is re-checked after 3 hours, then 6, 12 and 24, so waiting for the count
 costs a provider nothing extra.
 
 | checks | roughly how long it has been dead |
@@ -561,7 +574,7 @@ Three things it will not do:
 Every removal is logged with the stream ids and their providers, counted in the
 pass summary line, and recorded against the run in the database — `removed` on
 the run row, and `podium_streams_removed_total` in the metrics, so the count
-outlives the logs. Nothing happens under `PODIUM_DRY_RUN`, and a measure-only
+outlives the logs. Nothing happens under `PODIUM_DRY_RUN`, and a check-only
 group is never written to at all.
 
 Removal still has no undo: an assignment is something a channel remembers, not
@@ -648,7 +661,7 @@ catalogue snapshot.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `PODIUM_METRICS_CHANNELS` | `true` | also expose the per-channel source series — every managed channel's slots with provider and verdict; the only families that scale with the catalogue, so the switch exists for a Prometheus watching its cardinality (environment-only) |
+| `PODIUM_METRICS_CHANNELS` | `true` | also expose the per-channel source series — every managed channel's slots with provider and verdict; the only families that scale with the catalogue, so the switch exists for a Prometheus watching its cardinality |
 
 A scrape job needs the path, and the token if you set one:
 
@@ -668,7 +681,7 @@ cache, so a minute is plenty.
 
 ### Stability series
 
-Four gauges summarise the [stability ledger](usage.md#stability-the-failure-a-probe-cannot-see):
+Four gauges summarise the [stability ledger](usage.md#stability-the-failure-a-check-cannot-see):
 
 | Series | Meaning |
 | --- | --- |

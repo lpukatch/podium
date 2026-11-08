@@ -891,10 +891,22 @@ describe('teamarrRules stats_metric export', () => {
     expect(rules.some((rule) => rule.value === 'alive|=|1')).toBe(false);
   });
 
-  it('can be turned off without disturbing the priors', () => {
+  it('always carries the measured rules, which are not configurable', () => {
+    // `deadPoints`/`bitratePoints` were options once, but nothing ever passed
+    // them -- not the UI, not the docs' curl, not the scheduled push -- so
+    // they are constants now (`DEAD_POINTS`, `BITRATE_POINTS`). The test they
+    // had pinned a suppression path nobody could reach; this one pins the
+    // opposite, which is what every caller actually got.
     const profile = buildProfile(watchable(60, 6000), { minSamples: 20 });
-    const { rules } = teamarrRules(profile, { deadPoints: 0, bitratePoints: 0 });
-    expect(rules.some((rule) => rule.type === 'stats_metric')).toBe(false);
+    const { rules } = teamarrRules(profile);
+    const measured = rules.filter((rule) => rule.type === 'stats_metric');
+    expect(measured.some((rule) => rule.value.startsWith('alive|'))).toBe(true);
+    expect(measured.some((rule) => rule.value.startsWith('blank_detected|'))).toBe(true);
+    expect(measured.some((rule) => rule.value.startsWith('ffmpeg_output_bitrate|'))).toBe(true);
+    // The export still records the constants used, for whoever opens the file.
+    const { podium } = teamarrRules(profile);
+    expect(podium.measured.deadPoints).toBeLessThan(0);
+    expect(podium.measured.bitratePoints).toBeGreaterThan(0);
   });
 
   it('records the percentiles the rungs came from', () => {

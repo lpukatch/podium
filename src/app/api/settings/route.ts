@@ -4,6 +4,7 @@ import { responseErrorText } from '@/lib/error-text';
 import {
   credentialMoveMessage,
   describeSettings,
+  GROUPS,
   movedCredentials,
   resolveEnv,
   validateSettings,
@@ -26,6 +27,10 @@ export function GET() {
       // Secret values are never returned -- only whether one is set. The API
       // that writes a credential must not also read it back.
       fields: describeSettings(process.env, stored),
+      // The page's group taxonomy, from the same source of truth as the
+      // fields: the form stopped hand-writing its own list, which was how the
+      // first unlisted field landed in "Other settings".
+      groups: GROUPS,
       // What the app is actually using right now, for the parts worth showing.
       effective: (() => {
         const config = loadConfig(resolveEnv(process.env, stored));
@@ -46,7 +51,10 @@ export function GET() {
 export async function PUT(request: Request) {
   let store: Store | null = null;
   try {
-    const patch = (await request.json()) as Record<string, unknown>;
+    const patch = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+    if (patch === null) {
+      return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
+    }
     const { values, errors } = validateSettings(patch);
     if (errors.length > 0) {
       return NextResponse.json({ error: 'invalid settings', errors }, { status: 400 });
@@ -86,6 +94,7 @@ export async function PUT(request: Request) {
     return NextResponse.json({
       status: 'saved',
       fields: describeSettings(process.env, store.settings()),
+      groups: GROUPS,
     });
   } catch (error) {
     return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });

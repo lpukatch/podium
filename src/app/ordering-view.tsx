@@ -163,6 +163,10 @@ export function OrderingView() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  // Set by a successful save, cleared the moment the form is edited again.
+  // Without it the confirmation could not tell "saved" from "the form happens
+  // to agree with the server", which is also how it first loads.
+  const [justSaved, setJustSaved] = useState(false);
 
   const apply = useCallback((body: Response) => {
     const w = toWeights(body.weights);
@@ -198,6 +202,14 @@ export function OrderingView() {
 
   const current: OrderingState = { mode, preference, weights };
   const dirty = !same(current, saved);
+
+  // The "Saved." confirmation is dismissed by the first edit after it, not
+  // merely hidden while dirty: without this, untangling an edit -- or editing
+  // away and back to the saved values -- would bring "Saved." back out of
+  // nowhere, confirming a save that never happened.
+  useEffect(() => {
+    if (dirty) setJustSaved(false);
+  }, [dirty]);
 
   const save = async () => {
     setSaving(true);
@@ -236,6 +248,7 @@ export function OrderingView() {
       setError('');
       // Reflect exactly what we sent as the new saved baseline.
       setSaved({ mode, preference, weights });
+      setJustSaved(true);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -259,7 +272,7 @@ export function OrderingView() {
     <div className={`${card} p-5`}>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="text-sm font-semibold uppercase tracking-wide text-[var(--color-muted)]">
-          Stream ordering
+          Ranking
         </h3>
         <span className="text-sm text-[var(--color-muted)]">
           {loading ? 'loading…' : activeHelp}
@@ -488,10 +501,22 @@ export function OrderingView() {
         )}
       </div>
 
-      <div className="mt-4">
+      <div className="mt-4 flex items-center gap-3">
         <button type="button" className={btn} disabled={loading || saving || !dirty} onClick={save}>
-          {saving ? 'Saving…' : 'Save ordering'}
+          {saving ? 'Saving…' : 'Save ranking'}
         </button>
+        {/* Saying it beats implying it. The button going grey was the only
+            confirmation a save had happened, which reads identically to a
+            save that silently did nothing. Hidden again the moment the form
+            is dirty, so it cannot outlive the edit it confirmed. */}
+        {!saving && !dirty && justSaved && (
+          <span role="status" className="text-sm text-[var(--color-accent)]">
+            Saved. The worker picks these up on its next pass.
+          </span>
+        )}
+        {saving && (
+          <span className="text-sm text-[var(--color-muted)]">Writing the ordering block…</span>
+        )}
       </div>
     </div>
   );
