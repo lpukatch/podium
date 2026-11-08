@@ -42,7 +42,10 @@ npm run type-check
 npm run test:run
 ```
 
-CI runs exactly these three, plus a Docker build.
+CI runs exactly these three, an npm audit of the production dependency
+closure, a gitleaks scan of the full commit history, a coverage report, a
+conventional-commit subject check on merge requests, plus a Docker build
+and a trivy vulnerability scan on every published image.
 
 Upstream CI runs on Woodpecker; GitHub's mirror workflows remain separate.
 See [Woodpecker setup](docs/woodpecker.md) for secrets, runner requirements,
