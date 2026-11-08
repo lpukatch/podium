@@ -66,5 +66,40 @@ steps:
       TRIVY_CACHE_DIR: /tmp/trivy-cache
     commands:
       - case "$$CI_PIPELINE_EVENT" in tag) REF="$${CI_COMMIT_TAG#v}" ;; *) REF=main ;; esac
-      - trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed \
-          --scanners vuln --ignorefile .trivyignore "$$REGISTRY/$$IMAGE_NAME:$REF"
+      # The table goes to a file (save-scan-report below publishes it) and is
+      # then printed into this step's log either way, so findings are visible
+      # even when the gate is red. trivy writes the report before exiting
+      # nonzero; || RC=$? keeps that exit code through the file handling.
+      - trivy image --severity HIGH,CRITICAL --ignore-unfixed \
+          --scanners vuln --ignorefile .trivyignore \
+          --format table --output trivy-report.txt \
+          "$$REGISTRY/$$IMAGE_NAME:$REF" || RC=$$?
+      - cat trivy-report.txt
+      - exit $${RC:-0}
+
+  # Woodpecker has no pipeline attachments, so the report is published to the
+  # upstream Forgejo's generic package registry instead: one report per commit
+  # at <forgejo>/api/packages/<owner>/generic/podium-trivy/<sha>/trivy-<ref>.txt
+  # -- the durable record that outlives log retention.
+  #
+  # Runs even after a failed gate (status: [success, failure]) -- that is
+  # exactly the report worth keeping -- and failure: ignore so a hiccup here
+  # never masks the gate's verdict. The Forgejo host is derived from the
+  # runtime clone URL, never committed: this file ships to the public mirror.
+  - name: save-scan-report
+    image: curlimages/curl:8.23.0
+    when:
+      - event: [push, manual, tag]
+        status: [success, failure]
+    failure: ignore
+    environment:
+      PACKAGE_TOKEN:
+        from_secret: package_token
+    commands:
+      - test -f trivy-report.txt
+      - case "$$CI_PIPELINE_EVENT" in tag) REF="$${CI_COMMIT_TAG#v}" ;; *) REF=main ;; esac
+      - BASE=$(printf '%s\n' "$$CI_REPO_CLONE_URL" | sed -E 's#^(https?://[^/]+).*#\1#')
+      - URL="$$BASE/api/packages/$$CI_REPO_OWNER/generic/$${CI_REPO_NAME}-trivy/$$CI_COMMIT_SHA/trivy-$$REF.txt"
+      - curl -fsS --retry 3 -H "Authorization: token $$PACKAGE_TOKEN" \
+          --upload-file trivy-report.txt "$$URL"
+      - echo "Report saved to $$URL"
