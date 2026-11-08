@@ -203,6 +203,14 @@ export function OrderingView() {
   const current: OrderingState = { mode, preference, weights };
   const dirty = !same(current, saved);
 
+  // The "Saved." confirmation is dismissed by the first edit after it, not
+  // merely hidden while dirty: without this, untangling an edit -- or editing
+  // away and back to the saved values -- would bring "Saved." back out of
+  // nowhere, confirming a save that never happened.
+  useEffect(() => {
+    if (dirty) setJustSaved(false);
+  }, [dirty]);
+
   const save = async () => {
     setSaving(true);
     try {

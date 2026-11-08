@@ -525,6 +525,7 @@ export const FIELDS: FieldSpec[] = [
     group: 'quick-checks',
     min: 0,
     max: 64,
+    int: true,
   },
   {
     key: 'PODIUM_ANALYZE_SECONDS',
@@ -823,7 +824,7 @@ export const FIELDS: FieldSpec[] = [
     key: 'PODIUM_QUALITY_POINTS_PER_MBPS',
     kind: 'number',
     label: 'Points per Mbps of bitrate',
-    help: 'How much a measured Mbps above the median is worth in a pushed rule, and how much a Mbps below costs. 0 suppresses the bitrate ladder.',
+    help: 'How much a measured Mbps above the median is worth in a pushed rule, and how much a Mbps below costs. 0 drops the account, group and name priors, leaving the measured bitrate ladder on its own.',
     more: 'Only the ratio against your own rules matters; raise it if yours use larger numbers. Generated account, group and name rules are capped at ±15 so they cannot outrank a direct measurement of the stream. The ladder is centred on your median, so a stream Teamarr has no stats for scores 0 and sits level with a median one. Also a Quality-tab box once, for the same reason as the sample floor above.',
     section: 'quality',
     group: 'learn-scope',

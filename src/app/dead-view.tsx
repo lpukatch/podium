@@ -355,38 +355,13 @@ export function DeadView({
                         : 'Preparing to check…'}
                     </span>
                   </>
-                ) : confirmingProbe && autoApply ? (
-                  /* One click was one click too few for this button. With
-                     "Apply reorders" ticked -- the default -- Check all both
-                     checks every channel and writes each verdict's order to
-                     Dispatcharr, and the apply API's own documentation reads
-                     "overwrites the channel's stream array with no undo". So
-                     it gets the same inline two-step the Danger Zone, the
-                     soak card and the Teamarr push use, naming what it
-                     writes. Untick the box and checking is safe and
-                     repeatable, which is what the button says it is again. */
-                  <>
-                    <span className="max-w-[60ch] text-sm text-[var(--color-muted)]">
-                      Check all {totals.channelsAffected} channel(s) and write each verdict's order
-                      to Dispatcharr? Applying overwrites the channel's stream order and there is no
-                      undo. Untick <b>Apply reorders</b> to check without writing anything.
-                    </span>
-                    <button
-                      type="button"
-                      className={`${btn} !border-[var(--color-bad)] !bg-[var(--color-bad)] !text-[var(--color-on-bad)]`}
-                      onClick={() => {
-                        setConfirmingProbe(false);
-                        void startProbe();
-                      }}
-                    >
-                      Check and apply
-                    </button>
-                    <button type="button" className={btn} onClick={() => setConfirmingProbe(false)}>
-                      Cancel
-                    </button>
-                  </>
                 ) : (
                   <>
+                    {/* The checkbox stays rendered through the two-step confirm
+                       below: the confirm's escape hatch is "untick Apply
+                       reorders", and an instruction to untick a box that the
+                       confirm hid is not an escape hatch. Unticking collapses
+                       the confirm back to the plain button. */}
                     <label className="flex cursor-pointer items-center gap-1.5 text-sm text-[var(--color-muted)]">
                       <input
                         type="checkbox"
@@ -396,42 +371,81 @@ export function DeadView({
                       />
                       Apply reorders
                     </label>
-                    <button
-                      type="button"
-                      disabled={totals.channelsAffected === 0 || soaking}
-                      onClick={() =>
-                        void (autoApply && totals.channelsAffected > 0
-                          ? setConfirmingProbe(true)
-                          : startProbe())
-                      }
-                      className={btn}
-                      title={
-                        totals.channelsAffected === 0
-                          ? 'No channel has a dead or black stream'
-                          : `Check all ${totals.channelsAffected} channel(s) carrying dead or black streams`
-                      }
-                    >
-                      Check all ({n(totals.channelsAffected)})
-                    </button>
-                    <button
-                      type="button"
-                      disabled={totals.channelsAffected === 0 || soaking}
-                      onClick={() => void queueSoak()}
-                      className={btn}
-                      title={
-                        totals.channelsAffected === 0
-                          ? 'No channel has a dead or black stream'
-                          : `Queue soaks for streams on ${totals.channelsAffected} channel(s)`
-                      }
-                    >
-                      {soaking && (
-                        <LoaderCircle
-                          className="mr-1 inline h-4 w-4 animate-spin"
-                          aria-hidden="true"
-                        />
-                      )}
-                      {soaking ? 'Queueing soak…' : `Soak all (${n(totals.channelsAffected)})`}
-                    </button>
+                    {confirmingProbe && autoApply ? (
+                      /* One click was one click too few for this button. With
+                         "Apply reorders" ticked -- the default -- Check all both
+                         checks every channel and writes each verdict's order to
+                         Dispatcharr, and the apply API's own documentation reads
+                         "overwrites the channel's stream array with no undo". So
+                         it gets the same inline two-step the Danger Zone, the
+                         soak card and the Teamarr push use, naming what it
+                         writes. Untick the box and checking is safe and
+                         repeatable, which is what the button says it is again. */
+                      <>
+                        <span className="max-w-[60ch] text-sm text-[var(--color-muted)]">
+                          Check all {totals.channelsAffected} channel(s) and write each verdict's
+                          order to Dispatcharr? Applying overwrites the channel's stream order and
+                          there is no undo. Untick <b>Apply reorders</b> to check without writing
+                          anything.
+                        </span>
+                        <button
+                          type="button"
+                          className={`${btn} !border-[var(--color-bad)] !bg-[var(--color-bad)] !text-[var(--color-on-bad)]`}
+                          onClick={() => {
+                            setConfirmingProbe(false);
+                            void startProbe();
+                          }}
+                        >
+                          Check and apply
+                        </button>
+                        <button
+                          type="button"
+                          className={btn}
+                          onClick={() => setConfirmingProbe(false)}
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          disabled={totals.channelsAffected === 0 || soaking}
+                          onClick={() =>
+                            void (autoApply && totals.channelsAffected > 0
+                              ? setConfirmingProbe(true)
+                              : startProbe())
+                          }
+                          className={btn}
+                          title={
+                            totals.channelsAffected === 0
+                              ? 'No channel has a dead or black stream'
+                              : `Check all ${totals.channelsAffected} channel(s) carrying dead or black streams`
+                          }
+                        >
+                          Check all ({n(totals.channelsAffected)})
+                        </button>
+                        <button
+                          type="button"
+                          disabled={totals.channelsAffected === 0 || soaking}
+                          onClick={() => void queueSoak()}
+                          className={btn}
+                          title={
+                            totals.channelsAffected === 0
+                              ? 'No channel has a dead or black stream'
+                              : `Queue soaks for streams on ${totals.channelsAffected} channel(s)`
+                          }
+                        >
+                          {soaking && (
+                            <LoaderCircle
+                              className="mr-1 inline h-4 w-4 animate-spin"
+                              aria-hidden="true"
+                            />
+                          )}
+                          {soaking ? 'Queueing soak…' : `Soak all (${n(totals.channelsAffected)})`}
+                        </button>
+                      </>
+                    )}
                   </>
                 )}
               </div>

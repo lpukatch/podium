@@ -395,7 +395,7 @@ word.
 | `PODIUM_QUALITY_INCLUDE_GROUPS` | *(empty)* | globs — `* SPORT*, *PPV*` — that admit a group whatever its policy says |
 | `PODIUM_QUALITY_EXCLUDE_GROUPS` | *(empty)* | globs — `*VOD*, *MOVIE*, *24/7*` — that drop a sample however it was admitted |
 | `PODIUM_QUALITY_MIN_SAMPLES` | `20` | fewest samples a stream name needs before it earns its own quality rule; the Quality tab still lists under-sampled names, dimmed |
-| `PODIUM_QUALITY_POINTS_PER_MBPS` | `5` | what a measured Mbps above the median is worth in a pushed rule, and what a Mbps below costs; `0` suppresses the bitrate ladder |
+| `PODIUM_QUALITY_POINTS_PER_MBPS` | `5` | what a measured Mbps above the median is worth in a pushed rule, and what a Mbps below costs; `0` drops the account, group and name priors, leaving the measured bitrate ladder on its own |
 
 The last two were Quality-tab boxes once, which meant the rules previewed in
 the browser were not the rules the scheduled push fitted — the push always ran

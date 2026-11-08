@@ -312,6 +312,13 @@ export default function Page() {
   // mounts lazily: a session that never opens Settings pays for neither the
   // fetch nor the DOM, and one that has keeps its unsaved edits.
   const [settingsEverOpened, setSettingsEverOpened] = useState(false);
+  // The error screen mounts the form too -- setup failures are fixed by typing
+  // credentials into it -- so it arms the keep-alive as well. Without this,
+  // Retry succeeding unmounts the form (the flag is still false) and whatever
+  // the operator typed there is dropped before they ever reach Settings.
+  useEffect(() => {
+    if (error) setSettingsEverOpened(true);
+  }, [error]);
   const sectionRefs = useRef<Partial<Record<SettingsSection, HTMLButtonElement | null>>>({});
   const [groupId, setGroupId] = useState<number | null>(null);
   const [channelId, setChannelId] = useState<number | null>(null);
