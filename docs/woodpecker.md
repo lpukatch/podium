@@ -88,6 +88,14 @@ BUMP_TYPE=auto
 `BUMP_TYPE` defaults to `auto`; `patch`, `minor`, and `major` are also supported.
 Without `RELEASE=true`, a manual pipeline never bumps the version.
 
+The release commit also carries `CHANGELOG.md`: bump.sh generates the new
+release's section with git-cliff (`cliff.toml` is the template) and prepends
+it. The version and checksum of the git-cliff build are pinned in `bump.yml`
+(`# renovate:` annotation) with matching defaults in bump.sh for local
+releases; a checksum mismatch aborts the release. The GitHub release body is
+read back out of `CHANGELOG.md`, so what users read in the repo is what they
+get on releases.
+
 The release workflow fetches current `main` and all tags, skips if there are no
 commits since the last release, and derives the bump from Conventional Commit
 subjects. It updates `package.json`, commits, and pushes an annotated tag using
