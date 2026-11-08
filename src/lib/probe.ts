@@ -149,8 +149,14 @@ export interface ProbeOptions {
    * If false (default), missing video track marks the stream as DEAD.
    */
   audioOnly?: boolean;
-  /** When true, log extra probe diagnostics. */
-  debug?: boolean;
+  /**
+   * Called with the last few lines of ffprobe's stderr when a check exits
+   * non-zero, for debug logging. Logging only: what reaches the stored verdict
+   * stays the last stderr line alone, so `deadReason` classification never
+   * varies with logging settings. Already passed through `deadDetail` -- no
+   * connection URLs or credentials.
+   */
+  onStderrTail?: (tail: string) => void;
 }
 
 export interface FfprobeStream {
@@ -571,7 +577,7 @@ export async function probe(url: string, options: ProbeOptions = {}): Promise<Pr
     detectBlack = true,
     blackRatio = 0.8,
     audioOnly = false,
-    debug = false,
+    onStderrTail,
   } = options;
 
   const refusal = rejectUrl(url);
@@ -638,13 +644,14 @@ export async function probe(url: string, options: ProbeOptions = {}): Promise<Pr
     child.on('close', (code) => {
       if (code !== 0) {
         const lines = stderr.trim().split('\n').filter(Boolean);
-        const detail =
-          debug && lines.length > 1
-            ? lines.slice(-3).join('; ')
-            : lines.length > 0
-              ? lines[lines.length - 1]!
-              : `exit ${code}`;
-        finish({ ...DEAD, error: detail.slice(0, 300) });
+        const detail = lines.length > 0 ? lines[lines.length - 1]! : `exit ${code}`;
+        if (onStderrTail && lines.length > 1) {
+          // Debug context for the line above: what came before it on stderr.
+          // Through `deadDetail`, like every other log path -- ffprobe echoes
+          // the input URL, and probe URLs carry credentials.
+          onStderrTail(deadDetail(lines.slice(-3).join('; ')));
+        }
+        finish({ ...DEAD, error: detail.slice(0, 200) });
         return;
       }
       try {

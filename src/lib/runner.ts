@@ -2155,7 +2155,16 @@ export class Runner {
                 detectBlack: config.PODIUM_DETECT_BLACK,
                 blackRatio: config.PODIUM_BLACK_RATIO,
                 audioOnly: job.audioOnly,
-                debug: config.PODIUM_DEBUG,
+                // Debug context for the "probe failed" line below: the last
+                // few stderr lines, already redacted by probe. The stored
+                // verdict keeps the last line alone, so `deadReason`
+                // classification never varies with the debug flag.
+                onStderrTail: config.PODIUM_DEBUG
+                  ? (tail) =>
+                      log(
+                        `probe stderr: ${stream?.name ?? `stream ${job.streamId}`} (${providerNames.get(job.providerId) ?? `provider ${job.providerId}`}): ${tail}`,
+                      )
+                  : undefined,
               });
             } catch (error) {
               // probe() returns DEAD rather than throwing, so this is defensive

@@ -259,7 +259,7 @@ It needs `PODIUM_PROBE_IDLE_PROVIDERS` on, which in turn needs
 | `PODIUM_MIN_BITRATE_KBPS` | `500` | below this counts as dead |
 | `PODIUM_DETECT_BLACK` | `true` | black-screen detection |
 | `PODIUM_BLACK_RATIO` | `0.8` | share of the sample that must be black for a stream to be flagged |
-| `PODIUM_DEBUG` | `false` | log every check, passed and failed, with resolution, bitrate and timing detail; also follows a standard `DEBUG` env var (`1`, `true`, `podium`) |
+| `PODIUM_DEBUG` | `false` | log every check, passed and failed, with resolution, bitrate and timing detail, plus the last lines of a failed check's error output (URLs and credentials stripped); also follows a standard `DEBUG` env var (`1`, `true`, `podium`) until a value is saved in Settings -- the saved one then wins |
 | `PODIUM_LANE_STAGGER_MS` | `0` | delay between starting each parallel check; quick checks and soaks stagger on the same setting |
 | `PODIUM_USER_AGENT` | `VLC/3.0.14` | user agent for direct checks; replaced by the stream-profile agent when that switch below is on |
 | `PODIUM_DIRECT_PROFILE_USER_AGENT` | `false` | apply the stream profile's user agent to direct checks, replacing the agent above |
