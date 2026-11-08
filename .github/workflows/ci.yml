@@ -43,10 +43,11 @@ jobs:
 
       - name: Test
         # ffmpeg so the probe tests exercise the real ffprobe path rather than
-        # only the parser.
+        # only the parser. Coverage table lands in the run log; thresholds
+        # follow once main's baseline is visible.
         run: |
           sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
-          npm run test:run
+          npm run test:coverage
 
   docker:
     # Publish builds on main; CI only needs to validate PR images.

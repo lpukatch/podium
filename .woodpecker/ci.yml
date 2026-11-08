@@ -55,4 +55,6 @@ steps:
     commands:
       # Containers do not share installed system packages with earlier steps.
       - apt-get update && apt-get install -y --no-install-recommends ffmpeg
-      - npm run test:run
+      # The text reporter's table lands in the pipeline log; thresholds wait
+      # until main's baseline is visible, then pin it a point below current.
+      - npm run test:coverage
