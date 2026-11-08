@@ -23,6 +23,11 @@ jobs:
       - name: Install
         run: npm ci
 
+      # Same policy as the upstream Woodpecker pipeline: production closure
+      # only (devDependencies never ship), HIGH is the gate.
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Lint and format check
         run: npm run format:check
 

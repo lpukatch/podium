@@ -9,6 +9,15 @@ steps:
       - node --test .woodpecker/scripts/build-metadata.test.cjs
       - npm ci
 
+  # The shipped closure only: the standalone server traces production
+  # dependencies, so devDependencies never reach an image -- auditing them
+  # gates on noise. HIGH is the bar: moderate findings would train the red
+  # pipeline to be ignored, and renovate lands the rest within days.
+  - name: audit
+    image: node:26-bookworm
+    commands:
+      - npm audit --omit=dev --audit-level=high
+
   # Forgejo has no server-side secret scanning, so the pipeline is the
   # substitute: the GitHub mirror is public and syncs every commit, meaning a
   # token that lands on main is exposed within one sync. Scan the full history
