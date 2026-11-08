@@ -6,8 +6,18 @@ steps:
   - name: install
     image: node:26-bookworm
     commands:
-      - node --test .woodpecker/scripts/build-metadata.test.cjs
+      - node --test .woodpecker/scripts/*.test.cjs
       - npm ci
+
+  # The release job reads subjects to pick patch/minor/major (bump.sh); a
+  # non-conventional one silently downgrades the next release. Runs on merge
+  # requests, where the branch's own commits are what review sees.
+  - name: commit-subjects
+    image: node:26-bookworm
+    when:
+      - event: pull_request
+    commands:
+      - node .woodpecker/scripts/check-commit-subjects.cjs
 
   # The shipped closure only: the standalone server traces production
   # dependencies, so devDependencies never reach an image -- auditing them
