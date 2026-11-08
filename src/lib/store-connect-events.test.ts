@@ -19,7 +19,7 @@ import { Store } from './store';
 function row(over: Partial<ConnectEventRow> = {}): ConnectEventRow {
   return {
     event: 'stream_switch',
-    channelKey: '09bbd059-1a49-47ee-a525-c1444e1c6bd7',
+    channelKey: 'podium-test-channel-key',
     streamId: 77177,
     previousStreamId: 77013,
     reason: 'buffering_timeout',

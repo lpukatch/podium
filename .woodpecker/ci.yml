@@ -9,6 +9,18 @@ steps:
       - node --test .woodpecker/scripts/build-metadata.test.cjs
       - npm ci
 
+  # Forgejo has no server-side secret scanning, so the pipeline is the
+  # substitute: the GitHub mirror is public and syncs every commit, meaning a
+  # token that lands on main is exposed within one sync. Scan the full history
+  # (unshallow first -- the default clone is shallow) so a secret from an
+  # older branch is caught too. `gitleaks git` exits nonzero on any finding;
+  # accepted false positives are fingerprinted in .gitleaksignore.
+  - name: secrets-scan
+    image: ghcr.io/gitleaks/gitleaks:v8.30.1
+    commands:
+      - if [ "$(git rev-parse --is-shallow-repository)" = true ]; then git fetch --unshallow origin; fi
+      - gitleaks git --no-banner
+
   - name: lint-and-format
     image: node:26-bookworm
     commands:

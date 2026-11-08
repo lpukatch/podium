@@ -46,7 +46,9 @@ behavior is unchanged. `.forgejo/default_merge_message/` is also unchanged.
 
 ## Checks and images
 
-- Pushes and PRs targeting `main`: format/lint, type checks, tests with real
+- Pushes and PRs targeting `main`: a gitleaks scan of the full commit history
+  (Forgejo has no server-side secret scanning, and the GitHub mirror makes
+  every landed commit public), plus format/lint, type checks, tests with real
   ffprobe, and an amd64 Docker build.
 - Pushes to `main`: publish `:main` and refresh `:buildcache`.
 - PRs: build without publishing an image or writing the cache.
