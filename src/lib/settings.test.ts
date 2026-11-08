@@ -634,4 +634,36 @@ describe('settings persistence', () => {
         .PODIUM_DRY_RUN,
     ).toBe(false);
   });
+
+  it('exposes and validates debug logging, supporting DEBUG env var fallback', () => {
+    expect(FIELD_KEYS).toContain('PODIUM_DEBUG');
+
+    const behaviour = describeSettings({ DISPATCHARR_API_KEY: 'k' }, store.settings()).filter(
+      (f) => f.section === 'behaviour',
+    );
+    const debugField = behaviour.find((f) => f.key === 'PODIUM_DEBUG');
+    expect(debugField).toBeDefined();
+    expect(debugField?.defaultValue).toBe('false');
+
+    // Validation
+    expect(validateSettings({ PODIUM_DEBUG: 'true' }).errors).toEqual([]);
+    expect(validateSettings({ PODIUM_DEBUG: '1' }).errors).toEqual([]);
+
+    // Persistence
+    store.setSettings({ PODIUM_DEBUG: 'true' });
+    const config = loadConfig(resolveEnv({ DISPATCHARR_API_KEY: 'k' }, store.settings()));
+    expect(config.PODIUM_DEBUG).toBe(true);
+
+    // Fallback to process.env.DEBUG
+    const origDebug = process.env.DEBUG;
+    try {
+      store.setSettings({ PODIUM_DEBUG: null });
+      process.env.DEBUG = '1';
+      const debugConfig = loadConfig({ DISPATCHARR_API_KEY: 'k' });
+      expect(debugConfig.PODIUM_DEBUG).toBe(true);
+    } finally {
+      if (origDebug === undefined) delete process.env.DEBUG;
+      else process.env.DEBUG = origDebug;
+    }
+  });
 });
