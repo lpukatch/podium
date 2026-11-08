@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { THEME_STORAGE_KEY } from './theme';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -6,7 +7,7 @@ export const metadata: Metadata = {
   description: 'Provider-aware stream checker and reorderer for Dispatcharr',
 };
 
-const themeScript = `(function(){try{var t=localStorage.getItem('podium-theme');if(t==='dark'||t==='light'){document.documentElement.setAttribute('data-theme',t);}}catch(e){}})();`;
+const themeScript = `(function(){try{var t=localStorage.getItem('${THEME_STORAGE_KEY}');if(t==='dark'||t==='light'){document.documentElement.setAttribute('data-theme',t);}}catch(e){}})();`;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (

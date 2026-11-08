@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyTheme, parseTheme, type ThemeTarget } from './theme';
+import { applyTheme, menuFocusIndex, parseTheme, type ThemeTarget } from './theme';
 
 describe('theme parsing', () => {
   it('parses valid themes', () => {
@@ -45,5 +45,36 @@ describe('theme application', () => {
 
     applyTheme('system', el);
     expect('data-theme' in el.attrs).toBe(false);
+  });
+});
+
+describe('menu focus', () => {
+  it('moves down with wraparound', () => {
+    expect(menuFocusIndex(0, 'ArrowDown', 3)).toBe(1);
+    expect(menuFocusIndex(1, 'ArrowDown', 3)).toBe(2);
+    expect(menuFocusIndex(2, 'ArrowDown', 3)).toBe(0);
+  });
+
+  it('moves up with wraparound', () => {
+    expect(menuFocusIndex(2, 'ArrowUp', 3)).toBe(1);
+    expect(menuFocusIndex(0, 'ArrowUp', 3)).toBe(2);
+  });
+
+  it('jumps to the ends on Home and End', () => {
+    expect(menuFocusIndex(1, 'Home', 3)).toBe(0);
+    expect(menuFocusIndex(1, 'End', 3)).toBe(2);
+  });
+
+  it('lands on a real item when focus has not entered yet', () => {
+    expect(menuFocusIndex(-1, 'ArrowDown', 3)).toBe(0);
+    expect(menuFocusIndex(-1, 'ArrowUp', 3)).toBe(2);
+    expect(menuFocusIndex(-1, 'Home', 3)).toBe(0);
+    expect(menuFocusIndex(-1, 'End', 3)).toBe(2);
+  });
+
+  it('ignores keys it does not handle and empty menus', () => {
+    expect(menuFocusIndex(1, 'ArrowLeft', 3)).toBe(-1);
+    expect(menuFocusIndex(1, 'a', 3)).toBe(-1);
+    expect(menuFocusIndex(0, 'ArrowDown', 0)).toBe(-1);
   });
 });

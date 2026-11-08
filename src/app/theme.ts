@@ -9,6 +9,32 @@ export function parseTheme(value: unknown): Theme {
   return 'system';
 }
 
+/**
+ * Next focused index for a vertical menu: ArrowDown/ArrowUp cycle with
+ * wraparound, Home/End jump to the ends. `current` may be -1 when focus has
+ * not entered the items yet. Returns -1 for keys it does not handle.
+ */
+export function menuFocusIndex(current: number, key: string, count: number): number {
+  if (count === 0) return -1;
+  if (current < 0) {
+    if (key === 'ArrowDown' || key === 'Home') return 0;
+    if (key === 'ArrowUp' || key === 'End') return count - 1;
+    return -1;
+  }
+  switch (key) {
+    case 'ArrowDown':
+      return (current + 1) % count;
+    case 'ArrowUp':
+      return (current - 1 + count) % count;
+    case 'Home':
+      return 0;
+    case 'End':
+      return count - 1;
+    default:
+      return -1;
+  }
+}
+
 export interface ThemeTarget {
   setAttribute(name: string, value: string): void;
   removeAttribute(name: string): void;

@@ -20,23 +20,15 @@
   color-scheme: light dark;
 }
 
+/* The @theme block above is the light palette and Tailwind emits it on
+   :root — the light theme only pins the color-scheme. */
 :root[data-theme="light"] {
   color-scheme: light;
-  --color-ink: #1a1a19;
-  --color-muted: #6b6b66;
-  --color-line: #e4e4e1;
-  --color-panel: #ffffff;
-  --color-canvas: #fbfbfa;
-  --color-accent: #2f6f4e;
-  --color-accent-soft: #e8f2ec;
-  --color-warn: #8a5a1b;
-  --color-bad: #a33a2e;
-  --color-accent-solid: #205837;
-  --color-on-accent: #ffffff;
-  --color-on-warn: #ffffff;
-  --color-on-bad: #ffffff;
 }
 
+/* The dark palette appears twice because pure CSS cannot share one ruleset
+   across "OS prefers dark and no explicit choice" and "explicit dark while
+   the OS prefers light". Keep the two copies byte-identical. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --color-ink: #e8e8e6;

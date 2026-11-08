@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   applyTheme,
   getStoredTheme,
+  menuFocusIndex,
   parseTheme,
   setStoredTheme,
   THEME_STORAGE_KEY,
@@ -21,6 +22,7 @@ export function ThemeToggle() {
   const [theme, setTheme] = useState<Theme>('system');
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     setTheme(getStoredTheme());
@@ -36,40 +38,67 @@ export function ThemeToggle() {
     return () => window.removeEventListener('storage', onStorage);
   }, []);
 
+  // Opening moves focus to the current theme's item, so the keyboard pattern
+  // the menu roles promise works from the first keystroke.
   useEffect(() => {
     if (!open) return;
-    const handleClickOutside = (e: MouseEvent | TouchEvent) => {
+    const items = containerRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]');
+    const current = OPTIONS.findIndex((option) => option.id === theme);
+    const target = items?.[Math.max(current, 0)];
+    target?.focus();
+  }, [open, theme]);
+
+  // Close on pointer down outside. Focus stays where the click landed.
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (e: MouseEvent | TouchEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setOpen(false);
       }
     };
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    document.addEventListener('touchstart', handleClickOutside);
-    document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('touchstart', handlePointerDown);
     return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-      document.removeEventListener('touchstart', handleClickOutside);
-      document.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('touchstart', handlePointerDown);
     };
   }, [open]);
+
+  // Menu keyboard pattern: ArrowUp/Down cycle, Home/End jump, Tab closes and
+  // moves on naturally, Escape closes and returns focus to the toggle.
+  const handleMenuKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      setOpen(false);
+      triggerRef.current?.focus();
+      return;
+    }
+    if (e.key === 'Tab') {
+      setOpen(false);
+      return;
+    }
+    const items = containerRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]');
+    if (!items || items.length === 0) return;
+    const current = Array.from(items).indexOf(document.activeElement as HTMLButtonElement);
+    const next = menuFocusIndex(current, e.key, items.length);
+    if (next >= 0) {
+      e.preventDefault();
+      items[next]?.focus();
+    }
+  };
 
   const selectTheme = (next: Theme) => {
     setTheme(next);
     setStoredTheme(next);
     applyTheme(next);
     setOpen(false);
+    triggerRef.current?.focus();
   };
 
   const CurrentIcon = theme === 'dark' ? Moon : theme === 'light' ? Sun : Monitor;
   const currentLabel = theme === 'dark' ? 'Dark' : theme === 'light' ? 'Light' : 'System';
 
   return (
-    <div ref={containerRef} className="relative flex-none">
+    <div ref={containerRef} className="relative flex-none" onKeyDown={handleMenuKeyDown}>
       <button
         type="button"
         onClick={() => setOpen((prev) => !prev)}
@@ -77,7 +106,8 @@ export function ThemeToggle() {
         title={`Theme: ${currentLabel}`}
         aria-label={`Theme: ${currentLabel}. Click to change theme.`}
         aria-expanded={open}
-        aria-haspopup="true"
+        aria-haspopup="menu"
+        ref={triggerRef}
       >
         <CurrentIcon className="h-4 w-4" aria-hidden="true" />
       </button>
