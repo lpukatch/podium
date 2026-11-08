@@ -52,6 +52,14 @@ behavior is unchanged. `.forgejo/default_merge_message/` is also unchanged.
 - PRs: build without publishing an image or writing the cache.
 - Tags `vX.Y.Z`: publish `:X.Y.Z`, `:X.Y`, and `:latest` and refresh the cache.
 - Manual pipelines on `main`: checks and a `:main` image, unless `RELEASE=true`.
+- Every published image is scanned with trivy (pinned `aquasec/trivy` image);
+  the pipeline fails on HIGH or CRITICAL findings that have an available fix.
+  The scan runs after push: `:main` is scanned on every edge build, so a
+  release is cut from an already-scanned commit, and the tag pipeline's scan
+  is the final gate before `:latest` moves. Accepted findings go in
+  `.trivyignore`, one line each with a reason and a removal condition. If the
+  registry presents an internal CA the trivy container cannot verify, set
+  `TRIVY_INSECURE=true` on the `image-scan` step.
 
 Only tag builds move `latest`. Non-tag app versions include the short commit
 SHA. Docker media types and disabled provenance preserve Unraid compatibility.

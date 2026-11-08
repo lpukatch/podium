@@ -39,3 +39,32 @@ steps:
       labels:
         - org.opencontainers.image.title=podium
         - org.opencontainers.image.description=Provider-aware stream checker and reorderer for Dispatcharr
+
+  # Scan what was just published, straight from the registry: the buildx plugin
+  # builds inside its own DinD container, so there is no local image for this
+  # step to read. Edge builds scan :main on every push, so a release cut
+  # inherits an already-scanned commit; the tag pipeline re-scans as the final
+  # gate before :latest moves. PR pipelines publish nothing, so they skip this.
+  #
+  # --ignore-unfixed: an OS CVE with no backported fix (the reason the base
+  # image moved to trixie) would otherwise hold CI red forever. Accepted
+  # findings go in .trivyignore, committed and reviewable, never in someone's
+  # head.
+  - name: image-scan
+    image: aquasec/trivy:0.76.2
+    when:
+      - event: [push, manual, tag]
+    environment:
+      REGISTRY:
+        from_secret: registry
+      IMAGE_NAME:
+        from_secret: image_name
+      TRIVY_USERNAME:
+        from_secret: registry_username
+      TRIVY_PASSWORD:
+        from_secret: registry_token
+      TRIVY_CACHE_DIR: /tmp/trivy-cache
+    commands:
+      - case "$$CI_PIPELINE_EVENT" in tag) REF="$${CI_COMMIT_TAG#v}" ;; *) REF=main ;; esac
+      - trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed \
+          --scanners vuln --ignorefile .trivyignore "$$REGISTRY/$$IMAGE_NAME:$REF"
