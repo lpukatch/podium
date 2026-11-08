@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RequireClause } from '@/lib/setting-requirements';
 import { clampNote, unsatisfiedRequires } from '@/lib/setting-requirements';
 import { VERSION } from '@/lib/version';
@@ -92,7 +92,7 @@ const SECTIONS: Array<{
   {
     id: 'measurement',
     sources: ['probing'],
-    title: 'Measure streams',
+    title: 'Checking streams',
     blurb: 'Control how Podium checks playback and detects failures.',
   },
   {
@@ -187,7 +187,7 @@ function requireNote(
   return sentences.join(' ');
 }
 
-export function SettingsView() {
+export function SettingsView({ active }: { active?: boolean } = {}) {
   const [fields, setFields] = useState<Field[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [effective, setEffective] = useState<{ dryRun: boolean; hasCredentials: boolean } | null>(
@@ -237,6 +237,12 @@ export function SettingsView() {
     return ['1', 'true', 'yes', 'on'].includes(raw);
   };
   const dirty = Object.keys(edits).length > 0;
+  const dirtyRef = useRef(false);
+  dirtyRef.current = dirty;
+
+  useEffect(() => {
+    if (active && !dirtyRef.current) void load();
+  }, [active, load]);
 
   /**
    * Every field's effective displayed value, as the dependency checks read the
@@ -423,7 +429,7 @@ export function SettingsView() {
             </span>
           </h2>
           <p className="mt-1 text-sm text-[var(--color-muted)]">
-            Connect services, choose what changes automatically, and tune how streams are measured.
+            Connect services, choose what changes automatically, and tune how streams are checked.
           </p>
         </div>
         <label className="block w-full max-w-xs">
@@ -722,7 +728,7 @@ export function SettingsView() {
               Danger Zone
             </h3>
             <p className="mt-1 text-sm text-[var(--color-muted)]">
-              Clear all cached probe results and run history. Podium will need to re-probe every
+              Clear all cached check results and run history. Podium will need to re-check every
               stream from scratch on the next pass.
             </p>
             <div className="mt-4 flex flex-wrap items-center gap-3">
@@ -737,6 +743,15 @@ export function SettingsView() {
                 </button>
               ) : (
                 <>
+                  {/* Said here as well as enforced by the route: on a stock
+                      install the dry run is on, and the reset now refuses
+                      rather than answering a probe-wipe with a bare 200.
+                      Better to read it before clicking than in the error. */}
+                  {effective?.dryRun && (
+                    <p className="text-sm text-[var(--color-bad)]">
+                      The dry run is on, so the reset will be refused — turn it off above first.
+                    </p>
+                  )}
                   <button
                     type="button"
                     className={`${btn} !border-[var(--color-bad)] !bg-[var(--color-bad)] !text-[var(--color-on-bad)] font-medium`}

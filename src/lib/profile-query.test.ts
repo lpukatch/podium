@@ -54,9 +54,10 @@ describe('query defaults', () => {
   it('takes its defaults from the config when one is given', () => {
     // The whole point of the move: the route passes the settings-resolved
     // config, so a bare request fits the way the scheduled push does.
-    expect(
-      profileQuery(new URLSearchParams(), { minSamples: 50, pointsPerMbps: 9 }),
-    ).toEqual({ minSamples: 50, pointsPerMbps: 9 });
+    expect(profileQuery(new URLSearchParams(), { minSamples: 50, pointsPerMbps: 9 })).toEqual({
+      minSamples: 50,
+      pointsPerMbps: 9,
+    });
     expect(
       profileQuery(new URLSearchParams('minSamples=&pointsPerMbps='), {
         minSamples: 50,

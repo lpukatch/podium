@@ -132,7 +132,7 @@ const PHASES: Record<Progress['phase'], { label: string; tone: string }> = {
   fetching: { label: 'Fetching', tone: 'bg-[var(--color-accent-soft)] text-[var(--color-accent)]' },
   planning: { label: 'Planning', tone: 'bg-[var(--color-accent-soft)] text-[var(--color-accent)]' },
   probing: {
-    label: 'Probing',
+    label: 'Checking',
     tone: 'bg-[var(--color-accent-solid)] text-[var(--color-on-accent)]',
   },
   soaking: {
@@ -182,7 +182,7 @@ const n = (value: number) => value.toLocaleString();
  * Consecutive passes that changed nothing, folded into one row.
  *
  * On a settled install almost every pass is one of these, and fifteen
- * identical "0 probed · 0 dead" lines say less than one line saying there were
+ * identical "0 checked · 0 dead" lines say less than one line saying there were
  * fifteen. The passes that did something stay on their own row.
  */
 type Entry =
@@ -448,7 +448,7 @@ export function ProgressView() {
           <p className="mt-3">
             {p?.phase === 'probing' ? (
               <b>
-                Probing {n(p.total)} {p.total === 1 ? 'stream' : 'streams'}.
+                Checking {n(p.total)} {p.total === 1 ? 'stream' : 'streams'}.
               </b>
             ) : waiting > 0 ? (
               <b>
@@ -480,7 +480,7 @@ export function ProgressView() {
               />
             </div>
             <p className="mt-2 text-sm tabular-nums text-[var(--color-muted)]">
-              {n(p.probed)} / {n(p.total)} probed · {pct}%
+              {n(p.probed)} / {n(p.total)} checked · {pct}%
             </p>
           </>
         )}
@@ -515,12 +515,12 @@ export function ProgressView() {
             noise the rest of the time, so it no longer gets the big tiles. */}
         {p && !stale && (
           <p className="mt-2 text-sm tabular-nums text-[var(--color-muted)]">
-            This pass: {n(p.probed)} probed · {n(p.dead)} dead · {n(p.reordered)} reordered ·{' '}
+            This pass: {n(p.probed)} checked · {n(p.dead)} dead · {n(p.reordered)} reordered ·{' '}
             {n(p.unchanged ?? 0)} already in order · {n(p.cached)} from cache
             {/* Only when there are any. On an install with no measure-only
                 group this is a zero that never moves, and the line is already
                 long. */}
-            {(p.measured ?? 0) > 0 && <> · {n(p.measured ?? 0)} measured only</>}
+            {(p.measured ?? 0) > 0 && <> · {n(p.measured ?? 0)} checked only</>}
           </p>
         )}
 
@@ -575,7 +575,7 @@ export function ProgressView() {
           ) : confirming ? (
             <div className="flex flex-wrap items-center gap-3">
               <span className="text-sm">
-                Measure all {n(cache?.total ?? 0)} streams again, however fresh they are?{' '}
+                Re-check all {n(cache?.total ?? 0)} streams, however fresh they are?{' '}
                 <span className="text-[var(--color-muted)]">
                   It runs at the provider limits and pauses whenever anyone is watching, so on a
                   busy evening it can take a long time. Cancelling puts the current verdicts back in
@@ -655,14 +655,14 @@ export function ProgressView() {
                 Hold every stream on the channels Podium manages open in turn, to find out how long
                 each one really lasts?{' '}
                 <span className="text-[var(--color-muted)]">
-                  This is the slow measurement, and how long it takes is set by your narrowest
-                  provider rather than by the total: one connection and a few hundred streams is the
-                  same wall clock however idle the rest are. Queued runs use the soak length from
+                  This is the slow check, and how long it takes is set by your narrowest provider
+                  rather than by the total: one connection and a few hundred streams is the same
+                  wall clock however idle the rest are. Queued runs use the soak length from
                   Settings; <b>Start now</b> ignores both the window and that length, beginning on
                   the next pass at the seconds chosen beside it — for a night you know the house is
                   empty. It does not ignore anything else: it runs at the provider limits and still
                   stops the moment anyone starts watching. Nothing is written to Dispatcharr, and
-                  the queue can be cleared at any time. Streams that were dead at their last probe
+                  the queue can be cleared at any time. Streams that were dead at their last check
                   are left out.
                 </span>
               </span>
@@ -703,7 +703,7 @@ export function ProgressView() {
           ) : (
             <div className="flex flex-wrap items-center gap-3">
               <span className="text-sm text-[var(--color-muted)]">
-                Measure how long every stream holds, not just how it looks in five seconds. Queue it
+                Check how long every stream holds, not just how it looks in five seconds. Queue it
                 for the soak window, or start a baseline run straight away on a night nobody is
                 watching.
               </span>
@@ -720,7 +720,7 @@ export function ProgressView() {
         <div className={`${card} mt-4 p-5`}>
           <h3 className={heading}>Library</h3>
           <p className="mt-1.5 text-sm text-[var(--color-muted)]">
-            Every stream a rule claims, as the last probe left it. Live verdicts are rechecked after{' '}
+            Every stream a rule claims, as the last check left it. Live verdicts are rechecked after{' '}
             {duration(stats.liveTtlMs)}, dead ones after {duration(stats.deadTtlMs)}
             {stats.deadTtlMaxMs !== undefined && stats.deadTtlMaxMs > stats.deadTtlMs ? (
               <>
@@ -764,14 +764,14 @@ export function ProgressView() {
         <div className={`${card} mt-4 p-5`}>
           <h3 className={heading}>Last 24 hours</h3>
           <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <Stat label="Probed" value={stats.day.probed} sub="streams checked" />
+            <Stat label="Checked" value={stats.day.probed} sub="streams checked" />
             <Stat
               label="Dead found"
               value={stats.day.dead}
               tone={stats.day.dead > 0 ? 'bad' : undefined}
               sub={
                 stats.day.probed > 0
-                  ? `${Math.round((100 * stats.day.dead) / stats.day.probed)}% of probes`
+                  ? `${Math.round((100 * stats.day.dead) / stats.day.probed)}% of checks`
                   : undefined
               }
             />
@@ -889,7 +889,7 @@ export function ProgressView() {
                       </span>
                     ) : (
                       <>
-                        {n(entry.run.probed)} probed · {n(entry.run.dead)} dead ·{' '}
+                        {n(entry.run.probed)} checked · {n(entry.run.dead)} dead ·{' '}
                         {n(entry.run.reordered)} reordered
                       </>
                     )}
@@ -963,7 +963,7 @@ function Activity({ buckets }: { buckets: Array<{ from: number; probed: number; 
   if (buckets.every((b) => b.probed === 0)) {
     return (
       <p className="mt-3 text-sm text-[var(--color-muted)]">
-        No probes in the last 24 hours — every verdict was still inside its TTL.
+        No checks in the last 24 hours — every verdict was still inside its TTL.
       </p>
     );
   }
@@ -973,7 +973,7 @@ function Activity({ buckets }: { buckets: Array<{ from: number; probed: number; 
         {buckets.map((b) => (
           <div
             key={b.from}
-            title={`${clock(b.from)} — ${n(b.probed)} probed, ${n(b.dead)} dead`}
+            title={`${clock(b.from)} — ${n(b.probed)} checked, ${n(b.dead)} dead`}
             className="flex-1 rounded-t-[3px] bg-[var(--color-accent)]"
             style={{
               height: `${Math.max((100 * b.probed) / peak, b.probed > 0 ? 6 : 2)}%`,

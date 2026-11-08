@@ -130,7 +130,7 @@ interface Preview {
 
 /** "3m ago" / "2h ago" / "never" -- the question is freshness, not the date. */
 function since(ms: number | null): string {
-  if (!ms) return 'never probed';
+  if (!ms) return 'never checked';
   const s = Math.max(Math.round((Date.now() - ms) / 1000), 0);
   if (s < 90) return `${s}s ago`;
   if (s < 5400) return `${Math.round(s / 60)}m ago`;
@@ -147,7 +147,7 @@ const MODES: Array<{ value: Mode; label: string; hint: string }> = [
     label: 'Always',
     hint: 'Checks the channels you have given a rule, on the normal freshness schedule. Channels with no rule are left alone.',
   },
-  { value: 'never', label: 'Never', hint: 'Never probed, and the order is left as it is.' },
+  { value: 'never', label: 'Never', hint: 'Never checked, and the order is left as it is.' },
   {
     value: 'after_epg_start',
     label: 'After kickoff',
@@ -177,7 +177,7 @@ const GRACE_CHOICES = [0, 1, 2, 3, 5, 10, 15, 20, 30];
 const graceChoices = (current: number): number[] =>
   [...new Set([...GRACE_CHOICES, current])].sort((a, b) => a - b);
 const GRACE_TITLE =
-  'How long after the live programme starts before its streams are probed. Too soon, and a feed that is about to come up is recorded as dead.';
+  'How long after the live programme starts before its streams are checked. Too soon, and a feed that is about to come up is recorded as dead.';
 
 /** Modes where a channel with no rule is still ranked, off its own assignment. */
 const RANKS_ASSIGNED = new Set<Mode>(['after_epg_start', 'assigned']);
@@ -308,6 +308,10 @@ export default function Page() {
 
   const [tab, setTab] = useState<Tab>('groups');
   const [section, setSection] = useState<SettingsSection>('general');
+  // Whether the settings form has ever been shown, so its keep-alive container
+  // mounts lazily: a session that never opens Settings pays for neither the
+  // fetch nor the DOM, and one that has keeps its unsaved edits.
+  const [settingsEverOpened, setSettingsEverOpened] = useState(false);
   const sectionRefs = useRef<Partial<Record<SettingsSection, HTMLButtonElement | null>>>({});
   const [groupId, setGroupId] = useState<number | null>(null);
   const [channelId, setChannelId] = useState<number | null>(null);
@@ -470,6 +474,7 @@ export default function Page() {
   // narrow settings strip. Keep the page's vertical position unchanged.
   useEffect(() => {
     if (tab !== 'settings') return;
+    setSettingsEverOpened(true);
     const selected = sectionRefs.current[section];
     const strip = selected?.parentElement;
     if (!selected || !strip) return;
@@ -840,7 +845,7 @@ export default function Page() {
         `Queued ${body.queued} stream(s) to soak` +
           (already > 0 ? `; ${already} already waiting` : '') +
           ((body.skippedDead ?? 0) > 0
-            ? `; left out ${body.skippedDead} that were dead at their last probe`
+            ? `; left out ${body.skippedDead} that were dead at their last check`
             : '') +
           `. ${body.total} in the queue — the worker works through it at the provider limits.`,
       );
@@ -1129,35 +1134,6 @@ export default function Page() {
     setEditingAlias(null);
   };
 
-  // Every reason this fails is fixed in Settings -- a missing credential, a
-  // wrong URL, a Dispatcharr that moved -- so the settings form is part of the
-  // error screen rather than behind a tab bar this early return skips. Without
-  // it, clearing the environment variables to use the UI left an error card
-  // whose only button was a Retry that could never succeed.
-  if (error) {
-    return (
-      <main className="mx-auto max-w-3xl p-8">
-        <div className={`${card} ${error.needsSetup ? '' : 'border-[var(--color-bad)]'} p-6`}>
-          <h2
-            className={`text-lg font-semibold ${error.needsSetup ? '' : 'text-[var(--color-bad)]'}`}
-          >
-            {error.error}
-          </h2>
-          <p className="mt-2 text-[var(--color-muted)]">{error.detail || error.hint}</p>
-          {error.detail && error.hint && (
-            <p className="mt-1 text-sm text-[var(--color-muted)]">{error.hint}</p>
-          )}
-          <button type="button" className={`${btn} mt-4`} onClick={() => void load()}>
-            {error.needsSetup ? 'Continue' : 'Retry'}
-          </button>
-        </div>
-        <div className="mt-4">
-          <SettingsView />
-        </div>
-      </main>
-    );
-  }
-
   // Catalogue-backed views fetch every channel and stream from Dispatcharr,
   // which takes seconds on a real install. Show a loading state rather than
   // rendering "0 managed, 0 groups" while that request is in flight.
@@ -1222,7 +1198,7 @@ export default function Page() {
           {/* Not "Refresh": the Dead tab has its own, which re-reads the probe
               cache, and two identically named buttons a card apart invited
               the question of which did what. */}
-          {(areaForTab(tab).id === 'channels' || group) && (
+          {!error && (areaForTab(tab).id === 'channels' || group) && (
             <button
               type="button"
               className={`${btn} flex flex-none items-center gap-2`}
@@ -1244,7 +1220,7 @@ export default function Page() {
             v{VERSION}
           </span>
         </div>
-        {!group && areaForTab(tab).id === 'channels' && (
+        {!error && !group && areaForTab(tab).id === 'channels' && (
           <p className="mt-1.5 text-sm tabular-nums text-[var(--color-muted)]">
             {totals.managed} managed · {totals.excluded} excluded · {totals.gaps} with no match ·{' '}
             {totals.regex > 0 ? `${totals.regex} on legacy regex · ` : ''}
@@ -1255,7 +1231,26 @@ export default function Page() {
       </header>
 
       <main className="flex-1">
-        {!group && (
+        {error && (
+          <div className="mx-auto max-w-3xl p-8 pb-4">
+            <div className={`${card} ${error.needsSetup ? '' : 'border-[var(--color-bad)]'} p-6`}>
+              <h2
+                className={`text-lg font-semibold ${error.needsSetup ? '' : 'text-[var(--color-bad)]'}`}
+              >
+                {error.error}
+              </h2>
+              <p className="mt-2 text-[var(--color-muted)]">{error.detail || error.hint}</p>
+              {error.detail && error.hint && (
+                <p className="mt-1 text-sm text-[var(--color-muted)]">{error.hint}</p>
+              )}
+              <button type="button" className={`${btn} mt-4`} onClick={() => void load()}>
+                {error.needsSetup ? 'Continue' : 'Retry'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {!error && !group && (
           <>
             <nav
               aria-label="Main navigation"
@@ -1336,7 +1331,9 @@ export default function Page() {
                     </button>
                   ))}
                 </nav>
-                {section === 'general' && <SettingsView />}
+                {/* The general section's form is kept alive by the block above,
+                    which un-hides it here and keeps it mounted on the other
+                    sub-tabs. */}
                 {section !== 'general' && (
                   <div className="p-5">
                     {section === 'ordering' && <OrderingView />}
@@ -1394,7 +1391,7 @@ export default function Page() {
                             {g.name}
                           </span>
                           <span className="text-sm tabular-nums text-[var(--color-muted)]">
-                            {coverage(g)} · {g.links} links
+                            {coverage(g)} · {g.links} streams
                             {g.mode !== 'never' && g.ruled - g.matchedChannels > 0
                               ? ` · ${g.ruled - g.matchedChannels} no match`
                               : ''}
@@ -1470,9 +1467,9 @@ export default function Page() {
                             Boolean(p.measureOnly),
                           )
                         }
-                        title="Probe these groups and record what is learned, but never write an order or assign a stream. For groups another app owns and rewrites — a Teamarr fixture group — where a write from here is overwritten anyway."
+                        title="Check these groups and record what is learned, but never write an order or assign a stream. For groups another app owns and rewrites — a Teamarr fixture group — where a write from here is overwritten anyway."
                       >
-                        {p.measureOnly ? '✓ Measure only' : 'Measure only'}
+                        {p.measureOnly ? '✓ Check only' : 'Check only'}
                       </button>
                       {p.mode === 'after_epg_start' && (
                         <select
@@ -1652,7 +1649,7 @@ export default function Page() {
               </button>
               <h2 className="mt-1 text-xl font-semibold">{group.name}</h2>
               <p className="text-sm tabular-nums text-[var(--color-muted)]">
-                {coverage(group)} · {group.links} stream links
+                {coverage(group)} · {group.links} streams
                 {group.ruled - group.matchedChannels > 0
                   ? ` · ${group.ruled - group.matchedChannels} with no match`
                   : ''}
@@ -1691,9 +1688,9 @@ export default function Page() {
                     void toggleMeasureOnly(group.id, group.mode, Boolean(group.measureOnly))
                   }
                   className={chip(Boolean(group.measureOnly))}
-                  title="Probe this group's channels and record what it learns, but never write an order or assign a stream. For channels another app owns and rewrites -- a Teamarr fixture group -- where a reorder from here would be overwritten anyway."
+                  title="Check this group's channels and record what it learns, but never write an order or assign a stream. For channels another app owns and rewrites -- a Teamarr fixture group -- where a reorder from here would be overwritten anyway."
                 >
-                  {group.measureOnly ? '✓ Measure only' : 'Measure only'}
+                  {group.measureOnly ? '✓ Check only' : 'Check only'}
                 </button>
                 <label
                   className="flex items-center gap-2 text-sm text-[var(--color-muted)]"
@@ -1781,7 +1778,7 @@ export default function Page() {
                   Currently set by a name rule. Choosing here pins this group explicitly.
                 </p>
               )}
-              {/* On-demand probe & re-check for the group */}
+              {/* On-demand checking for the group */}
               {group.mode !== 'never' && (
                 <div className="mt-3 space-y-3">
                   <div className="flex flex-wrap items-center gap-3">
@@ -1792,7 +1789,7 @@ export default function Page() {
                           onClick={cancelProbeAll}
                           className={`${btn} border-[var(--color-bad)] text-[var(--color-bad)]`}
                         >
-                          Cancel probe
+                          Cancel check
                         </button>
                         <span className="flex items-center gap-2 text-sm text-[var(--color-muted)]">
                           <LoaderCircle
@@ -1800,8 +1797,8 @@ export default function Page() {
                             aria-hidden="true"
                           />
                           {probeProgress
-                            ? `Probing channel ${probeProgress.current} of ${probeProgress.total}: ${probeProgress.channelName} (${probeProgress.probed} probed${probeProgress.dead > 0 ? `, ${probeProgress.dead} dead` : ''})…`
-                            : 'Preparing to probe…'}
+                            ? `Checking channel ${probeProgress.current} of ${probeProgress.total}: ${probeProgress.channelName} (${probeProgress.probed} checked${probeProgress.dead > 0 ? `, ${probeProgress.dead} dead` : ''})…`
+                            : 'Preparing to check…'}
                         </span>
                       </>
                     ) : (
@@ -1813,14 +1810,14 @@ export default function Page() {
                           className={btn}
                           title={
                             probeableChannels.length === 0
-                              ? 'No channels in this group have rules or assignments to probe'
-                              : `Probe all ${probeableChannels.length} channel(s) in this group now`
+                              ? 'No channels in this group have rules or assignments to check'
+                              : `Check all ${probeableChannels.length} channel(s) in this group now`
                           }
                         >
-                          Probe all
+                          Check all
                         </button>
                         <span className="text-sm text-[var(--color-muted)]">
-                          Probes every channel here now, from this page.
+                          Checks every channel here now, from this page.
                         </span>
                       </>
                     )}
@@ -1880,7 +1877,7 @@ export default function Page() {
                     </button>
                     <span className="min-w-0 flex-1 basis-64 text-sm text-[var(--color-muted)]">
                       Holds each stream open for a few minutes to find out how long it really lasts
-                      — the failure a probe is too short to see. Runs at the provider limits and
+                      — the failure a check is too short to see. Runs at the provider limits and
                       stops while anyone is watching, so a big group takes several nights.
                     </span>
                   </div>
@@ -2730,6 +2727,27 @@ export default function Page() {
             </div>
           </div>
         )}
+
+        {/* The settings form stays alive across the whole app: mounted on
+            the first visit to Settings (or on error), then hidden rather than
+            unmounted whenever the operator goes elsewhere -- including drilling
+            into a group or channel. It holds unsaved edits that would otherwise
+            be lost. */}
+        {(settingsEverOpened || Boolean(error)) && (
+          <div
+            className={
+              error
+                ? 'mx-auto max-w-3xl px-8 pb-8'
+                : !group && tab === 'settings' && section === 'general'
+                  ? undefined
+                  : 'hidden'
+            }
+          >
+            <SettingsView
+              active={Boolean(error || (!group && tab === 'settings' && section === 'general'))}
+            />
+          </div>
+        )}
       </main>
     </div>
   );
@@ -2872,7 +2890,7 @@ function StreamList({
                         </span>
                       </>
                     ) : (
-                      <span className="text-[var(--color-muted)]">never probed</span>
+                      <span className="text-[var(--color-muted)]">never checked</span>
                     )}
                     {r.lastSoak && (
                       <span className="mt-1 block text-[var(--color-muted)]">

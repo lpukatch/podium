@@ -122,14 +122,44 @@ export async function GET() {
  */
 export async function PUT(request: Request) {
   try {
-    const body = (await request.json()) as {
+    // Malformed JSON is the client's mistake; the 400 says so before any
+    // reading of the body can turn it into a 500 or, worse, a silent reset.
+    const body = (await request.json().catch(() => null)) as {
       mode?: string;
       providerPreference?: string[];
       weights?: Record<string, unknown>;
-    };
+    } | null;
+    if (body === null) {
+      return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
+    }
 
     const mode: OrderingResponse['mode'] =
       body.mode === 'provider' || body.mode === 'alias' ? body.mode : 'quality';
+
+    // PUT replaces the ordering block wholesale, so a payload the client
+    // fumbled is indistinguishable from a deliberate reset. Absent fields keep
+    // their documented fallbacks -- an older client that omits them leaves the
+    // install on today's behaviour -- but a field that is *present* and the
+    // wrong shape is a mistake worth naming, not folding away: the one thing
+    // this route must never do is answer 200 with an ordering nobody asked
+    // for. (A non-array providerPreference used to throw on .map and land in
+    // the 500 catch; a non-object weights used to read as all-defaults.)
+    if (
+      body.providerPreference !== undefined &&
+      (!Array.isArray(body.providerPreference) ||
+        body.providerPreference.some((n) => typeof n !== 'string'))
+    ) {
+      return NextResponse.json(
+        { error: 'providerPreference must be a list of names' },
+        { status: 400 },
+      );
+    }
+    if (
+      body.weights !== undefined &&
+      (typeof body.weights !== 'object' || body.weights === null || Array.isArray(body.weights))
+    ) {
+      return NextResponse.json({ error: 'weights must be an object' }, { status: 400 });
+    }
 
     const providerPreference = [
       ...new Set((body.providerPreference ?? []).map((n) => String(n).trim()).filter(Boolean)),
@@ -151,7 +181,10 @@ export async function PUT(request: Request) {
       audio: num(w.audio),
       hdr: num(w.hdr),
       stability: num(w.stability),
-      prefer_h265: Boolean(w.preferH265),
+      // Strictly `true`, not `Boolean(...)`: the old coercion scored the
+      // *string* "false" as truthy and switched the preference on, and a JSON
+      // "false" is exactly what a fumbled checkbox sends.
+      prefer_h265: w.preferH265 === true,
       hdr_preference:
         w.hdrPreference === 'hlg' || w.hdrPreference === 'pq' ? w.hdrPreference : 'none',
       hevc_bitrate_factor: positive(w.hevcBitrateFactor, DEFAULT_WEIGHTS.hevcBitrateFactor),
