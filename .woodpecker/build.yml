@@ -66,5 +66,8 @@ steps:
       TRIVY_CACHE_DIR: /tmp/trivy-cache
     commands:
       - case "$$CI_PIPELINE_EVENT" in tag) REF="$${CI_COMMIT_TAG#v}" ;; *) REF=main ;; esac
-      - trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed \
-          --scanners vuln --ignorefile .trivyignore "$$REGISTRY/$$IMAGE_NAME:$REF"
+      # One physical line: YAML folds a multi-line plain scalar into a single
+      # line, so the "\" line-continuations became "\" + space -- a stray
+      # positional argument trivy rejected with "multiple targets cannot be
+      # specified". Shell line continuations do not exist in YAML scalars.
+      - trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --scanners vuln --ignorefile .trivyignore "$$REGISTRY/$$IMAGE_NAME:$REF"
