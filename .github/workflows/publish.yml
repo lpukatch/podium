@@ -28,18 +28,19 @@ jobs:
     permissions:
       contents: write # softprops/action-gh-release
       packages: write # push to ghcr
+      security-events: write # upload-sarif: code-scanning alerts
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Login to ghcr.io
-        uses: docker/login-action@v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -47,7 +48,7 @@ jobs:
 
       - name: Docker tags and labels
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -72,7 +73,7 @@ jobs:
           echo "PODIUM_BUILD_VERSION=${v}" >> "$GITHUB_ENV"
 
       - name: Build and push
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: ./Dockerfile
@@ -94,18 +95,48 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # GitHub's own generated notes are built from merged pull requests, and
-      # this repo has none: it is a mirror, the PRs live upstream on Forgejo,
-      # and a mirror push is a force push. So the generated section came out
-      # empty and every release read as the docker pull line and nothing else.
-      # The commits are all here, though, so write the changelog from those.
+      # Same gate as the Woodpecker image-scan step (see .woodpecker/build.yml):
+      # edge builds scan :main on every push so a tag cut inherits a
+      # scanned commit, and the tag pipeline re-scans as the final gate
+      # before :latest moves. Runs after push because the image only exists
+      # in ghcr; the docker login above is what lets trivy pull it.
+      #
+      # SARIF rather than a table: the file feeds the code-scanning upload
+      # below, so each scan lands on the Security tab as alerts with a
+      # history (new/fixed/resolved across builds) instead of vanishing with
+      # the run log. exit-code keeps the red/green gate.
+      - name: Scan published image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: '1'
+          scanners: vuln
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+
+      # Upload even when the scan gate failed -- a red scan is exactly the
+      # scan whose findings belong on the Security tab. The hashFiles guard
+      # skips this if an earlier step died before trivy ever ran.
+      - name: Upload scan results
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4
+        with:
+          sarif_file: trivy-results.sarif
+
+      # CHANGELOG.md is written by the release commit (git-cliff; cliff.toml is
+      # the template and documents the heading contract this depends on). The
+      # release body is this tag's section read back out of that file, so the
+      # changelog users read in the repo is the changelog they get on
+      # releases. generate_release_notes still appends GitHub's section (the
+      # compare link) after it.
       - name: Compose release notes
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           TAG="${GITHUB_REF_NAME}"
-          # Walk back from the tagged commit's *parent*, or describe would
-          # answer with the tag being released and the range would be empty.
-          PREV=$(git describe --tags --abbrev=0 --match "v*" "${TAG}^" 2>/dev/null || true)
           {
             echo '```sh'
             # The image is tagged from the semver, which has no leading v --
@@ -113,20 +144,30 @@ jobs:
             echo "docker pull ${REGISTRY}/${IMAGE_NAME}:${TAG#v}"
             echo '```'
             echo
-            echo "## Changes"
-            echo
-            if [ -n "$PREV" ]; then RANGE="${PREV}..${TAG}"; else RANGE="${TAG}"; fi
-            # A merge commit repeats the subject of the branch it merges and the
-            # release commit is bookkeeping, so neither earns a line of its own.
-            git log "$RANGE" --no-merges --pretty="- %s (%h)" \
-              | grep -v '^- chore(release):' \
-              || echo "- no changes"
+            # Exact-line match, so "## v1.1" cannot stop at "## v1.18".
+            awk -v h="## ${TAG#v}" '$0 == h {f = 1; next} f && /^## /{exit} f' \
+              CHANGELOG.md > section.md
+            if [ -s section.md ]; then
+              cat section.md
+            else
+              # Fallback for tags that predate the changelog: flat commit list,
+              # merges and release bookkeeping excluded.
+              echo "## Changes"
+              echo
+              # Walk back from the tagged commit's *parent*, or describe would
+              # answer with the tag being released and the range would be empty.
+              PREV=$(git describe --tags --abbrev=0 --match "v*" "${TAG}^" 2>/dev/null || true)
+              if [ -n "$PREV" ]; then RANGE="${PREV}..${TAG}"; else RANGE="${TAG}"; fi
+              git log "$RANGE" --no-merges --pretty="- %s (%h)" \
+                | grep -v '^- chore(release):' \
+                || echo "- no changes"
+            fi
           } > "${RUNNER_TEMP}/release-notes.md"
           cat "${RUNNER_TEMP}/release-notes.md"
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         with:
           # body_path wins over body, and generate_release_notes appends
           # GitHub's section (the Full Changelog compare link) after it.

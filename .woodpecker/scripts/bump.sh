@@ -23,6 +23,24 @@ case "$BUMP_TYPE" in
   *) echo 'BUMP_TYPE must be auto, patch, minor, or major' >&2; exit 1 ;;
 esac
 
+# Release notes are generated with a checksum-verified git-cliff build. The
+# version in .woodpecker/bump.yml carries the renovate annotation; the
+# defaults here cover local releases (npm run release:bump) -- keep the three
+# values in sync.
+GIT_CLIFF_VERSION=${GIT_CLIFF_VERSION:-2.14.2}
+GIT_CLIFF_SHA256=${GIT_CLIFF_SHA256:-fa21e2fc70046fcfd0e43e5e4613873ab799aff3d9dc8559c00d31b270e417d0}
+fetch_cliff() {
+  local_dir=$(mktemp -d)
+  curl -fsSL "https://github.com/orhun/git-cliff/releases/download/v${GIT_CLIFF_VERSION}/git-cliff-${GIT_CLIFF_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+    -o "$local_dir/cliff.tar.gz"
+  if ! printf '%s  %s\n' "$GIT_CLIFF_SHA256" "$local_dir/cliff.tar.gz" | sha256sum -c --status -; then
+    echo 'git-cliff checksum mismatch; refusing to generate release notes' >&2
+    exit 1
+  fi
+  tar -xzf "$local_dir/cliff.tar.gz" -C "$local_dir"
+  CLIFF="$local_dir/git-cliff-${GIT_CLIFF_VERSION}/git-cliff"
+}
+
 # Fetch the current main and complete tag history even after a shallow clone.
 if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
   git fetch --unshallow origin
@@ -82,7 +100,14 @@ console.log(version);
 NODE
 )
 
-git add package.json package-lock.json
+# Release notes: the release commit carries CHANGELOG.md with this release's
+# section on top. cliff.toml is the template; publish.yml reads the section
+# back out of this file for the GitHub release body. Runs before the release
+# commit exists, so `--unreleased` is exactly the range being released.
+test -f CHANGELOG.md || { echo 'CHANGELOG.md missing at the repo root' >&2; exit 1; }
+fetch_cliff
+"$CLIFF" --unreleased --tag "v$NEW_VERSION" --prepend CHANGELOG.md
+git add package.json package-lock.json CHANGELOG.md
 if ! git diff --cached --quiet; then
   git commit -m "chore(release): v$NEW_VERSION"
 fi
@@ -106,8 +131,6 @@ GIT_ASKPASS="$ASKPASS" GIT_TERMINAL_PROMPT=0 git -c credential.helper= push --at
 fi
 
 printf '\nReleased v%s (previous: %s)\n\n## Changelog\n' "$NEW_VERSION" "$LATEST_TAG"
-if [ "$LATEST_TAG" = v0.0.0 ]; then
-  git log "v$NEW_VERSION" --pretty='- %s (%h)'
-else
-  git log "$LATEST_TAG..v$NEW_VERSION" --pretty='- %s (%h)'
-fi
+# Same section the GitHub release will show: read it back out of the file
+# rather than re-deriving it with a second git log.
+awk -v h="## v$NEW_VERSION" '$0 == h {f = 1; next} f && /^## /{exit} f' CHANGELOG.md

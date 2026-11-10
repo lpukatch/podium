@@ -12,7 +12,7 @@ import { parseStatusPayload } from './dispatcharr';
 /** One channel as the live endpoint describes it. */
 function live(over: Record<string, unknown> = {}) {
   return {
-    channel_id: '09bbd059-1a49-47ee-a525-c1444e1c6bd7',
+    channel_id: 'podium-test-channel-key',
     state: 'active',
     url: 'https://provider.example/live/a/b/15053.ts',
     owner: 'dispatcharr-abc:317',
@@ -35,7 +35,7 @@ describe('parseStatusPayload', () => {
     const { channels } = parseStatusPayload({ channels: [live()], count: 1 });
     expect(channels).toHaveLength(1);
     expect(channels[0]).toMatchObject({
-      key: '09bbd059-1a49-47ee-a525-c1444e1c6bd7',
+      key: 'podium-test-channel-key',
       streamId: 77013,
       profileId: 6,
       state: 'active',
@@ -52,14 +52,14 @@ describe('parseStatusPayload', () => {
 
   it('keeps the uuid key even when no map can resolve it to an id', () => {
     const { channels } = parseStatusPayload({ channels: [live()] });
-    expect(channels[0]?.key).toBe('09bbd059-1a49-47ee-a525-c1444e1c6bd7');
+    expect(channels[0]?.key).toBe('podium-test-channel-key');
     expect(channels[0]?.channelId).toBeNull();
   });
 
   it('resolves the numeric id when a map knows the uuid', () => {
     const { channels } = parseStatusPayload(
       { channels: [live()] },
-      { '09bbd059-1a49-47ee-a525-c1444e1c6bd7': 35200 },
+      { 'podium-test-channel-key': 35200 },
     );
     expect(channels[0]?.channelId).toBe(35200);
   });

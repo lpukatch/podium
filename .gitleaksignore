@@ -1,0 +1,10 @@
+# Accepted gitleaks findings, fingerprinted as <commit>:<file>:<rule>:<line>
+# (copied verbatim from the scan's report). These are a test fixture's opaque
+# channel key (a UUID-shaped string that trips the generic-api-key entropy
+# rule); the fixture now uses a lower-entropy value, so these only cover
+# history that already shipped.
+14a7d2a0f71ce109396548ae8cfaa67c6a124e32:src/lib/live-channels.test.ts:generic-api-key:38
+338837e272283607b52efa250a69db02e0fbd3e9:src/lib/stability-poller.test.ts:generic-api-key:335
+9b9b563dfdb2c56663a450eb9b31701e3712d8a3:src/lib/connect-events.test.ts:generic-api-key:35
+9b9b563dfdb2c56663a450eb9b31701e3712d8a3:src/lib/stability-poller.test.ts:generic-api-key:217
+9b9b563dfdb2c56663a450eb9b31701e3712d8a3:src/lib/store-connect-events.test.ts:generic-api-key:18
