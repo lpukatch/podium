@@ -4,6 +4,10 @@ when:
     branch: main
     evaluate: 'RELEASE == "true"'
 
+depends_on: [ci]
+concurrency:
+  limit: 1
+
 steps:
   - name: version-bump
     image: node:26-bookworm

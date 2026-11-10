@@ -6,6 +6,7 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  workflow_call:
 
 jobs:
   test:
@@ -28,7 +29,9 @@ jobs:
           cache: npm
 
       - name: Install
-        run: npm ci
+        run: |
+          node --test .woodpecker/scripts/*.test.cjs
+          npm ci
 
       # Same policy as the upstream Woodpecker pipeline: production closure
       # only (devDependencies never ship), HIGH is the gate.

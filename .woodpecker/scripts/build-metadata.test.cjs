@@ -23,6 +23,7 @@ for (const event of ['push', 'pull_request', 'tag', 'manual']) {
           CI_PIPELINE_EVENT: event,
           CI_COMMIT_TAG: 'v1.2.3',
           CI_COMMIT_PULL_REQUEST: '317',
+          CI_PIPELINE_NUMBER: '42',
         },
       });
 
@@ -38,8 +39,9 @@ for (const event of ['push', 'pull_request', 'tag', 'manual']) {
         ? 'type=registry,ref=registry.example.com/you/podium:buildcache,mode=max' : '');
       assert.equal(metadata.PLUGIN_CACHE_FROM, String.raw`type=registry\,ref=registry.example.com/you/podium:buildcache`);
       const tags = fs.readFileSync(path.join(cwd, '.tags'), 'utf8').trim().split('\n');
-      assert.deepEqual(tags, event === 'tag' ? ['1.2.3', '1.2', 'latest']
-        : event === 'pull_request' ? ['pr-317'] : ['main']);
+      assert.deepEqual(tags, event === 'pull_request' ? ['pr-317']
+        : [`candidate-${git('rev-parse', '--short', 'HEAD').toString().trim()}-42`]);
+      assert.equal(fs.readFileSync(path.join(cwd, '.candidate-tag'), 'utf8'), `${tags[0]}\n`);
       assert.equal(metadata.PODIUM_BUILD_VERSION, event === 'tag'
         ? '1.2.3' : `1.2.3+g${git('rev-parse', '--short', 'HEAD').toString().trim()}`);
     } finally {

@@ -23,7 +23,17 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  validate:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   publish:
+    needs: validate
+    # One publisher for all refs; never interrupt a multi-tag promotion.
+    concurrency:
+      group: image-publication
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: write # softprops/action-gh-release
@@ -72,7 +82,8 @@ jobs:
           esac
           echo "PODIUM_BUILD_VERSION=${v}" >> "$GITHUB_ENV"
 
-      - name: Build and push
+      - name: Build candidate
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
@@ -80,7 +91,7 @@ jobs:
           # amd64 only: an arm64 pass costs a full QEMU-emulated Next.js build.
           platforms: linux/amd64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: PODIUM_BUILD_VERSION=${{ env.PODIUM_BUILD_VERSION }}
           # Skips the attestation manifest, which otherwise shows up on the
@@ -95,20 +106,16 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Same gate as the Woodpecker image-scan step (see .woodpecker/build.yml):
-      # edge builds scan :main on every push so a tag cut inherits a
-      # scanned commit, and the tag pipeline re-scans as the final gate
-      # before :latest moves. Runs after push because the image only exists
-      # in ghcr; the docker login above is what lets trivy pull it.
+      # Scan the exact candidate digest. Consumer tags have not moved yet.
       #
       # SARIF rather than a table: the file feeds the code-scanning upload
       # below, so each scan lands on the Security tab as alerts with a
       # history (new/fixed/resolved across builds) instead of vanishing with
       # the run log. exit-code keeps the red/green gate.
-      - name: Scan published image
+      - name: Scan candidate
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
           format: sarif
           output: trivy-results.sarif
           exit-code: '1'
@@ -123,9 +130,33 @@ jobs:
       # skips this if an earlier step died before trivy ever ran.
       - name: Upload scan results
         if: always() && hashFiles('trivy-results.sarif') != ''
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4
         with:
           sarif_file: trivy-results.sarif
+
+      - name: Plan promotion
+        env:
+          CI_PIPELINE_EVENT: ${{ startsWith(github.ref, 'refs/tags/') && 'tag' || 'push' }}
+          CI_COMMIT_TAG: ${{ github.ref_name }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          node .woodpecker/scripts/promotion-plan.cjs
+          printf '%s/%s@%s\n' "$REGISTRY" "$IMAGE_NAME" "$IMAGE_DIGEST" > .image-ref
+
+      - name: Promote scanned image
+        env:
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          docker run --rm --entrypoint /bin/sh \
+            -e REGISTRY -e IMAGE_NAME -e REGISTRY_USERNAME -e REGISTRY_TOKEN \
+            -v "$PWD:/work:ro" -w /work regclient/regctl:v0.11.7-alpine -ec '
+              printf "%s" "$REGISTRY_TOKEN" | regctl registry login "$REGISTRY" -u "$REGISTRY_USERNAME" --pass-stdin
+              while IFS= read -r tag; do
+                regctl image copy "$(cat .image-ref)" "$REGISTRY/$IMAGE_NAME:$tag"
+              done < .promotion-tags
+            '
 
       # CHANGELOG.md is written by the release commit (git-cliff; cliff.toml is
       # the template and documents the heading contract this depends on). The

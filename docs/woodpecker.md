@@ -51,15 +51,18 @@ behavior is unchanged. `.forgejo/default_merge_message/` is also unchanged.
   (Forgejo has no server-side secret scanning, and the GitHub mirror makes
   every landed commit public), plus format/lint, type checks, tests with real
   ffprobe, and an amd64 Docker build.
-- Pushes to `main`: publish `:main` and refresh `:buildcache`.
+- Pushes to `main`: validate, build a candidate, scan its digest, then promote
+  it to `:main`. Builds also refresh `:buildcache` (a build cache, not a release).
 - PRs: build without publishing an image or writing the cache.
-- Tags `vX.Y.Z`: publish `:X.Y.Z`, `:X.Y`, and `:latest` and refresh the cache.
+- Tags `vX.Y.Z`: run validation, build and scan a candidate, then promote
+  `:X.Y.Z`, `:X.Y`, and `:latest` without rebuilding.
 - Manual pipelines on `main`: checks and a `:main` image, unless `RELEASE=true`.
-- Every published image is scanned with trivy (pinned `aquasec/trivy` image);
+- Every candidate image is scanned with trivy (pinned `aquasec/trivy` image);
   the pipeline fails on HIGH or CRITICAL findings that have an available fix.
-  The scan runs after push: `:main` is scanned on every edge build, so a
-  release is cut from an already-scanned commit, and the tag pipeline's scan
-  is the final gate before `:latest` moves. Accepted findings go in
+  The scan runs after pushing a run-specific `candidate-*` tag, but before
+  moving any consumer tag. Both scanning and promotion use the same digest,
+  so another build cannot change the image being checked. Failed candidates
+  stay in the registry for investigation but are never promoted. Accepted findings go in
   `.trivyignore`, one line each with a reason and a removal condition. If the
   registry presents an internal CA the trivy container cannot verify, set
   `TRIVY_INSECURE=true` on the `image-scan` step.
@@ -74,6 +77,18 @@ behavior is unchanged. `.forgejo/default_merge_message/` is also unchanged.
 
 Only tag builds move `latest`. Non-tag app versions include the short commit
 SHA. Docker media types and disabled provenance preserve Unraid compatibility.
+The build workflow depends on successful `ci` validation, including tag events.
+Publishing is serialized (`concurrency.limit: 1`). Before promotion, current
+remote refs are checked: stale main builds skip `:main`; older releases still
+get their version tag but do not overwrite aliases belonging to newer Git tags.
+This is intentionally conservative even if a newer tag's build failed. GitHub
+uses the same promotion planner, a reusable validation workflow, and one
+publication concurrency group. Tag updates are sequential, not transactional;
+retry a failed promotion to repair partially updated aliases.
+
+`regclient/regctl:v0.11.7-alpine` resolves candidate digests and copies manifests
+without Docker-in-Docker or rebuilding. Candidate tags and scan packages need
+a registry retention policy; do not delete a candidate while its scan is running.
 The generated BuildKit exporter explicitly sets `push=true` for publishing and
 `push=false` for PRs. With a custom exporter, the plugin's `dry_run` flag alone
 does not control exporter pushes, and omitting `push=` invokes a separate
@@ -110,7 +125,8 @@ commits since the last release, and derives the bump from Conventional Commit
 subjects. It updates `package.json`, commits, and pushes an annotated tag using
 the bypass token. The changelog is printed in the job log. The pushed tag starts
 the image build and, after mirroring, the existing GitHub release workflow.
-Run only one release pipeline at a time.
+Release bump workflows are serialized and depend on validation. If main advances
+after that validation, the bump refuses to release; start a new manual pipeline.
 
 ### Release from a local checkout
 

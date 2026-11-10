@@ -1,6 +1,8 @@
 when:
   - event: [push, pull_request, manual]
     branch: main
+  - event: tag
+    ref: refs/tags/v*
 
 steps:
   - name: install

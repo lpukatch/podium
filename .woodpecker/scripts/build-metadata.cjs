@@ -22,18 +22,23 @@ const metadata = {
 };
 
 let tags;
+const sha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim();
 if (event === 'tag') {
   if (!/^v\d+\.\d+\.\d+$/.test(tag || '')) {
     throw new Error('Release image tags must have the form vX.Y.Z');
   }
   const released = tag.slice(1);
-  tags = [released, released.split('.').slice(0, 2).join('.'), 'latest'];
+  if (released !== version) throw new Error('Release tag must match package.json version');
   metadata.PODIUM_BUILD_VERSION = version;
 } else {
-  tags = [event === 'pull_request' ? `pr-${process.env.CI_COMMIT_PULL_REQUEST}` : 'main'];
-  const sha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim();
   metadata.PODIUM_BUILD_VERSION = `${version}+g${sha}`;
 }
+
+// Each run gets a private staging tag; no consumer-facing tag moves yet.
+const run = process.env.CI_PIPELINE_NUMBER;
+if (!/^\d+$/.test(run || '')) throw new Error('CI_PIPELINE_NUMBER is required');
+tags = [event === 'pull_request' ? `pr-${process.env.CI_COMMIT_PULL_REQUEST}` : `candidate-${sha}-${run}`];
+fs.writeFileSync('.candidate-tag', `${tags[0]}\n`);
 
 // PRs only read the cache. Only main/tag builds publish images or cache layers.
 metadata.PLUGIN_CACHE_TO = event === 'pull_request'

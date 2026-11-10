@@ -7,6 +7,12 @@ when:
   - event: tag
     ref: refs/tags/v*
 
+# Validation also runs for tags. Serialize publication; the promotion plan
+# additionally checks remote refs because queue order need not be commit order.
+depends_on: [ci]
+concurrency:
+  limit: 1
+
 steps:
   - name: metadata
     image: node:26-bookworm
@@ -20,7 +26,7 @@ steps:
 
   # Allowlist this exact image with WOODPECKER_PLUGINS_PRIVILEGED on the server.
   # Do not add commands here: that would override the plugin entrypoint.
-  - name: build-and-publish
+  - name: build-candidate
     image: woodpeckerci/plugin-docker-buildx:6.1.2
     settings:
       env_file: .woodpecker-build.env
@@ -40,11 +46,25 @@ steps:
         - org.opencontainers.image.title=podium
         - org.opencontainers.image.description=Provider-aware stream checker and reorderer for Dispatcharr
 
-  # Scan what was just published, straight from the registry: the buildx plugin
-  # builds inside its own DinD container, so there is no local image for this
-  # step to read. Edge builds scan :main on every push, so a release cut
-  # inherits an already-scanned commit; the tag pipeline re-scans as the final
-  # gate before :latest moves. PR pipelines publish nothing, so they skip this.
+  - name: resolve-candidate
+    image: regclient/regctl:v0.11.7-alpine
+    when:
+      - event: [push, manual, tag]
+    environment:
+      REGISTRY:
+        from_secret: registry
+      IMAGE_NAME:
+        from_secret: image_name
+      REGISTRY_USERNAME:
+        from_secret: registry_username
+      REGISTRY_TOKEN:
+        from_secret: registry_token
+    commands:
+      - printf '%s' "$$REGISTRY_TOKEN" | regctl registry login "$$REGISTRY" -u "$$REGISTRY_USERNAME" --pass-stdin
+      - DIGEST=$(regctl image digest "$$REGISTRY/$$IMAGE_NAME:$(cat .candidate-tag)")
+      - printf '%s@%s\n' "$$REGISTRY/$$IMAGE_NAME" "$$DIGEST" > .image-ref
+
+  # Scan the exact staged manifest, never a mutable consumer tag.
   #
   # --ignore-unfixed: an OS CVE with no backported fix (the reason the base
   # image moved to trixie) would otherwise hold CI red forever. Accepted
@@ -65,7 +85,6 @@ steps:
         from_secret: registry_token
       TRIVY_CACHE_DIR: /tmp/trivy-cache
     commands:
-      - case "$$CI_PIPELINE_EVENT" in tag) REF="$${CI_COMMIT_TAG#v}" ;; *) REF=main ;; esac
       # The table goes to a file (save-scan-report below publishes it) and is
       # then printed into this step's log either way, so findings are visible
       # even when the gate is red. trivy writes the report before exiting
@@ -73,9 +92,33 @@ steps:
       # One physical line: YAML folds a multi-line plain scalar into a single
       # line, and a trailing backslash next to the folding space becomes a
       # stray positional argument ("multiple targets cannot be specified").
-      - trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --scanners vuln --ignorefile .trivyignore --format table --output trivy-report.txt "$$REGISTRY/$$IMAGE_NAME:$REF" || RC=$$?
+      - trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --scanners vuln --ignorefile .trivyignore --format table --output trivy-report.txt "$(cat .image-ref)" || RC=$$?
       - cat trivy-report.txt
       - exit $${RC:-0}
+
+  - name: promotion-plan
+    image: node:26-bookworm
+    when:
+      - event: [push, manual, tag]
+    commands:
+      - node .woodpecker/scripts/promotion-plan.cjs
+
+  - name: promote-scanned-image
+    image: regclient/regctl:v0.11.7-alpine
+    when:
+      - event: [push, manual, tag]
+    environment:
+      REGISTRY:
+        from_secret: registry
+      IMAGE_NAME:
+        from_secret: image_name
+      REGISTRY_USERNAME:
+        from_secret: registry_username
+      REGISTRY_TOKEN:
+        from_secret: registry_token
+    commands:
+      - printf '%s' "$$REGISTRY_TOKEN" | regctl registry login "$$REGISTRY" -u "$$REGISTRY_USERNAME" --pass-stdin
+      - while IFS= read -r TAG; do regctl image copy "$(cat .image-ref)" "$$REGISTRY/$$IMAGE_NAME:$$TAG" || exit $$?; done < .promotion-tags
 
   # Woodpecker has no pipeline attachments, so the report is published to the
   # upstream Forgejo's generic package registry instead: one report per commit

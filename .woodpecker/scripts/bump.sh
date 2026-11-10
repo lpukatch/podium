@@ -50,6 +50,10 @@ if [ "$LOCAL" = true ]; then
   git merge --ff-only origin/main
   test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
 else
+  if [ "$(git rev-parse origin/main)" != "$CI_COMMIT_SHA" ]; then
+    echo 'main advanced after validation; start a new release pipeline.' >&2
+    exit 1
+  fi
   git checkout -B main origin/main
   git config user.name 'Woodpecker CI'
   git config user.email 'woodpecker@forgejo.local'
