@@ -43,6 +43,11 @@ test('save-scan-report runs after a failed gate but cannot gate itself', () => {
   assert.match(build, /from_secret: package_token/);
 });
 
+test('report uploads have connection and transfer timeouts', () => {
+  const build = read('.woodpecker/build.yml');
+  assert.match(build, /curl -fsS --retry 3 --connect-timeout 10 --max-time 120/);
+});
+
 test('the Forgejo host is derived from the clone URL, not committed', () => {
   const build = read('.woodpecker/build.yml');
   assert.match(build, /CI_REPO_CLONE_URL/);

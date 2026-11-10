@@ -102,5 +102,5 @@ steps:
       - URL="$$BASE/api/packages/$$CI_REPO_OWNER/generic/$${CI_REPO_NAME}-trivy/$$CI_COMMIT_SHA/trivy-$$REF.txt"
       # Single-quoted YAML scalar: plain scalars split on ": ", so the
       # Authorization header would otherwise parse as a mapping, not a string.
-      - 'curl -fsS --retry 3 -H "Authorization: token $$PACKAGE_TOKEN" --upload-file trivy-report.txt "$$URL"'
+      - 'curl -fsS --retry 3 --connect-timeout 10 --max-time 120 -H "Authorization: token $$PACKAGE_TOKEN" --upload-file trivy-report.txt "$$URL"'
       - echo "Report saved to $$URL"
