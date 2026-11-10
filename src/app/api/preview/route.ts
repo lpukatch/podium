@@ -3,10 +3,20 @@ import { loadConfig } from '@/lib/config';
 import { Eligibility } from '@/lib/eligibility';
 import { responseErrorText } from '@/lib/error-text';
 import type { ChannelRule } from '@/lib/matcher';
+import { resolveOrdering } from '@/lib/ordering';
 import type { ProbeResult } from '@/lib/probe';
 import { groupFilter } from '@/lib/provider-groups';
 import { parseProviders } from '@/lib/rules';
-import { groupPatterns, index, matcher, policies, snapshot } from '@/lib/server/state';
+import { belowBitrateFloor, frameRate, hdrFormat } from '@/lib/scoring';
+import {
+  config,
+  groupPatterns,
+  index,
+  matcher,
+  ordering,
+  policies,
+  snapshot,
+} from '@/lib/server/state';
 import { Store } from '@/lib/store';
 
 export const dynamic = 'force-dynamic';
@@ -134,11 +144,11 @@ export async function POST(request: Request) {
 
     const channel = snap.channels.find((c) => c.id === body.channelId);
     const channelGroupName = snap.groups.find((g) => g.id === channel?.groupId)?.name;
-    const inherited = new Eligibility(policies(), undefined, groupPatterns()).policyFor(
+    const groupPolicy = new Eligibility(policies(), undefined, groupPatterns()).policyFor(
       channel?.groupId,
       channelGroupName,
-    ).groupFilter;
-    const hits = m.match(rule, idx, inherited);
+    );
+    const hits = m.match(rule, idx, groupPolicy.groupFilter);
     const matchedIds = new Set(hits.map(([id]) => id));
     const assigned = new Set(channel?.streams ?? []);
     // Dispatcharr's array is ordered; position is what a viewer actually gets.
@@ -171,11 +181,20 @@ export async function POST(request: Request) {
     const streamById = new Map(snap.streams.map((s) => [s.id, s]));
     const providerNames = new Map(snap.providers.map((p) => [p.id, p.name]));
     const groupNames = new Map(snap.groups.map((g) => [g.id, g.name]));
+    // The floor this channel is ranked under (a rules-file override wins over
+    // the env knob), so `lastLowBitrate` agrees with the check rather than
+    // quoting a threshold of its own.
+    const { weights } = resolveOrdering(
+      ordering(),
+      providerNames,
+      config().PODIUM_MIN_BITRATE_KBPS,
+    );
 
     const describe = (id: number, step: number | null) => {
       const stream = streamById.get(id);
       if (!stream) return null;
       const norm = m.normalize(stream.name);
+      const last = verdicts.get(id)?.result;
       return {
         id,
         raw: stream.name,
@@ -193,9 +212,21 @@ export async function POST(request: Request) {
         currentRank: currentOrder.get(id) ?? null,
         lastProbedAt: verdicts.get(id)?.probedAt ?? null,
         lastAlive: verdicts.get(id)?.alive ?? null,
-        lastHeight: verdicts.get(id)?.result.height ?? null,
-        lastBitrateKbps: verdicts.get(id)?.result.bitrateKbps ?? null,
-        lastBlack: verdicts.get(id)?.result.black ?? null,
+        lastWidth: last?.width ?? null,
+        lastHeight: last?.height ?? null,
+        // The rate a viewer gets, as `source_fps` publishes it -- see `frameRate`.
+        lastFps: last ? frameRate(last) : null,
+        lastVideoCodec: last?.videoCodec ?? null,
+        // `null` both when unprobed and when ffprobe declared no transfer.
+        lastHdrFormat: last ? hdrFormat(last) : null,
+        lastBitrateKbps: last?.bitrateKbps ?? null,
+        lastLowBitrate: last ? belowBitrateFloor(last, weights, groupPolicy.audioOnly) : null,
+        lastAudioCodec: last?.audioCodec ?? null,
+        lastAudioChannels: last?.audioChannels ?? null,
+        lastChannelLayout: last?.channelLayout ?? null,
+        lastAudioBitrateKbps: last?.audioBitrateKbps ?? null,
+        lastAudioSampleRate: last?.audioSampleRate ?? null,
+        lastBlack: last?.black ?? null,
         lastSoak: soakResults.get(id) ?? null,
       };
     };
