@@ -1,0 +1,221 @@
+name: Build and Publish
+
+# Publishes to the registry configured in this repo's Actions variables, so the
+# hostname is not baked into a file that ships to the public mirror. Set:
+#
+#   REGISTRY           e.g. registry.example.com
+#   IMAGE_NAME         e.g. you/podium
+#   REGISTRY_USERNAME  registry service account (REGISTRY_TOKEN must read the
+#                      private :buildcache on PRs, so keep it read-only-scoped)
+#   REGISTRY_TOKEN     registry token
+#   PACKAGE_TOKEN      Forgejo token with package:write; saves trivy reports
+#
+# Tagging matches the GitHub mirror's publish workflow on purpose:
+#
+#   push to main  -> :main                  an edge image, for tracking main
+#   tag v*        -> :X.Y.Z :X.Y :latest    a release
+#
+# `latest` only moves on a tag, never on a push to main. Every push goes to a
+# run-specific candidate tag first, is scanned there, and only then is copied
+# to the consumer tags -- scanning and promotion always reference the same
+# digest, so another build cannot change the image being checked.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Serialize publication; queue order need not be commit order, so the
+# promotion plan also checks current remote refs before moving any tag.
+concurrency:
+  group: image-publication
+  cancel-in-progress: false
+
+env:
+  # amd64 only: an arm64 pass costs a full QEMU-emulated Next.js build for a
+  # platform nothing here runs.
+  DOCKER_PLATFORMS: linux/amd64
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # Full history: the commit-subject check walks origin/main..HEAD.
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+          cache: npm
+
+      - name: Install
+        run: |
+          node --test .ci/scripts/*.test.cjs
+          npm ci
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Scan history for secrets
+        run: docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/gitleaks/gitleaks:v8.30.1 git --no-banner
+
+      - name: Lint and format check
+        run: npm run format:check
+
+      - name: Type check
+        run: npm run type-check
+
+      - name: Test
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+          npm run test:coverage
+
+  publish:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # Full history: build version and the promotion plan read tags/refs.
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: network=host
+
+      - name: Login to Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ vars.REGISTRY }}
+          username: ${{ vars.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
+
+      # What the app itself reports as its version; must match the GitHub
+      # mirror's publish workflow. A tag build gets the released number, an
+      # edge build gets that number plus the short commit sha, because
+      # package.json only moves at release time.
+      - name: App build version
+        run: |
+          v="$(node -p "require('./package.json').version")"
+          case "$GITHUB_REF" in
+            refs/tags/v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) v="${v}+g$(git rev-parse --short HEAD)" ;;
+          esac
+          echo "PODIUM_BUILD_VERSION=${v}" >> "$GITHUB_ENV"
+
+      # A tag build must carry the exact released version: the semver tag is
+      # what the promotion plan trusts, so anything else would lie in the
+      # registry. Candidates get a run-private staging tag; no consumer-facing
+      # tag moves before the scan passes.
+      - name: Build candidate
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ env.DOCKER_PLATFORMS }}
+          push: true
+          tags: ${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}:candidate-${{ github.sha }}-${{ github.run_number }}
+          labels: |
+            org.opencontainers.image.title=podium
+            org.opencontainers.image.description=Provider-aware stream checker and reorderer for Dispatcharr
+          build-args: PODIUM_BUILD_VERSION=${{ env.PODIUM_BUILD_VERSION }}
+          # Skips the attestation manifest, which otherwise shows up on the
+          # packages page as an "unknown/unknown" platform entry.
+          provenance: false
+          # Export with Docker media types, not OCI ones: Unraid's Docker tab
+          # fails to parse an OCI-typed manifest and shows the template as
+          # "not available". Combined with push: true this stays a single
+          # export -- buildx sets push on an explicit image export rather than
+          # adding a second registry one.
+          outputs: type=image,oci-mediatypes=false
+          # A build cache, not a release: every write replaces the tag and
+          # orphans the previous blobs for the registry's GC to reap. PR builds
+          # read this cache from ci.yml but never write it.
+          cache-from: type=registry,ref=${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}:buildcache,mode=max
+
+      # Scan the exact staged manifest, never a mutable consumer tag.
+      #
+      # --ignore-unfixed: an OS CVE with no backported fix (the reason the base
+      # image moved to trixie) would otherwise hold CI red forever. Accepted
+      # findings go in .trivyignore, committed and reviewable, never in someone's
+      # head. The table goes to a file (save-scan-report below publishes it) and
+      # is printed into the next step's log either way, so findings are visible
+      # even when the gate is red. trivy writes the report before exiting
+      # nonzero; || RC=$? keeps that exit code through the file handling, and
+      # exit restores it as this step's verdict. One physical line per command:
+      # YAML folds a multi-line plain scalar into a single line, and a trailing
+      # backslash next to the folding space becomes a stray positional argument
+      # ("multiple targets cannot be specified"). docker run because the trivy
+      # image is Alpine-based and cannot host the checkout action's glibc node
+      # binary as the job's container.
+      - name: Scan candidate
+        env:
+          IMAGE_REF: ${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          TRIVY_USERNAME: ${{ vars.REGISTRY_USERNAME }}
+          TRIVY_PASSWORD: ${{ secrets.REGISTRY_TOKEN }}
+          TRIVY_CACHE_DIR: /tmp/trivy-cache
+        run: |
+          docker run --rm -e TRIVY_USERNAME -e TRIVY_PASSWORD -e TRIVY_CACHE_DIR -v "$PWD:/repo" -w /repo aquasec/trivy:0.76.2 image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --scanners vuln --ignorefile /repo/.trivyignore --format table --output /repo/trivy-report.txt "$IMAGE_REF" || RC=$?
+          cat trivy-report.txt || true
+          exit "${RC:-0}"
+
+      # Only publishing events may promote; stale main builds skip :main and
+      # older releases never overwrite aliases belonging to newer Git tags.
+      - name: Plan promotion
+        env:
+          CI_PIPELINE_EVENT: ${{ startsWith(github.ref, 'refs/tags/') && 'tag' || 'push' }}
+          CI_COMMIT_TAG: ${{ github.ref_name }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          REGISTRY: ${{ vars.REGISTRY }}
+          IMAGE_NAME: ${{ vars.IMAGE_NAME }}
+        run: |
+          node .ci/scripts/promotion-plan.cjs
+          printf '%s/%s@%s\n' "$REGISTRY" "$IMAGE_NAME" "$IMAGE_DIGEST" > .image-ref
+
+      - name: Promote scanned image
+        env:
+          REGISTRY: ${{ vars.REGISTRY }}
+          IMAGE_NAME: ${{ vars.IMAGE_NAME }}
+          REGISTRY_USERNAME: ${{ vars.REGISTRY_USERNAME }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          docker run --rm --entrypoint /bin/sh \
+            -e REGISTRY -e IMAGE_NAME -e REGISTRY_USERNAME -e REGISTRY_TOKEN \
+            -v "$PWD:/work:ro" -w /work regclient/regctl:v0.11.7-alpine -ec '
+              printf "%s" "$REGISTRY_TOKEN" | regctl registry login "$REGISTRY" -u "$REGISTRY_USERNAME" --pass-stdin
+              while IFS= read -r tag; do
+                regctl image copy "$(cat /work/.image-ref)" "$REGISTRY/$IMAGE_NAME:$tag"
+              done < /work/.promotion-tags
+            '
+
+      # Forgejo has no code-scanning tab, so the report is published to this
+      # server's generic package registry instead: one report per commit at
+      # <forgejo>/api/packages/<owner>/generic/podium-trivy/<sha>/trivy-<ref>.txt
+      # -- the durable record that outlives log retention.
+      #
+      # Runs even after a failed gate -- that is exactly the report worth
+      # keeping -- and continue-on-error so a hiccup here never masks the
+      # gate's verdict. The Forgejo host comes from the runtime server URL,
+      # never committed: this file ships to the public mirror.
+      - name: Save scan report
+        if: always() && hashFiles('trivy-report.txt') != ''
+        continue-on-error: true
+        env:
+          PACKAGE_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/v*) REF="${GITHUB_REF_NAME#v}" ;;
+            *) REF=main ;;
+          esac
+          URL="${GITHUB_SERVER_URL}/api/packages/${GITHUB_REPOSITORY_OWNER}/generic/${GITHUB_REPOSITORY_NAME}-trivy/${GITHUB_SHA}/trivy-${REF}.txt"
+          curl -fsS --retry 3 --connect-timeout 10 --max-time 120 -H "Authorization: token ${PACKAGE_TOKEN}" --upload-file trivy-report.txt "$URL"
+          echo "Report saved to $URL"

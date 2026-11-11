@@ -1,5 +1,5 @@
 # Release notes, generated from Conventional Commits. Two consumers:
-# .woodpecker/scripts/bump.sh writes each release's section on top of
+# .ci/scripts/bump.sh writes each release's section on top of
 # CHANGELOG.md (`--unreleased --tag vX --prepend`), and the GitHub release
 # body in publish.yml is read back out of that file -- so this file is the
 # single source of truth for release notes.

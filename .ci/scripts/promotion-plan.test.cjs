@@ -41,18 +41,19 @@ test('promotion plans reject stale main builds and preserve newer release aliase
 });
 
 test('real scan commands preserve failure and do not reach promotion', () => {
-  const build = read('.woodpecker/build.yml');
-  const scan = build.split('  - name: image-scan\n')[1].split('\n  - name:')[0];
-  const commands = scan.split('\n').filter((line) => line.startsWith('      - '))
-    .map((line) => line.slice(8).replaceAll('$$', '$'));
-  // Only commands, not the event filter.
-  const script = commands.slice(commands.findIndex((line) => line.startsWith('trivy '))).join('\n');
+  const build = read('.forgejo/workflows/build.yml');
+  const scan = build.split('      - name: Scan candidate\n')[1].split('\n      - name:')[0];
+  // The run block's commands are the indented lines after `run: |`.
+  const commands = scan.slice(scan.indexOf('run: |')).split('\n').slice(1)
+    .filter((line) => line.startsWith('          '))
+    .map((line) => line.slice(10));
+  const script = commands.join('\n');
   for (const rc of [0, 1, 2]) {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'podium-scan-'));
     try {
       fs.writeFileSync(path.join(cwd, '.image-ref'), 'registry.example.com/podium@sha256:abc\n');
       const result = spawnSync('sh', ['-ec', `
-        trivy() { printf 'scan evidence\n' > trivy-report.txt; return ${rc}; }
+        docker() { printf 'scan evidence\n' > trivy-report.txt; return ${rc}; }
         ( ${script}\n )
         touch promoted
       `], { cwd, encoding: 'utf8' });
@@ -66,23 +67,29 @@ test('real scan commands preserve failure and do not reach promotion', () => {
 });
 
 test('both publishers gate promotion on validation and digest scans', () => {
-  const wood = read('.woodpecker/build.yml');
-  assert.match(wood, /depends_on: \[ci\]/);
-  assert.match(wood, /concurrency:\n  limit: 1/);
-  assert.ok(wood.indexOf('name: image-scan') < wood.indexOf('name: promote-scanned-image'));
-  assert.match(wood, /"\$\(cat \.image-ref\)"/);
+  const upstream = read('.forgejo/workflows/build.yml');
+  assert.match(upstream, /needs: validate/);
+  assert.match(upstream, /concurrency:\n  group: image-publication/);
+  assert.ok(upstream.indexOf('name: Scan candidate') < upstream.indexOf('name: Promote scanned image'));
+  assert.match(upstream, /IMAGE_REF: \$\{\{ vars\.REGISTRY \}\}\/\$\{\{ vars\.IMAGE_NAME \}\}@\$\{\{ steps\.build\.outputs\.digest \}\}/);
+  assert.match(read('.forgejo/workflows/build.yml'), /tags: \["v\*"\]/);
   const github = read('.github/workflows/publish.yml');
   assert.match(github, /needs: validate/);
   assert.match(github, /@\$\{\{ steps.build.outputs.digest \}\}/);
   assert.ok(github.indexOf('name: Scan candidate') < github.indexOf('name: Promote scanned image'));
-  assert.match(read('.woodpecker/ci.yml'), /event: tag/);
 });
 
 test('promotion stops on the first failed registry copy', () => {
-  const build = read('.woodpecker/build.yml');
-  const step = build.split('  - name: promote-scanned-image\n')[1].split('\n  # Woodpecker')[0];
-  const loop = step.split('\n').find((line) => line.startsWith('      - while '))
-    .slice(8).replaceAll('$$', '$');
+  const build = read('.forgejo/workflows/build.yml');
+  const step = build.split('      - name: Promote scanned image\n')[1].split('\n      # ')[0];
+  // The loop runs inside the regctl container where the workspace is mounted
+  // at /work; the harness runs it against the real cwd, so unmap the mount.
+  const loopLines = step.split('\n');
+  const start = loopLines.findIndex((line) => line.includes('while IFS= read -r tag'));
+  const end = loopLines.findIndex((line) => line.trim().startsWith('done <'));
+  const loop = loopLines.slice(start, end + 1)
+    .map((line) => line.trim().replace(/\/work\//g, './'))
+    .join('\n');
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'podium-copy-'));
   try {
     fs.writeFileSync(path.join(cwd, '.promotion-tags'), '1.2.3\n1.2\nlatest\n');

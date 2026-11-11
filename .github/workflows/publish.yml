@@ -141,7 +141,7 @@ jobs:
           CI_COMMIT_TAG: ${{ github.ref_name }}
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          node .woodpecker/scripts/promotion-plan.cjs
+          node .ci/scripts/promotion-plan.cjs
           printf '%s/%s@%s\n' "$REGISTRY" "$IMAGE_NAME" "$IMAGE_DIGEST" > .image-ref
 
       - name: Promote scanned image

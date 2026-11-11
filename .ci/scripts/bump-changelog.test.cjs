@@ -31,17 +31,17 @@ test('section headings stay exactly "## " + tag', () => {
 });
 
 test('bump.sh prepends the generated section into the release commit', () => {
-  const bump = read('.woodpecker/scripts/bump.sh');
+  const bump = read('.ci/scripts/bump.sh');
   assert.match(bump, /--unreleased --tag "v\$NEW_VERSION" --prepend CHANGELOG\.md/);
   assert.match(bump, /git add package\.json package-lock\.json CHANGELOG\.md/);
 });
 
 test('bump.yml pins the git-cliff version and checksum bump.sh defaults to', () => {
-  const bumpYml = read('.woodpecker/bump.yml');
+  const bumpYml = read('.forgejo/workflows/bump.yml');
   assert.match(bumpYml, /# renovate: datasource=github-releases depName=orhun\/git-cliff/);
   const pinned = bumpYml.match(/GIT_CLIFF_VERSION: "?([^"\s]+)"?/)[1];
   const sha = bumpYml.match(/GIT_CLIFF_SHA256: ([0-9a-f]{64})/)[1];
-  const bump = read('.woodpecker/scripts/bump.sh');
+  const bump = read('.ci/scripts/bump.sh');
   assert.match(bump, new RegExp(`GIT_CLIFF_SHA256:-${sha}`));
   assert.match(bump, new RegExp(`GIT_CLIFF_VERSION:-${pinned.replace(/\./g, '\\.')}`));
 });
