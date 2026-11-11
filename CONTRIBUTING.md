@@ -28,9 +28,10 @@ npm run test:run
 ```
 
 [mise](https://mise.jdx.dev) pins the tools npm cannot — the Node version and
-git-cliff live in `mise.toml`, the same pins CI installs with mise-action, and
-Renovate keeps the versions current. Without mise, install Node 26 by hand;
-local releases (`npm run release:bump`) do need mise for git-cliff.
+git-cliff live in `mise.toml`, the same pins the release workflow installs
+with mise, and Renovate keeps the versions current. Without mise, install
+Node 26 by hand; local releases (`npm run release:bump`) do need mise for
+git-cliff.
 
 Podium needs a Dispatcharr to talk to, but it starts with no credentials and
 says so rather than refusing to boot — enter them in **Settings**. Leave
