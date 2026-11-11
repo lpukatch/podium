@@ -11,7 +11,13 @@ const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
 
 test('setup-node pins the same node major as mise.toml', () => {
   const major = read('mise.toml').match(/^node = "(\d+)"$/m)[1];
-  for (const f of ['.forgejo/workflows/ci.yml', '.forgejo/workflows/build.yml']) {
+  // The GitHub mirror too: these tests run there as well, so a mirror-only
+  // bump of node-version would fail its own CI until mise.toml moves with it.
+  for (const f of [
+    '.forgejo/workflows/ci.yml',
+    '.forgejo/workflows/build.yml',
+    '.github/workflows/ci.yml',
+  ]) {
     assert.match(
       read(f),
       new RegExp(`node-version: '${major}'`),
