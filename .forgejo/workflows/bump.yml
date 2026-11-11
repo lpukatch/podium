@@ -61,5 +61,6 @@ jobs:
           BUMP_TYPE: ${{ github.event.inputs.bump_type }}
           CI_PIPELINE_EVENT: manual
           CI_COMMIT_BRANCH: main
+          CI_COMMIT_SHA: ${{ github.sha }}
           CI_REPO_CLONE_URL: ${{ github.server_url }}/${{ github.repository }}
         run: sh .ci/scripts/bump.sh
