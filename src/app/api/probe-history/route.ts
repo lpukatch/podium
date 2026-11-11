@@ -4,6 +4,7 @@ import { Eligibility } from '@/lib/eligibility';
 import { responseErrorText } from '@/lib/error-text';
 import { audioOnlyByStream, type CachedVerdict, probeFields } from '@/lib/last-probe';
 import { resolveOrdering } from '@/lib/ordering';
+import { deadDetail } from '@/lib/probe';
 import { config, groupPatterns, ordering, policies, snapshot } from '@/lib/server/state';
 import type { CatalogueRow } from '@/lib/store';
 import { PROBE_HISTORY_MS, PROBE_HISTORY_PER_STREAM, Store } from '@/lib/store';
@@ -22,7 +23,9 @@ const refuse = (error: string) => NextResponse.json({ error }, { status: 400 });
  * timeline `/api/verdicts` cannot give, since the probe cache keeps only the
  * latest. An entry describes its probe with the fields `/api/verdicts` uses
  * for the latest one, read by the same code (`probeFields`), plus the probe's
- * `error`.
+ * `error` -- as `deadDetail` publishes it, without the stream URL or any
+ * credential it carried. `probe_history` keeps the raw text for debugging;
+ * provider URLs routinely embed the account login, and this is an API.
  *
  * Read-only. It probes nothing, and the only Dispatcharr traffic is whatever
  * `snapshot()` already does, which is needed for one thing: the channel groups
@@ -111,7 +114,7 @@ export async function GET(request: Request) {
           probedAt: probe.probedAt,
           alive: probe.alive,
           ...probeFields(probe.result, weights, audioOnly.get(id) ?? false),
-          error: probe.result.error || null,
+          error: deadDetail(probe.result.error) || null,
         })),
       }));
 

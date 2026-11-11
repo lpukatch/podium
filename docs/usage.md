@@ -1167,7 +1167,8 @@ nothing beyond the snapshot every other page already reads.
           "channelLayout": "stereo",
           "audioBitrateKbps": 128,
           "audioSampleRate": 48000,
-          "error": null              // why a dead probe failed, e.g. "timeout"; null when alive
+          "error": null              // why a dead probe failed, e.g. "timeout"; null when alive.
+                                     // Stream URLs and credentials are stripped, as in quality_reason.
         }
       ]
     }

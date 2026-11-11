@@ -163,6 +163,44 @@ describe('GET /api/probe-history', () => {
     ]);
   });
 
+  it('strips stream URLs and credentials from errors, keeping the raw text stored', async () => {
+    const LEAKY = 204;
+    const user = 'alice-acct';
+    const pass = 's3cr3t-pw';
+    const failures = [
+      `http://${user}:${pass}@provider.example:8080/live/1234.ts: Server returned 401 Unauthorized`,
+      `http://provider.example/live/${user}/${pass}/1234.ts: Connection timed out`,
+      `Failed to open http://provider.example/get.php?username=${user}&password=${pass} for reading`,
+      `error: username=${user}&password=${pass}`,
+    ];
+    withStore((store) => {
+      for (const [i, error] of failures.entries()) {
+        clock = 500 + i;
+        store.put(LEAKY, 'h', probe({ ...dead, error }));
+      }
+    });
+    clock = 600;
+
+    const response = await route.GET(
+      new Request(`http://podium:3456/api/probe-history?stream=${LEAKY}`),
+    );
+    const text = await response.text();
+    expect(response.status).toBe(200);
+    expect(text).not.toContain(user);
+    expect(text).not.toContain(pass);
+    expect(text).not.toContain('provider.example');
+    expect(probesOf(JSON.parse(text), LEAKY)?.map((p) => p.error)).toEqual([
+      'error: username=...&password=...',
+      'Failed to open for reading',
+      'Connection timed out',
+      'Server returned 401 Unauthorized',
+    ]);
+
+    // Only the response is scrubbed: storage keeps ffmpeg's words for debugging.
+    const stored = withStore((store) => store.probeHistory({ streamIds: [LEAKY], limit: 10 }));
+    expect(stored.get(LEAKY)?.map((v) => v.result.error)).toEqual([...failures].reverse());
+  });
+
   // One hash per stream here, so the newest probe is the verdict /api/verdicts
   // shows. (After a hash change it need not be: that fold can prefer an older
   // hash's alive row, which the docs say.)
