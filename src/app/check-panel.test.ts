@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { orderToApply, pairwisePairs, pendingChange, reconcileSoaks } from './check-panel';
+import {
+  orderToApply,
+  pairwisePairs,
+  pendingChange,
+  recheckStateFor,
+  reconcileSoaks,
+} from './check-panel';
 
 /**
  * A channel whose rule claims three of its five streams, with the ranking
@@ -139,5 +145,24 @@ describe('pairwise audio similarities', () => {
 
   it('keeps the canonical low:high key whatever way round the report wrote it', () => {
     expect(pairwisePairs({ '9:5': 0.4 })).toEqual([{ a: 5, b: 9, similarity: 0.4, key: '5:9' }]);
+  });
+});
+
+describe('recheckStateFor', () => {
+  it('reads this channel out of the queue, and only this channel', () => {
+    const body = { all: null, groups: { '5': 1000 }, channels: { '5': 2000, '6': 3000 } };
+    expect(recheckStateFor(body, 5)).toEqual({ queuedAt: 2000, allAt: null });
+    expect(recheckStateFor(body, 7)).toEqual({ queuedAt: null, allAt: null });
+  });
+
+  it('reports a whole-catalogue request, which covers every channel', () => {
+    expect(recheckStateFor({ all: 4000, channels: {} }, 5)).toEqual({
+      queuedAt: null,
+      allAt: 4000,
+    });
+  });
+
+  it('reads an older server without channel marks as nothing queued', () => {
+    expect(recheckStateFor({ all: null }, 5)).toEqual({ queuedAt: null, allAt: null });
   });
 });

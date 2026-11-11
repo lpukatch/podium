@@ -18,7 +18,7 @@ import { loadConfig } from './config';
 import type { Channel, Stream } from './dispatcharr';
 import type { ProbeResult } from './probe';
 import { RulesSource } from './rules-source';
-import { Runner } from './runner';
+import { type OutstandingMark, Runner } from './runner';
 import { ALL_GROUPS, forcedAtFor, NO_MARKS, Store } from './store';
 
 const result = (over: Partial<ProbeResult> = {}): ProbeResult => ({
@@ -65,10 +65,12 @@ describe('refresh marks in the store', () => {
   });
 
   it('takes the later of the two marks that can cover a channel', () => {
-    const marks = { all: 1000, byGroup: new Map([[42, 3000]]) };
+    const marks = { all: 1000, byGroup: new Map([[42, 3000]]), byChannel: new Map() };
     expect(forcedAtFor(marks, 42)).toBe(3000);
     // The group mark is older here, so the catalogue-wide one is what applies.
-    expect(forcedAtFor({ all: 9000, byGroup: new Map([[42, 3000]]) }, 42)).toBe(9000);
+    expect(
+      forcedAtFor({ all: 9000, byGroup: new Map([[42, 3000]]), byChannel: new Map() }, 42),
+    ).toBe(9000);
     // A group nobody marked, and a channel in no group at all: both are still
     // in the catalogue, so both are covered by a catalogue-wide request.
     expect(forcedAtFor(marks, 7)).toBe(1000);
@@ -123,6 +125,69 @@ describe('refresh marks in the store', () => {
     // A mark against verdicts that no longer exist has already been granted,
     // and would otherwise keep waking the worker forever.
     expect(store.refreshMarks().all).toBeNull();
+    expect(store.refreshMarksVersion()).toBe(0);
+  });
+
+  it('keeps channel marks apart from group marks with the same id', () => {
+    store.setRefreshMark(7, 1000);
+    store.setChannelRefreshMark(7, 2000);
+
+    const marks = store.refreshMarks();
+    expect(marks.byGroup.get(7)).toBe(1000);
+    expect(marks.byChannel.get(7)).toBe(2000);
+    expect(store.clearChannelRefreshMark(7)).toBe(1);
+    expect(store.clearChannelRefreshMark(7)).toBe(0);
+    expect(store.refreshMarks().byGroup.get(7)).toBe(1000);
+  });
+
+  it('retires a channel request by its instant, leaving a re-armed one alone', () => {
+    store.setChannelRefreshMark(5, 1000);
+    store.setChannelRefreshMark(5, 2000);
+    expect(store.clearChannelRefreshMark(5, 1000)).toBe(0);
+    expect(store.refreshMarks().byChannel.get(5)).toBe(2000);
+    expect(store.clearChannelRefreshMark(5, 2000)).toBe(1);
+    expect(store.refreshMarks().byChannel.size).toBe(0);
+  });
+
+  it('takes the latest of the catalogue, group and channel marks', () => {
+    const marks = {
+      all: 1000,
+      byGroup: new Map([[42, 3000]]),
+      byChannel: new Map([[5, 5000]]),
+    };
+    expect(forcedAtFor(marks, 42, 5)).toBe(5000);
+    // Only the channel that was asked for: its neighbours keep the group's.
+    expect(forcedAtFor(marks, 42, 6)).toBe(3000);
+    // A channel in no group is still reachable by its own mark.
+    expect(forcedAtFor(marks, null, 5)).toBe(5000);
+    // A later group mark wins over an older channel one.
+    expect(forcedAtFor({ ...marks, byGroup: new Map([[42, 8000]]) }, 42, 5)).toBe(8000);
+  });
+
+  it('drops the channel marks a catalogue-wide request subsumes', () => {
+    store.setChannelRefreshMark(5, 1000);
+    store.setChannelRefreshMark(6, 1000);
+    store.setRefreshMark(42, 1000);
+
+    expect(store.clearChannelRefreshMarks()).toBe(2);
+    expect(store.refreshMarks().byChannel.size).toBe(0);
+    // Group marks are a separate clear.
+    expect(store.refreshMarks().byGroup.get(42)).toBe(1000);
+  });
+
+  it('raises the version on a new channel request too', () => {
+    store.setRefreshMark(42, 1000);
+    store.setChannelRefreshMark(5, 3000);
+    expect(store.refreshMarksVersion()).toBe(3000);
+    // Only new requests move it forward; a cancel lowers it.
+    store.clearChannelRefreshMark(5);
+    expect(store.refreshMarksVersion()).toBe(1000);
+  });
+
+  it('clears channel marks with the data they were about', () => {
+    store.setChannelRefreshMark(5, 1000);
+    store.resetData();
+    expect(store.refreshMarks().byChannel.size).toBe(0);
     expect(store.refreshMarksVersion()).toBe(0);
   });
 
@@ -233,7 +298,7 @@ describe('the planner against a mark', () => {
           jobs: Array<{ streamId: number }>;
           ages: number[];
           planned: Array<{ channel: { id: number }; cacheComplete: boolean }>;
-          outstandingMarks: Array<{ groupId: number; forcedAt: number; remaining: number }>;
+          outstandingMarks: OutstandingMark[];
         };
       }
     ).plan.call(
@@ -251,15 +316,10 @@ describe('the planner against a mark', () => {
   }
 
   /** retireSatisfiedMarks is private for the same reason plan() is. */
-  function retire(
-    runner: Runner,
-    marks: Array<{ groupId: number; forcedAt: number; remaining: number }>,
-  ): number {
+  function retire(runner: Runner, marks: OutstandingMark[]): number {
     return (
       runner as unknown as {
-        retireSatisfiedMarks: (
-          marks: Array<{ groupId: number; forcedAt: number; remaining: number }>,
-        ) => number;
+        retireSatisfiedMarks: (marks: OutstandingMark[]) => number;
       }
     ).retireSatisfiedMarks.call(runner, marks);
   }
@@ -390,6 +450,98 @@ describe('the planner against a mark', () => {
     expect(store.refreshMarks().all).toBe(allAt);
   });
 
+  it('re-queues a fresh verdict on the marked channel, and only that channel', () => {
+    const { rules, runner } = build();
+    store.put(10, 'h', result());
+    store.put(20, 'h', result());
+    expect(plan(runner, rules).jobs).toHaveLength(0);
+
+    // Channel 2 is in group 200; a group-100 mark would not reach it, and this
+    // must not reach channel 1 either.
+    store.setChannelRefreshMark(2, Date.now());
+    expect(plan(runner, rules).jobs.map((j) => j.streamId)).toEqual([20]);
+  });
+
+  it('does not read a channel mark as the group with the same id', () => {
+    // Channel 100 does not exist; group 100 does. A shared key space would
+    // re-check all of group 100 here.
+    const { rules, runner } = build();
+    store.put(10, 'h', result());
+    store.put(20, 'h', result());
+    store.setChannelRefreshMark(100, Date.now());
+    expect(plan(runner, rules).jobs).toHaveLength(0);
+  });
+
+  it('puts a channel verdict back in service when its request is cancelled', () => {
+    const { rules, runner } = build();
+    store.put(10, 'h', result());
+    store.put(20, 'h', result());
+    store.setChannelRefreshMark(1, Date.now());
+    expect(plan(runner, rules).jobs.map((j) => j.streamId)).toEqual([10]);
+
+    store.clearChannelRefreshMark(1);
+    const after = plan(runner, rules);
+    expect(after.jobs).toHaveLength(0);
+    expect(after.planned.find((p) => p.channel.id === 1)?.cacheComplete).toBe(true);
+  });
+
+  it('holds a channel request open until its verdicts are re-probed, then retires it', () => {
+    const { rules, runner } = build();
+    const lines: string[] = [];
+    store.put(10, 'h', result());
+    store.put(20, 'h', result());
+    const at = Date.now();
+    store.setChannelRefreshMark(1, at);
+
+    // Before the re-probe: stream 10 is still to go, so the request stays.
+    const before = plan(runner, rules);
+    expect(before.outstandingMarks).toEqual([{ channelId: 1, forcedAt: at, remaining: 1 }]);
+    expect(retire(runner, before.outstandingMarks)).toBe(1);
+    expect(store.refreshMarks().byChannel.get(1)).toBe(at);
+
+    // The re-probe lands strictly after the request; the next pass finds it
+    // satisfied and drops it, announcing which channel finished.
+    vi.useFakeTimers({ now: at + 60_000, toFake: ['Date'] });
+    try {
+      store.put(10, 'h', result());
+      const logged = new Runner({
+        config: () => loadConfig({ DISPATCHARR_API_KEY: 'k', PODIUM_DATA_DIR: dir }),
+        store,
+        rules,
+        log: (line) => lines.push(line),
+      });
+      const after = plan(logged, rules);
+      expect(after.jobs).toHaveLength(0);
+      expect(after.outstandingMarks).toEqual([{ channelId: 1, forcedAt: at, remaining: 0 }]);
+      expect(retire(logged, after.outstandingMarks)).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(store.refreshMarks().byChannel.has(1)).toBe(false);
+    expect(lines).toContain('re-check of channel 1 finished');
+  });
+
+  it('keeps a channel request and a group request over it open independently', () => {
+    // Channel 1 sits in group 100. The channel mark is a minute old, so the
+    // verdict outlives it; the group mark is stamped after, so it does not.
+    const { rules, runner } = build();
+    const channelAt = Date.now() - 60_000;
+    store.setChannelRefreshMark(1, channelAt);
+    store.put(10, 'h', result());
+    store.put(20, 'h', result());
+    const groupAt = Date.now();
+    store.setRefreshMark(100, groupAt);
+
+    const planned = plan(runner, rules);
+    expect(planned.outstandingMarks).toEqual([
+      { groupId: 100, forcedAt: groupAt, remaining: 1 },
+      { channelId: 1, forcedAt: channelAt, remaining: 0 },
+    ]);
+    expect(retire(runner, planned.outstandingMarks)).toBe(1);
+    expect(store.refreshMarks().byChannel.has(1)).toBe(false);
+    expect(store.refreshMarks().byGroup.get(100)).toBe(groupAt);
+  });
+
   it('paces a marked stream as work to do now, not at its usual turn', () => {
     // `sliceSize` sizes the pass off the oldest open age, so reporting the real
     // age of a stream probed a minute ago would trickle a requested re-check at
@@ -435,6 +587,26 @@ describe('the worker waking for a request', () => {
       const before = lines.length;
       store.setRefreshMark(ALL_GROUPS, Date.now());
       // The check rides the 30s heartbeat, which is the worst-case latency.
+      await vi.advanceTimersByTimeAsync(31_000);
+
+      expect(lines.slice(before).join('\n')).toContain('re-check requested; starting a pass now');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('wakes for a request on a single channel too', async () => {
+    // Channel marks live in their own table, which the heartbeat's version has
+    // to read as well or a channel re-check waits for the idle timer.
+    vi.useFakeTimers();
+    try {
+      const lines: string[] = [];
+      const config = loadConfig({ PODIUM_DATA_DIR: dir, DISPATCHARR_API_KEY: 'k' });
+      stop = await startWorker(config, (m) => lines.push(m));
+      await vi.advanceTimersByTimeAsync(100);
+
+      const before = lines.length;
+      store.setChannelRefreshMark(1, Date.now());
       await vi.advanceTimersByTimeAsync(31_000);
 
       expect(lines.slice(before).join('\n')).toContain('re-check requested; starting a pass now');

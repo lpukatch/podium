@@ -523,14 +523,15 @@ is satisfied by a library measured at four this morning, which is not the same
 as being ready for something that is on tonight — and the streams a provider
 swaps out during the day are exactly the ones you find out about at kickoff.
 
-Two buttons say "look again anyway":
+Three buttons say "look again anyway":
 
 | where | scope |
 | --- | --- |
+| **Re-check this channel**, in a channel's **Check now** panel | every stream on that channel |
 | a group's page | every stream on every channel in that group |
 | **Progress** | the whole catalogue |
 
-Both **queue** work rather than doing it. They write a single timestamp, and the
+All three **queue** work rather than doing it. They write a single timestamp, and the
 planner then treats every verdict older than it as expired, so the next pass
 picks the streams up through the ordinary machinery: provider lanes at their own
 limits, the pass yielding the moment somebody starts watching, and event
@@ -543,6 +544,11 @@ The worker notices within 30 seconds, even from the middle of an idle sleep.
 Cancelling is free. Nothing was deleted from the cache to queue the work, so
 dropping the request puts the existing verdicts straight back into service, and
 whatever was already re-probed stays re-probed.
+
+The scopes overlap harmlessly: a channel is held to the latest request that
+covers it, and each request finishes on its own once its streams have been
+re-probed. Queueing the whole catalogue drops the group and channel requests
+underneath it, so cancelling it leaves nothing small still running.
 
 Two things to know before queueing the whole catalogue:
 
@@ -558,9 +564,11 @@ Two things to know before queueing the whole catalogue:
   not up yet records a dead stream and sinks it. For those, queueing the group
   an hour or two before kickoff is worth more than queueing everything at nine.
 
-For a single channel, the **Check now** panel on the channel itself is faster
-still — it checks on the spot and shows the ordering the results imply without
-writing anything. To check all channels in a group immediately on demand, use
+For a single channel, **Check this channel** in the same **Check now** panel is
+faster still — it probes on the spot and shows the ordering the results imply
+without writing anything. **Re-check this channel** is the patient version: it
+waits for the worker, and the new verdicts rank the channel in the ordinary
+pass. To probe all channels in a group immediately on demand, use
 the **Check all** button on the group view.
 
 ## Ranking
@@ -1033,6 +1041,100 @@ cost — for a failure far rarer than dead, black or throttled.
 Mode and weights live in **Settings → Ranking**. Preferred providers
 only apply in `provider` mode; in `quality` mode the best measured source wins
 outright, whoever carries it.
+
+## Reading every verdict
+
+    GET /api/verdicts
+
+Returns what Podium knows about every stream on every channel it manages, in
+one call: each channel's streams in slot order, and each stream's cached
+verdict and latest soak. It is what the channel editor shows for one channel at
+a time, for the whole catalogue, and it describes a stream with the same fields,
+read by the same code. The one that can differ is `lastLowBitrate` for a stream
+on several channels, below.
+
+It reads only what is already held: the catalogue the worker records each
+pass, the probe cache and the soak results. It probes nothing, and it asks
+Dispatcharr nothing beyond the snapshot every other page already reads.
+
+```jsonc
+{
+  "fetchedAt": 1793900000000,          // when the snapshot was taken
+  "catalogueWrittenAt": 1793899000000, // when the worker last recorded the catalogue, or null
+  "cacheUnavailable": false,           // true when the cache could not be read
+  "groups": [{ "id": 643, "name": "Sports" }],
+  "channels": [
+    { "id": 462, "name": "Sports One", "groupId": 643, "streams": [7653, 8135] } // slot order
+  ],
+  "streams": [
+    {
+      "id": 7653,
+      "name": "UK: Sports One FHD",
+      "provider": "Provider A",
+      "providerGroup": "UK | Sport",
+      "lastProbedAt": 1793890000000,
+      "lastAlive": true,
+      "lastBlack": false,
+      "lastLowBitrate": false,
+      "lastHeight": 1080,
+      "lastWidth": 1920,
+      "lastFps": 50,
+      "lastVideoCodec": "h264",
+      "lastHdrFormat": null,
+      "lastBitrateKbps": 6400,
+      "lastAudioCodec": "aac",
+      "lastAudioChannels": 2,
+      "lastChannelLayout": "stereo",
+      "lastAudioBitrateKbps": 128,
+      "lastAudioSampleRate": 48000,
+      "deadStreak": 0,
+      "lastSoak": {
+        "streamId": 7653,
+        "completedAt": 1793860000000,
+        "heldMs": 180000,
+        "drops": 0,
+        "failedDials": 0,
+        "unreachable": false
+      }
+    }
+  ]
+}
+```
+
+A few things worth knowing when reading it:
+
+- **Each stream appears once** in `streams`, however many channels carry it;
+  `channels[].streams` refer to it by id. Only streams on managed channels are
+  listed, not the provider's whole catalogue.
+- **`null` means unknown.** A stream nothing has probed has every `last*` field
+  and `deadStreak` `null`; `lastSoak` is `null` until a soak has finished. A
+  stream that has left the provider since the catalogue was recorded keeps its
+  verdict, but its `name` and `providerGroup` are `null`.
+- **`lastLowBitrate` is judged per channel.** A video floor does not apply on an
+  audio-only channel, so a stream carried by several channels reads as low when
+  any channel carrying it would call it low.
+- **`deadStreak`** is the number of consecutive dead verdicts, the count
+  [`PODIUM_REMOVE_DEAD_AFTER_CHECKS`](configuration.md#removing-dead-streams)
+  is measured against; it is `0` for anything currently alive.
+- **When the database cannot be opened**, the answer is still a `200`, with
+  `cacheUnavailable: true` and empty `channels` and `streams` — the catalogue
+  lives in the same database, so without it there is no managed set to list.
+  If the catalogue was read but the verdicts could not be, the channels come
+  back with every verdict unknown and the same flag set. An empty list with the
+  flag clear really does mean nothing is managed yet.
+
+### Fetching only what changed
+
+    GET /api/verdicts?since=1793890000000
+
+Keeps only the streams whose verdict or soak landed after that moment (epoch
+milliseconds): `lastProbedAt` or `lastSoak.completedAt` later than `since`.
+Channels always come back whole, so a poller can pass the previous response's
+`fetchedAt` and merge the few streams that moved into what it already holds.
+Anything other than a whole, non-negative number is refused with a `400`.
+
+A failure to read the snapshot from Dispatcharr is a `500` with `error` and
+`detail`, as on the other read endpoints.
 
 ## Exporting what Podium learned
 

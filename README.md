@@ -82,9 +82,9 @@ going at breakfast.
 
 The target is a floor, though, and the afternoon of a big game is when that
 shows: everything can be comfortably inside the window and still have been
-measured at four in the morning. A group — or the whole catalogue — can be
-[queued for a re-check](docs/usage.md#re-checking-on-demand) whatever the cache
-says. It queues rather than probes, so the pass that does the work is still the
+measured at four in the morning. A channel, a group, or the whole catalogue
+can be [queued for a re-check](docs/usage.md#re-checking-on-demand) whatever the
+cache says. It queues rather than probes, so the pass that does the work is still the
 paced one, and calling it off puts the existing verdicts straight back in
 service.
 
@@ -139,6 +139,7 @@ network, and set `PODIUM_AUTH_TOKEN` if it goes anywhere else —
 | guide | what is in it |
 | --- | --- |
 | **[Usage](docs/usage.md)** | Matching streams to channels, section qualifiers, group policy, ranking, and importing existing rules |
+| **[Reading every verdict](docs/usage.md#reading-every-verdict)** | `GET /api/verdicts`: every managed channel's streams in slot order, each with its cached verdict and latest soak, in one read-only call |
 | **[Quality priors and the Teamarr export](docs/usage.md#exporting-what-podium-learned)** | Ranking a stream nobody has measured yet, from what its account and its name have been worth before — and exporting that as Teamarr scoring rules, or checking the rules you already run against it |
 | **[Configuration](docs/configuration.md)** | Every environment variable, who can reach it, concurrency limits, and how to keep a settled install quiet |
 | **[Metrics and Grafana](docs/configuration.md#metrics)** | Scraping `/api/metrics`, comparing providers from it, and an [example dashboard](docs/grafana/podium-provider-quality.json) to import |
