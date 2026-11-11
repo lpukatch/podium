@@ -204,6 +204,78 @@ describe('renderMetrics', () => {
     expect(m.get('podium_last_run_failed')).toBe(1);
   });
 
+  it('keeps lifetime totals when the runs history is trimmed', () => {
+    // The counter used to be a SUM over the runs table, which drops rows past
+    // RUN_HISTORY_MS -- so the totals, and every rate() on them, walked
+    // backwards at each trim. They live in lifetime_totals now.
+    store.startRun('old');
+    store.finishRun('old', { probed: 100, cached: 50, error: 'boom' });
+    store.startRun('new');
+    store.finishRun('new', { probed: 1 });
+
+    // What RUN_HISTORY_MS's trim does, taken to its limit -- every row the
+    // runs table ever had, gone. The private statement helper keeps tests from
+    // writing anything else.
+    const trim = (store as unknown as {
+      sql: (text: string) => { run: (...p: unknown[]) => { changes: number } };
+    })
+      .sql('DELETE FROM runs WHERE started_at < ?')
+      .run(Date.now() + 1000);
+    expect(trim.changes).toBe(2);
+
+    const m = parse(renderMetrics(store, { maxAgeMs: 3600_000, now: NOW }));
+    expect(m.get('podium_runs_total')).toBe(2);
+    expect(m.get('podium_runs_failed_total')).toBe(1);
+    expect(m.get('podium_streams_probed_total')).toBe(101);
+    expect(m.get('podium_streams_cached_total')).toBe(50);
+  });
+
+  it('reopening the store re-seeds nothing', () => {
+    // The seed statements run on every boot, guarded by INSERT OR IGNORE: a
+    // second Store on the same database must not add the retained history on
+    // top of the counters again.
+    store.startRun('a');
+    store.finishRun('a', { probed: 10 });
+    const before = store.runTotals();
+
+    const reopened = new Store(join(dir, 'm.db'));
+    try {
+      expect(reopened.runTotals()).toEqual(before);
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it('keeps teamarr sync totals when the log rolls over', () => {
+    // The retained log keeps its newest 200 rows; a sync total computed over
+    // it used to step back down at every rollover. The durable counters count
+    // every attempt, whatever happened to the rows.
+    for (let i = 0; i < 205; i++) {
+      store.saveTeamarrSync({ at: NOW + i, pushed: i % 2 === 0 });
+    }
+    expect(store.teamarrSyncLog()).toHaveLength(200);
+
+    const m = parse(renderMetrics(store, { maxAgeMs: 3600_000, now: NOW }));
+    expect(m.get('podium_teamarr_sync_total{outcome="pushed"}')).toBe(103);
+    expect(m.get('podium_teamarr_sync_total{outcome="refused"}')).toBe(102);
+    // The gauge rounds to the second, like every timestamp series here.
+    expect(m.get('podium_teamarr_last_push_timestamp_seconds')).toBe(
+      Math.round((NOW + 204) / 1000),
+    );
+  });
+
+  it('publishes the teamarr series even before the first sync', () => {
+    // The series used to appear only once the retained log had a row, so a
+    // scrape could watch them appear and disappear across a rollover. Zero is
+    // a value, not an absence.
+    const m = parse(renderMetrics(store, { maxAgeMs: 3600_000, now: NOW }));
+    expect(m.get('podium_teamarr_sync_total{outcome="pushed"}')).toBe(0);
+    expect(m.get('podium_teamarr_sync_total{outcome="deferred"}')).toBe(0);
+    expect(m.get('podium_teamarr_sync_total{outcome="refused"}')).toBe(0);
+    expect(m.get('podium_teamarr_sync_total{outcome="failed"}')).toBe(0);
+    expect(m.get('podium_teamarr_last_push_timestamp_seconds')).toBe(0);
+  });
+
   it('counts cached verdicts by liveness', () => {
     store.put(1, 'h', alive());
     store.put(2, 'h', alive());

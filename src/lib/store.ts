@@ -416,6 +416,22 @@ CREATE TABLE IF NOT EXISTS teamarr_sync_log (
     outcome  TEXT    NOT NULL
 );
 
+-- Lifetime counters, durable against the pruning of everything they count.
+--
+-- The runs table is trimmed to RUN_HISTORY_MS and teamarr_sync_log to its
+-- newest few hundred rows, so a total computed over those tables walks
+-- backwards as rows age out -- and a Prometheus counter that decreases is a
+-- rate() poison: the reset it implies never happened. These rows are the
+-- counter's memory instead, incremented as each run finishes and each sync is
+-- recorded, and seeded once from whatever history is retained so an upgrade
+-- does not read as a reset. The INSERT OR IGNORE seeds are re-executed on
+-- every boot and no-op once the keys exist, so a later boot can never
+-- double-count.
+CREATE TABLE IF NOT EXISTS lifetime_totals (
+    key TEXT PRIMARY KEY,
+    n   INTEGER NOT NULL DEFAULT 0
+);
+
 -- One row per *distinct* check result, not per pass that ran one.
 --
 -- A pass runs the check whenever a rule set has been uploaded, which on a
@@ -1467,6 +1483,37 @@ export class Store {
       }
       this.splitProbeCacheByVariant();
       this.addProbeCacheBlackColumn();
+      // The lifetime seeds run here rather than inside SCHEMA because they sum
+      // columns the ALTER loop above may still be adding -- a database from a
+      // version without `removed` has no such column until the loop has run,
+      // and the seeds must read the migrated shape, not the old one.
+      this.db.exec(`
+        INSERT OR IGNORE INTO lifetime_totals (key, n) SELECT 'runs', COUNT(*) FROM runs;
+        INSERT OR IGNORE INTO lifetime_totals (key, n)
+            SELECT 'failed', COALESCE(SUM(error IS NOT NULL), 0) FROM runs;
+        INSERT OR IGNORE INTO lifetime_totals (key, n) SELECT 'probed', COALESCE(SUM(probed), 0) FROM runs;
+        INSERT OR IGNORE INTO lifetime_totals (key, n) SELECT 'cached', COALESCE(SUM(cached), 0) FROM runs;
+        INSERT OR IGNORE INTO lifetime_totals (key, n) SELECT 'dead', COALESCE(SUM(dead), 0) FROM runs;
+        INSERT OR IGNORE INTO lifetime_totals (key, n)
+            SELECT 'reordered', COALESCE(SUM(reordered), 0) FROM runs;
+        INSERT OR IGNORE INTO lifetime_totals (key, n)
+            SELECT 'assigned', COALESCE(SUM(assigned), 0) FROM runs;
+        INSERT OR IGNORE INTO lifetime_totals (key, n)
+            SELECT 'removed', COALESCE(SUM(removed), 0) FROM runs;
+        INSERT OR IGNORE INTO lifetime_totals (key, n)
+            SELECT 'skipped', COALESCE(SUM(skipped), 0) FROM runs;
+        INSERT OR IGNORE INTO lifetime_totals (key, n)
+            SELECT 'teamarr.sync.pushed', COALESCE(SUM(pushed), 0) FROM teamarr_sync_log;
+        INSERT OR IGNORE INTO lifetime_totals (key, n)
+            SELECT 'teamarr.sync.deferred', COALESCE(SUM(deferred), 0) FROM teamarr_sync_log;
+        INSERT OR IGNORE INTO lifetime_totals (key, n)
+            SELECT 'teamarr.sync.failed', COALESCE(SUM(failed), 0) FROM teamarr_sync_log;
+        INSERT OR IGNORE INTO lifetime_totals (key, n)
+            SELECT 'teamarr.sync.refused',
+                   COUNT(*) - COALESCE(SUM(pushed), 0) - COALESCE(SUM(deferred), 0)
+                            - COALESCE(SUM(failed), 0)
+            FROM teamarr_sync_log;
+      `);
       if (path !== ':memory:') {
         Store.initializedPaths.add(path);
       }
@@ -1762,6 +1809,7 @@ export class Store {
   startRun(runId: string): void {
     const now = Date.now();
     this.sql('INSERT OR REPLACE INTO runs (run_id, started_at) VALUES (?, ?)').run(runId, now);
+    this.bumpLifetimeTotals({ runs: 1 });
     // Trimmed here rather than in `prune()`, which only runs when a worker
     // starts: a container that stays up for months would never trim this table
     // at all. Against `runs_started_at` this is an index seek that matches
@@ -1824,6 +1872,26 @@ export class Store {
         `UPDATE runs SET finished_at = ?${setClause ? `, ${setClause}` : ''} WHERE run_id = ?`,
       )
       .run(Date.now(), ...entries.map(([, value]) => value as string | number), runId);
+
+    // The durable counters move with the row, so the totals the metrics
+    // publish stay monotonic after the runs table trims. Only the fields this
+    // call carries move: the columns it leaves alone were NULL on the sum the
+    // seeds took, and stay absent here for the same reason.
+    const delta: Record<string, number> = {};
+    for (const key of [
+      'probed',
+      'cached',
+      'dead',
+      'reordered',
+      'assigned',
+      'removed',
+      'skipped',
+    ] as const) {
+      const n = fields[key];
+      if (typeof n === 'number' && n !== 0) delta[key] = n;
+    }
+    if (fields.error) delta.failed = 1;
+    this.bumpLifetimeTotals(delta);
   }
 
   /**
@@ -2522,7 +2590,14 @@ export class Store {
     }));
   }
 
-  /** Lifetime totals across every recorded run. */
+  /**
+   * Lifetime totals across every recorded run, including pruned ones.
+   *
+   * Read from `lifetime_totals`, which the run lifecycle increments as rows
+   * land -- the `runs` table itself is trimmed to RUN_HISTORY_MS, so a sum
+   * over it would walk backwards and poison every rate() built on these
+   * series.
+   */
   runTotals(): {
     runs: number;
     failed: number;
@@ -2534,29 +2609,51 @@ export class Store {
     removed: number;
     skipped: number;
   } {
-    const row = this.sql(
-      `SELECT COUNT(*) AS runs,
-              COALESCE(SUM(error IS NOT NULL), 0) AS failed,
-              COALESCE(SUM(probed), 0)    AS probed,
-              COALESCE(SUM(cached), 0)    AS cached,
-              COALESCE(SUM(dead), 0)      AS dead,
-              COALESCE(SUM(reordered), 0) AS reordered,
-              COALESCE(SUM(assigned), 0)  AS assigned,
-              COALESCE(SUM(removed), 0)   AS removed,
-              COALESCE(SUM(skipped), 0)   AS skipped
-       FROM runs`,
-    ).get() as Record<string, number>;
+    const t = this.lifetimeTotals();
     return {
-      runs: row.runs ?? 0,
-      failed: row.failed ?? 0,
-      probed: row.probed ?? 0,
-      cached: row.cached ?? 0,
-      dead: row.dead ?? 0,
-      reordered: row.reordered ?? 0,
-      assigned: row.assigned ?? 0,
-      removed: row.removed ?? 0,
-      skipped: row.skipped ?? 0,
+      runs: t.runs ?? 0,
+      failed: t.failed ?? 0,
+      probed: t.probed ?? 0,
+      cached: t.cached ?? 0,
+      dead: t.dead ?? 0,
+      reordered: t.reordered ?? 0,
+      assigned: t.assigned ?? 0,
+      removed: t.removed ?? 0,
+      skipped: t.skipped ?? 0,
     };
+  }
+
+  /**
+   * Add to the durable lifetime counters.
+   *
+   * Every caller is inside the store's own synchronous write path, so the
+   * counter can only fall behind the tables it mirrors if a crash lands
+   * between the row write and the bump -- the same window every write here
+   * has, and the same answer: the next seedless boot reconciles nothing, but
+   * the error is bounded by one run.
+   */
+  bumpLifetimeTotals(delta: Record<string, number>): void {
+    const entries = Object.entries(delta).filter(([, n]) => n !== 0);
+    if (entries.length === 0) return;
+    this.db.transaction(() => {
+      for (const [key, n] of entries) {
+        this.sql(
+          `INSERT INTO lifetime_totals (key, n) VALUES (?, ?)
+             ON CONFLICT(key) DO UPDATE SET n = n + excluded.n`,
+        ).run(key, n);
+      }
+    })();
+  }
+
+  /** The durable lifetime counters, keyed as they were written. */
+  lifetimeTotals(): Record<string, number> {
+    const rows = this.sql('SELECT key, n FROM lifetime_totals').all() as Array<{
+      key: string;
+      n: number;
+    }>;
+    const out: Record<string, number> = {};
+    for (const row of rows) out[row.key] = row.n;
+    return out;
   }
 
   /** Who holds the worker lock, and how fresh their heartbeat is. */
@@ -2696,6 +2793,20 @@ export class Store {
       typeof o?.error === 'string' ? 1 : 0,
       JSON.stringify(outcome),
     );
+    // The durable counters move with the row: the log above is trimmed to its
+    // newest few hundred entries, and the metrics series built from these
+    // totals must outlive that trim.
+    const pushed = o?.pushed === true ? 1 : 0;
+    const deferred = o?.deferred === true ? 1 : 0;
+    const failed = typeof o?.error === 'string' ? 1 : 0;
+    this.bumpLifetimeTotals({
+      'teamarr.sync.pushed': pushed,
+      'teamarr.sync.deferred': deferred,
+      'teamarr.sync.failed': failed,
+      // Everything that completed without writing and without deferring --
+      // the same classification the log's flags encode.
+      'teamarr.sync.refused': pushed + deferred + failed === 0 ? 1 : 0,
+    });
     // Keep the newest TEAMARR_SYNC_LOG_ROWS: the (N+1)th newest id is the
     // first to go, so the OFFSET is the cap itself, not one under it.
     this.sql(
@@ -3652,6 +3763,10 @@ export class Store {
       this.sql('DELETE FROM probe_cache').run();
       this.sql('DELETE FROM probe_history').run();
       this.sql('DELETE FROM runs').run();
+      // The lifetime counters are history like the rows they mirror: "start
+      // measuring again" starts the counters too, and the seeds on the next
+      // boot find empty tables and write zeros.
+      this.sql('DELETE FROM lifetime_totals').run();
       // A mark against verdicts that no longer exist is a request that has
       // already been granted, and leaving it would keep waking the worker.
       this.sql('DELETE FROM refresh_marks').run();
