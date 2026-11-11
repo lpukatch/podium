@@ -23,24 +23,6 @@ case "$BUMP_TYPE" in
   *) echo 'BUMP_TYPE must be auto, patch, minor, or major' >&2; exit 1 ;;
 esac
 
-# Release notes are generated with a checksum-verified git-cliff build. The
-# version in .forgejo/workflows/bump.yml carries the renovate annotation; the
-# defaults here cover local releases (npm run release:bump) -- keep the three
-# values in sync.
-GIT_CLIFF_VERSION=${GIT_CLIFF_VERSION:-2.14.2}
-GIT_CLIFF_SHA256=${GIT_CLIFF_SHA256:-fa21e2fc70046fcfd0e43e5e4613873ab799aff3d9dc8559c00d31b270e417d0}
-fetch_cliff() {
-  local_dir=$(mktemp -d)
-  curl -fsSL "https://github.com/orhun/git-cliff/releases/download/v${GIT_CLIFF_VERSION}/git-cliff-${GIT_CLIFF_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
-    -o "$local_dir/cliff.tar.gz"
-  if ! printf '%s  %s\n' "$GIT_CLIFF_SHA256" "$local_dir/cliff.tar.gz" | sha256sum -c --status -; then
-    echo 'git-cliff checksum mismatch; refusing to generate release notes' >&2
-    exit 1
-  fi
-  tar -xzf "$local_dir/cliff.tar.gz" -C "$local_dir"
-  CLIFF="$local_dir/git-cliff-${GIT_CLIFF_VERSION}/git-cliff"
-}
-
 # Fetch the current main and complete tag history even after a shallow clone.
 if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
   git fetch --unshallow origin
@@ -108,9 +90,17 @@ NODE
 # section on top. cliff.toml is the template; publish.yml reads the section
 # back out of this file for the GitHub release body. Runs before the release
 # commit exists, so `--unreleased` is exactly the range being released.
+#
+# git-cliff comes from mise.toml ([tools]) -- the same pin CI installs with
+# mise-action, renovate's mise manager keeping the version current. `mise exec`
+# resolves it even without an activated shell, so a one-time `mise install`
+# is all a local release needs.
 test -f CHANGELOG.md || { echo 'CHANGELOG.md missing at the repo root' >&2; exit 1; }
-fetch_cliff
-"$CLIFF" --unreleased --tag "v$NEW_VERSION" --prepend CHANGELOG.md
+command -v mise >/dev/null 2>&1 || {
+  echo 'mise not found; install it (https://mise.run) and run `mise install`' >&2
+  exit 1
+}
+mise exec -- git-cliff --unreleased --tag "v$NEW_VERSION" --prepend CHANGELOG.md
 git add package.json package-lock.json CHANGELOG.md
 if ! git diff --cached --quiet; then
   git commit -m "chore(release): v$NEW_VERSION"

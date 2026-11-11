@@ -6,9 +6,9 @@ name: Version Bump
 #
 # The heavy lifting is .ci/scripts/bump.sh, shared with local releases
 # (`npm run release:bump`). It derives the bump from Conventional Commit
-# subjects, updates both package files, generates CHANGELOG.md with a
-# checksum-verified git-cliff build, commits, and atomically pushes the release
-# commit and annotated tag -- which then triggers build.yml and, after
+# subjects, updates both package files, generates CHANGELOG.md with git-cliff
+# (installed from the mise.toml pin), commits, and atomically pushes the
+# release commit and annotated tag -- which then triggers build.yml and, after
 # mirroring, the GitHub release workflow.
 
 on:
@@ -24,6 +24,13 @@ on:
           - patch
           - minor
           - major
+
+env:
+  # The mise release the mise-action step installs. The action itself is
+  # SHA-pinned below; renovate's annotation manager bumps this line like every
+  # other *_VERSION pin.
+  # renovate: datasource=github-releases depName=jdx/mise
+  MISE_VERSION: "2026.11.7"
 
 # Validation already ran on this SHA; a release pipeline that follows a manual
 # one anyway would just serialize behind it.
@@ -45,14 +52,14 @@ jobs:
           # sends a stale ref.
           ref: main
 
+      # git-cliff (and node) from the mise.toml pin -- same step as ci.yml.
+      - name: Set up tools
+        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          version: ${{ env.MISE_VERSION }}
+
       - name: Version bump
         env:
-          # renovate: datasource=github-releases depName=orhun/git-cliff
-          GIT_CLIFF_VERSION: "2.14.2"
-          # sha256 of git-cliff-${GIT_CLIFF_VERSION}-x86_64-unknown-linux-musl.tar.gz.
-          # renovate updates only the version line: set this alongside each bump
-          # (bump.sh hard-fails on a mismatch, and its local defaults must match).
-          GIT_CLIFF_SHA256: fa21e2fc70046fcfd0e43e5e4613873ab799aff3d9dc8559c00d31b270e417d0
           # These adapt the Actions runtime to the contract bump.sh (written for
           # the previous Woodpecker pipeline) expects. CI_REPO_CLONE_URL must use
           # HTTPS for the release script's token authentication.
