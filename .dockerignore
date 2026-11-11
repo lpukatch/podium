@@ -1,0 +1,63 @@
+# What never enters the image build.
+#
+# The Dockerfile's build stage does `COPY . .`, so everything in this directory
+# ships to the builder unless it is named here. Three kinds of things must not:
+#
+#   Secrets and state. A checkout used for local development carries a database
+#   with a live Dispatcharr credential in its settings, .env files, and editor
+#   swap buffers beside the compose file. None of it has any business in a
+#   builder layer, which is retained by the registry's build cache and scanned
+#   by trivy like any other input.
+#
+#   Host build output. A host node_modules or .next copied over the ones the
+#   deps stage installed and the build stage produced would quietly replace
+#   container-built artefacts with machine-specific ones -- the native
+#   better-sqlite3 binding is the case that actually breaks, but none of it is
+#   honest to ship.
+#
+#   Weight. .git and the docs images are most of this directory; excluding them
+#   keeps the build context small enough that cache hits dominate build time.
+
+# Version control and CI machinery
+.git
+.github
+.forgejo
+.woodpecker
+.ci
+.gitignore
+.gitleaksignore
+.trivyignore
+renovate.json
+cliff.toml
+
+# Host dependencies and build output
+node_modules/
+.next/
+out/
+build/
+dist/
+coverage/
+*.tsbuildinfo
+next-env.d.ts
+
+# Local state: the dev database carries a live Dispatcharr credential, and an
+# exported config can carry one too.
+data/
+.env
+.env.local
+.local/
+
+# Editor and agent scratch state
+.claude/
+.playwright-mcp/
+*.swp
+*.swo
+*~
+
+# Documentation and release metadata: nothing here is read by `next build` or
+# the esbuild worker bundle, and docs/images is the largest tree after .git.
+docs/
+*.md
+Dockerfile
+docker-compose.yml
+.dockerignore
