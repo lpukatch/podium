@@ -6,8 +6,39 @@ steps:
   - name: install
     image: node:26-bookworm
     commands:
-      - node --test .woodpecker/scripts/build-metadata.test.cjs
+      - node --test .woodpecker/scripts/*.test.cjs
       - npm ci
+
+  # The release job reads subjects to pick patch/minor/major (bump.sh); a
+  # non-conventional one silently downgrades the next release. Runs on merge
+  # requests, where the branch's own commits are what review sees.
+  - name: commit-subjects
+    image: node:26-bookworm
+    when:
+      - event: pull_request
+    commands:
+      - node .woodpecker/scripts/check-commit-subjects.cjs
+
+  # The shipped closure only: the standalone server traces production
+  # dependencies, so devDependencies never reach an image -- auditing them
+  # gates on noise. HIGH is the bar: moderate findings would train the red
+  # pipeline to be ignored, and renovate lands the rest within days.
+  - name: audit
+    image: node:26-bookworm
+    commands:
+      - npm audit --omit=dev --audit-level=high
+
+  # Forgejo has no server-side secret scanning, so the pipeline is the
+  # substitute: the GitHub mirror is public and syncs every commit, meaning a
+  # token that lands on main is exposed within one sync. Scan the full history
+  # (unshallow first -- the default clone is shallow) so a secret from an
+  # older branch is caught too. `gitleaks git` exits nonzero on any finding;
+  # accepted false positives are fingerprinted in .gitleaksignore.
+  - name: secrets-scan
+    image: ghcr.io/gitleaks/gitleaks:v8.30.1
+    commands:
+      - if [ "$(git rev-parse --is-shallow-repository)" = true ]; then git fetch --unshallow origin; fi
+      - gitleaks git --no-banner
 
   - name: lint-and-format
     image: node:26-bookworm
@@ -24,4 +55,6 @@ steps:
     commands:
       # Containers do not share installed system packages with earlier steps.
       - apt-get update && apt-get install -y --no-install-recommends ffmpeg
-      - npm run test:run
+      # The text reporter's table lands in the pipeline log; thresholds wait
+      # until main's baseline is visible, then pin it a point below current.
+      - npm run test:coverage

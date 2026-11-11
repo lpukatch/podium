@@ -30,6 +30,7 @@ behavior is unchanged. `.forgejo/default_merge_message/` is also unchanged.
    | `registry_username` | Registry service account username | push, pull_request, tag, manual |
    | `registry_token` | Registry token (existing `REGISTRY_TOKEN`) | push, pull_request, tag, manual |
    | `bypass_token` | Forgejo token allowed to push main and tags (existing `BYPASS_TOKEN`) | **manual only** |
+   | `package_token` | Forgejo token with only `package:write` scope; saves trivy scan reports to the generic package registry | push, manual, tag |
 
    PRs require registry access to read the private build cache, as before. Giving
    credentials to PR code is inherently sensitive: prefer read-only credentials
@@ -46,7 +47,9 @@ behavior is unchanged. `.forgejo/default_merge_message/` is also unchanged.
 
 ## Checks and images
 
-- Pushes and PRs targeting `main`: format/lint, type checks, tests with real
+- Pushes and PRs targeting `main`: a gitleaks scan of the full commit history
+  (Forgejo has no server-side secret scanning, and the GitHub mirror makes
+  every landed commit public), plus format/lint, type checks, tests with real
   ffprobe, and an amd64 Docker build.
 - Pushes to `main`: publish `:main` and refresh `:buildcache`.
 - PRs: build without publishing an image or writing the cache.
@@ -60,6 +63,14 @@ behavior is unchanged. `.forgejo/default_merge_message/` is also unchanged.
   `.trivyignore`, one line each with a reason and a removal condition. If the
   registry presents an internal CA the trivy container cannot verify, set
   `TRIVY_INSECURE=true` on the `image-scan` step.
+- Findings live in two places. The full table is printed into the pipeline log
+  even when the gate fails, and the `save-scan-report` step publishes the
+  report to the upstream Forgejo's generic package registry — one report per
+  commit at `podium-trivy/<commit sha>/trivy-<ref>.txt` — so each build's
+  findings stay addressable after logs rotate. That upload runs even when the
+  gate failed and is best-effort (`failure: ignore`): it never masks the
+  gate's verdict. It derives the Forgejo host from the runtime clone URL, so
+  no hostname is committed here.
 
 Only tag builds move `latest`. Non-tag app versions include the short commit
 SHA. Docker media types and disabled provenance preserve Unraid compatibility.
@@ -85,6 +96,14 @@ BUMP_TYPE=auto
 
 `BUMP_TYPE` defaults to `auto`; `patch`, `minor`, and `major` are also supported.
 Without `RELEASE=true`, a manual pipeline never bumps the version.
+
+The release commit also carries `CHANGELOG.md`: bump.sh generates the new
+release's section with git-cliff (`cliff.toml` is the template) and prepends
+it. The version and checksum of the git-cliff build are pinned in `bump.yml`
+(`# renovate:` annotation) with matching defaults in bump.sh for local
+releases; a checksum mismatch aborts the release. The GitHub release body is
+read back out of `CHANGELOG.md`, so what users read in the repo is what they
+get on releases.
 
 The release workflow fetches current `main` and all tags, skips if there are no
 commits since the last release, and derives the bump from Conventional Commit

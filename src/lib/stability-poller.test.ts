@@ -19,7 +19,7 @@ import { Store } from './store';
 /** One live channel, shaped as `/proxy/ts/status` reports it. */
 function live(over: Record<string, unknown> = {}) {
   return {
-    channel_id: '09bbd059-1a49-47ee-a525-c1444e1c6bd7',
+    channel_id: 'podium-test-channel-key',
     state: 'active',
     client_count: 1,
     started_at: 1_789_529_704.443,
@@ -214,7 +214,7 @@ describe('the session poller', () => {
       writer.recordConnectEvents([
         {
           event: 'stream_switch',
-          channelKey: '09bbd059-1a49-47ee-a525-c1444e1c6bd7',
+          channelKey: 'podium-test-channel-key',
           streamId: 77177,
           previousStreamId: 77013,
           reason: 'buffering_timeout',
@@ -332,7 +332,7 @@ describe('the session poller', () => {
       writer.recordConnectEvents([
         {
           event: 'channel_error',
-          channelKey: '09bbd059-1a49-47ee-a525-c1444e1c6bd7',
+          channelKey: 'podium-test-channel-key',
           streamId: 77013,
           previousStreamId: null,
           reason: 'buffering_timeout',

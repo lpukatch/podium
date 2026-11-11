@@ -59,7 +59,7 @@ describe('the connect event receiver', () => {
     const resp = await call(
       'stream_switch',
       new URLSearchParams({
-        channel_id: '09bbd059-1a49-47ee-a525-c1444e1c6bd7',
+        channel_id: 'podium-test-channel-key',
         stream_id: '77177',
         previous_stream_id: '77013',
         reason: 'buffering_timeout',

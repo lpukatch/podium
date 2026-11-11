@@ -22,7 +22,7 @@ describe('parseConnectEvent', () => {
       'stream_switch',
       FORM,
       form({
-        channel_id: '09bbd059-1a49-47ee-a525-c1444e1c6bd7',
+        channel_id: 'podium-test-channel-key',
         channel_name: 'ESPN',
         reason: 'buffering_timeout',
         stream_id: '77177',
@@ -33,7 +33,7 @@ describe('parseConnectEvent', () => {
     expect(event).toEqual({
       event: 'stream_switch',
       channelName: 'ESPN',
-      channelKey: '09bbd059-1a49-47ee-a525-c1444e1c6bd7',
+      channelKey: 'podium-test-channel-key',
       channelId: null,
       streamId: 77177,
       previousStreamId: 77013,
