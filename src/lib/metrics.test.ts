@@ -216,9 +216,11 @@ describe('renderMetrics', () => {
     // What RUN_HISTORY_MS's trim does, taken to its limit -- every row the
     // runs table ever had, gone. The private statement helper keeps tests from
     // writing anything else.
-    const trim = (store as unknown as {
-      sql: (text: string) => { run: (...p: unknown[]) => { changes: number } };
-    })
+    const trim = (
+      store as unknown as {
+        sql: (text: string) => { run: (...p: unknown[]) => { changes: number } };
+      }
+    )
       .sql('DELETE FROM runs WHERE started_at < ?')
       .run(Date.now() + 1000);
     expect(trim.changes).toBe(2);
