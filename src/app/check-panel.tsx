@@ -443,7 +443,7 @@ export function CheckPanel({
   /**
    * Queue this channel for a re-check, or call one off.
    *
-   * Unlike "Probe this channel", this does not probe: it stamps an instant, and
+   * Unlike "Check this channel", this does not probe: it stamps an instant, and
    * the next pass treats every verdict older than it as expired -- at the
    * provider limits, and paused while anyone is watching.
    */

@@ -564,12 +564,12 @@ Two things to know before queueing the whole catalogue:
   not up yet records a dead stream and sinks it. For those, queueing the group
   an hour or two before kickoff is worth more than queueing everything at nine.
 
-For a single channel, **Probe this channel** in the same **Check now** panel is
+For a single channel, **Check this channel** in the same **Check now** panel is
 faster still — it probes on the spot and shows the ordering the results imply
 without writing anything. **Re-check this channel** is the patient version: it
 waits for the worker, and the new verdicts rank the channel in the ordinary
 pass. To probe all channels in a group immediately on demand, use
-the **Probe all** button on the group view.
+the **Check all** button on the group view.
 
 ## Ranking
 
