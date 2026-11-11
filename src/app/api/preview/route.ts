@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
 import { Eligibility } from '@/lib/eligibility';
 import { responseErrorText } from '@/lib/error-text';
+import { readJson } from '@/lib/http-body';
 import { type CachedVerdict, lastProbeFields } from '@/lib/last-probe';
 import type { ChannelRule } from '@/lib/matcher';
 import { resolveOrdering } from '@/lib/ordering';
@@ -29,7 +30,7 @@ export const dynamic = 'force-dynamic';
  */
 export async function POST(request: Request) {
   try {
-    const body = (await request.json().catch(() => null)) as {
+    const parsed = await readJson<{
       channelId: number;
       aliases?: string[];
       contains?: string[];
@@ -40,10 +41,11 @@ export async function POST(request: Request) {
       aliasProviders?: Record<string, number[]>;
       aliasProviderGroupFilters?: Record<string, Record<string, unknown>>;
       containsGroupFilters?: Record<string, unknown>;
-    } | null;
-    if (body === null) {
-      return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
+    }>(request);
+    if (!parsed.ok) {
+      return NextResponse.json({ error: parsed.message }, { status: parsed.status });
     }
+    const body = parsed.value;
 
     // The editor sends well-formed bodies; these guards are for everything
     // else that can POST here. `channelId` of `undefined` used to sail through

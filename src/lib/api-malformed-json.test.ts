@@ -134,3 +134,39 @@ describe('a body that is not JSON', () => {
     await expect400(response);
   });
 });
+
+describe('a body bigger than the cap', () => {
+  // Chunked: no Content-Length at all, so the proxy's door does not close on
+  // it and the route's bounded reader is the only thing that can. This is the
+  // hole the old `request.json()` left -- it buffered whatever arrived, and a
+  // length was a claim the body never had to keep.
+  const chunked = (megabytes: number): Request => {
+    const chunk = new TextEncoder().encode('x'.repeat(1024 * 1024));
+    let sent = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent >= megabytes) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(chunk);
+        sent += 1;
+      },
+    });
+    return new Request('http://podium/api/x', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: stream,
+      // Node's Request requires the duplex hint for a streaming body.
+      duplex: 'half',
+    } as RequestInit);
+  };
+
+  it('is a 413 from the settings route when it streams in over the cap', async () => {
+    const { PUT } = await import('../app/api/settings/route');
+    const response = await PUT(chunked(6));
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: 'Request body too large (limit 5 MB).' });
+    expect(readFileSync(rulesPath, 'utf8')).toBe(RULES);
+  });
+});

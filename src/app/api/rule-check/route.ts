@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
 import { responseErrorText } from '@/lib/error-text';
+import { readJson } from '@/lib/http-body';
 import { applyMatches, checkInputs, scoredChannelIds } from '@/lib/rule-check-inputs';
 import { snapshot } from '@/lib/server/state';
 import { resolveEnv } from '@/lib/settings';
@@ -53,10 +54,11 @@ export function GET() {
 export async function POST(request: Request) {
   let store: Store | null = null;
   try {
-    const parsed = (await request.json().catch(() => null)) as unknown;
-    if (parsed === null) {
-      return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
+    const read = await readJson(request);
+    if (!read.ok) {
+      return NextResponse.json({ error: read.message }, { status: read.status });
     }
+    const parsed = read.value as unknown;
     const container = parsed as { rules?: unknown };
     const raw = Array.isArray(parsed) ? parsed : container?.rules;
     if (!Array.isArray(raw)) {

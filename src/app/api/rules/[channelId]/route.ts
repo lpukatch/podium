@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { responseErrorText } from '@/lib/error-text';
+import { readJson } from '@/lib/http-body';
 import { parseMaxResolution, parseMinResolution, RESOLUTION_CHOICES } from '@/lib/resolution';
 import { readRulesDoc, writeRulesDoc } from '@/lib/server/state';
 
@@ -34,7 +35,7 @@ async function putChannelRule(
     return NextResponse.json({ error: 'bad channel id' }, { status: 400 });
   }
 
-  const body = (await request.json().catch(() => null)) as {
+  const parsed = await readJson<{
     aliases?: string[];
     contains?: string[];
     exclude?: string[];
@@ -57,10 +58,11 @@ async function putChannelRule(
     /** The ceiling twin of `minResolution`, same readings. */
     maxResolution?: string | null;
     excludeFast?: boolean | null;
-  } | null;
-  if (body === null) {
-    return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
+  }>(request);
+  if (!parsed.ok) {
+    return NextResponse.json({ error: parsed.message }, { status: parsed.status });
   }
+  const body = parsed.value;
   const clean = (values: string[] | undefined) =>
     (values ?? []).map((v) => v.trim()).filter(Boolean);
 

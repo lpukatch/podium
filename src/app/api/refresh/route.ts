@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
 import { responseErrorText } from '@/lib/error-text';
+import { readJson } from '@/lib/http-body';
 import { ALL_GROUPS, Store } from '@/lib/store';
 
 export const dynamic = 'force-dynamic';
@@ -92,7 +93,18 @@ export function GET() {
 export async function POST(request: Request) {
   let store: Store | null = null;
   try {
-    const body = (await request.json().catch(() => ({}))) as {
+    // Optional body: malformed JSON reads as absent, the same courtesy the
+    // old `.catch(() => ({}))` gave. Size is not optional -- a body the
+    // reader stopped at the cap is refused, not ignored.
+    const read = await readJson<{
+      scope?: string;
+      groupId?: unknown;
+      channelId?: unknown;
+    }>(request);
+    if (!read.ok && read.status === 413) {
+      return NextResponse.json({ error: read.message }, { status: 413 });
+    }
+    const body = (read.ok ? read.value : {}) as {
       scope?: string;
       groupId?: unknown;
       channelId?: unknown;
