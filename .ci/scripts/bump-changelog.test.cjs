@@ -36,6 +36,13 @@ test('bump.sh prepends the generated section into the release commit', () => {
   assert.match(bump, /git add package\.json package-lock\.json CHANGELOG\.md/);
 });
 
+test('bump.yml supplies the validated commit SHA required by bump.sh', () => {
+  const bump = read('.ci/scripts/bump.sh');
+  assert.match(bump, /"\$\(git rev-parse origin\/main\)" != "\$CI_COMMIT_SHA"/);
+  const workflow = read('.forgejo/workflows/bump.yml');
+  assert.match(workflow, /^\s+CI_COMMIT_SHA: \$\{\{ github\.sha \}\}$/m);
+});
+
 test('bump.yml pins the git-cliff version and checksum bump.sh defaults to', () => {
   const bumpYml = read('.forgejo/workflows/bump.yml');
   assert.match(bumpYml, /# renovate: datasource=github-releases depName=orhun\/git-cliff/);
