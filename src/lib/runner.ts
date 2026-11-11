@@ -1989,6 +1989,19 @@ export class Runner {
         }
         return [...rows.values()];
       };
+      // The pass's own side of the same snapshot: streams held open per lane,
+      // keyed `provider:profile`. The manual check reads this from the progress
+      // row and charges it before offering slots, so a lane this pass is
+      // working is not offered to the check at its paper cap. Zero-width holds
+      // are kept out rather than written as zeros, so "absent" always means
+      // "not held" and an idle pass publishes nothing here.
+      const laneHoldsSnapshot = (): Record<string, number> => {
+        const holds: Record<string, number> = {};
+        for (const [key, inflight] of laneCurrent) {
+          if (inflight.size > 0) holds[key] = inflight.size;
+        }
+        return holds;
+      };
       this.emit({
         phase: 'probing',
         total: selectedStreams,
@@ -2005,6 +2018,7 @@ export class Runner {
         heldBack,
         message: `probing ${selectedStreams} streams`,
         lanes: laneSnapshot(),
+        laneHolds: laneHoldsSnapshot(),
       });
 
       // The pass's per-stream verdicts: counters and the stats published to
@@ -2152,7 +2166,7 @@ export class Runner {
               laneCurrent.set(key, inflight);
             }
             inflight.set(job.streamId, channelNames.get(job.channelId) ?? `#${job.channelId}`);
-            this.emit({ lanes: laneSnapshot() });
+            this.emit({ lanes: laneSnapshot(), laneHolds: laneHoldsSnapshot() });
 
             const stream = streamById.get(job.streamId);
             let result: ProbeResult;
@@ -2184,7 +2198,7 @@ export class Runner {
               // The stream settles without this variant too, or its verdict
               // would wait on a probe that already gave up.
               laneFailed.set(key, (laneFailed.get(key) ?? 0) + 1);
-              this.emit({ lanes: laneSnapshot() });
+              this.emit({ lanes: laneSnapshot(), laneHolds: laneHoldsSnapshot() });
               settler.landed(job, null);
               const prov = providerNames.get(job.providerId) ?? `provider ${job.providerId}`;
               const name = stream?.name ?? `stream ${job.streamId}`;
@@ -2231,6 +2245,7 @@ export class Runner {
               reordered: counters.reordered,
               unchanged: counters.unchanged,
               lanes: laneSnapshot(),
+              laneHolds: laneHoldsSnapshot(),
               message: `${providerNames.get(job.providerId) ?? job.providerId}: ${
                 stream?.name?.slice(0, 60) ?? job.streamId
               }`,
@@ -2366,8 +2381,11 @@ export class Runner {
         message: `finished in ${((Date.now() - started) / 1000).toFixed(1)}s`,
         // laneSnapshot() carries the same done/dead/failed counts the mid-run
         // snapshots did, so the lane bars no longer flip meaning at completion.
-        // `current` is empty: the run is over and nothing is in flight.
+        // `current` is empty: the run is over and nothing is in flight -- and
+        // the holds say the same thing, so a manual check reading this row
+        // sees every lane free.
         lanes: laneSnapshot(),
+        laneHolds: laneHoldsSnapshot(),
       });
 
       // Check the Teamarr rules against what this pass just measured, before

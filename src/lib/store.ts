@@ -840,6 +840,17 @@ export interface Progress {
      */
     current: string[];
   }>;
+  /**
+   * Streams the pass holds open per lane, keyed `provider:profile`
+   * (`laneKey`), updated on every probe the pass starts and finishes.
+   *
+   * This is the pass's side of the provider-capacity bargain: a manual check
+   * reads it alongside the phase and charges it to the lane before offering
+   * slots, so a lane the pass is working is not offered at its paper cap.
+   * Absent on a row from an older worker, and on any row whose pass is not
+   * probing -- every hold is released when its probe lands.
+   */
+  laneHolds?: Record<string, number>;
   message: string;
   /**
    * When the next pass is due, and the cadence and target it is working to.
