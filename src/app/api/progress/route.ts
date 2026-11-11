@@ -70,7 +70,7 @@ export function GET() {
       stale,
       worker,
       heartbeatAgeSeconds: heartbeatAge === null ? null : Math.round(heartbeatAge / 1000),
-      refresh: { all: marks.all, groups: marks.byGroup.size },
+      refresh: { all: marks.all, groups: marks.byGroup.size, channels: marks.byChannel.size },
       runs,
       stats: {
         cache: store.cacheHealth(
