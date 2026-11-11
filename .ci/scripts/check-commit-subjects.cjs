@@ -3,7 +3,7 @@
 const { execFileSync } = require('node:child_process');
 
 // The release job reads commit subjects to pick the next version
-// (.woodpecker/scripts/bump.sh), so a subject that is not a conventional
+// (.ci/scripts/bump.sh), so a subject that is not a conventional
 // commit is not just untidy -- `feature:` instead of `feat:` silently
 // downgrades the next release from a minor to a patch. MR pipelines enforce
 // the same families bump.sh acts on.

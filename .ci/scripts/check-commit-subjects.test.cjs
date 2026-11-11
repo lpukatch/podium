@@ -46,9 +46,9 @@ test('breaking-change subjects keep their bang', () => {
 // The gate only runs on merge requests, where the branch's own commits are
 // what review sees. These wiring asserts keep the gate and the pipelines in
 // sync -- the script's whole value is being in the path for every MR.
-test('woodpecker runs the check on pull_request events', () => {
-  const ci = fs.readFileSync(path.join(__dirname, '../ci.yml'), 'utf8');
-  assert.match(ci, /name: commit-subjects[\s\S]*?when:[\s\S]*?event: pull_request[\s\S]*?check-commit-subjects\.cjs/);
+test('the upstream workflow runs the check on pull_request events', () => {
+  const ci = fs.readFileSync(path.join(__dirname, '../../.forgejo/workflows/ci.yml'), 'utf8');
+  assert.match(ci, /name: Commit subjects[\s\S]*?if: github\.event_name == 'pull_request'[\s\S]*?check-commit-subjects\.cjs/);
 });
 
 test('the mirror workflow runs the check on pull_request events', () => {

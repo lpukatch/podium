@@ -47,9 +47,9 @@ closure, a gitleaks scan of the full commit history, a coverage report, a
 conventional-commit subject check on merge requests, plus a Docker build
 and a trivy vulnerability scan on every published image.
 
-Upstream CI runs on Woodpecker; GitHub's mirror workflows remain separate.
-See [Woodpecker setup](docs/woodpecker.md) for secrets, runner requirements,
-and the manual release procedure.
+Upstream CI runs on Forgejo Actions; GitHub's mirror workflows remain separate.
+See [Forgejo Actions setup](docs/forgejo-actions.md) for secrets, runner
+requirements, and the manual release procedure.
 
 Do not open a pull or merge request until these checks and the Docker build pass
 locally; CI is confirmation, not the first test run.

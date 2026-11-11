@@ -24,7 +24,7 @@ case "$BUMP_TYPE" in
 esac
 
 # Release notes are generated with a checksum-verified git-cliff build. The
-# version in .woodpecker/bump.yml carries the renovate annotation; the
+# version in .forgejo/workflows/bump.yml carries the renovate annotation; the
 # defaults here cover local releases (npm run release:bump) -- keep the three
 # values in sync.
 GIT_CLIFF_VERSION=${GIT_CLIFF_VERSION:-2.14.2}
@@ -55,8 +55,8 @@ else
     exit 1
   fi
   git checkout -B main origin/main
-  git config user.name 'Woodpecker CI'
-  git config user.email 'woodpecker@forgejo.local'
+  git config user.name 'Forgejo Actions'
+  git config user.email 'actions@forgejo.local'
 fi
 
 LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -n 1)

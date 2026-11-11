@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # Full history: the commit-subject check walks origin/main..HEAD.
+          fetch-depth: 0
+
+      - name: Commit subjects
+        if: github.event_name == 'pull_request'
+        run: node .ci/scripts/check-commit-subjects.cjs
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+          cache: npm
+
+      - name: Install
+        run: |
+          node --test .ci/scripts/*.test.cjs
+          npm ci
+
+      # The shipped closure only: the standalone server traces production
+      # dependencies, so devDependencies never reach an image -- auditing them
+      # gates on noise. HIGH is the bar: moderate findings would train the red
+      # pipeline to be ignored, and renovate lands the rest within days.
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      # Forgejo has no server-side secret scanning, so the pipeline is the
+      # substitute: the GitHub mirror is public and syncs every commit, meaning a
+      # token that lands on main is exposed within one sync. Scan the full
+      # history (fetch-depth: 0 above) so a secret from an older branch is
+      # caught too. `gitleaks git` exits nonzero on any finding; accepted false
+      # positives are fingerprinted in .gitleaksignore.
+      #
+      # docker run rather than `container:` on the job: the gitleaks image is
+      # Alpine and cannot run the checkout action's glibc node binary inside
+      # itself.
+      - name: Scan history for secrets
+        run: docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/gitleaks/gitleaks:v8.30.1 git --no-banner
+
+      - name: Lint and format check
+        run: npm run format:check
+
+      - name: Type check
+        run: npm run type-check
+
+      - name: Test
+        # ffmpeg so the probe tests exercise the real ffprobe path rather than
+        # only the parser. Coverage table lands in the run log; thresholds
+        # follow once main's baseline is visible.
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+          npm run test:coverage
+
+  docker:
+    # Publish builds on main; CI only needs to validate PR images.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: network=host
+
+      - name: Login to Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ vars.REGISTRY }}
+          username: ${{ vars.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
+
+      # Build only -- publishing is build.yml's job.
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: false
+          tags: podium:ci
+          build-args: PODIUM_BUILD_VERSION=0.0.0-ci
+          # Skips the attestation manifest, which otherwise shows up on the
+          # packages page as an "unknown/unknown" platform entry.
+          provenance: false
+          # Export with Docker media types, not OCI ones: Unraid's Docker tab
+          # fails to parse an OCI-typed manifest and shows the template as
+          # "not available".
+          outputs: type=image,oci-mediatypes=false
+          # PRs read main's cache but never write it: every write replaces the
+          # :buildcache tag and orphans the previous blobs for the registry's
+          # GC to reap.
+          cache-from: type=registry,ref=${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}:buildcache
