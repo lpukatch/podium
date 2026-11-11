@@ -96,11 +96,12 @@ release's section with git-cliff (`cliff.toml` is the template) and prepends
 it. git-cliff and node are pinned in `mise.toml` — Renovate's mise manager
 keeps the pinned versions current, and the release workflow installs mise
 directly (the forge's action mirror does not carry mise-action) and runs
-`mise install` for the pinned tools. bump.sh runs git-cliff through
-`mise exec`, so the version is the same in CI and for local releases; the only
-checksum kept by hand is mise's own, in `bump.yml`, guarded by the tool-pins
-contract test. The GitHub release body is read back out of `CHANGELOG.md`, so
-what users read in the repo is what they get on releases.
+`mise install` for the pinned tools. The mise download is verified against
+the release's own `SHASUMS256.txt`, so nothing checksum-related is maintained
+by hand. bump.sh runs git-cliff through `mise exec`, so the version is the
+same in CI and for local releases. The GitHub release body is read back out
+of `CHANGELOG.md`, so what users read in the repo is what they get on
+releases.
 
 ### Release from a local checkout
 

@@ -26,18 +26,17 @@ test('setup-node pins the same node major as mise.toml', () => {
   }
 });
 
-test('bump.yml pins the mise release and checksum that install-mise.sh verifies', () => {
+test('bump.yml pins the mise release; install-mise.sh verifies against its SHASUMS', () => {
   const bumpYml = read('.forgejo/workflows/bump.yml');
   assert.match(bumpYml, /# renovate: datasource=github-releases depName=jdx\/mise/);
-  const version = bumpYml.match(/MISE_VERSION: "?([^"\s]+)"?/)[1];
-  const sha = bumpYml.match(/MISE_SHA256: ([0-9a-f]{64})/)[1];
-  assert.ok(version, 'MISE_VERSION missing from bump.yml');
-  assert.ok(sha, 'MISE_SHA256 missing from bump.yml');
+  assert.match(bumpYml, /MISE_VERSION: "?\d{4}\.\d+\.\d+"?/);
+  // No hand-pinned checksum anywhere in the workflow: renovate bumps
+  // MISE_VERSION alone, and the installer verifies the download against the
+  // release's own SHASUMS256.txt instead.
+  assert.doesNotMatch(bumpYml, /[0-9a-f]{64}/);
   const installer = read('.ci/scripts/install-mise.sh');
   assert.match(installer, /mise-v\$\{MISE_VERSION\}-linux-x64/);
-  assert.match(installer, /sha256sum -c/);
-  // The checksum cannot be validated statically; presence and pairing with the
-  // version is the contract -- renovate bumps only the version line.
+  assert.match(installer, /SHASUMS256\.txt/);
   assert.match(bumpYml, /mise install/);
   assert.match(bumpYml, /mise exec -- sh \.ci\/scripts\/bump\.sh/);
 });

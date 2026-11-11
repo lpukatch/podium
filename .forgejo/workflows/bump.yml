@@ -47,16 +47,13 @@ jobs:
 
       # mise rather than jdx/mise-action: the runner resolves `uses:` through
       # the forge's action mirror, which does not carry that action, so it is
-      # installed directly -- checksummed, the way bump.sh used to install
-      # git-cliff itself.
+      # installed directly, verifying the download against the release's own
+      # SHASUMS256.txt. renovate bumps MISE_VERSION alone; nothing here is
+      # maintained alongside a bump.
       - name: Install mise
         env:
           # renovate: datasource=github-releases depName=jdx/mise
           MISE_VERSION: "2026.11.6"
-          # sha256 of mise-v${MISE_VERSION}-linux-x64. renovate updates only the
-          # version line: set this alongside each bump (install-mise.sh
-          # hard-fails on a mismatch).
-          MISE_SHA256: 5fb74f80aab81e0a5ca20eb6414cc69b78ae0cab1deaeb521572ed26d8d4a6e3
         run: sh .ci/scripts/install-mise.sh
 
       # node and git-cliff from the mise.toml pin, the same versions local
