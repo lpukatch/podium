@@ -43,8 +43,7 @@ next-env.d.ts
 # Local state: the dev database carries a live Dispatcharr credential, and an
 # exported config can carry one too.
 data/
-.env
-.env.local
+.env*
 .local/
 
 # Editor and agent scratch state
