@@ -1895,7 +1895,7 @@ export class Runner {
       // every tick, so the pacer's "grow the slice as the deadline nears" shape
       // was dead code.
       const oldestOpenAge = openAges.length
-        ? openAges.reduce((max, age) => (age > max ? age : max), 0)
+        ? openAges.reduce((max, age) => Math.max(max, age), 0)
         : 0;
       // Paced against the freshness target, deliberately *not* against the TTL
       // that made an item due. Those are different questions: a dead verdict
