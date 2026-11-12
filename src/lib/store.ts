@@ -74,6 +74,34 @@ CREATE TABLE IF NOT EXISTS probe_cache (
 );
 CREATE INDEX IF NOT EXISTS probe_cache_probed_at ON probe_cache (probed_at);
 
+-- Every verdict put() writes, kept for a while after the next one replaces it.
+--
+-- probe_cache is upserted, so it only ever answers "what is this stream now".
+-- A stream that flipped dead at 19:58 and back at 20:05, or whose bitrate
+-- halved on Tuesday, has already been overwritten by the time anyone asks --
+-- the cache was built to decide what to probe next, not to remember. This is
+-- the same verdict appended rather than replaced, written in the same
+-- transaction with the same probed_at. The newest row here is the stream's
+-- latest probe, which is not always the verdict verdicts() reports: that one
+-- folds every row the cache holds for the stream, a hash it has moved on from
+-- included, and an older hash's alive row can win.
+--
+-- Bounded twice: PROBE_HISTORY_PER_STREAM rows per stream, trimmed as each is
+-- written, and PROBE_HISTORY_MS of age, swept each pass. Unlike
+-- quality_samples it describes a stream rather than its provenance, so it
+-- goes with the stream: pruneOutside and resetData clear it as they clear
+-- probe_cache. There is no variant_id: both callers of put() write pooled
+-- verdicts, and the per-login rows pruneVariants sweeps predate this table.
+CREATE TABLE IF NOT EXISTS probe_history (
+    stream_id INTEGER NOT NULL,
+    probed_at INTEGER NOT NULL, -- epoch ms, the same value written to probe_cache
+    alive     INTEGER NOT NULL,
+    black     INTEGER NOT NULL,
+    result    TEXT    NOT NULL  -- JSON ProbeResult, as in probe_cache
+);
+CREATE INDEX IF NOT EXISTS probe_history_stream ON probe_history (stream_id, probed_at DESC);
+CREATE INDEX IF NOT EXISTS probe_history_time   ON probe_history (probed_at);
+
 CREATE TABLE IF NOT EXISTS runs (
     run_id           TEXT PRIMARY KEY,
     started_at       INTEGER NOT NULL,
@@ -874,6 +902,28 @@ export const BUSY_TIMEOUT_MS = 5_000;
  */
 export const RUN_HISTORY_MS = 30 * 86_400_000;
 
+/**
+ * How long a stream's past verdicts are kept in `probe_history`.
+ *
+ * A month, the same as run history: long enough to look back at "when did it
+ * start dying" a week or two after the fact. On the default TTLs a healthy
+ * stream is reprobed daily, so this is the bound that bites for most streams:
+ * thirty-odd rows each.
+ */
+export const PROBE_HISTORY_MS = 30 * 86_400_000;
+
+/**
+ * How many past verdicts `probe_history` keeps per stream, newest first.
+ *
+ * The bound for the streams probed far more often than daily -- a stream
+ * whose bitrate ffprobe could not read is retried every half hour, and the
+ * channel editor's check probes on demand -- which an age bound alone would
+ * let grow by the thousand. A hundred is still two days of half-hourly probes.
+ * Trimmed as each verdict is written, so the table never holds more than this
+ * times the number of streams.
+ */
+export const PROBE_HISTORY_PER_STREAM = 100;
+
 export const IDLE_PROGRESS: Progress = {
   runId: null,
   phase: 'idle',
@@ -1655,28 +1705,47 @@ export class Store {
    * than read-then-written: the worker holds the lock so nothing else writes
    * here, but a count that can silently skip on a retry is not worth the risk
    * when SQL expresses it exactly.
+   *
+   * The same verdict is appended to `probe_history` in the same transaction,
+   * with the same `probed_at`, so the two cannot drift apart about when a
+   * probe ran or what it found. That stream is then trimmed back to
+   * `PROBE_HISTORY_PER_STREAM` rows: a seek on `probe_history_stream` over at
+   * most one row more than the cap.
    */
   put(streamId: number, streamHash: string, result: ProbeResult, variantId = 0): void {
-    this.sql(
-      `INSERT INTO probe_cache (stream_id, stream_hash, variant_id, probed_at, alive, black, result, dead_streak)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(stream_id, stream_hash, variant_id) DO UPDATE SET
-         probed_at   = excluded.probed_at,
-         alive       = excluded.alive,
-         black       = excluded.black,
-         result      = excluded.result,
-         dead_streak = CASE WHEN excluded.alive = 1 THEN 0
-                            ELSE probe_cache.dead_streak + 1 END`,
-    ).run(
-      streamId,
-      streamHash,
-      variantId,
-      Date.now(),
-      result.alive ? 1 : 0,
-      result.black ? 1 : 0,
-      JSON.stringify(result),
-      result.alive ? 0 : 1,
-    );
+    const now = Date.now();
+    const alive = result.alive ? 1 : 0;
+    const black = result.black ? 1 : 0;
+    const json = JSON.stringify(result);
+    this.db.transaction(() => {
+      this.sql(
+        `INSERT INTO probe_cache (stream_id, stream_hash, variant_id, probed_at, alive, black, result, dead_streak)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(stream_id, stream_hash, variant_id) DO UPDATE SET
+           probed_at   = excluded.probed_at,
+           alive       = excluded.alive,
+           black       = excluded.black,
+           result      = excluded.result,
+           dead_streak = CASE WHEN excluded.alive = 1 THEN 0
+                              ELSE probe_cache.dead_streak + 1 END`,
+      ).run(streamId, streamHash, variantId, now, alive, black, json, alive ? 0 : 1);
+      this.sql(
+        'INSERT INTO probe_history (stream_id, probed_at, alive, black, result) VALUES (?, ?, ?, ?, ?)',
+      ).run(streamId, now, alive, black, json);
+      // By rowid rather than a probed_at cutoff: two verdicts in the same
+      // millisecond (an on-demand check racing the pass) would otherwise tie
+      // at the boundary and both survive.
+      this.sql(
+        `DELETE FROM probe_history
+          WHERE stream_id = ?
+            AND rowid NOT IN (
+              SELECT rowid FROM probe_history
+               WHERE stream_id = ?
+               ORDER BY probed_at DESC, rowid DESC
+               LIMIT ?
+            )`,
+      ).run(streamId, streamId, PROBE_HISTORY_PER_STREAM);
+    })();
   }
 
   startRun(runId: string): void {
@@ -1708,6 +1777,12 @@ export class Store {
     // nobody watches never accumulates rows *and* never pays to look -- the
     // index seek matches nothing on all but the first pass of the day.
     this.sql('DELETE FROM stream_legs WHERE ended_at < ?').run(now - STABILITY_HISTORY_MS);
+    // Same sweep, same bargain. `put()` caps each stream's history as it
+    // writes, but a stream that stays managed and stops being probed is never
+    // written again, so only an age sweep retires its rows -- a seek on
+    // `probe_history_time`. One that stops being managed goes with
+    // `pruneOutside`.
+    this.sql('DELETE FROM probe_history WHERE probed_at < ?').run(now - PROBE_HISTORY_MS);
   }
 
   finishRun(runId: string, fields: RunUpdate = {}): void {
@@ -1799,6 +1874,67 @@ export class Store {
           out.set(streamId, { probedAt, alive: best.alive, result: best });
         }
       }
+    }
+    return out;
+  }
+
+  /**
+   * Past verdicts per stream from `probe_history`, newest first, at most
+   * `limit` each, and only those probed strictly after `since` when given.
+   *
+   * With `streamIds` it reads just those streams; without, every stream that
+   * has history in range -- which with `since` is "what has been probed since
+   * I last asked". A stream with nothing in range is absent from the map
+   * rather than mapped to an empty list. Rows are as written: no variant fold,
+   * because history is only ever written pooled.
+   */
+  probeHistory(options: {
+    streamIds?: number[];
+    since?: number | null;
+    limit: number;
+  }): Map<number, Array<{ probedAt: number; alive: boolean; result: ProbeResult }>> {
+    const { streamIds, limit } = options;
+    // Every real probed_at is positive, so -1 keeps every row.
+    const since = options.since ?? -1;
+    const out = new Map<number, Array<{ probedAt: number; alive: boolean; result: ProbeResult }>>();
+    const query = (streamFilter: string) =>
+      `SELECT stream_id, probed_at, alive, result FROM (
+         SELECT stream_id, probed_at, alive, result,
+                ROW_NUMBER() OVER (
+                  PARTITION BY stream_id ORDER BY probed_at DESC, rowid DESC
+                ) AS rank
+           FROM probe_history
+          WHERE probed_at > ? ${streamFilter}
+       ) WHERE rank <= ?
+       ORDER BY stream_id, rank`;
+    type Row = { stream_id: number; probed_at: number; alive: number; result: string };
+    const collect = (rows: Row[]) => {
+      for (const row of rows) {
+        let result: ProbeResult;
+        try {
+          result = JSON.parse(row.result) as ProbeResult;
+        } catch {
+          // An unreadable row is a gap in the history, not a failed read.
+          continue;
+        }
+        const list = out.get(row.stream_id) ?? [];
+        list.push({ probedAt: row.probed_at, alive: row.alive === 1, result });
+        out.set(row.stream_id, list);
+      }
+    };
+
+    if (streamIds === undefined) {
+      collect(this.sql(query('')).all(since, limit) as Row[]);
+      return out;
+    }
+    // Chunked to stay under SQLite's bound-variable limit, as `verdicts()` is.
+    for (let i = 0; i < streamIds.length; i += 400) {
+      const chunk = streamIds.slice(i, i + 400);
+      const holes = chunk.map(() => '?').join(',');
+      // Not cached: one bind hole per id, so the text varies with the chunk.
+      collect(
+        this.db.prepare(query(`AND stream_id IN (${holes})`)).all(since, ...chunk, limit) as Row[],
+      );
     }
     return out;
   }
@@ -3503,6 +3639,7 @@ export class Store {
   resetData(): void {
     this.db.transaction(() => {
       this.sql('DELETE FROM probe_cache').run();
+      this.sql('DELETE FROM probe_history').run();
       this.sql('DELETE FROM runs').run();
       // A mark against verdicts that no longer exist is a request that has
       // already been granted, and leaving it would keep waking the worker.
@@ -3636,6 +3773,11 @@ export class Store {
       this.sql('DELETE FROM _podium_keep').run();
       const insert = this.sql('INSERT INTO _podium_keep (id) VALUES (?)');
       for (const id of ids) insert.run(id);
+      // A stream's history goes with its verdict. The count stays the cache's
+      // alone: it is what the pass logs as orphan cache rows.
+      this.sql(
+        'DELETE FROM probe_history WHERE stream_id NOT IN (SELECT id FROM _podium_keep)',
+      ).run();
       return this.sql(
         'DELETE FROM probe_cache WHERE stream_id NOT IN (SELECT id FROM _podium_keep)',
       ).run().changes;
