@@ -1,0 +1,12 @@
+# The two tools npm cannot pin: Node itself and the release-notes generator.
+# CI installs both with mise-action; contributors with a one-time `mise install`.
+# Renovate's mise manager keeps the version lines current.
+#
+# No mise.lock on purpose: `mise install --locked` hard-fails once the pin and
+# the lock disagree, so a lock would turn every renovate bump red until
+# somebody re-ran `mise lock` here. The requirements carry the semantics
+# instead -- node floats within the major (as setup-node's '26' did), git-cliff
+# is an exact pin.
+[tools]
+node = "26"
+"git-cliff" = "2.14.2"

@@ -47,6 +47,8 @@ jobs:
           # Full history: the commit-subject check walks origin/main..HEAD.
           fetch-depth: 0
 
+      # node-version must match the node pin in mise.toml (local dev and the
+      # release workflow); the tool-pins contract test hard-fails on drift.
       - name: Set up Node
         uses: actions/setup-node@v7
         with:

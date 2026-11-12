@@ -93,17 +93,22 @@ existing GitHub release workflow.
 
 The release commit also carries `CHANGELOG.md`: bump.sh generates the new
 release's section with git-cliff (`cliff.toml` is the template) and prepends
-it. The version and checksum of the git-cliff build are pinned in `bump.yml`
-(`# renovate:` annotation) with matching defaults in bump.sh for local
-releases; a checksum mismatch aborts the release. The GitHub release body is
-read back out of `CHANGELOG.md`, so what users read in the repo is what they
-get on releases.
+it. git-cliff and node are pinned in `mise.toml` — Renovate's mise manager
+keeps the pinned versions current, and the release workflow installs mise
+directly (the forge's action mirror does not carry mise-action) and runs
+`mise install` for the pinned tools. The mise download is verified against
+the release's own `SHASUMS256.txt`, so nothing checksum-related is maintained
+by hand. bump.sh runs git-cliff through `mise exec`, so the version is the
+same in CI and for local releases. The GitHub release body is read back out
+of `CHANGELOG.md`, so what users read in the repo is what they get on
+releases.
 
 ### Release from a local checkout
 
 From a clean `main` checkout with Git push access, run:
 
 ```sh
+mise install            # first time only: node + git-cliff from mise.toml
 npm run release:bump -- minor
 ```
 

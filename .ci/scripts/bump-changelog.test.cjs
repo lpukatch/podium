@@ -43,12 +43,12 @@ test('bump.yml supplies the validated commit SHA required by bump.sh', () => {
   assert.match(workflow, /^\s+CI_COMMIT_SHA: \$\{\{ github\.sha \}\}$/m);
 });
 
-test('bump.yml pins the git-cliff version and checksum bump.sh defaults to', () => {
-  const bumpYml = read('.forgejo/workflows/bump.yml');
-  assert.match(bumpYml, /# renovate: datasource=github-releases depName=orhun\/git-cliff/);
-  const pinned = bumpYml.match(/GIT_CLIFF_VERSION: "?([^"\s]+)"?/)[1];
-  const sha = bumpYml.match(/GIT_CLIFF_SHA256: ([0-9a-f]{64})/)[1];
+test('git-cliff runs through mise with its version pinned in mise.toml', () => {
   const bump = read('.ci/scripts/bump.sh');
-  assert.match(bump, new RegExp(`GIT_CLIFF_SHA256:-${sha}`));
-  assert.match(bump, new RegExp(`GIT_CLIFF_VERSION:-${pinned.replace(/\./g, '\\.')}`));
+  assert.match(bump, /mise exec -- git-cliff --unreleased/);
+  // The hand-rolled version+sha256 pair must stay gone: mise.toml is the only
+  // pin now, and the workflows install git-cliff via mise-action.
+  assert.doesNotMatch(bump, /GIT_CLIFF_(VERSION|SHA256)/);
+  assert.doesNotMatch(read('.forgejo/workflows/bump.yml'), /GIT_CLIFF_/);
+  assert.match(read('mise.toml'), /"git-cliff" = "\d+\.\d+\.\d+"/);
 });
