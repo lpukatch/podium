@@ -55,6 +55,17 @@ describe('readJson', () => {
     expect(malformed).toEqual({ ok: false, status: 400, message: 'body is not JSON' });
   });
 
+  it('answers 400 for a literal null body', async () => {
+    // JSON.parse("null") succeeds, and every caller reads the result as an
+    // object -- letting null through would throw in a handler far from the
+    // parse and surface as a 500. The routes' old `=== null` guards caught
+    // exactly this; this is where they live now.
+    const read = await readJson(
+      new Request('http://podium/api/x', { method: 'POST', body: 'null' }),
+    );
+    expect(read).toEqual({ ok: false, status: 400, message: 'body is not JSON' });
+  });
+
   it('answers 400 for a missing body', async () => {
     const read = await readJson(new Request('http://podium/api/x'));
     expect(read).toEqual({ ok: false, status: 400, message: 'body is not JSON' });

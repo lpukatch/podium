@@ -74,7 +74,11 @@ export async function readText(
  *
  * A body that is not JSON answers 400 -- the routes' own wording, kept so the
  * client sees the same refusal it always did -- and one over the cap answers
- * 413 whether or not it declared a length.
+ * 413 whether or not it declared a length. A literal `null` body answers 400
+ * too: `JSON.parse("null")` succeeds, and every caller here reads the result
+ * as an object, so passing null through would throw `TypeError` in a handler
+ * far from the parse and surface as a 500 -- the routes' old `=== null`
+ * guards caught exactly this, and this is where they live now.
  */
 export async function readJson<T = unknown>(
   request: Request,
@@ -83,7 +87,9 @@ export async function readJson<T = unknown>(
   const read = await readText(request, limit);
   if (!read.ok) return read;
   try {
-    return { ok: true, value: JSON.parse(read.value) as T };
+    const value = JSON.parse(read.value) as T;
+    if (value === null) return { ok: false, status: 400, message: 'body is not JSON' };
+    return { ok: true, value };
   } catch {
     return { ok: false, status: 400, message: 'body is not JSON' };
   }

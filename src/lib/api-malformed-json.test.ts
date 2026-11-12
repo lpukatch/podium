@@ -107,6 +107,22 @@ describe('a body that is not JSON', () => {
     expect(readFileSync(rulesPath, 'utf8')).toBe(RULES);
   });
 
+  it('is a 400, not a 500, from the settings route when the body is JSON null', async () => {
+    // JSON.parse("null") succeeds, so this is not a parse failure -- it is a
+    // body the route reads as an object and cannot use. The old `=== null`
+    // guards answered 400; the bounded reader keeps that answer.
+    const { PUT } = await import('../app/api/settings/route');
+    await expect400(await PUT(put('null')));
+  });
+
+  it('is a 400, not a 500, from the apply route when the body is JSON null', async () => {
+    const { POST } = await import('../app/api/apply/[channelId]/route');
+    const response = await POST(post('null'), {
+      params: Promise.resolve({ channelId: '5' }),
+    });
+    await expect400(response);
+  });
+
   it('is a 400 from the quality-profile merge route', async () => {
     const { POST } = await import('../app/api/quality-profile/route');
     await expect400(await POST(post('{"rules": ')));
