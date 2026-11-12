@@ -3,6 +3,7 @@ import { loadConfig } from '@/lib/config';
 import { connectTokenMatches } from '@/lib/connect';
 import { isConnectEventName, parseConnectEvent } from '@/lib/connect-events';
 import { errorText } from '@/lib/error-text';
+import { readText } from '@/lib/http-body';
 import { Store } from '@/lib/store';
 
 export const dynamic = 'force-dynamic';
@@ -60,10 +61,15 @@ export async function POST(
       return NextResponse.json({ error: 'missing or wrong token' }, { status: 401 });
     }
 
+    const body = await readText(request);
+    if (!body.ok) {
+      store.recordConnectRejection(event, body.status, body.message);
+      return NextResponse.json({ error: body.message }, { status: body.status });
+    }
     const parsed = parseConnectEvent(
       event,
       request.headers.get('content-type') ?? '',
-      await request.text(),
+      body.value,
       Date.now(),
     );
     if (parsed === null) {

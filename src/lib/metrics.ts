@@ -194,6 +194,9 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
   }
 
   // --- lifetime totals -----------------------------------------------------
+  // Durable in `lifetime_totals` and incremented as rows land: the `runs`
+  // table trims to RUN_HISTORY_MS, and a counter computed over it would walk
+  // backwards at each trim -- a reset rate() would have to believe.
   const totals = store.runTotals();
   out.add('podium_runs_total', 'Runs recorded.', 'counter', totals.runs);
   out.add('podium_runs_failed_total', 'Runs that ended in an error.', 'counter', totals.failed);
@@ -244,42 +247,44 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
   // The push is safety-gated (thin coverage defers, a regression refuses), so
   // "nothing was written" is a normal outcome and the single latest-attempt row
   // cannot distinguish a healthy always-deferring install from one whose
-  // scheduled sync died on Tuesday. Counted over the retained sync history
-  // rather than process lifetime, like everything else here derived from the
-  // database -- which means the counters step back to zero when the log rolls
-  // over, and rate() treats that as the reset it is.
+  // scheduled sync died on Tuesday.
+  //
+  // The totals come from `lifetime_totals`, bumped as each attempt is
+  // recorded, not from the retained log: the log drops its oldest rows at
+  // 200, and a counter that walks backwards at every rollover is a reset
+  // rate() and increase() would believe. The log still answers "when did a
+  // push last actually happen" -- a question about the recent past, which a
+  // gauge may take from whatever history is kept. The series are published
+  // whether or not a sync has ever run, so a scrape never sees them appear
+  // and disappear.
+  const syncTotals = store.lifetimeTotals();
   const syncLog = store.teamarrSyncLog();
-  if (syncLog.length > 0) {
-    type Bucket = 'pushed' | 'deferred' | 'refused' | 'failed';
-    const buckets: Record<Bucket, number> = { pushed: 0, deferred: 0, refused: 0, failed: 0 };
-    let lastPush = 0;
-    for (const row of syncLog) {
-      const bucket: Bucket = row.pushed
-        ? 'pushed'
-        : row.deferred
-          ? 'deferred'
-          : row.failed
-            ? 'failed'
-            : 'refused';
-      buckets[bucket] += 1;
-      if (row.pushed && row.ranAt > lastPush) lastPush = row.ranAt;
-    }
-    for (const bucket of Object.keys(buckets) as Bucket[]) {
-      out.add(
-        'podium_teamarr_sync_total',
-        'Teamarr sync attempts in the retained history (oldest dropped at 200), by outcome.',
-        'counter',
-        buckets[bucket],
-        { outcome: bucket },
-      );
-    }
+  type Bucket = 'pushed' | 'deferred' | 'refused' | 'failed';
+  const buckets: Record<Bucket, number> = {
+    pushed: syncTotals['teamarr.sync.pushed'] ?? 0,
+    deferred: syncTotals['teamarr.sync.deferred'] ?? 0,
+    refused: syncTotals['teamarr.sync.refused'] ?? 0,
+    failed: syncTotals['teamarr.sync.failed'] ?? 0,
+  };
+  let lastPush = 0;
+  for (const row of syncLog) {
+    if (row.pushed && row.ranAt > lastPush) lastPush = row.ranAt;
+  }
+  for (const bucket of Object.keys(buckets) as Bucket[]) {
     out.add(
-      'podium_teamarr_last_push_timestamp_seconds',
-      'Unix time of the most recent push in the retained history; 0 when none was kept.',
-      'gauge',
-      Math.round(lastPush / 1000),
+      'podium_teamarr_sync_total',
+      'Teamarr sync attempts recorded since tracking began, by outcome.',
+      'counter',
+      buckets[bucket],
+      { outcome: bucket },
     );
   }
+  out.add(
+    'podium_teamarr_last_push_timestamp_seconds',
+    'Unix time of the most recent push in the retained history; 0 when none was kept.',
+    'gauge',
+    Math.round(lastPush / 1000),
+  );
 
   // Receiver totals are durable, not the length of the consumed event queue.
   try {

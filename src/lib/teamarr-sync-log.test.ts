@@ -72,8 +72,15 @@ describe('teamarr sync log', () => {
     expect(text).toContain('podium_teamarr_last_push_timestamp_seconds 1700000000');
   });
 
-  it('emits no teamarr series before the first attempt', () => {
+  it('emits the teamarr series at zero before the first attempt', () => {
+    // The totals are durable in lifetime_totals and published whether or not
+    // a sync has ever run, so a scrape never sees the series appear and
+    // disappear across the log's rollover -- zero is a value, not an absence.
     const text = renderMetrics(store, { maxAgeMs: 3600_000 });
-    expect(text).not.toContain('podium_teamarr_');
+    expect(text).toContain('podium_teamarr_sync_total{outcome="pushed"} 0');
+    expect(text).toContain('podium_teamarr_sync_total{outcome="deferred"} 0');
+    expect(text).toContain('podium_teamarr_sync_total{outcome="refused"} 0');
+    expect(text).toContain('podium_teamarr_sync_total{outcome="failed"} 0');
+    expect(text).toContain('podium_teamarr_last_push_timestamp_seconds 0');
   });
 });

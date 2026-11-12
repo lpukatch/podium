@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
 import { errorText } from '@/lib/error-text';
+import { readJson } from '@/lib/http-body';
 import { snapshot } from '@/lib/server/state';
 import { type SoakRequest, type SoakSource, Store } from '@/lib/store';
 
@@ -212,7 +213,19 @@ export function GET() {
 export async function POST(request: Request) {
   let store: Store | null = null;
   try {
-    const body = (await request.json().catch(() => ({}))) as {
+    // Optional body, same bargain as /api/refresh: malformed reads as absent,
+    // oversized is refused.
+    const read = await readJson<{
+      scope?: string;
+      id?: unknown;
+      channelIds?: unknown;
+      now?: boolean;
+      seconds?: unknown;
+    }>(request);
+    if (!read.ok && read.status === 413) {
+      return NextResponse.json({ error: read.message }, { status: 413 });
+    }
+    const body = (read.ok ? read.value : {}) as {
       scope?: string;
       id?: unknown;
       channelIds?: unknown;

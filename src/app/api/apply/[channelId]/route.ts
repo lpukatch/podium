@@ -3,6 +3,7 @@ import { requireCredentials } from '@/lib/config';
 import { DispatcharrClient } from '@/lib/dispatcharr';
 import { currentProgrammes, describeVerdict, Eligibility } from '@/lib/eligibility';
 import { responseErrorText } from '@/lib/error-text';
+import { readJson } from '@/lib/http-body';
 import { catalogueRows, composeApplyOrder } from '@/lib/runner';
 import {
   groupPatterns,
@@ -32,16 +33,17 @@ export async function POST(request: Request, context: { params: Promise<{ channe
 
   let store: Store | null = null;
   try {
-    const body = (await request.json().catch(() => null)) as {
+    const parsed = await readJson<{
       order?: number[];
       removeUnmatched?: boolean;
       force?: boolean;
       allowAssign?: boolean;
       pruned?: number[];
-    } | null;
-    if (body === null) {
-      return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
+    }>(request);
+    if (!parsed.ok) {
+      return NextResponse.json({ error: parsed.message }, { status: parsed.status });
     }
+    const body = parsed.value;
     const order = body.order ?? [];
     if (order.length === 0 || order.some((n) => !Number.isInteger(n))) {
       return NextResponse.json({ error: 'order must be a non-empty list of ids' }, { status: 400 });

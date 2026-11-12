@@ -9,6 +9,7 @@ import {
 } from '@/lib/backup';
 import { loadConfig } from '@/lib/config';
 import { responseErrorText } from '@/lib/error-text';
+import { readJson } from '@/lib/http-body';
 import { loadRules } from '@/lib/rules';
 import { readRulesDoc, writeRulesDoc } from '@/lib/server/state';
 import { credentialMoveMessage, movedCredentials } from '@/lib/settings';
@@ -77,11 +78,14 @@ export async function POST(request: Request) {
   let store: Store | null = null;
   try {
     let raw: unknown;
-    try {
-      raw = await request.json();
-    } catch {
-      return NextResponse.json({ error: 'not a JSON file' }, { status: 400 });
+    const read = await readJson(request);
+    if (!read.ok) {
+      return NextResponse.json(
+        { error: read.status === 413 ? read.message : 'not a JSON file' },
+        { status: read.status },
+      );
     }
+    raw = read.value;
 
     let parsed: ReturnType<typeof parseBundle>;
     try {

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { responseErrorText } from '@/lib/error-text';
+import { readJson } from '@/lib/http-body';
 import {
   DEFAULT_WEIGHTS,
   type HdrPreference,
@@ -124,14 +125,17 @@ export async function PUT(request: Request) {
   try {
     // Malformed JSON is the client's mistake; the 400 says so before any
     // reading of the body can turn it into a 500 or, worse, a silent reset.
-    const body = (await request.json().catch(() => null)) as {
+    // A body over the cap answers 413 at the read, not wherever the buffer
+    // happened to give out.
+    const parsed = await readJson<{
       mode?: string;
       providerPreference?: string[];
       weights?: Record<string, unknown>;
-    } | null;
-    if (body === null) {
-      return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
+    }>(request);
+    if (!parsed.ok) {
+      return NextResponse.json({ error: parsed.message }, { status: parsed.status });
     }
+    const body = parsed.value;
 
     const mode: OrderingResponse['mode'] =
       body.mode === 'provider' || body.mode === 'alias' ? body.mode : 'quality';

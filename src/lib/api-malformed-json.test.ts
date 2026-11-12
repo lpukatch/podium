@@ -107,6 +107,22 @@ describe('a body that is not JSON', () => {
     expect(readFileSync(rulesPath, 'utf8')).toBe(RULES);
   });
 
+  it('is a 400, not a 500, from the settings route when the body is JSON null', async () => {
+    // JSON.parse("null") succeeds, so this is not a parse failure -- it is a
+    // body the route reads as an object and cannot use. The old `=== null`
+    // guards answered 400; the bounded reader keeps that answer.
+    const { PUT } = await import('../app/api/settings/route');
+    await expect400(await PUT(put('null')));
+  });
+
+  it('is a 400, not a 500, from the apply route when the body is JSON null', async () => {
+    const { POST } = await import('../app/api/apply/[channelId]/route');
+    const response = await POST(post('null'), {
+      params: Promise.resolve({ channelId: '5' }),
+    });
+    await expect400(response);
+  });
+
   it('is a 400 from the quality-profile merge route', async () => {
     const { POST } = await import('../app/api/quality-profile/route');
     await expect400(await POST(post('{"rules": ')));
@@ -132,5 +148,41 @@ describe('a body that is not JSON', () => {
       params: Promise.resolve({ channelId: '5' }),
     });
     await expect400(response);
+  });
+});
+
+describe('a body bigger than the cap', () => {
+  // Chunked: no Content-Length at all, so the proxy's door does not close on
+  // it and the route's bounded reader is the only thing that can. This is the
+  // hole the old `request.json()` left -- it buffered whatever arrived, and a
+  // length was a claim the body never had to keep.
+  const chunked = (megabytes: number): Request => {
+    const chunk = new TextEncoder().encode('x'.repeat(1024 * 1024));
+    let sent = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent >= megabytes) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(chunk);
+        sent += 1;
+      },
+    });
+    return new Request('http://podium/api/x', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: stream,
+      // Node's Request requires the duplex hint for a streaming body.
+      duplex: 'half',
+    } as RequestInit);
+  };
+
+  it('is a 413 from the settings route when it streams in over the cap', async () => {
+    const { PUT } = await import('../app/api/settings/route');
+    const response = await PUT(chunked(6));
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: 'Request body too large (limit 5 MB).' });
+    expect(readFileSync(rulesPath, 'utf8')).toBe(RULES);
   });
 });

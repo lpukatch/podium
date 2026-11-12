@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { requireCredentials } from '@/lib/config';
 import { DispatcharrClient } from '@/lib/dispatcharr';
 import { responseErrorText } from '@/lib/error-text';
+import { readJson } from '@/lib/http-body';
 import { catalogueRows, withoutStream } from '@/lib/runner';
 import { noteStreamOrder, config as serverConfig, snapshot } from '@/lib/server/state';
 import { Store } from '@/lib/store';
@@ -30,10 +31,11 @@ export async function POST(request: Request, context: { params: Promise<{ channe
 
   let store: Store | null = null;
   try {
-    const body = (await request.json().catch(() => null)) as { streamId?: number } | null;
-    if (body === null) {
-      return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
+    const parsed = await readJson<{ streamId?: number }>(request);
+    if (!parsed.ok) {
+      return NextResponse.json({ error: parsed.message }, { status: parsed.status });
     }
+    const body = parsed.value;
     const streamId = Number(body.streamId);
     if (!Number.isInteger(streamId)) {
       return NextResponse.json({ error: 'streamId must be an integer' }, { status: 400 });

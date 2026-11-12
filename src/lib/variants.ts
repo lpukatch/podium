@@ -314,18 +314,25 @@ export interface VariantVerdict {
  * across the lanes with room.
  *
  * The difference from the worker is the company the check keeps. It runs
- * beside a pass, and the pass's own probes are invisible to the activity read
- * by design -- `activityOptions` filters the probe's user agent out of
- * `/proxy/ts/status`, and a direct probe never touches Dispatcharr at all --
- * so a lane can look free while the pass is holding it. `yieldToWorker` is
- * the answer, and it is deliberately stingy: one slot of *surplus* per
- * provider, and never the last. A probe that collides with the pass costs a
- * retry; refusing the check strands a provider whose second connection is
- * verifiably free for as long as the pass runs -- which, on an install that
- * is always a little behind, is always. The old arithmetic applied that yield
- * per lane, which closed every capped lane on a multi-login account the
- * moment a pass started, and read nothing but the caps: viewers were
- * invisible to it too, so a check could open a lane a viewer was sitting in.
+ * beside a pass, and the pass's own probes used to be invisible to it twice
+ * over: the activity read filters the probe's user agent out of
+ * `/proxy/ts/status`, a direct probe never touches Dispatcharr at all, and the
+ * pass's holds were simply unknown. The holds are visible now -- the runner
+ * publishes per-lane in-flight counts in the progress row on every probe it
+ * starts and finishes (`Progress.laneHolds`), the same row this caller already
+ * reads for the phase -- and `holdsByLane` charges them here, so a lane the
+ * pass is working is offered to the check at zero, not at its paper cap. What
+ * is still unknowable is the probe the pass will start *after* the read and
+ * before the check finishes drawing: `yieldToWorker` stays the margin for
+ * that, one slot of *surplus* per provider, never the last.
+ *
+ * A probe that still collides with the pass costs a retry; refusing the check
+ * strands a provider whose second connection is verifiably free for as long
+ * as the pass runs -- which, on an install that is always a little behind, is
+ * always. The old arithmetic applied that yield per lane, which closed every
+ * capped lane on a multi-login account the moment a pass started, and read
+ * nothing but the caps: viewers were invisible to it too, so a check could
+ * open a lane a viewer was sitting in.
  *
  * `reserveFor` names the courtesy slots for one provider. It fails closed the
  * same way the worker's does -- a session that cannot be placed could be on
@@ -335,13 +342,19 @@ export function checkLaneLimits(
   loginsByProvider: Map<number, ProviderLogin[]>,
   viewersByLane: Map<string, number>,
   reserveFor: (providerId: number) => number,
+  holdsByLane: Map<string, number>,
   yieldToWorker: boolean,
 ): Map<string, number> {
   const out = new Map<string, number>();
   for (const [providerId, logins] of loginsByProvider) {
     const headroom = logins.map((login) => ({
       key: laneKey(providerId, login.id),
-      free: Math.max(0, login.maxStreams - (viewersByLane.get(laneKey(providerId, login.id)) ?? 0)),
+      free: Math.max(
+        0,
+        login.maxStreams -
+          (viewersByLane.get(laneKey(providerId, login.id)) ?? 0) -
+          (holdsByLane.get(laneKey(providerId, login.id)) ?? 0),
+      ),
     }));
     let spare = headroom.reduce((sum, lane) => sum + lane.free, 0) - reserveFor(providerId);
     if (yieldToWorker && spare > 1) spare -= 1;

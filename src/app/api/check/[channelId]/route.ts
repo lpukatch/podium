@@ -286,11 +286,15 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     // uses (see `checkLaneLimits`): live viewers charged to the lane
     // Dispatcharr named them on -- so a viewer occupying one of a two-login
     // account's connections leaves the other checkable -- the courtesy
-    // reserve once per provider, and, while a pass is probing, one slot of
-    // surplus yielded to it. The pass's own probes are invisible to the
-    // activity read, so that yield is the only courtesy it gets; the old
-    // arithmetic took one per lane, which closed every capped lane on a
-    // multi-login account for as long as a pass ran.
+    // reserve once per provider, and the pass's own in-flight probes charged
+    // to the lanes it actually holds (the runner publishes them in the
+    // progress row on every probe it starts and finishes), so a lane the pass
+    // is working is not offered to this check at its paper cap. While a pass
+    // is probing, one slot of surplus is still yielded to it: the holds are a
+    // snapshot, and the pass will start more probes between this read and the
+    // check finishing its draw. The old arithmetic took that yield per lane,
+    // which closed every capped lane on a multi-login account for as long as
+    // a pass ran.
     const viewersByLane = new Map<string, number>();
     for (const session of sessions ?? []) {
       if (session.profileId === null) continue;
@@ -299,7 +303,19 @@ export async function POST(request: Request, context: { params: Promise<{ channe
       const key = laneKey(lane.providerId, lane.login.id);
       viewersByLane.set(key, (viewersByLane.get(key) ?? 0) + 1);
     }
-    const limits = checkLaneLimits(loginsByProvider, viewersByLane, reserveFor, workerBusy);
+    // Holds only describe a pass that is probing; on any other row they are
+    // the tail of a finished pass, and reading them would charge lanes that
+    // are free again.
+    const holdsByLane = workerBusy
+      ? new Map<string, number>(Object.entries(progress.laneHolds ?? {}))
+      : new Map<string, number>();
+    const limits = checkLaneLimits(
+      loginsByProvider,
+      viewersByLane,
+      reserveFor,
+      holdsByLane,
+      workerBusy,
+    );
 
     const jobs: ProbeJob[] = [];
     const maxCheckStreams = 50;

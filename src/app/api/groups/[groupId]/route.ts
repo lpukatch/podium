@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { ALWAYS, MAX_GRACE_MINUTES, VALID_MODES, validGraceMinutes } from '@/lib/eligibility';
 import { responseErrorText } from '@/lib/error-text';
+import { readJson } from '@/lib/http-body';
 import { parseMaxResolution, parseMinResolution, RESOLUTION_CHOICES } from '@/lib/resolution';
 import { readRulesDoc, writeRulesDoc } from '@/lib/server/state';
 
@@ -23,7 +24,7 @@ async function putGroupRule(request: Request, context: { params: Promise<{ group
     return NextResponse.json({ error: 'bad group id' }, { status: 400 });
   }
 
-  const body = (await request.json().catch(() => null)) as {
+  const parsed = await readJson<{
     mode?: string;
     graceMinutes?: number;
     windowMinutes?: number;
@@ -37,10 +38,11 @@ async function putGroupRule(request: Request, context: { params: Promise<{ group
     minResolution?: string | null;
     /** The ceiling twin of `minResolution`, same readings. */
     maxResolution?: string | null;
-  } | null;
-  if (body === null) {
-    return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
+  }>(request);
+  if (!parsed.ok) {
+    return NextResponse.json({ error: parsed.message }, { status: parsed.status });
   }
+  const body = parsed.value;
   const mode = body.mode ?? ALWAYS;
   if (!VALID_MODES.includes(mode as never)) {
     return NextResponse.json({ error: `unknown mode ${mode}` }, { status: 400 });

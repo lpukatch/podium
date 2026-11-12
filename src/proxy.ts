@@ -20,21 +20,10 @@
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { type AccessPolicy, checkAccess, forwardedHostOf, parseHostList } from './lib/access';
+import { MAX_BODY_BYTES } from './lib/http-body';
 
 /** The cookie the token lands in, so a browser only presents it once. */
 const TOKEN_COOKIE = 'podium_token';
-
-/**
- * The most a request body may claim to be.
- *
- * Every writer here takes JSON the size of a rules file or a backup bundle --
- * kilobytes, a hundred of them at most -- so a Content-Length past this is not
- * a legitimate request, and the cheap place to say so is the door, before the
- * body is buffered into memory. Reads are untouched, and a body that arrives
- * without a length (chunked) passes: the routes that parse it fail on their
- * own long before anything near this size.
- */
-const MAX_BODY_BYTES = 5 * 1024 * 1024;
 
 function policy(): AccessPolicy {
   return {
@@ -144,7 +133,8 @@ export function proxy(request: NextRequest): NextResponse {
 
   // A body larger than anything a writer here legitimately sends is refused at
   // the door, on the length the client itself declared -- nothing was read to
-  // say it.
+  // say it. A chunked body declares nothing, so it passes here and is bounded
+  // by the readers in `lib/http-body` at the route, on actual bytes.
   const contentLength = Number(request.headers.get('content-length') ?? 0);
   if (
     contentLength > MAX_BODY_BYTES &&

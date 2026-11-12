@@ -7,6 +7,7 @@ import {
   validGraceMinutes,
 } from '@/lib/eligibility';
 import { responseErrorText } from '@/lib/error-text';
+import { readJson } from '@/lib/http-body';
 import { parseMaxResolution, parseMinResolution, RESOLUTION_CHOICES } from '@/lib/resolution';
 import { readRulesDoc, snapshot, userGroups, writeRulesDoc } from '@/lib/server/state';
 
@@ -36,7 +37,7 @@ export async function PUT(request: Request) {
 }
 
 async function putGroupPattern(request: Request) {
-  const body = (await request.json().catch(() => null)) as {
+  const parsed = await readJson<{
     pattern?: string;
     mode?: string;
     audioOnly?: boolean;
@@ -53,10 +54,11 @@ async function putGroupPattern(request: Request) {
     /** The ceiling twin of `minResolution`, same readings. */
     maxResolution?: string | null;
     groupFilter?: { includeGroups?: string[]; excludeGroups?: string[] } | null;
-  } | null;
-  if (body === null) {
-    return NextResponse.json({ error: 'body is not JSON' }, { status: 400 });
+  }>(request);
+  if (!parsed.ok) {
+    return NextResponse.json({ error: parsed.message }, { status: parsed.status });
   }
+  const body = parsed.value;
   const pattern = (body.pattern ?? '').trim();
   const mode = body.mode ?? ALWAYS;
 
