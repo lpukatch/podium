@@ -2,11 +2,12 @@ import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
 import { Eligibility } from '@/lib/eligibility';
 import { responseErrorText } from '@/lib/error-text';
-import { type CachedVerdict, lastProbeFields } from '@/lib/last-probe';
+import { audioOnlyByStream, type CachedVerdict, lastProbeFields } from '@/lib/last-probe';
 import { resolveOrdering } from '@/lib/ordering';
 import { config, groupPatterns, ordering, policies, snapshot } from '@/lib/server/state';
 import type { CatalogueRow, StoredSoakResult } from '@/lib/store';
 import { Store } from '@/lib/store';
+import { wholeNumber } from '@/lib/whole-number';
 
 export const dynamic = 'force-dynamic';
 
@@ -29,9 +30,8 @@ export const dynamic = 'force-dynamic';
  */
 export async function GET(request: Request) {
   const raw = new URL(request.url).searchParams.get('since');
-  // Digits only: `Number()` alone would take '', '1e3' and ' 5' as well.
-  const since = raw === null ? null : /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
-  if (since !== null && !Number.isSafeInteger(since)) {
+  const since = raw === null ? null : wholeNumber(raw);
+  if (raw !== null && since === null) {
     return NextResponse.json({ error: 'since must be epoch milliseconds' }, { status: 400 });
   }
 
@@ -78,7 +78,14 @@ export async function GET(request: Request) {
       providerNames,
       config().PODIUM_MIN_BITRATE_KBPS,
     );
-    const eligibility = new Eligibility(policies(), undefined, groupPatterns());
+    // A stream is listed once however many channels carry it, so the floor
+    // it is judged against is the one any carrier would apply -- see
+    // `audioOnlyByStream`. Its keys are the streams, in catalogue order.
+    const audioOnlyEverywhere = audioOnlyByStream(
+      rows,
+      snap,
+      new Eligibility(policies(), undefined, groupPatterns()),
+    );
 
     // `catalogue()` is ordered by channel, then slot, so first-seen order is
     // slot order within each channel.
@@ -86,11 +93,6 @@ export async function GET(request: Request) {
       number,
       { id: number; name: string; groupId: number | null; streams: number[] }
     >();
-    // A stream is listed once however many channels carry it, but the video
-    // floor is a per-channel judgement: an audio-only channel does not apply
-    // it. A stream reads as low when any channel carrying it would call it
-    // low, which is the floor applied unless every carrier is audio-only.
-    const audioOnlyEverywhere = new Map<number, boolean>();
     const catalogueProvider = new Map<number, string>();
     for (const row of rows) {
       let channel = channels.get(row.channelId);
@@ -105,15 +107,6 @@ export async function GET(request: Request) {
         channels.set(row.channelId, channel);
       }
       channel.streams.push(row.streamId);
-      const groupId = channel.groupId;
-      const audioOnly = Boolean(
-        eligibility.policyFor(groupId, groupId == null ? undefined : groupNames.get(groupId))
-          .audioOnly,
-      );
-      audioOnlyEverywhere.set(
-        row.streamId,
-        (audioOnlyEverywhere.get(row.streamId) ?? true) && audioOnly,
-      );
       if (!catalogueProvider.has(row.streamId)) {
         catalogueProvider.set(row.streamId, row.providerName);
       }
