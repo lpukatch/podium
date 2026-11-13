@@ -53,7 +53,7 @@ jobs:
       - name: Install mise
         env:
           # renovate: datasource=github-releases depName=jdx/mise
-          MISE_VERSION: "2026.11.7"
+          MISE_VERSION: "2026.11.8"
         run: sh .ci/scripts/install-mise.sh
 
       # node and git-cliff from the mise.toml pin, the same versions local
