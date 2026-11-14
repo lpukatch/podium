@@ -51,9 +51,12 @@ test('real scan commands preserve failure and do not reach promotion', () => {
   for (const rc of [0, 1, 2]) {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'podium-scan-'));
     try {
-      fs.writeFileSync(path.join(cwd, '.image-ref'), 'registry.example.com/podium@sha256:abc\n');
+      fs.writeFileSync(path.join(cwd, '.trivyignore'), '\n');
+      // The stub stands in for the trivy container: the report reaches the
+      // step on the container's stdout (the wrapper cats it), which the step
+      // redirects into the workspace trivy-report.txt.
       const result = spawnSync('sh', ['-ec', `
-        docker() { printf 'scan evidence\n' > trivy-report.txt; return ${rc}; }
+        docker() { printf 'scan evidence\n'; return ${rc}; }
         ( ${script}\n )
         touch promoted
       `], { cwd, encoding: 'utf8' });
@@ -82,22 +85,26 @@ test('both publishers gate promotion on validation and digest scans', () => {
 test('promotion stops on the first failed registry copy', () => {
   const build = read('.forgejo/workflows/build.yml');
   const step = build.split('      - name: Promote scanned image\n')[1].split('\n      # ')[0];
-  // The loop runs inside the regctl container where the workspace is mounted
-  // at /work; the harness runs it against the real cwd, so unmap the mount.
-  const loopLines = step.split('\n');
-  const start = loopLines.findIndex((line) => line.includes('while IFS= read -r tag'));
-  const end = loopLines.findIndex((line) => line.trim().startsWith('done <'));
-  const loop = loopLines.slice(start, end + 1)
-    .map((line) => line.trim().replace(/\/work\//g, './'))
-    .join('\n');
+  // The step is one physical docker run line whose sh script is the quoted
+  // argument; extract it so the harness can stub regctl directly, with the
+  // plan contents passed as env exactly as the step passes them.
+  const script = step.match(/-ec '([\s\S]*)'/)[1];
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'podium-copy-'));
   try {
-    fs.writeFileSync(path.join(cwd, '.promotion-tags'), '1.2.3\n1.2\nlatest\n');
-    fs.writeFileSync(path.join(cwd, '.image-ref'), 'registry.example.com/podium@sha256:abc\n');
     const result = spawnSync('sh', ['-ec', `
-      regctl() { printf '%s\n' "$*" >> copies; return 7; }
-      ${loop}
-    `], { cwd, encoding: 'utf8', env: { ...process.env, REGISTRY: 'registry.example.com', IMAGE_NAME: 'podium' } });
+      regctl() { [ "$1" = image ] || return 0; printf '%s\n' "$*" >> copies; return 7; }
+      ${script}
+    `], {
+      cwd,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        REGISTRY: 'registry.example.com',
+        IMAGE_NAME: 'podium',
+        IMAGE_REF: 'registry.example.com/podium@sha256:abc',
+        PROMOTION_TAGS: '1.2.3\n1.2\nlatest\n',
+      },
+    });
     assert.equal(result.status, 7);
     const copies = fs.readFileSync(path.join(cwd, 'copies'), 'utf8').trim().split('\n');
     assert.deepEqual(copies, ['image copy registry.example.com/podium@sha256:abc registry.example.com/podium:1.2.3']);

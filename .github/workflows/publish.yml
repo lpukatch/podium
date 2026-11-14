@@ -144,19 +144,14 @@ jobs:
           node .ci/scripts/promotion-plan.cjs
           printf '%s/%s@%s\n' "$REGISTRY" "$IMAGE_NAME" "$IMAGE_DIGEST" > .image-ref
 
+      # No workspace bind mount (kept in lockstep with the forge's build.yml):
+      # the plan files' contents are read job-side and passed in env instead.
       - name: Promote scanned image
         env:
           REGISTRY_USERNAME: ${{ github.actor }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          docker run --rm --entrypoint /bin/sh \
-            -e REGISTRY -e IMAGE_NAME -e REGISTRY_USERNAME -e REGISTRY_TOKEN \
-            -v "$PWD:/work:ro" -w /work regclient/regctl:v0.11.7-alpine -ec '
-              printf "%s" "$REGISTRY_TOKEN" | regctl registry login "$REGISTRY" -u "$REGISTRY_USERNAME" --pass-stdin
-              while IFS= read -r tag; do
-                regctl image copy "$(cat .image-ref)" "$REGISTRY/$IMAGE_NAME:$tag"
-              done < .promotion-tags
-            '
+          docker run --rm --entrypoint /bin/sh -e REGISTRY -e IMAGE_NAME -e REGISTRY_USERNAME -e REGISTRY_TOKEN -e IMAGE_REF="$(cat .image-ref)" -e PROMOTION_TAGS="$(cat .promotion-tags)" regclient/regctl:v0.11.7-alpine -ec 'printf "%s" "$REGISTRY_TOKEN" | regctl registry login "$REGISTRY" -u "$REGISTRY_USERNAME" --pass-stdin; printf "%s" "$PROMOTION_TAGS" | while IFS= read -r tag; do [ -n "$tag" ] || continue; regctl image copy "$IMAGE_REF" "$REGISTRY/$IMAGE_NAME:$tag"; done'
 
       # CHANGELOG.md is written by the release commit (git-cliff; cliff.toml is
       # the template and documents the heading contract this depends on). The
