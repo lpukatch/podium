@@ -16,10 +16,15 @@ const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
 test('the scan gate keeps its exit code through the report handling', () => {
   const build = read('.forgejo/workflows/build.yml');
   assert.match(build, /--exit-code 1 --severity/);
-  assert.match(build, /--format table --output \/repo\/trivy-report\.txt/);
-  assert.match(build, /\|\| RC=\$\?/);
+  assert.match(build, /--format table --output \/tmp\/trivy-report\.txt/);
+  assert.match(build, /> trivy-report\.txt \|\| RC=\$\?/);
   assert.match(build, /cat trivy-report\.txt \|\| true/);
   assert.match(build, /exit "\$\{RC:-0\}"/);
+  // The ignorefile must be regenerated inside the trivy container: trivy
+  // fatals at flag conversion on an --ignorefile that does not exist, and a
+  // bind mount cannot deliver workspace files to this runner (see
+  // docker-workspace-mounts.test.cjs).
+  assert.match(build, /printf "%s" "\$PODIUM_TRIVY_IGNORES" > \/tmp\/\.trivyignore/);
 });
 
 test('no command scalar ends with a backslash continuation', () => {

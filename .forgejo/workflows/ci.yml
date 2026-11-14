@@ -55,8 +55,15 @@ jobs:
       # docker run rather than `container:` on the job: the gitleaks image is
       # Alpine and cannot run the checkout action's glibc node binary inside
       # itself.
+      #
+      # The tree goes in as a tar stream over stdin, never as a `-v "$PWD"`
+      # bind: the runner's docker daemon cannot resolve the job container's
+      # workspace path, so a bind silently presents an empty directory -- and
+      # gitleaks exits 0 when it cannot scan, which let this step pass green
+      # while scanning nothing for four days after the Actions migration
+      # (enforced by .ci/scripts/docker-workspace-mounts.test.cjs).
       - name: Scan history for secrets
-        run: docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/gitleaks/gitleaks:v8.30.1 git --no-banner
+        run: tar -c --exclude=./node_modules . | docker run --rm -i --entrypoint /bin/sh ghcr.io/gitleaks/gitleaks:v8.30.1 -ec 'mkdir -p /repo && tar -x -C /repo && cd /repo && exec gitleaks git --no-banner'
 
       - name: Lint and format check
         run: npm run format:check
