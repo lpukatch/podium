@@ -1,15 +1,22 @@
 import { NextResponse } from 'next/server';
-import { ALWAYS, MAX_GRACE_MINUTES, VALID_MODES, validGraceMinutes } from '@/lib/eligibility';
+import {
+  ALWAYS,
+  compileGlob,
+  MAX_GRACE_MINUTES,
+  parseGroupPatterns,
+  VALID_MODES,
+  validGraceMinutes,
+} from '@/lib/eligibility';
 import { responseErrorText } from '@/lib/error-text';
 import { readJson } from '@/lib/http-body';
 import { parseMaxResolution, parseMinResolution, RESOLUTION_CHOICES } from '@/lib/resolution';
-import { readRulesDoc, writeRulesDoc } from '@/lib/server/state';
+import { readRulesDoc, snapshot, withRulesLock, writeRulesDoc } from '@/lib/server/state';
 
 export const dynamic = 'force-dynamic';
 
 export async function PUT(request: Request, context: { params: Promise<{ groupId: string }> }) {
   try {
-    return await putGroupRule(request, context);
+    return await withRulesLock(() => putGroupRule(request, context));
   } catch (error) {
     // Same reason as the channel rule route: a rules-file failure is a 500
     // with a reason the settings page can show, not a bare framework error.
@@ -77,16 +84,29 @@ async function putGroupRule(request: Request, context: { params: Promise<{ group
   const stored = groups[String(id)];
   const storedObj =
     stored && typeof stored === 'object' ? (stored as Record<string, unknown>) : undefined;
-  const keptLive = storedObj?.require_live;
-  const audioOnly = body.audioOnly !== undefined ? body.audioOnly : Boolean(storedObj?.audio_only);
+  const snap = await snapshot().catch(() => null);
+  const groupName = snap?.groups.find((group) => group.id === id)?.name;
+  const matchedPattern = groupName
+    ? parseGroupPatterns(doc.group_patterns).find((pattern) =>
+        compileGlob(pattern.pattern).test(groupName),
+      )
+    : undefined;
+  const baseline = storedObj ?? (matchedPattern as unknown as Record<string, unknown> | undefined);
+  const keptLive = baseline?.require_live ?? baseline?.requireLive;
+  const audioOnly =
+    body.audioOnly !== undefined
+      ? body.audioOnly
+      : Boolean(baseline?.audio_only ?? baseline?.audioOnly);
   const measureOnly =
-    body.measureOnly !== undefined ? body.measureOnly : Boolean(storedObj?.measure_only);
+    body.measureOnly !== undefined
+      ? body.measureOnly
+      : Boolean(baseline?.measure_only ?? baseline?.measureOnly);
   // Carried over like the flags above: every chip on the group posts only the
   // one thing it changes, and changing the mode must not quietly drop a floor.
-  const storedFloor = parseMinResolution(storedObj?.min_resolution);
+  const storedFloor = parseMinResolution(baseline?.min_resolution ?? baseline?.minResolution);
   const minResolution =
     body.minResolution !== undefined ? requestedFloor : (storedFloor ?? undefined);
-  const storedCeiling = parseMaxResolution(storedObj?.max_resolution);
+  const storedCeiling = parseMaxResolution(baseline?.max_resolution ?? baseline?.maxResolution);
   const maxResolution =
     body.maxResolution !== undefined ? requestedCeiling : (storedCeiling ?? undefined);
 
@@ -115,9 +135,15 @@ async function putGroupRule(request: Request, context: { params: Promise<{ group
   // here at all, and the entry is the override.
   const storedValue = pinnedToNoFloor ? 'none' : minResolution;
   const storedCapValue = pinnedToNoCap ? 'none' : maxResolution;
+  const baselineFilter = baseline?.groupFilter as
+    | { includeGroups?: string[]; excludeGroups?: string[] }
+    | undefined;
   const filter =
     body.groupFilter === undefined
-      ? { includeGroups: storedObj?.include_groups, excludeGroups: storedObj?.exclude_groups }
+      ? {
+          includeGroups: baseline?.include_groups ?? baselineFilter?.includeGroups,
+          excludeGroups: baseline?.exclude_groups ?? baselineFilter?.excludeGroups,
+        }
       : body.groupFilter;
   const isDefault =
     mode === ALWAYS &&
@@ -129,7 +155,7 @@ async function putGroupRule(request: Request, context: { params: Promise<{ group
     !filter?.includeGroups &&
     !filter?.excludeGroups;
 
-  if (isDefault && !pinnedToNoFloor && !pinnedToNoCap) {
+  if (isDefault && !pinnedToNoFloor && !pinnedToNoCap && !matchedPattern) {
     // Default mode with no custom settings: clean up entry
     delete groups[String(id)];
   } else {
@@ -138,8 +164,9 @@ async function putGroupRule(request: Request, context: { params: Promise<{ group
       // Read back before defaulted: these have no control in this UI, so a
       // value in the file was put there by hand, and a chip that changes the
       // floor must not reset the window an operator tuned.
-      grace_minutes: body.graceMinutes ?? storedObj?.grace_minutes ?? 5,
-      window_minutes: body.windowMinutes ?? storedObj?.window_minutes ?? 180,
+      grace_minutes: body.graceMinutes ?? baseline?.grace_minutes ?? baseline?.graceMinutes ?? 5,
+      window_minutes:
+        body.windowMinutes ?? baseline?.window_minutes ?? baseline?.windowMinutes ?? 180,
       ...(audioOnly ? { audio_only: true } : {}),
       ...(measureOnly ? { measure_only: true } : {}),
       ...(storedValue ? { min_resolution: storedValue } : {}),

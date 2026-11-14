@@ -216,6 +216,7 @@ export async function runLanes<T>(
   // queued for it has landed, success or failure.
   const outstanding = new Map<number, number>();
   const results = new Map<number, Array<[ProbeJob, T | null]>>();
+  const skippedOnLane = new Map<string, number>();
   for (const job of jobs) {
     outstanding.set(job.channelId, (outstanding.get(job.channelId) ?? 0) + 1);
   }
@@ -265,26 +266,45 @@ export async function runLanes<T>(
     const key = laneKey(job.providerId, job.profileId);
     const lane = lanes.get(key)!;
     const semaphore = semaphores.get(key)!;
+    const skip = async (): Promise<void> => {
+      stats.skipped += 1;
+      const skipped = (skippedOnLane.get(key) ?? 0) + 1;
+      skippedOnLane.set(key, skipped);
+      if (lane.done + lane.failed + skipped === lane.queued) lane.endedAt = Date.now();
+      await settle(job, null, true);
+    };
 
     if (abort.aborted) {
-      stats.skipped += 1;
-      await settle(job, null, true);
+      await skip();
       return;
     }
 
     await semaphore.acquire();
     options.onSlotAcquire?.(key);
     let result: T | null = null;
+    let acquiredOverall = false;
     try {
       if (abort.aborted) {
-        stats.skipped += 1;
-        await settle(job, null, true);
+        await skip();
         return;
       }
       if (lane.startedAt === null) lane.startedAt = Date.now();
       if (staggerMs > 0) await new Promise((r) => setTimeout(r, staggerMs));
+      if (abort.aborted) {
+        await skip();
+        return;
+      }
 
       await overall?.acquire();
+      acquiredOverall = Boolean(overall);
+      if (abort.aborted) {
+        if (acquiredOverall) {
+          overall?.release();
+          acquiredOverall = false;
+        }
+        await skip();
+        return;
+      }
       const t0 = Date.now();
       try {
         result = await probe(job);
@@ -297,10 +317,10 @@ export async function runLanes<T>(
         lane.failed += 1;
       } finally {
         lane.busyMs += Date.now() - t0;
-        if (lane.done + lane.failed === lane.queued) {
+        if (lane.done + lane.failed + (skippedOnLane.get(key) ?? 0) === lane.queued) {
           lane.endedAt = Date.now();
         }
-        overall?.release();
+        if (acquiredOverall) overall?.release();
       }
     } finally {
       options.onSlotRelease?.(key);

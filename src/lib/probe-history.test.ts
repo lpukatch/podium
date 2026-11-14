@@ -118,8 +118,8 @@ describe('probe history', () => {
     expect(store.probeHistory({ limit: 10 })).toEqual(
       new Map([[2, [expect.objectContaining({ probedAt: 1_000 + PROBE_HISTORY_MS - 10 })]]]),
     );
-    // The sweep is the history's own: the cache is left to `prune()`.
-    expect(store.verdicts([1]).has(1)).toBe(true);
+    // A long-lived worker trims the cache during each pass, not only at boot.
+    expect(store.verdicts([1]).has(1)).toBe(false);
   });
 
   it('is cleared by resetData, like the cache', () => {

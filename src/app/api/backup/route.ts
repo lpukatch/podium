@@ -11,7 +11,7 @@ import { loadConfig } from '@/lib/config';
 import { responseErrorText } from '@/lib/error-text';
 import { readJson } from '@/lib/http-body';
 import { loadRules } from '@/lib/rules';
-import { readRulesDoc, writeRulesDoc } from '@/lib/server/state';
+import { readRulesDoc, withRulesLock, writeRulesDoc } from '@/lib/server/state';
 import { credentialMoveMessage, movedCredentials } from '@/lib/settings';
 import { Store } from '@/lib/store';
 
@@ -74,7 +74,11 @@ export function GET() {
  * otherwise, and a restore is what people reach for when something has
  * already gone wrong.
  */
-export async function POST(request: Request) {
+export function POST(request: Request) {
+  return withRulesLock(() => postBackup(request));
+}
+
+async function postBackup(request: Request) {
   let store: Store | null = null;
   try {
     let raw: unknown;

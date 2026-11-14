@@ -133,6 +133,15 @@ describe('per-variant rows', () => {
     store.close();
   });
 
+  it('removes superseded URL hashes when a stream is probed again', () => {
+    const store = new Store(':memory:');
+    store.put(19, 'old-url', verdict(true));
+    store.put(19, 'new-url', verdict(false));
+    expect(store.verdicts([19]).get(19)?.alive).toBe(false);
+    expect(store.variants(19, 'old-url').size).toBe(0);
+    store.close();
+  });
+
   it('reports one verdict per stream, the best login it has', () => {
     const store = new Store(':memory:');
     store.put(20, 'h', verdict(true, { height: 720 }));

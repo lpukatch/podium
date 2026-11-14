@@ -193,7 +193,7 @@ describe('soaking everything', () => {
     const { POST } = await import('../app/api/soak/route');
     const resp = await POST(post({ scope: 'channels', id: [10, 20] }));
     const body = await resp.json();
-    expect(resp.status).toBe(200);
+    expect(resp.status, JSON.stringify(body)).toBe(200);
     // Requested counts the survivors of the dead filter: stream 2 on channel
     // 10 is dead, and channel 20 resolved to nothing at all.
     expect(body).toMatchObject({ requested: 1, queued: 1, skippedDead: 1 });

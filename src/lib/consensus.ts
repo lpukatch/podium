@@ -10,7 +10,7 @@
  */
 
 import { type ChildProcess, spawn } from 'child_process';
-import { protocolArgs, rejectUrl, userAgentArgs } from './probe';
+import { protocolArgs, rejectUrl, trackChild, userAgentArgs } from './probe';
 
 export interface FrameFeature {
   /** Root-mean-square energy of the frame. */
@@ -85,7 +85,12 @@ export function computeAudioFingerprint(pcm: Buffer, sampleRate = SAMPLE_RATE): 
     return { frames: [], durationSeconds: sampleCount / sampleRate, sampleCount };
   }
 
-  const int16 = new Int16Array(pcm.buffer, pcm.byteOffset, sampleCount);
+  const byteLength = sampleCount * 2;
+  const aligned =
+    pcm.byteOffset % 2 === 0
+      ? pcm
+      : Buffer.from(pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + byteLength));
+  const int16 = new Int16Array(aligned.buffer, aligned.byteOffset, sampleCount);
   const numFrames = Math.floor((sampleCount - FRAME_SIZE) / HOP_SIZE) + 1;
   const rawFrames: FrameFeature[] = new Array(numFrames);
 
@@ -547,6 +552,7 @@ export async function extractAudioPcm(
       child = spawn(/*turbopackIgnore: true*/ ffmpegPath, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
+      trackChild(child);
     } catch (err) {
       return reject(err);
     }

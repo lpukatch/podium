@@ -5,7 +5,7 @@ import { readJson } from '@/lib/http-body';
 import { mineNames } from '@/lib/miner';
 import {
   buildProfile,
-  inScope,
+  filterInScope,
   mergeTeamarrRules,
   parseGlobs,
   profileQuery,
@@ -17,6 +17,12 @@ import { resolveEnv } from '@/lib/settings';
 import { Store } from '@/lib/store';
 
 export const dynamic = 'force-dynamic';
+
+let fitCache: {
+  key: string;
+  profile: ReturnType<typeof buildProfile>;
+  miner: ReturnType<typeof mineNames>;
+} | null = null;
 
 /**
  * The configured scope, with per-request overrides.
@@ -72,15 +78,17 @@ export function GET(request: Request) {
       pointsPerMbps: config.PODIUM_QUALITY_POINTS_PER_MBPS,
     });
     const scope = scopeOf(url, config);
-    const samples = store.qualitySamples();
-    const profile = buildProfile(samples, { minSamples, scope });
-    // Mined from the same population the profile was fitted on -- see
-    // `mineNames`. Pass A's findings are reported; only Pass B's are exported.
-    const miner = mineNames(
-      samples.filter((sample) => inScope(sample, scope)),
-      profile.groups,
-      { minCarrierSamples: minSamples },
-    );
+    const cacheKey = `${store.qualityStamp()}|${JSON.stringify(scope)}|${minSamples}|${pointsPerMbps}`;
+    if (fitCache?.key !== cacheKey) {
+      const samples = store.qualitySamples();
+      const profile = buildProfile(samples, { minSamples, scope });
+      // Pass A's findings are reported; only Pass B's are exported.
+      const miner = mineNames(filterInScope(samples, scope), profile.groups, {
+        minCarrierSamples: minSamples,
+      });
+      fitCache = { key: cacheKey, profile, miner };
+    }
+    const { profile, miner } = fitCache;
 
     if (url.searchParams.get('format') !== 'teamarr') {
       // `fit` travels with the profile so the Quality tab can dim buckets
@@ -159,11 +167,9 @@ export async function POST(request: Request) {
     const scope = scopeOf(url, config);
     const samples = store.qualitySamples();
     const profile = buildProfile(samples, { minSamples, scope });
-    const miner = mineNames(
-      samples.filter((sample) => inScope(sample, scope)),
-      profile.groups,
-      { minCarrierSamples: minSamples },
-    );
+    const miner = mineNames(filterInScope(samples, scope), profile.groups, {
+      minCarrierSamples: minSamples,
+    });
     const generated = teamarrRules(profile, {
       minSamples,
       pointsPerMbps,

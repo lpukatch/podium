@@ -15,6 +15,8 @@
 
 import { loadConfig } from './lib/config';
 import { ensureRulesFile } from './lib/rules';
+import { resolveEnv } from './lib/settings';
+import { Store } from './lib/store';
 import { VERSION } from './lib/version';
 import { startWorker } from './worker/loop';
 
@@ -28,7 +30,17 @@ async function main(): Promise<void> {
   // off a running container was to recognise the framework versions around it.
   log(`podium v${VERSION}`);
 
-  const config = loadConfig();
+  let config = loadConfig();
+  try {
+    const store = new Store(config.dbPath);
+    try {
+      config = loadConfig(resolveEnv(process.env, store.settings()));
+    } finally {
+      store.close();
+    }
+  } catch {
+    // A damaged or unavailable database must not prevent the UI from starting.
+  }
 
   // Do this before either half starts: both read the rules file, and a fresh
   // volume has none. Writing a valid empty one means a first run needs no

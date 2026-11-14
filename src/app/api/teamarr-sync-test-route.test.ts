@@ -3,12 +3,9 @@
  *
  * Reaching out to whatever URL a request carries is the endpoint's whole job,
  * which also makes it the one HTTP surface that will fetch an arbitrary
- * address for the asking. The Dispatcharr test gates that behind having
- * something to authenticate with; Teamarr takes no credential, so the bar
- * here is the integration being switched on in *saved* settings or the
- * environment. The request's own fields do not count -- they are exactly
- * what a drive-by POST controls -- so a patch that flips PODIUM_TEAMARR_SYNC
- * on inside the same request is refused like any other.
+ * address for the asking. The typed Teamarr URL is validated by the settings
+ * schema, and the test action is explicitly an operator-requested connection
+ * check even when scheduled pushes are disabled.
  */
 
 import { mkdtempSync, rmSync } from 'fs';
@@ -43,6 +40,11 @@ describe('the teamarr test gate', () => {
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'podium-teamarr-test-'));
     process.env.PODIUM_DATA_DIR = dir;
+    vi.mocked(TeamarrClient).mockImplementation(
+      class {
+        rules = async () => [];
+      } as unknown as FakeClientCtor,
+    );
   });
 
   afterEach(() => {
@@ -51,27 +53,23 @@ describe('the teamarr test gate', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('refuses to dial out while sync is off in saved settings', async () => {
-    // No settings at all: the fresh-install state, and the state an unsaved
-    // patch cannot move.
+  it('tests a typed URL while scheduled sync is off', async () => {
     const resp = await call({ PODIUM_TEAMARR_URL: 'http://teamarr:9195' });
     const body = await resp.json();
-    expect(body.ok).toBe(false);
-    expect(body.needsEnabled).toBe(true);
-    expect(String(body.error)).toContain('sync is off');
-    // The refusal happens before the network, which is the point.
-    expect(vi.mocked(TeamarrClient)).not.toHaveBeenCalled();
+    expect(body.ok).toBe(true);
+    expect(body.neverPushed).toBe(true);
+    expect(vi.mocked(TeamarrClient)).toHaveBeenCalledWith('http://teamarr:9195');
   });
 
-  it('a request that switches sync on for itself is refused the same way', async () => {
+  it('tests a typed URL when the settings form enables scheduled sync', async () => {
     const resp = await call({
       PODIUM_TEAMARR_URL: 'http://teamarr:9195',
       PODIUM_TEAMARR_SYNC: 'true',
     });
     const body = await resp.json();
-    expect(body.ok).toBe(false);
-    expect(body.needsEnabled).toBe(true);
-    expect(vi.mocked(TeamarrClient)).not.toHaveBeenCalled();
+    expect(body.ok).toBe(true);
+    expect(body.neverPushed).toBe(true);
+    expect(vi.mocked(TeamarrClient)).toHaveBeenCalledWith('http://teamarr:9195');
   });
 
   it('tests for real once sync is saved', async () => {

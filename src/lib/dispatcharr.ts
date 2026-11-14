@@ -529,23 +529,35 @@ export function transformUrl(
   searchPattern: string,
   replacePattern: string,
 ): string | null {
-  if (!searchPattern) return null;
-  let search: RegExp;
-  try {
-    search = new RegExp(toJsSearch(searchPattern), 'g');
-  } catch {
-    return null;
+  if (!url || !searchPattern) return null;
+  const key = `${searchPattern}\0${replacePattern ?? ''}`;
+  let compiled = transformCache.get(key);
+  if (compiled === undefined) {
+    try {
+      const replacement = toJsReplacement(replacePattern);
+      compiled =
+        replacement === null
+          ? null
+          : { search: new RegExp(toJsSearch(searchPattern), 'g'), replacement };
+    } catch {
+      compiled = null;
+    }
+    if (transformCache.size >= 512) transformCache.clear();
+    transformCache.set(key, compiled);
   }
-  const replacement = toJsReplacement(replacePattern);
-  if (replacement === null) return null;
+  if (!compiled) return null;
   try {
-    return url.replace(search, replacement);
+    compiled.search.lastIndex = 0;
+    const rewritten = url.replace(compiled.search, compiled.replacement);
+    return rewritten;
   } catch {
     // A replacement that throws is the same class of authoring error as a
     // pattern that does not compile.
     return null;
   }
 }
+
+const transformCache = new Map<string, { search: RegExp; replacement: string } | null>();
 
 export interface DispatcharrAuth {
   apiKey?: string;

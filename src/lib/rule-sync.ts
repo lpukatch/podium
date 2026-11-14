@@ -39,6 +39,7 @@ export const PRUNE_SHARE_FLOOR = 10;
 
 /** How many pre-prune copies of the rules file are kept beside it. */
 export const BACKUPS_KEPT = 5;
+let tmpSeq = 0;
 
 /** Lookups in flight at once. The first sync on an old file can have hundreds. */
 const LOOKUP_CONCURRENCY = 4;
@@ -145,7 +146,7 @@ export async function pruneDeletedChannelRules(
 
   const backup = `${path}${BACKUP_TAG}${new Date(now).toISOString().replace(/[:.]/g, '-')}`;
   writeFileSync(backup, current.text, 'utf8');
-  const tmp = `${path}.tmp`;
+  const tmp = `${path}.${process.pid}.${++tmpSeq}.tmp`;
   writeFileSync(
     tmp,
     JSON.stringify({ ...(current.doc as object), channels: kept }, null, 1),

@@ -65,6 +65,11 @@ describe('consensus audio fingerprinting', () => {
     expect(tinyFp.frames).toHaveLength(0);
   });
 
+  it('accepts PCM slices with an odd byte offset', () => {
+    const unaligned = Buffer.alloc(2_001).subarray(1);
+    expect(() => computeAudioFingerprint(unaligned)).not.toThrow();
+  });
+
   it('matches identical streams with near-perfect similarity', () => {
     const pcmA = generatePcm(4, 440, 1.5);
     const pcmB = Buffer.from(pcmA); // exact clone

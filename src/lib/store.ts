@@ -658,8 +658,11 @@ CREATE TABLE IF NOT EXISTS connect_delivery_history (
 CREATE INDEX IF NOT EXISTS connect_delivery_history_received
     ON connect_delivery_history (received_at);
 
-CREATE INDEX IF NOT EXISTS quality_samples_bucket
-    ON quality_samples (provider_id, tier, sampled_at);
+DROP INDEX IF EXISTS quality_samples_bucket;
+CREATE INDEX IF NOT EXISTS quality_samples_partition
+    ON quality_samples (provider_id, tier, policy_mode, sampled_at DESC);
+CREATE INDEX IF NOT EXISTS quality_samples_time
+    ON quality_samples (sampled_at);
 `;
 
 /**
@@ -1706,6 +1709,33 @@ export class Store {
     const hashes = new Map(streams.map((stream) => [stream.id, stream.streamHash]));
     const out = new Map<number, Map<number, CacheEntry>>();
     if (hashes.size === 0) return out;
+    if (hashes.size > 500) {
+      const rows = this.sql(
+        `SELECT stream_id, stream_hash, variant_id, probed_at, alive, result, dead_streak
+           FROM probe_cache`,
+      ).all() as Array<CacheRow & { stream_id: number; stream_hash: string; variant_id: number }>;
+      for (const row of rows) {
+        if (hashes.get(row.stream_id) !== row.stream_hash) continue;
+        let result: ProbeResult | null = null;
+        try {
+          result = JSON.parse(row.result) as ProbeResult;
+        } catch {
+          // Preserve the timestamp and streak of a malformed verdict.
+        }
+        let variants = out.get(row.stream_id);
+        if (!variants) {
+          variants = new Map();
+          out.set(row.stream_id, variants);
+        }
+        variants.set(row.variant_id, {
+          probedAt: row.probed_at,
+          alive: Boolean(row.alive),
+          deadStreak: row.dead_streak ?? 0,
+          result,
+        });
+      }
+      return out;
+    }
     // A temporary table keeps the query bounded even for catalogues larger
     // than SQLite's bind-variable limit. Each call replaces its contents.
     this.db.transaction(() => {
@@ -1776,6 +1806,10 @@ export class Store {
     const black = result.black ? 1 : 0;
     const json = JSON.stringify(result);
     this.db.transaction(() => {
+      this.sql('DELETE FROM probe_cache WHERE stream_id = ? AND stream_hash <> ?').run(
+        streamId,
+        streamHash,
+      );
       this.sql(
         `INSERT INTO probe_cache (stream_id, stream_hash, variant_id, probed_at, alive, black, result, dead_streak)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -1808,40 +1842,43 @@ export class Store {
 
   startRun(runId: string): void {
     const now = Date.now();
-    this.sql('INSERT OR REPLACE INTO runs (run_id, started_at) VALUES (?, ?)').run(runId, now);
-    this.bumpLifetimeTotals({ runs: 1 });
-    // Trimmed here rather than in `prune()`, which only runs when a worker
-    // starts: a container that stays up for months would never trim this table
-    // at all. Against `runs_started_at` this is an index seek that matches
-    // nothing on every pass but the first of the day, so paying it per pass
-    // costs less than the bookkeeping to pay it less often.
-    this.sql('DELETE FROM runs WHERE started_at < ?').run(now - RUN_HISTORY_MS);
-    // Same bargain, same place, for the same reason: the quality table grows
-    // by one row per probe and a container that stays up for months would
-    // otherwise never trim it. Bounded by SAMPLES_PER_BUCKET times the number
-    // of buckets -- tens of thousands of rows at the very most -- so the sweep
-    // is cheap enough to pay every pass rather than only at boot.
-    this.trimQuality();
-    // Same sweep, same reason. A check is a handful of rows per pass, but a
-    // pass runs hourly forever. The misses go first and on their own clock --
-    // they are the bulk of the database and are read over days, while the
-    // summary rows they hang off are read over months. See
-    // `RULE_CHECK_MISS_HISTORY_MS`.
-    this.sql('DELETE FROM rule_check_misses WHERE checked_at < ?').run(
-      now - RULE_CHECK_MISS_HISTORY_MS,
-    );
-    this.sql('DELETE FROM rule_checks WHERE checked_at < ?').run(now - RULE_CHECK_HISTORY_MS);
-    // Same sweep, same place, same bargain. The ledger is written by the
-    // poller rather than by a pass, so trimming it here means an install
-    // nobody watches never accumulates rows *and* never pays to look -- the
-    // index seek matches nothing on all but the first pass of the day.
-    this.sql('DELETE FROM stream_legs WHERE ended_at < ?').run(now - STABILITY_HISTORY_MS);
-    // Same sweep, same bargain. `put()` caps each stream's history as it
-    // writes, but a stream that stays managed and stops being probed is never
-    // written again, so only an age sweep retires its rows -- a seek on
-    // `probe_history_time`. One that stops being managed goes with
-    // `pruneOutside`.
-    this.sql('DELETE FROM probe_history WHERE probed_at < ?').run(now - PROBE_HISTORY_MS);
+    this.db.transaction(() => {
+      this.sql('INSERT OR REPLACE INTO runs (run_id, started_at) VALUES (?, ?)').run(runId, now);
+      this.bumpLifetimeTotals({ runs: 1 });
+      // Trimmed here rather than in `prune()`, which only runs when a worker
+      // starts: a container that stays up for months would never trim this table
+      // at all. Against `runs_started_at` this is an index seek that matches
+      // nothing on every pass but the first of the day, so paying it per pass
+      // costs less than the bookkeeping to pay it less often.
+      this.sql('DELETE FROM runs WHERE started_at < ?').run(now - RUN_HISTORY_MS);
+      // Same bargain, same place, for the same reason: the quality table grows
+      // by one row per probe and a container that stays up for months would
+      // otherwise never trim it. Bounded by SAMPLES_PER_BUCKET times the number
+      // of buckets -- tens of thousands of rows at the very most -- so the sweep
+      // is cheap enough to pay every pass rather than only at boot.
+      this.trimQuality();
+      // Same sweep, same reason. A check is a handful of rows per pass, but a
+      // pass runs hourly forever. The misses go first and on their own clock --
+      // they are the bulk of the database and are read over days, while the
+      // summary rows they hang off are read over months. See
+      // `RULE_CHECK_MISS_HISTORY_MS`.
+      this.sql('DELETE FROM rule_check_misses WHERE checked_at < ?').run(
+        now - RULE_CHECK_MISS_HISTORY_MS,
+      );
+      this.sql('DELETE FROM rule_checks WHERE checked_at < ?').run(now - RULE_CHECK_HISTORY_MS);
+      // Same sweep, same place, same bargain. The ledger is written by the
+      // poller rather than by a pass, so trimming it here means an install
+      // nobody watches never accumulates rows *and* never pays to look -- the
+      // index seek matches nothing on all but the first pass of the day.
+      this.sql('DELETE FROM stream_legs WHERE ended_at < ?').run(now - STABILITY_HISTORY_MS);
+      // Same sweep, same bargain. `put()` caps each stream's history as it
+      // writes, but a stream that stays managed and stops being probed is never
+      // written again, so only an age sweep retires its rows -- a seek on
+      // `probe_history_time`. One that stops being managed goes with
+      // `pruneOutside`.
+      this.sql('DELETE FROM probe_history WHERE probed_at < ?').run(now - PROBE_HISTORY_MS);
+      this.sql('DELETE FROM probe_cache WHERE probed_at < ?').run(now - 30 * 86_400_000);
+    })();
   }
 
   finishRun(runId: string, fields: RunUpdate = {}): void {
@@ -1918,18 +1955,34 @@ export class Store {
       const chunk = streamIds.slice(i, i + 400);
       const holes = chunk.map(() => '?').join(',');
       // Not cached: one bind hole per id, so the text varies with the chunk.
-      const rows = this.db
+      const rawRows = this.db
         .prepare(
-          `SELECT stream_id, variant_id, probed_at, alive, result FROM probe_cache
+          `SELECT rowid AS row_id, stream_id, stream_hash, variant_id, probed_at, alive, result FROM probe_cache
            WHERE stream_id IN (${holes})`,
         )
         .all(...chunk) as Array<{
         stream_id: number;
+        row_id: number;
+        stream_hash: string;
         variant_id: number;
         probed_at: number;
         alive: number;
         result: string;
       }>;
+      const newestByStream = new Map<number, (typeof rawRows)[number]>();
+      for (const row of rawRows) {
+        const newest = newestByStream.get(row.stream_id);
+        if (
+          !newest ||
+          row.probed_at > newest.probed_at ||
+          (row.probed_at === newest.probed_at && row.row_id > newest.row_id)
+        ) {
+          newestByStream.set(row.stream_id, row);
+        }
+      }
+      const rows = rawRows.filter(
+        (row) => newestByStream.get(row.stream_id)?.stream_hash === row.stream_hash,
+      );
       const byStream = new Map<number, Array<{ variantId: number; row: (typeof rows)[number] }>>();
       for (const row of rows) {
         const list = byStream.get(row.stream_id) ?? [];
@@ -3094,6 +3147,14 @@ export class Store {
       fps: row.fps,
       videoCodec: row.video_codec ?? '',
     }));
+  }
+
+  /** Cheap change token for memoized quality fits. */
+  qualityStamp(): string {
+    const row = this.sql(
+      'SELECT COUNT(*) AS count, COALESCE(MAX(sampled_at), 0) AS latest FROM quality_samples',
+    ).get() as { count: number; latest: number };
+    return `${row.count}:${row.latest}`;
   }
 
   /**

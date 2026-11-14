@@ -14,6 +14,7 @@ const state = vi.hoisted(() => ({
   writeRulesDoc: vi.fn(),
   snapshot: vi.fn(),
   userGroups: vi.fn(),
+  withRulesLock: vi.fn(async (fn: () => unknown) => fn()),
 }));
 vi.mock('@/lib/server/state', () => state);
 

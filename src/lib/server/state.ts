@@ -8,12 +8,14 @@
  */
 
 import { readFileSync, renameSync, writeFileSync } from 'fs';
+import { rename, writeFile } from 'fs/promises';
 import { type Config, loadConfig, requireCredentials } from '../config';
 import type { Channel, Group, Provider, Stream } from '../dispatcharr';
 import { DispatcharrClient } from '../dispatcharr';
 import type { GroupPattern, GroupPolicy } from '../eligibility';
 import { parseGroupPatterns } from '../eligibility';
 import type { Matcher, StreamIndex } from '../matcher';
+import { Mutex } from '../mutex';
 import type { OrderingConfig } from '../ordering';
 import type { MaxResolution, MinResolution } from '../resolution';
 import { readRulesFile } from '../rules';
@@ -29,6 +31,13 @@ const CACHE_TTL_MS = 300_000;
  * first page view.
  */
 const PERSIST_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+let tmpSeq = 0;
+const rulesMutex = new Mutex();
+
+/** Serialize rule-file read-modify-write operations within this process. */
+export function withRulesLock<T>(fn: () => T | Promise<T>): Promise<T> {
+  return rulesMutex.run(async () => fn());
+}
 
 export interface Snapshot {
   channels: Channel[];
@@ -119,7 +128,7 @@ export function readRulesDoc(): Record<string, unknown> {
 /** Write via a temp file: a crash mid-write must not leave rules unparseable. */
 export function writeRulesDoc(doc: unknown): void {
   const path = config().rulesPath;
-  const tmp = `${path}.tmp`;
+  const tmp = `${path}.${process.pid}.${++tmpSeq}.tmp`;
   writeFileSync(tmp, JSON.stringify(doc, null, 1), 'utf8');
   renameSync(tmp, path);
   // The mtime check would catch this anyway; being explicit avoids depending on
@@ -239,7 +248,7 @@ async function revalidate(): Promise<Snapshot> {
   ]);
   const snap: Snapshot = { channels, streams, providers, groups, fetchedAt: Date.now() };
   cache.snapshot = snap;
-  persistSnapshot(snap);
+  void persistSnapshot(snap);
   // The index contains references to the previous snapshot's streams. Drop it
   // as soon as a replacement arrives, rather than retaining two catalogues
   // until the next route happens to request matching.
@@ -275,12 +284,12 @@ function startRevalidate(): void {
  * never leaves a half-readable cache behind. Best effort: an unwritable data
  * directory costs a crawl on restart, not a page.
  */
-function persistSnapshot(snap: Snapshot): void {
+async function persistSnapshot(snap: Snapshot): Promise<void> {
   try {
     const path = config().cataloguePath;
-    const tmp = `${path}.tmp`;
-    writeFileSync(tmp, JSON.stringify(snap), 'utf8');
-    renameSync(tmp, path);
+    const tmp = `${path}.${process.pid}.${++tmpSeq}.tmp`;
+    await writeFile(tmp, JSON.stringify(snap), 'utf8');
+    await rename(tmp, path);
   } catch {
     // left unpersisted
   }

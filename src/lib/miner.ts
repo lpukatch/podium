@@ -265,9 +265,15 @@ export function plausibleToken(token: string): boolean {
  *
  * Returns display tokens; `tokenPattern` turns one into a regex.
  */
+const TOKEN_CACHE_MAX = 16_384;
+const tokenCache = new Map<string, string[]>();
+
 export function candidateTokens(name: string): string[] {
+  const key = name ?? '';
+  const cached = tokenCache.get(key);
+  if (cached) return cached;
   const found = new Set<string>();
-  const upper = (name ?? '').toUpperCase();
+  const upper = key.toUpperCase();
 
   for (const match of upper.matchAll(/\[([^\]]*)\]|\(([^)]*)\)/g)) {
     const body = (match[1] ?? match[2] ?? '').trim();
@@ -292,7 +298,10 @@ export function candidateTokens(name: string): string[] {
 
   for (const seed of SEED_TOKENS) if (upper.includes(seed)) found.add(seed);
 
-  return [...found].filter(plausibleToken);
+  const result = [...found].filter(plausibleToken);
+  if (tokenCache.size >= TOKEN_CACHE_MAX) tokenCache.clear();
+  tokenCache.set(key, result);
+  return result;
 }
 
 /**

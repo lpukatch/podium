@@ -162,12 +162,12 @@ describe('Store dead-streak bookkeeping', () => {
     store.close();
   });
 
-  it('keeps a streak per (stream, hash), so a re-published stream starts clean', () => {
+  it('drops the prior URL verdict when a stream is re-published', () => {
     const store = new Store(':memory:');
     store.put(1, 'old', verdict(false));
     store.put(1, 'old', verdict(false));
     store.put(1, 'new', verdict(false));
-    expect(store.entry(1, 'old')?.deadStreak).toBe(2);
+    expect(store.entry(1, 'old')).toBeNull();
     expect(store.entry(1, 'new')?.deadStreak).toBe(1);
     store.close();
   });

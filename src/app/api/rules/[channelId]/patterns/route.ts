@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { responseErrorText } from '@/lib/error-text';
-import { readRulesDoc, writeRulesDoc } from '@/lib/server/state';
+import { readRulesDoc, withRulesLock, writeRulesDoc } from '@/lib/server/state';
 
 export const dynamic = 'force-dynamic';
 
@@ -22,21 +22,23 @@ export async function DELETE(
   context: { params: Promise<{ channelId: string }> },
 ) {
   try {
-    const { channelId } = await context.params;
-    const id = Number(channelId);
-    if (!Number.isInteger(id)) {
-      return NextResponse.json({ error: 'bad channel id' }, { status: 400 });
-    }
+    return await withRulesLock(async () => {
+      const { channelId } = await context.params;
+      const id = Number(channelId);
+      if (!Number.isInteger(id)) {
+        return NextResponse.json({ error: 'bad channel id' }, { status: 400 });
+      }
 
-    const doc = readRulesDoc();
-    const channels = (doc.channels ?? []) as ChannelEntry[];
-    const entry = channels.find((c) => Number(c.channel_id) === id);
-    if (!entry) return NextResponse.json({ error: 'unknown channel' }, { status: 404 });
+      const doc = readRulesDoc();
+      const channels = (doc.channels ?? []) as ChannelEntry[];
+      const entry = channels.find((c) => Number(c.channel_id) === id);
+      if (!entry) return NextResponse.json({ error: 'unknown channel' }, { status: 404 });
 
-    const removed = (entry.patterns ?? []).length;
-    entry.patterns = [];
-    writeRulesDoc(doc);
-    return NextResponse.json({ status: 'removed', removed });
+      const removed = (entry.patterns ?? []).length;
+      entry.patterns = [];
+      writeRulesDoc(doc);
+      return NextResponse.json({ status: 'removed', removed });
+    });
   } catch (error) {
     return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   }

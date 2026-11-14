@@ -15,6 +15,12 @@ import { type ChildProcess, spawn } from 'child_process';
 
 const runningChildren = new Set<ChildProcess>();
 
+/** Keep subprocesses killable if the process exits during a media operation. */
+export function trackChild(child: ChildProcess): void {
+  runningChildren.add(child);
+  child.once('close', () => runningChildren.delete(child));
+}
+
 /**
  * Append a chunk, keeping at most the last `max` characters.
  *

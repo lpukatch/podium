@@ -9,7 +9,13 @@ import {
 import { responseErrorText } from '@/lib/error-text';
 import { readJson } from '@/lib/http-body';
 import { parseMaxResolution, parseMinResolution, RESOLUTION_CHOICES } from '@/lib/resolution';
-import { readRulesDoc, snapshot, userGroups, writeRulesDoc } from '@/lib/server/state';
+import {
+  readRulesDoc,
+  snapshot,
+  userGroups,
+  withRulesLock,
+  writeRulesDoc,
+} from '@/lib/server/state';
 
 export const dynamic = 'force-dynamic';
 
@@ -30,7 +36,7 @@ interface PatternRow {
 /** Add or replace a name-pattern rule, and report which groups it would hit. */
 export async function PUT(request: Request) {
   try {
-    return await putGroupPattern(request);
+    return await withRulesLock(() => putGroupPattern(request));
   } catch (error) {
     return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   }
@@ -184,7 +190,7 @@ async function putGroupPattern(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
-    return await deleteGroupPattern(request);
+    return await withRulesLock(() => deleteGroupPattern(request));
   } catch (error) {
     return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
   }
