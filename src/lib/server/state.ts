@@ -13,10 +13,11 @@ import { type Config, loadConfig, requireCredentials } from '../config';
 import type { Channel, Group, Provider, Stream } from '../dispatcharr';
 import { DispatcharrClient } from '../dispatcharr';
 import type { GroupPattern, GroupPolicy } from '../eligibility';
-import { parseGroupPatterns } from '../eligibility';
+import { assignmentIsRule, Eligibility, parseGroupPatterns } from '../eligibility';
 import type { Matcher, StreamIndex } from '../matcher';
 import { Mutex } from '../mutex';
 import type { OrderingConfig } from '../ordering';
+import { groupAllowed } from '../provider-groups';
 import type { MaxResolution, MinResolution } from '../resolution';
 import { readRulesFile } from '../rules';
 import { RulesSource } from '../rules-source';
@@ -108,6 +109,13 @@ export function config(): Config {
 
 /** Long-lived handle for reading the settings table. See `config`. */
 let settingsStore: Store | null = null;
+let claimsCache: { key: string; value: Claims } | null = null;
+
+export interface Claims {
+  hitsByChannel: Map<number, Array<[number, number]>>;
+  claimedIds: Set<number>;
+  claimedByStream: Map<number, Array<{ id: number; name: string }>>;
+}
 
 function client(): DispatcharrClient {
   const c = config();
@@ -137,6 +145,7 @@ export function writeRulesDoc(doc: unknown): void {
   cache.matcher = null;
   cache.index = null;
   cache.indexToken = '';
+  claimsCache = null;
 }
 
 // Shared with the worker's view of the same file: keyed on mtime, so an edit
@@ -327,7 +336,10 @@ function loadPersistedSnapshot(): Snapshot | null {
  */
 export function noteStreamOrder(channelId: number, streams: number[]): void {
   const channel = cache.snapshot?.channels.find((c) => c.id === channelId);
-  if (channel) channel.streams = [...streams];
+  if (channel) {
+    channel.streams = [...streams];
+    claimsCache = null;
+  }
 }
 
 export async function index(): Promise<StreamIndex> {
@@ -341,6 +353,56 @@ export async function index(): Promise<StreamIndex> {
     cache.indexToken = token;
   }
   return cache.index;
+}
+
+/** Matched stream claims shared by the group, stream search, and group views. */
+export async function claims(snap?: Snapshot, ignoreExcluded = false): Promise<Claims> {
+  const current = snap ?? (await snapshot());
+  const m = matcher();
+  const idx = await index();
+  const key = `${cache.indexToken}:${source().fileMtime() ?? 0}:${ignoreExcluded ? 1 : 0}`;
+  if (claimsCache?.key === key) return claimsCache.value;
+
+  const matchIndex = ignoreExcluded ? { ...idx, excludedGroups: new Set<number>() } : idx;
+  const groupNames = new Map(current.groups.map((group) => [group.id, group.name]));
+  const byId = new Map(current.streams.map((stream) => [stream.id, stream]));
+  const eligibility = new Eligibility(cache.policies, undefined, cache.patterns);
+  const hitsByChannel = new Map<number, Array<[number, number]>>();
+  const claimedIds = new Set<number>();
+  const claimedByStream = new Map<number, Array<{ id: number; name: string }>>();
+
+  for (const channel of current.channels) {
+    const groupName = channel.groupId == null ? undefined : groupNames.get(channel.groupId);
+    const policy = eligibility.policyFor(channel.groupId, groupName);
+    const rule = m.rules.get(channel.id);
+    let hits: Array<[number, number]> = [];
+    if (rule) {
+      hits = m.match(rule, matchIndex, policy.groupFilter);
+    } else if (policy.mode !== 'never' && assignmentIsRule(policy.mode)) {
+      const seen = new Set<number>();
+      for (const streamId of channel.streams) {
+        if (seen.has(streamId)) continue;
+        const stream = byId.get(streamId);
+        if (!stream || (stream.groupId != null && matchIndex.excludedGroups.has(stream.groupId)))
+          continue;
+        const streamGroup = stream.groupId == null ? undefined : groupNames.get(stream.groupId);
+        if (policy.groupFilter && !groupAllowed(streamGroup, policy.groupFilter)) continue;
+        seen.add(streamId);
+        hits.push([streamId, 0]);
+      }
+    }
+    hitsByChannel.set(channel.id, hits);
+    for (const [streamId] of hits) {
+      claimedIds.add(streamId);
+      const owners = claimedByStream.get(streamId) ?? [];
+      owners.push({ id: channel.id, name: rule?.name || String(channel.id) });
+      claimedByStream.set(streamId, owners);
+    }
+  }
+
+  const value = { hitsByChannel, claimedIds, claimedByStream };
+  claimsCache = { key, value };
+  return value;
 }
 
 /**

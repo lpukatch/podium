@@ -2,13 +2,12 @@ import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
 import { ALWAYS, assignmentIsRule, Eligibility, type GroupPolicy } from '@/lib/eligibility';
 import { responseErrorText } from '@/lib/error-text';
-import { assignedCandidates } from '@/lib/runner';
 import {
   channelCeilings,
   channelFloors,
+  claims,
   config,
   groupPatterns,
-  index,
   matcher,
   policies,
   snapshot,
@@ -27,7 +26,7 @@ export async function GET(request: Request) {
     const refresh = new URL(request.url).searchParams.get('refresh') === '1';
     const snap = await snapshot(refresh);
     const m = matcher();
-    const idx = await index();
+    const matched = await claims(snap);
     const policy = policies();
     const patterns = groupPatterns();
     const floors = channelFloors();
@@ -60,7 +59,6 @@ export async function GET(request: Request) {
     }
 
     const providerNames = Object.fromEntries(snap.providers.map((p) => [p.id, p.name]));
-    const streamById = new Map(snap.streams.map((s) => [s.id, s]));
     const streamGroupIds = new Set(snap.streams.map((s) => s.groupId));
 
     const payload = groups.map((group) => {
@@ -90,17 +88,7 @@ export async function GET(request: Request) {
         // off its own assignment by the worker, so showing it as "no rule, 0
         // matched" would describe the opposite of what happens to it.
         const assignmentOnly = !rule && assignmentIsRule(mode);
-        const hits = rule
-          ? m.match(rule, idx, resolved.groupFilter)
-          : assignmentOnly
-            ? assignedCandidates(
-                channel,
-                streamById,
-                idx.excludedGroups,
-                idx.groupNames,
-                resolved.groupFilter,
-              )
-            : [];
+        const hits = matched.hitsByChannel.get(channel.id) ?? [];
         if (rule) ruled += 1;
         if (hits.length > 0) matchedChannels += 1;
         links += hits.length;
