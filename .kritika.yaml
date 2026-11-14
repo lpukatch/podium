@@ -7,16 +7,23 @@
 # API surface it does not converge within the instance budgets (two
 # runs of MR !405 spent 15/16 and 31/32 steps, the second killing the
 # full 120m wall). Split the review into paths-scoped agents instead:
-# each replaces the default pass, reads only its own files, and carries
-# a lowered step/time budget that caps exploration per part.
+# each replaces the default pass, only changed files matching its paths
+# are in scope for it, and each carries a lowered step/time budget that
+# caps exploration per part. An agent only runs when its paths match,
+# so a typical small MR still pays for exactly one agent. Intentionally
+# outside every agent: repo-root tooling and docs (Dockerfile, config
+# files, *.md) — MRs touching only those get no agent review.
+# src/app/* is deliberately non-recursive: the flat views match it,
+# src/app/api/** belongs to api-routes alone.
 review:
   agents:
     - name: core-state
       instructions: >-
         Scope: Podium's core — the store, scheduler, miners/probes,
-        Dispatcharr client, and worker loop. Review only the files your
-        paths match; judge each change against local context and
-        docs/miner.md rather than enumerating consumers elsewhere.
+        Dispatcharr client, and worker loop. Only the changed files your
+        paths match are in scope; judge each change against local
+        context and docs/miner.md rather than enumerating consumers
+        elsewhere.
       paths:
         - src/lib/**
         - src/worker/**
@@ -35,6 +42,21 @@ review:
       agent:
         steps: 10
         timeout: 35m
+
+    - name: views-and-scripts
+      instructions: >-
+        Scope: the operator UI views, client-side probe loop, the
+        Dispatcharr proxy, and the CLI scripts under src/scripts. Only
+        the changed files your paths match are in scope; judge UI
+        changes against the API handlers they call, not the core
+        modules behind those handlers.
+      paths:
+        - src/app/*
+        - src/proxy.*
+        - src/scripts/**
+      agent:
+        steps: 10
+        timeout: 30m
 
 context:
   - path: docs/miner.md
