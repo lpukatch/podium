@@ -1,0 +1,41 @@
+# Kritika (in-cluster Forgejo PR reviewer) repository configuration.
+# Read from the merge base of each PR, so changes here apply to PRs that
+# include this commit in their merge base with main.
+#
+# The default review pass reads every changed file and explores repo
+# context freely; on MRs that touch the central store together with the
+# API surface it does not converge within the instance budgets (two
+# runs of MR !405 spent 15/16 and 31/32 steps, the second killing the
+# full 120m wall). Split the review into paths-scoped agents instead:
+# each replaces the default pass, reads only its own files, and carries
+# a lowered step/time budget that caps exploration per part.
+review:
+  agents:
+    - name: core-state
+      instructions: >-
+        Scope: Podium's core — the store, scheduler, miners/probes,
+        Dispatcharr client, and worker loop. Review only the files your
+        paths match; judge each change against local context and
+        docs/miner.md rather than enumerating consumers elsewhere.
+      paths:
+        - src/lib/**
+        - src/worker/**
+        - src/entry.ts
+      agent:
+        steps: 14
+        timeout: 50m
+
+    - name: api-routes
+      instructions: >-
+        Scope: HTTP API route handlers. Judge each route's changes
+        against the helpers it imports; do not audit unrelated routes
+        or the core modules behind them beyond what the diff needs.
+      paths:
+        - src/app/api/**
+      agent:
+        steps: 10
+        timeout: 35m
+
+context:
+  - path: docs/miner.md
+    description: Podium's core mining/ranking algorithm and its invariants.
