@@ -185,6 +185,7 @@ export class TeamarrClient {
     try {
       response = await fetch(target, {
         method,
+        redirect: 'error',
         signal: controller.signal,
         headers: body ? { 'Content-Type': 'application/json' } : undefined,
         body: body ? JSON.stringify(body) : undefined,
