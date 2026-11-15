@@ -388,7 +388,7 @@ export function OrderingView() {
         </button>
         {advanced && (
           <div className="mt-2">
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
               {WEIGHT_FIELDS.map((f) => (
                 <label key={f.key} className="block text-xs text-[var(--color-muted)]">
                   {f.label}

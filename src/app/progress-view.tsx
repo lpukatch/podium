@@ -145,7 +145,7 @@ const PHASES: Record<Progress['phase'], { label: string; tone: string }> = {
 };
 
 /** Phases where the numbers move second by second and a fast poll earns itself. */
-const BUSY: Array<Progress['phase']> = ['fetching', 'planning', 'probing'];
+const BUSY: Array<Progress['phase']> = ['fetching', 'planning', 'probing', 'soaking'];
 
 function ago(ms: number): string {
   const s = Math.max(Math.round((Date.now() - ms) / 1000), 0);
@@ -279,7 +279,12 @@ export function ProgressView() {
 
   const poll = useCallback(async () => {
     try {
-      const resp = await fetch('/api/progress');
+      const [progressResult, soakResult] = await Promise.allSettled([
+        fetch('/api/progress'),
+        fetch('/api/soak'),
+      ]);
+      if (progressResult.status === 'rejected') throw progressResult.reason;
+      const resp = progressResult.value;
       const body = await resp.json();
       if (!resp.ok || body.error) {
         setError(body.detail || body.error || `HTTP ${resp.status}`);
@@ -307,7 +312,8 @@ export function ProgressView() {
       // owned by a different table and a different endpoint, and folding it in
       // would make the progress payload depend on it being readable.
       try {
-        const soakResp = await fetch('/api/soak');
+        if (soakResult.status === 'rejected') throw soakResult.reason;
+        const soakResp = soakResult.value;
         const soakBody = await soakResp.json();
         if (soakResp.ok && !soakBody.error) {
           setSoakQueue({
@@ -490,7 +496,14 @@ export function ProgressView() {
 
         {p && p.phase === 'probing' && (
           <>
-            <div className="mt-4 h-2 overflow-hidden rounded-full bg-[var(--color-line)]">
+            <div
+              role="progressbar"
+              aria-label="Stream probe progress"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={pct}
+              className="mt-4 h-2 overflow-hidden rounded-full bg-[var(--color-line)]"
+            >
               <div
                 className="h-full rounded-full bg-[var(--color-accent)] transition-[width] duration-500"
                 style={{ width: `${pct}%` }}
@@ -504,7 +517,14 @@ export function ProgressView() {
 
         {p && p.phase === 'soaking' && soakTotal > 0 && (
           <>
-            <div className="mt-4 h-2 overflow-hidden rounded-full bg-[var(--color-line)]">
+            <div
+              role="progressbar"
+              aria-label="Stream soak progress"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={soakPct}
+              className="mt-4 h-2 overflow-hidden rounded-full bg-[var(--color-line)]"
+            >
               <div
                 className="h-full rounded-full bg-[var(--color-accent)] transition-[width] duration-500"
                 style={{ width: `${soakPct}%` }}
