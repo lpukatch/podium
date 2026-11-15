@@ -27,9 +27,8 @@
  *
  * The body carries no authentication either, so the secret travels in
  * headers: the integration is created with `X-Podium-Connect-Token`, which
- * the receiver checks against the token in Podium's settings, plus
- * `X-Podium-Token` when `PODIUM_AUTH_TOKEN` guards this install's front door.
- * `requests.post(url, data=payload, headers=headers)` sends both verbatim.
+ * the receiver checks against the token in Podium's settings. These receiver
+ * paths use that dedicated token instead of the UI token.
  */
 
 import { randomBytes } from 'crypto';
@@ -67,8 +66,6 @@ export interface ProvisionInput {
   podiumUrl: string;
   /** The token deliveries must carry; see `ensureConnectToken`. */
   token: string;
-  /** Podium's front-door token, when one guards this install. */
-  authToken?: string;
 }
 
 export interface ProvisionResult {
@@ -78,12 +75,7 @@ export interface ProvisionResult {
 }
 
 function deliveryHeaders(input: ProvisionInput): Record<string, string> {
-  const headers: Record<string, string> = { 'X-Podium-Connect-Token': input.token };
-  const auth = (input.authToken ?? '').trim();
-  // The front door accepts this header as a credential, so a token-protected
-  // install does not have to choose between its API auth and its webhooks.
-  if (auth !== '') headers['X-Podium-Token'] = auth;
-  return headers;
+  return { 'X-Podium-Connect-Token': input.token };
 }
 
 function sameDelivery(

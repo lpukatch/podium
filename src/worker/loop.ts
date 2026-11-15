@@ -420,7 +420,6 @@ export async function startWorker(config: Config, log: Log): Promise<() => Promi
         const result = await provisionConnectEvents(poller, {
           podiumUrl: live.PODIUM_CONNECT_URL,
           token,
-          authToken: process.env.PODIUM_AUTH_TOKEN,
         });
         const touched = [...result.created, ...result.updated, ...result.removed];
         if (touched.length > 0) log(`connect events: ${touched.join(', ')}`);

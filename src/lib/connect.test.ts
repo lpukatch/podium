@@ -229,13 +229,31 @@ describe('provisionConnectEvents', () => {
     );
   });
 
-  it('adds the front-door token header when the install is token-guarded', async () => {
+  it('provisions only the dedicated Connect token header', async () => {
     const fake = fakeDispatcharr();
-    await provisionConnectEvents(fake.client, { ...INPUT, authToken: 'front-door' });
+    await provisionConnectEvents(fake.client, INPUT);
     expect(fake.state[0]?.config.headers).toEqual({
       'X-Podium-Connect-Token': 'tok',
-      'X-Podium-Token': 'front-door',
     });
+  });
+
+  it('removes the master token header from existing integrations', async () => {
+    const fake = fakeDispatcharr([
+      {
+        id: 7,
+        name: STREAM_SWITCH,
+        type: 'webhook',
+        enabled: true,
+        config: {
+          url: `http://podium:3456${connectEventPath('stream_switch')}`,
+          headers: { 'X-Podium-Connect-Token': 'tok', 'X-Podium-Token': 'old-master-token' },
+        },
+        subscriptions: [{ event: 'stream_switch', enabled: true }],
+      },
+    ]);
+    const result = await provisionConnectEvents(fake.client, INPUT);
+    expect(result.updated).toContain(STREAM_SWITCH);
+    expect(fake.state[0]?.config.headers).toEqual({ 'X-Podium-Connect-Token': 'tok' });
   });
 
   it('does nothing without an address to point at', async () => {

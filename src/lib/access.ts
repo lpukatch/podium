@@ -244,7 +244,12 @@ export type AccessVerdict =
  * forever. Metrics are *not* here: they describe your library, and Prometheus
  * can send an Authorization header.
  */
-const TOKEN_EXEMPT = new Set(['/api/health']);
+// Connect deliveries authenticate with their own token in the receiver route.
+const TOKEN_EXEMPT = new Set([
+  '/api/health',
+  '/api/connect/events/stream_switch',
+  '/api/connect/events/channel_error',
+]);
 
 export function checkAccess(request: AccessRequest, policy: AccessPolicy): AccessVerdict {
   // Normalised here rather than at the call site: the caller has a raw Host
