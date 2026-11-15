@@ -87,7 +87,7 @@ CREATE INDEX IF NOT EXISTS probe_cache_probed_at ON probe_cache (probed_at);
 -- included, and an older hash's alive row can win.
 --
 -- Bounded twice: PROBE_HISTORY_PER_STREAM rows per stream, trimmed as each is
--- written, and PROBE_HISTORY_MS of age, swept each pass. Unlike
+-- written, and PROBE_HISTORY_MS of age, swept during periodic maintenance. Unlike
 -- quality_samples it describes a stream rather than its provenance, so it
 -- goes with the stream: pruneOutside and resetData clear it as they clear
 -- probe_cache. There is no variant_id: both callers of put() write pooled
@@ -1413,6 +1413,7 @@ export interface DeadStreamRow {
 export class Store {
   private readonly db: Database.Database;
   private readonly statements = new Map<string, Database.Statement>();
+  private lastMaintenanceAt: number | null = null;
   private static initializedPaths = new Set<string>();
 
   constructor(path: string) {
@@ -1420,6 +1421,9 @@ export class Store {
     this.db = new Database(path);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
+    this.db.pragma('temp_store = MEMORY');
+    this.db.pragma('cache_size = -32000');
+    this.db.pragma('journal_size_limit = 67108864');
     this.db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
 
     if (path === ':memory:' || !Store.initializedPaths.has(path)) {
@@ -1842,20 +1846,16 @@ export class Store {
 
   startRun(runId: string): void {
     const now = Date.now();
+    const maintenance =
+      this.lastMaintenanceAt === null ||
+      now < this.lastMaintenanceAt ||
+      now - this.lastMaintenanceAt >= 15 * 60_000;
     this.db.transaction(() => {
       this.sql('INSERT OR REPLACE INTO runs (run_id, started_at) VALUES (?, ?)').run(runId, now);
       this.bumpLifetimeTotals({ runs: 1 });
-      // Trimmed here rather than in `prune()`, which only runs when a worker
-      // starts: a container that stays up for months would never trim this table
-      // at all. Against `runs_started_at` this is an index seek that matches
-      // nothing on every pass but the first of the day, so paying it per pass
-      // costs less than the bookkeeping to pay it less often.
+      // Keep per-tick accounting, but sweep history at most once per 15 minutes.
+      if (!maintenance) return;
       this.sql('DELETE FROM runs WHERE started_at < ?').run(now - RUN_HISTORY_MS);
-      // Same bargain, same place, for the same reason: the quality table grows
-      // by one row per probe and a container that stays up for months would
-      // otherwise never trim it. Bounded by SAMPLES_PER_BUCKET times the number
-      // of buckets -- tens of thousands of rows at the very most -- so the sweep
-      // is cheap enough to pay every pass rather than only at boot.
       this.trimQuality();
       // Same sweep, same reason. A check is a handful of rows per pass, but a
       // pass runs hourly forever. The misses go first and on their own clock --
@@ -1879,6 +1879,8 @@ export class Store {
       this.sql('DELETE FROM probe_history WHERE probed_at < ?').run(now - PROBE_HISTORY_MS);
       this.sql('DELETE FROM probe_cache WHERE probed_at < ?').run(now - 30 * 86_400_000);
     })();
+    // A failed transaction must leave maintenance due for the next attempt.
+    if (maintenance) this.lastMaintenanceAt = now;
   }
 
   finishRun(runId: string, fields: RunUpdate = {}): void {
@@ -2758,7 +2760,7 @@ export class Store {
    * answer is a bad bucket however fast the other two thirds run.
    *
    * Writes only -- no read-modify-write, no trim on the hot path. The trim is
-   * `trimQuality`, run once per pass, because doing it per sample would turn
+   * `trimQuality`, run during periodic maintenance, because doing it per sample would turn
    * every probe into a delete against the largest table here for the sake of
    * a row count nobody reads between passes.
    */
@@ -3985,8 +3987,13 @@ export class Store {
     const run = this.db.transaction((ids: number[]) => {
       this.db.exec('CREATE TEMP TABLE IF NOT EXISTS _podium_keep (id INTEGER PRIMARY KEY)');
       this.sql('DELETE FROM _podium_keep').run();
-      const insert = this.sql('INSERT INTO _podium_keep (id) VALUES (?)');
-      for (const id of ids) insert.run(id);
+      const chunkSize = 2_000;
+      for (let offset = 0; offset < ids.length; offset += chunkSize) {
+        const chunk = ids.slice(offset, offset + chunkSize);
+        this.db
+          .prepare(`INSERT INTO _podium_keep (id) VALUES ${chunk.map(() => '(?)').join(',')}`)
+          .run(...chunk);
+      }
       // A stream's history goes with its verdict. The count stays the cache's
       // alone: it is what the pass logs as orphan cache rows.
       this.sql(
