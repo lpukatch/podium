@@ -117,6 +117,23 @@ describe('reading a floor', () => {
     ]);
   });
 
+  it('warns about invalid min bounds in defaults and group patterns', () => {
+    const report = loadRules({
+      schema: 2,
+      defaults: { min_resolution: '1o80p' },
+      group_patterns: [
+        { pattern: 'Sports*', min_resolution: '1440p' },
+        { pattern: 'News*', min_resolution: '1080i' },
+        { pattern: 'Radio*', min_resolution: 'none' },
+      ],
+      channels: [],
+    });
+    expect(report.invalidFloors).toEqual([
+      'defaults: min_resolution "1o80p"',
+      'group pattern 1: min_resolution "1440p"',
+    ]);
+  });
+
   it('lets a channel raise, lower or clear its group floor', () => {
     expect(resolveResolutionFloor(undefined, '1080p')).toBe('1080p');
     expect(resolveResolutionFloor('2160p', '1080p')).toBe('2160p');
