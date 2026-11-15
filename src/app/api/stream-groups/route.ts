@@ -1,12 +1,11 @@
 import { NextResponse } from 'next/server';
-import { compileGlob, Eligibility } from '@/lib/eligibility';
+import { compileGlob } from '@/lib/eligibility';
 import { responseErrorText } from '@/lib/error-text';
 import { readJson } from '@/lib/http-body';
 import {
-  groupPatterns,
+  claims,
   index,
   matcher,
-  policies,
   readRulesDoc,
   snapshot,
   streamGroups,
@@ -34,27 +33,9 @@ export async function GET() {
     const snap = await snapshot();
     const m = matcher();
     const idx = await index();
-
-    // Claimed *ignoring* the exclusions, so a group already switched off still
-    // shows what it would take back if you switched it on again.
-    const claimed = new Set<number>();
-    const channelGroups = new Map(snap.channels.map((c) => [c.id, c.groupId]));
-    const groupNames = new Map(snap.groups.map((g) => [g.id, g.name]));
-    const eligibility = new Eligibility(policies(), undefined, groupPatterns());
-    for (const rule of m.rules.values()) {
-      const groupId = channelGroups.get(rule.channelId);
-      const filter = eligibility.policyFor(
-        groupId,
-        groupId == null ? undefined : groupNames.get(groupId),
-      ).groupFilter;
-      for (const [streamId] of m.match(
-        rule,
-        { ...idx, excludedGroups: new Set<number>() },
-        filter,
-      )) {
-        claimed.add(streamId);
-      }
-    }
+    // Claimed *ignoring* exclusions, so a group already switched off still
+    // shows what it would take back if it were switched on again.
+    const claimed = (await claims(snap, true)).claimedIds;
 
     const excludeGroups = m.guards.excludeGroups;
     const tests = excludeGroups.map((glob) => compileGlob(glob));

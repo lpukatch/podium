@@ -4,6 +4,7 @@ const state = vi.hoisted(() => ({
   snapshot: vi.fn(),
   index: vi.fn(),
   matcher: vi.fn(),
+  claims: vi.fn(),
   policies: () => new Map(),
   groupPatterns: () => [],
 }));
@@ -37,6 +38,19 @@ describe('stream search ownership', () => {
   });
 
   async function search(rules: Array<[number, { name: string; streams: number[] }]>) {
+    const claimedByStream = new Map<number, Array<{ id: number; name: string }>>();
+    for (const [id, rule] of rules) {
+      for (const streamId of rule.streams) {
+        const owners = claimedByStream.get(streamId) ?? [];
+        owners.push({ id, name: rule.name });
+        claimedByStream.set(streamId, owners);
+      }
+    }
+    state.claims.mockResolvedValue({
+      claimedByStream,
+      claimedIds: new Set(),
+      hitsByChannel: new Map(),
+    });
     state.matcher.mockReturnValue({
       rules: new Map(rules),
       match: (rule: { streams: number[] }) => new Map(rule.streams.map((id) => [id, true])),

@@ -1,8 +1,7 @@
 import { NextResponse } from 'next/server';
-import { Eligibility } from '@/lib/eligibility';
 import { responseErrorText } from '@/lib/error-text';
 import { leadingWord, matchKey } from '@/lib/normalize';
-import { groupPatterns, index, matcher, policies, snapshot } from '@/lib/server/state';
+import { claims, index, matcher, snapshot } from '@/lib/server/state';
 
 export const dynamic = 'force-dynamic';
 
@@ -30,31 +29,7 @@ export async function GET(request: Request) {
     const idx = await index();
     const m = matcher();
     const providerNames = new Map(snap.providers.map((p) => [p.id, p.name]));
-    const channelGroups = new Map(snap.channels.map((c) => [c.id, c.groupId]));
-    const groupNames = new Map(snap.groups.map((g) => [g.id, g.name]));
-    const eligibility = new Eligibility(policies(), undefined, groupPatterns());
-
-    // Which channel already claims a stream, so the UI can say "taken".
-    const claimedBy = new Map<number, string>();
-    const claimedByChannelIds = new Map<number, Set<number>>();
-    for (const [channelId, rule] of m.rules) {
-      const groupId = channelGroups.get(channelId);
-      const filter = eligibility.policyFor(
-        groupId,
-        groupId == null ? undefined : groupNames.get(groupId),
-      ).groupFilter;
-      for (const [streamId] of m.match(rule, idx, filter)) {
-        let owners = claimedByChannelIds.get(streamId);
-        if (!owners) {
-          owners = new Set();
-          claimedByChannelIds.set(streamId, owners);
-        }
-        owners.add(channelId);
-        if (!claimedBy.has(streamId)) {
-          claimedBy.set(streamId, rule.name || String(channelId));
-        }
-      }
-    }
+    const claimedByStream = (await claims(snap)).claimedByStream;
 
     const needle = matchKey(query);
     const loose = query.toLowerCase();
@@ -109,9 +84,10 @@ export async function GET(request: Request) {
       bucket.isFast = bucket.isFast || Boolean(norm.isFast);
       bucket.providers.add(providerNames.get(stream.providerId) ?? String(stream.providerId));
       if (bucket.samples.length < 3) bucket.samples.push(stream.name);
-      bucket.claimedBy ??= claimedBy.get(stream.id) ?? null;
-      for (const channelId of claimedByChannelIds.get(stream.id) ?? []) {
-        bucket.claimedByChannelIds.add(channelId);
+      const owners = claimedByStream.get(stream.id) ?? [];
+      bucket.claimedBy ??= owners[0]?.name ?? null;
+      for (const owner of owners) {
+        bucket.claimedByChannelIds.add(owner.id);
       }
       for (const prefix of norm.prefixes) {
         bucket.prefixes.set(prefix, (bucket.prefixes.get(prefix) ?? 0) + 1);
