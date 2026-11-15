@@ -1201,6 +1201,8 @@ export interface RunnerDeps {
 export class Runner {
   lastRun: RunSummary | null = null;
   private running = false;
+  private progressWrittenAt = -Infinity;
+  private progressFlush: ReturnType<typeof setTimeout> | null = null;
   private activeAbort: AbortFlag | null = null;
   /** The EPG grid is large and slow-changing; reuse it across passes. */
   private readonly epg = new EpgCache<unknown[]>();
@@ -1282,16 +1284,32 @@ export class Runner {
    * Publish progress for the UI.
    *
    * The worker and the web process are separate, so this goes through the
-   * store rather than memory. Cheap enough to call on every probe: one small
-   * upsert against a WAL database.
+   * store rather than memory. In-flight probes coalesce writes over 250 ms;
+   * phase changes flush immediately, including the final counters.
    */
   private emit(patch: Partial<Omit<Progress, 'updatedAt'>>): void {
+    const previousPhase = this.progress.phase;
     this.progress = { ...this.progress, ...patch };
-    try {
-      this.deps.store.setProgress(this.progress);
-    } catch {
-      // Progress is diagnostics; never let it take a run down.
+    const flush = () => {
+      if (this.progressFlush) clearTimeout(this.progressFlush);
+      this.progressFlush = null;
+      try {
+        this.deps.store.setProgress(this.progress);
+        this.progressWrittenAt = Date.now();
+      } catch {
+        // Progress is diagnostics; never let it take a run down.
+      }
+    };
+    const remaining = 250 - (Date.now() - this.progressWrittenAt);
+    if (
+      previousPhase === this.progress.phase &&
+      this.progress.phase === 'probing' &&
+      remaining > 0
+    ) {
+      if (!this.progressFlush) this.progressFlush = setTimeout(flush, remaining);
+      return;
     }
+    flush();
   }
 
   /**
