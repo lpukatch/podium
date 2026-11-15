@@ -350,6 +350,9 @@ export default function Page() {
   >({});
   const [editingAlias, setEditingAlias] = useState<string | null>(null);
   const [sourceSearch, setSourceSearch] = useState('');
+  const [containsSourceSearch, setContainsSourceSearch] = useState('');
+  const [policyError, setPolicyError] = useState('');
+  const [showAllChannels, setShowAllChannels] = useState(false);
   const [aliases, setAliases] = useState('');
   const [draftAlias, setDraftAlias] = useState('');
   const [contains, setContains] = useState('');
@@ -373,6 +376,7 @@ export default function Page() {
   const probeAbortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(async (refresh = false) => {
+    if (refresh) setDeadSummary(null);
     if (catalogueRequest.current && !refresh) return;
     catalogueRequest.current = true;
     setLoading(true);
@@ -726,7 +730,12 @@ export default function Page() {
         maxResolution,
       }),
     });
-    setSaved(resp.ok ? 'Saved' : 'Save failed');
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      setSaved(body.error || `Save failed (HTTP ${resp.status})`);
+      return;
+    }
+    setSaved('Saved');
     setTimeout(() => setSaved(''), 1800);
     if (resp.ok) {
       await load();
@@ -862,12 +871,31 @@ export default function Page() {
     }
   };
 
+  const mutatePolicy = async (url: string, init: RequestInit): Promise<boolean> => {
+    setPolicyError('');
+    try {
+      const response = await fetch(url, init);
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        setPolicyError(body.error || `Save failed (HTTP ${response.status})`);
+        return false;
+      }
+      return true;
+    } catch (error) {
+      setPolicyError(String(error));
+      return false;
+    }
+  };
+
   const setMode = async (id: number, mode: Mode) => {
-    await fetch(`/api/groups/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode }),
-    });
+    if (
+      !(await mutatePolicy(`/api/groups/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      }))
+    )
+      return;
     await load();
   };
   const setGroupStreamFilter = async (
@@ -875,29 +903,38 @@ export default function Page() {
     mode: Mode,
     groupFilter: ProviderGroupFilter | null,
   ) => {
-    await fetch(`/api/groups/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode, groupFilter }),
-    });
+    if (
+      !(await mutatePolicy(`/api/groups/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode, groupFilter }),
+      }))
+    )
+      return;
     await load();
   };
 
   const toggleAudioOnly = async (id: number, mode: Mode, currentAudioOnly: boolean) => {
-    await fetch(`/api/groups/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode, audioOnly: !currentAudioOnly }),
-    });
+    if (
+      !(await mutatePolicy(`/api/groups/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode, audioOnly: !currentAudioOnly }),
+      }))
+    )
+      return;
     await load();
   };
 
   const toggleMeasureOnly = async (id: number, mode: Mode, current: boolean) => {
-    await fetch(`/api/groups/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode, measureOnly: !current }),
-    });
+    if (
+      !(await mutatePolicy(`/api/groups/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode, measureOnly: !current }),
+      }))
+    )
+      return;
     await load();
   };
 
@@ -908,84 +945,125 @@ export default function Page() {
    * mode to carry it -- and the mode is what the buttons below set.
    */
   const togglePatternMeasureOnly = async (pattern: string, mode: Mode, current: boolean) => {
-    await fetch('/api/group-patterns', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pattern, mode, measureOnly: !current }),
-    });
+    if (
+      !(await mutatePolicy('/api/group-patterns', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pattern, mode, measureOnly: !current }),
+      }))
+    )
+      return;
     await load();
   };
 
   /** Set a group's resolution floor; an empty choice clears it. */
   const setGroupFloor = async (id: number, mode: Mode, floor: string) => {
-    await fetch(`/api/groups/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode, minResolution: floor || 'none' }),
-    });
+    if (
+      !(await mutatePolicy(`/api/groups/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode, minResolution: floor || 'none' }),
+      }))
+    )
+      return;
     await load();
   };
 
   /** Set a group's resolution ceiling; an empty choice clears it. */
   const setGroupCap = async (id: number, mode: Mode, cap: string) => {
-    await fetch(`/api/groups/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode, maxResolution: cap || 'none' }),
-    });
+    if (
+      !(await mutatePolicy(`/api/groups/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode, maxResolution: cap || 'none' }),
+      }))
+    )
+      return;
     await load();
   };
 
   const setGroupGrace = async (id: number, mode: Mode, minutes: number) => {
-    await fetch(`/api/groups/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode, graceMinutes: minutes }),
-    });
+    if (
+      !(await mutatePolicy(`/api/groups/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode, graceMinutes: minutes }),
+      }))
+    )
+      return;
     await load();
   };
 
   const setPatternGrace = async (pattern: string, mode: Mode, minutes: number) => {
-    await fetch('/api/group-patterns', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pattern, mode, graceMinutes: minutes }),
-    });
+    if (
+      !(await mutatePolicy('/api/group-patterns', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pattern, mode, graceMinutes: minutes }),
+      }))
+    )
+      return;
     await load();
   };
 
   const setPatternFloor = async (pattern: string, mode: Mode, floor: string) => {
-    await fetch('/api/group-patterns', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pattern, mode, minResolution: floor || 'none' }),
-    });
+    if (
+      !(await mutatePolicy('/api/group-patterns', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pattern, mode, minResolution: floor || 'none' }),
+      }))
+    )
+      return;
     await load();
   };
 
   const setPatternCap = async (pattern: string, mode: Mode, cap: string) => {
-    await fetch('/api/group-patterns', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pattern, mode, maxResolution: cap || 'none' }),
-    });
+    if (
+      !(await mutatePolicy('/api/group-patterns', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pattern, mode, maxResolution: cap || 'none' }),
+      }))
+    )
+      return;
     await load();
   };
 
   const savePattern = async (mode: Mode) => {
     const pattern = patternText.trim();
     if (!pattern) return;
-    await fetch('/api/group-patterns', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pattern, mode }),
-    });
+    if (
+      !(await mutatePolicy('/api/group-patterns', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pattern, mode }),
+      }))
+    )
+      return;
     setPatternText('');
     await load();
   };
 
   const dropPattern = async (pattern: string) => {
-    await fetch(`/api/group-patterns?pattern=${encodeURIComponent(pattern)}`, { method: 'DELETE' });
+    if (
+      !(await mutatePolicy(`/api/group-patterns?pattern=${encodeURIComponent(pattern)}`, {
+        method: 'DELETE',
+      }))
+    )
+      return;
+    await load();
+  };
+
+  const togglePatternAudioOnly = async (pattern: string, mode: Mode, current: boolean) => {
+    if (
+      !(await mutatePolicy('/api/group-patterns', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pattern, mode, audioOnly: !current }),
+      }))
+    )
+      return;
     await load();
   };
 
@@ -1308,6 +1386,7 @@ export default function Page() {
               <DeadView
                 onOpenChannel={openDeadChannel}
                 onChanged={async () => {
+                  setDeadSummary(null);
                   await load();
                 }}
               />
@@ -1360,6 +1439,14 @@ export default function Page() {
 
             {tab === 'groups' && (
               <>
+                {policyError && (
+                  <p
+                    role="alert"
+                    className="sticky top-0 z-10 bg-[var(--color-panel)] p-4 text-[var(--color-bad)]"
+                  >
+                    {policyError}
+                  </p>
+                )}
                 <div className="border-b border-[var(--color-line)] bg-[var(--color-panel)] p-4">
                   <div className="flex flex-wrap items-center gap-3">
                     <input
@@ -1456,13 +1543,20 @@ export default function Page() {
                   {patterns.map((p) => (
                     <div key={p.pattern} className="mt-3 flex items-center gap-3">
                       <code className="mono min-w-0 flex-1 truncate">{p.pattern}</code>
-                      {p.audioOnly && (
-                        <span
-                          className={`${pill} bg-[var(--color-accent-soft)] text-[var(--color-accent)]`}
-                        >
-                          audio
-                        </span>
-                      )}
+                      <button
+                        type="button"
+                        className={chip(Boolean(p.audioOnly))}
+                        aria-pressed={Boolean(p.audioOnly)}
+                        onClick={() =>
+                          void togglePatternAudioOnly(
+                            p.pattern,
+                            p.mode as Mode,
+                            Boolean(p.audioOnly),
+                          )
+                        }
+                      >
+                        {p.audioOnly ? '✓ Audio only' : 'Audio only'}
+                      </button>
                       <span className={`${pill} bg-[var(--color-line)] text-[var(--color-muted)]`}>
                         {MODE_CHIP[p.mode]}
                       </span>
@@ -1605,10 +1699,23 @@ export default function Page() {
                   />
                   <p className="mt-2 text-sm tabular-nums text-[var(--color-muted)]">
                     {allChannels.length} channels
+                    {allChannels.length > 500 && (
+                      <span>
+                        {' '}
+                        · {showAllChannels ? 'Showing all' : 'Showing first 500'}{' '}
+                        <button
+                          type="button"
+                          className="underline"
+                          onClick={() => setShowAllChannels(!showAllChannels)}
+                        >
+                          {showAllChannels ? 'Show fewer' : 'Show all'}
+                        </button>
+                      </span>
+                    )}
                   </p>
                 </div>
                 <ul>
-                  {allChannels.slice(0, 500).map((c) => (
+                  {(showAllChannels ? allChannels : allChannels.slice(0, 500)).map((c) => (
                     <li key={c.id}>
                       <button
                         type="button"
@@ -2399,12 +2506,14 @@ export default function Page() {
                   <input
                     className="mt-2 w-full rounded-lg border border-[var(--color-line)] bg-[var(--color-canvas)] px-3 py-2"
                     placeholder="Filter provider groups…"
-                    value={sourceSearch}
-                    onChange={(e) => setSourceSearch(e.target.value)}
+                    value={containsSourceSearch}
+                    onChange={(e) => setContainsSourceSearch(e.target.value)}
                   />
                   <div className="scroll-shadow max-h-40 overflow-y-auto pr-3">
                     {providerGroups
-                      .filter((g) => g.name.toLowerCase().includes(sourceSearch.toLowerCase()))
+                      .filter((g) =>
+                        g.name.toLowerCase().includes(containsSourceSearch.toLowerCase()),
+                      )
                       .map((g) => (
                         <button
                           key={g.id}
@@ -2488,7 +2597,10 @@ export default function Page() {
 
             <CheckPanel
               channelId={channel.id}
-              onApplied={() => void resync()}
+              onApplied={() => {
+                setDeadSummary(null);
+                void resync();
+              }}
               onSoakChannel={() => void queueSoak('channel', channel.id)}
               soakNote={soakNote?.scope === 'channel' ? soakNote.text : null}
             />
