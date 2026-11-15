@@ -197,6 +197,8 @@ jobs:
 
       # No workspace bind mount here either (see Scan candidate): the plan
       # files' contents are read job-side and passed in env instead.
+      # Command substitution strips trailing newlines from the tag file. Restore
+      # one so read processes the final tag (including a single :main tag).
       - name: Promote scanned image
         env:
           REGISTRY: ${{ vars.REGISTRY }}
@@ -204,7 +206,7 @@ jobs:
           REGISTRY_USERNAME: ${{ vars.REGISTRY_USERNAME }}
           REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
         run: |
-          docker run --rm --entrypoint /bin/sh -e REGISTRY -e IMAGE_NAME -e REGISTRY_USERNAME -e REGISTRY_TOKEN -e IMAGE_REF="$(cat .image-ref)" -e PROMOTION_TAGS="$(cat .promotion-tags)" regclient/regctl:v0.11.7-alpine -ec 'printf "%s" "$REGISTRY_TOKEN" | regctl registry login "$REGISTRY" -u "$REGISTRY_USERNAME" --pass-stdin; printf "%s" "$PROMOTION_TAGS" | while IFS= read -r tag; do [ -n "$tag" ] || continue; regctl image copy "$IMAGE_REF" "$REGISTRY/$IMAGE_NAME:$tag"; done'
+          docker run --rm --entrypoint /bin/sh -e REGISTRY -e IMAGE_NAME -e REGISTRY_USERNAME -e REGISTRY_TOKEN -e IMAGE_REF="$(cat .image-ref)" -e PROMOTION_TAGS="$(cat .promotion-tags)" regclient/regctl:v0.11.7-alpine -ec 'printf "%s" "$REGISTRY_TOKEN" | regctl registry login "$REGISTRY" -u "$REGISTRY_USERNAME" --pass-stdin; printf "%s\n" "$PROMOTION_TAGS" | while IFS= read -r tag; do [ -n "$tag" ] || continue; echo "Promoting $IMAGE_REF to $REGISTRY/$IMAGE_NAME:$tag"; regctl image copy "$IMAGE_REF" "$REGISTRY/$IMAGE_NAME:$tag"; echo "Promoted $REGISTRY/$IMAGE_NAME:$tag"; done'
 
       # Forgejo has no code-scanning tab, so the report is published to this
       # server's generic package registry instead: one report per commit at
