@@ -8,6 +8,20 @@ export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
 /**
+ * Same scheme, host, and port: the request is re-testing a place the install
+ * already points at, not pointing it somewhere new. An exact string match is
+ * the fallback, for a saved value that predates normalisation.
+ */
+function sameOrigin(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch {
+    return a === b;
+  }
+}
+
+/**
  * Reach Teamarr with the URL as typed, and say what answered.
  *
  * The push already reports what it did, but only after doing it, and only if it
@@ -27,6 +41,10 @@ export const maxDuration = 60;
  * write land, and is it still there. A rule set edited in Teamarr's UI since the
  * last push is not an error -- but it is the thing an operator most wants to
  * know before they push again, since the merge will fold their edits in.
+ *
+ * Reaching out to a typed URL is gated by what the install has already
+ * committed to, read from saved settings and the environment rather than from
+ * the request. See the gate below for why it has to be that side of the merge.
  */
 export async function POST(request: Request) {
   let store: Store | null = null;
@@ -59,6 +77,39 @@ export async function POST(request: Request) {
       return NextResponse.json({
         ok: false,
         error: 'No Teamarr URL is set. Enter one above, then test.',
+      });
+    }
+
+    // The Dispatcharr test refuses to dial out until there is something to
+    // authenticate with, because an ungated reachability answer is a way to
+    // make the server fetch an arbitrary URL for the asking. Teamarr takes no
+    // credential, so there is no per-request proof of intent for it -- the bar
+    // is that the install has already committed to Teamarr: sync switched on
+    // in what is configured, or the URL under test being the one already
+    // saved. Both read from saved settings and the environment, NOT from this
+    // request's fields, which are exactly what a drive-by POST controls -- a
+    // patch that flips PODIUM_TEAMARR_SYNC on inside the same request is
+    // refused like any other. An operator typing a fresh URL on an install
+    // with sync off hits this too; the message is written for them rather than
+    // for an attacker.
+    let storedConfig: ReturnType<typeof loadConfig> | null = null;
+    try {
+      storedConfig = loadConfig(resolveEnv(process.env, store.settings()));
+    } catch {
+      // Stored settings that do not load close the gate: there is no committed
+      // state to test against, whatever the patch carries.
+      storedConfig = null;
+    }
+    const syncOn = storedConfig?.PODIUM_TEAMARR_SYNC ?? false;
+    const savedUrl = (storedConfig?.PODIUM_TEAMARR_URL ?? '').trim();
+    if (!syncOn && !sameOrigin(url, savedUrl)) {
+      return NextResponse.json({
+        ok: false,
+        needsEnabled: true,
+        error:
+          'Teamarr sync is off in your saved settings, and this is not the URL that is ' +
+          'already saved, so there is nothing to test against. Save the URL -- switching ' +
+          'sync on and saving works too -- then test.',
       });
     }
 

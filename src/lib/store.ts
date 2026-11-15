@@ -2088,6 +2088,17 @@ export class Store {
    * materialised `black` column of the candidate query and then survive (or
    * not) the same fold everything else does.
    *
+   * Both the gate and the rows are scoped to each stream's *current* hash --
+   * the newest verdict's, `rowid` breaking a same-millisecond tie, which is
+   * the rule `currentHashOnly` applies for `deadStreaks` and `verdicts()`
+   * applies for display, moved into the query so they cannot disagree. Rows
+   * from a hash other than the newest one survive in old databases (`put()`
+   * only began sweeping them when it wrote) and in the window before a changed
+   * URL is re-probed, and read across hashes they lie both ways: a stale alive
+   * verdict satisfies `MAX(alive) = 0`'s negation and hides a stream that is
+   * dead now, while a stale dead or black one drags a moved stream into the
+   * candidate set on evidence its current URL never earned.
+   *
    * The winner's `dead_streak` is recovered by reference identity:
    * `pickBestVariant` returns one of the objects handed to it, so the entry
    * whose `result` *is* the winner names the row it came from. A streak on a
@@ -2098,31 +2109,48 @@ export class Store {
    */
   deadStreams(): DeadStreamRow[] {
     const rows = this.sql(
-      `SELECT rowid AS row_id, stream_id, stream_hash, variant_id, probed_at, result, dead_streak
-       FROM probe_cache
-       WHERE stream_id IN (
-         SELECT stream_id FROM probe_cache
-         GROUP BY stream_id
-         HAVING MAX(alive) = 0 OR COALESCE(SUM(black), 0) > 0
-       )`,
+      `WITH ranked AS (
+         SELECT stream_id,
+                stream_hash,
+                ROW_NUMBER() OVER (
+                  PARTITION BY stream_id ORDER BY probed_at DESC, rowid DESC
+                ) AS rank,
+                FIRST_VALUE(stream_hash) OVER (
+                  PARTITION BY stream_id ORDER BY probed_at DESC, rowid DESC
+                ) AS current_hash
+           FROM probe_cache
+       ),
+       current_hash AS (
+         SELECT stream_id, current_hash FROM ranked WHERE rank = 1
+       )
+       SELECT p.stream_id, p.variant_id, p.probed_at, p.result, p.dead_streak
+         FROM probe_cache p
+         JOIN current_hash c ON c.stream_id = p.stream_id AND c.current_hash = p.stream_hash
+        WHERE p.stream_id IN (
+          SELECT g.stream_id
+            FROM probe_cache g
+            JOIN current_hash cg
+              ON cg.stream_id = g.stream_id AND cg.current_hash = g.stream_hash
+           GROUP BY g.stream_id
+          HAVING MAX(g.alive) = 0 OR COALESCE(SUM(g.black), 0) > 0
+        )`,
     ).all() as Array<{
-      row_id: number;
       stream_id: number;
-      stream_hash: string;
       variant_id: number;
       probed_at: number;
       result: string;
       dead_streak: number;
     }>;
 
-    const byStream = new Map<number, CacheRowFold[]>();
+    const byStream = new Map<
+      number,
+      Array<{ variantId: number; probedAt: number; deadStreak: number; parsed: ProbeResult }>
+    >();
     for (const row of rows) {
       try {
         const entry = {
-          streamHash: row.stream_hash,
           variantId: row.variant_id,
           probedAt: row.probed_at,
-          rowId: row.row_id,
           deadStreak: row.dead_streak,
           parsed: JSON.parse(row.result) as ProbeResult,
         };
@@ -2135,8 +2163,7 @@ export class Store {
     }
 
     const out: DeadStreamRow[] = [];
-    for (const [streamId, all] of byStream) {
-      const entries = currentHashOnly(all);
+    for (const [streamId, entries] of byStream) {
       const best = pickBestVariant(
         entries.map((e) => ({ variantId: e.variantId, result: e.parsed })),
       );
