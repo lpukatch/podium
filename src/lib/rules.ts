@@ -77,6 +77,8 @@ const defaultsSchema = z
     /** Literal text deleted from every stream name. See `Guards.strip`. */
     strip: z.array(z.string()).optional(),
     max_prefix_segments: z.coerce.number().optional(),
+    min_resolution: z.unknown().optional(),
+    max_resolution: z.unknown().optional(),
     case_sensitive: z.boolean().optional(),
     require_exact_match: z.boolean().optional(),
   })
@@ -117,6 +119,7 @@ export const rulesDocSchema = z.object({
   defaults: defaultsSchema,
   channels: z.array(channelSchema).default([]),
   groups: z.record(z.string(), z.unknown()).optional(),
+  group_patterns: z.array(z.unknown()).optional(),
   ordering: orderingSchema,
   system_settings: z.record(z.string(), z.unknown()).optional(),
 });
@@ -343,6 +346,21 @@ export function loadRules(raw: unknown): LoadReport {
   const channelFloors = new Map<number, MinResolution | null>();
   const channelCeilings = new Map<number, MaxResolution | null>();
   const invalidFloors: string[] = [];
+
+  const checkBounds = (
+    label: string,
+    bounds: { min_resolution?: unknown; max_resolution?: unknown },
+  ) => {
+    const floor = invalidMinResolution(bounds.min_resolution);
+    if (floor) invalidFloors.push(`${label}: min_resolution "${floor}"`);
+    const ceiling = invalidMaxResolution(bounds.max_resolution);
+    if (ceiling) invalidFloors.push(`${label}: max_resolution "${ceiling}"`);
+  };
+  checkBounds('defaults', defaults);
+  for (const [index, raw] of (doc.group_patterns ?? []).entries()) {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    checkBounds(`group pattern ${index + 1}`, raw);
+  }
 
   // Groups are read for their bounds only; `parsePolicies` owns the rest. A
   // typo here is as silent as one on a channel, and as worth saying out loud.

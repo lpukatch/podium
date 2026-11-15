@@ -114,6 +114,23 @@ describe('reading a ceiling', () => {
     ]);
   });
 
+  it('warns about invalid max bounds in defaults and group patterns', () => {
+    const report = loadRules({
+      schema: 2,
+      defaults: { max_resolution: '1o80p' },
+      group_patterns: [
+        { pattern: 'Sports*', max_resolution: '1440p' },
+        { pattern: 'News*', max_resolution: '1080i' },
+        { pattern: 'Radio*', max_resolution: 'none' },
+      ],
+      channels: [],
+    });
+    expect(report.invalidFloors).toEqual([
+      'defaults: max_resolution "1o80p"',
+      'group pattern 1: max_resolution "1440p"',
+    ]);
+  });
+
   it('lets a channel lower, raise or clear its group ceiling', () => {
     expect(resolveResolutionCeiling(undefined, '1080p')).toBe('1080p');
     expect(resolveResolutionCeiling('720p', '1080p')).toBe('720p');
