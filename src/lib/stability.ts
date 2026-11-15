@@ -592,10 +592,10 @@ export function channelStability(
   let unstable = 0;
   for (const streamId of streamIds) {
     const record = records.get(streamId);
-    // "Measured" means the ledger could reach a verdict, which is the same
-    // evidence floor the weight uses -- not merely that a row exists.
+    // Watched streams count as measured even below the failure threshold.
+    // That threshold controls the unstable verdict, not observation coverage.
     if (!record || record.breaks + record.stalls < MIN_FAILURES) {
-      if (record && record.watchedMs > 0 && record.breaks + record.stalls === 0) measured += 1;
+      if (record && record.watchedMs > 0) measured += 1;
       continue;
     }
     measured += 1;
