@@ -108,11 +108,12 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     let runConsensus = url.searchParams.get('consensus') === 'true';
     if (request.headers.get('content-type')?.includes('application/json')) {
       const parsed = await readJson<{ force?: boolean; consensus?: boolean }>(request);
-      if (!parsed.ok) {
+      if (!parsed.ok && parsed.status === 413) {
         return NextResponse.json({ error: parsed.message }, { status: parsed.status });
       }
-      if (parsed.value.force) force = true;
-      if (parsed.value.consensus) runConsensus = true;
+      const body = (parsed.ok ? parsed.value : {}) as { force?: boolean; consensus?: boolean };
+      if (body.force) force = true;
+      if (body.consensus) runConsensus = true;
     }
 
     const config = serverConfig();

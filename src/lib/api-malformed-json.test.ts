@@ -8,6 +8,11 @@
  * Every route here expects a body, so the guard is `.catch(() => null)` plus
  * an explicit 400 -- not the `.catch(() => ({}))` the optional-body routes
  * use, which would paper over the client's mistake and then fail stranger.
+ *
+ * The check route is the exception, pinned in its own describe below: its
+ * body only ever turns optional flags on, so a malformed body reads as
+ * absent, the way the refresh route's optional body does -- only 413
+ * refuses.
  */
 
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
@@ -187,18 +192,41 @@ describe('a body bigger than the cap', () => {
   });
 });
 
+describe('the check route, whose body only carries flags', () => {
+  // Both flags come off the query string too, so the body is never required:
+  // a malformed or non-object body reads as absent flags -- the same bargain
+  // the refresh route documents -- and only 413 refuses. A truncated
+  // `{"force": tru` must answer exactly what a body-less request answers,
+  // not the write routes' `body is not JSON`.
+  const raw = (body: string) =>
+    new Request('http://podium/api/x', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+  const context = { params: Promise.resolve({ channelId: '5' }) };
+
+  it('reads a malformed or non-object body as absent flags, like no body', async () => {
+    const { POST } = await import('../app/api/check/[channelId]/route');
+    const absent = await POST(new Request('http://podium/api/x', { method: 'POST' }), context);
+    const absentBody = await absent.json();
+    for (const body of ['{"force": tru', '', 'null', '123', '"force"', '[]']) {
+      const answer = await POST(raw(body), context);
+      expect(answer.status).toBe(absent.status);
+      expect(await answer.json()).toEqual(absentBody);
+      expect(answer.status).not.toBe(400);
+    }
+  });
+});
+
 describe('audit request validation', () => {
   it.each(['{', 'null', '123', 'true', '"str"', '[]'])(
-    'rejects invalid object bodies before connection tests or probes: %s',
+    'rejects invalid object bodies before connection tests: %s',
     async (body) => {
       const settings = await import('../app/api/settings/test/route');
       const teamarr = await import('../app/api/teamarr-sync/test/route');
-      const check = await import('../app/api/check/[channelId]/route');
       await expect400(await settings.POST(post(body)));
       await expect400(await teamarr.POST(post(body)));
-      await expect400(
-        await check.POST(post(body), { params: Promise.resolve({ channelId: '5' }) }),
-      );
     },
   );
 
