@@ -1,0 +1,31 @@
+# Kritika (in-cluster Forgejo PR reviewer) repository configuration.
+# Read from the merge base of each PR, so changes here apply to PRs that
+# include this commit in their merge base with main.
+#
+# What this file deliberately does NOT do: split or bound reviews into
+# per-area agents. Verified against kritika's own parser
+# (internal/configfile/reviewers.go, CheckAgents): an agent without
+# `categories` is a model Route — it replaces the default pass and takes
+# nothing but name/model/fallback/effort/when/enabled, never paths,
+# instructions, or bounds; an agent with `categories` is a specialist
+# that runs BESIDE the unbounded default pass, so neither form can
+# replace the default pass with scoped, bounded parts. MR !405's review
+# must instead be made convergent by keeping its diff focused.
+#
+# What the file does: hands every reviewer the miner design doc as
+# context, and asks lib reviewers to trust it rather than re-deriving
+# the store graph from unrelated consumers — the exploration pattern
+# that burned !405's runs (15/16 then 31/32 steps).
+context:
+  - path: docs/miner.md
+    description: Podium's core mining/ranking algorithm and its invariants.
+
+rules:
+  - id: trust-miner-doc
+    rule: >-
+      docs/miner.md is the authority on the mining/ranking invariants.
+      When judging src/lib changes to the store, scheduler, or miners,
+      read it instead of re-deriving invariants from unrelated
+      consumers; do not enumerate callers beyond the files in the diff.
+    paths:
+      - src/lib/**
