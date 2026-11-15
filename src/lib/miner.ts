@@ -412,6 +412,7 @@ export interface NameCandidate {
 export function minePassA(
   samples: StoredQualitySample[],
   options: MinerOptions = {},
+  tokensOf: (name: string) => readonly string[] = candidateTokens,
 ): NameCandidate[] {
   const settings = resolve(options);
   if (samples.length === 0) return [];
@@ -436,7 +437,7 @@ export function minePassA(
   for (const list of cells.values()) {
     const holders = new Map<string, Set<StoredQualitySample>>();
     for (const sample of list) {
-      for (const token of candidateTokens(sample.streamName)) {
+      for (const token of tokensOf(sample.streamName)) {
         const set = holders.get(token);
         if (set) set.add(sample);
         else holders.set(token, new Set([sample]));
@@ -636,6 +637,7 @@ export function minePassB(
   samples: StoredQualitySample[],
   groups: Effect[],
   options: MinerOptions = {},
+  tokensOf: (name: string) => readonly string[] = candidateTokens,
 ): ConsolidationResult {
   const settings = resolve(options);
   const fitted = new Map(
@@ -656,7 +658,7 @@ export function minePassB(
   for (const [group, list] of byGroup) {
     const hits = new Map<string, number>();
     for (const sample of list) {
-      for (const token of candidateTokens(sample.streamName)) {
+      for (const token of tokensOf(sample.streamName)) {
         hits.set(token, (hits.get(token) ?? 0) + 1);
         const all = holders.get(token);
         if (all) all.add(sample);
@@ -827,7 +829,17 @@ export function mineNames(
   options: MinerOptions = {},
 ): MinerReport {
   const settings = resolve(options);
-  const candidates = minePassA(scoped, options);
+  // Scoped to one report: repeated names and both passes share tokenization,
+  // without retaining an old catalogue or tokens after configuration changes.
+  const tokens = new Map<string, readonly string[]>();
+  const tokensOf = (name: string): readonly string[] => {
+    const cached = tokens.get(name);
+    if (cached) return cached;
+    const found = candidateTokens(name);
+    tokens.set(name, found);
+    return found;
+  };
+  const candidates = minePassA(scoped, options, tokensOf);
 
   let windowStart = Number.POSITIVE_INFINITY;
   let windowEnd = Number.NEGATIVE_INFINITY;
@@ -864,6 +876,6 @@ export function mineNames(
         .map(([guard, count]) => ({ guard, count }))
         .sort((a, b) => b.count - a.count),
     },
-    passB: minePassB(scoped, groups, options),
+    passB: minePassB(scoped, groups, options, tokensOf),
   };
 }

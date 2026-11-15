@@ -355,6 +355,26 @@ describe('export', () => {
 });
 
 describe('readiness report', () => {
+  it('keeps both mining passes unchanged when sharing tokens', () => {
+    const samples = [
+      ...run(40, { streamName: 'Sports 1 [BACKUP]', bitrateKbps: 2500 }),
+      ...run(40, { streamName: 'Sports 1', bitrateKbps: 6000 }),
+      ...run(40, { streamName: 'PRIME: Sports 2', groupId: 2, groupName: 'Group Two' }),
+    ];
+    const groups = buildProfile(samples, {
+      minSamples: 20,
+      scope: { eventOnly: false, include: [], exclude: [] },
+    }).groups;
+    const report = mineNames(samples, groups);
+    expect(report.passA.candidates).toEqual(minePassA(samples));
+    expect(report.passB).toEqual(minePassB(samples, groups));
+    // A later report must tokenize the current name rather than reuse an old one.
+    samples[0]!.streamName = 'Other feed [RAW]';
+    const next = mineNames(samples, groups);
+    expect(next.passA.candidates).toEqual(minePassA(samples));
+    expect(next.passB).toEqual(minePassB(samples, groups));
+  });
+
   it('says how much window is still missing', () => {
     const samples = run(60, {}, 2);
     const report = mineNames(samples, []);
