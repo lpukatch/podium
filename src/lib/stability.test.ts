@@ -333,6 +333,26 @@ describe('channelStability', () => {
     expect(verdict).toMatchObject({ measured: 1, unstable: 0, allBad: false });
   });
 
+  it.each([{ breaks: 1 }, { stalls: 1 }])(
+    'counts a watched stream with one failure as measured: %j',
+    (failure) => {
+      const verdict = channelStability(
+        [1, 2],
+        records([
+          [1, { breaks: 3, watchedMs: 110_000 }],
+          [2, { ...failure, watchedMs: 110_000 }],
+        ]),
+        1,
+      );
+      expect(verdict).toEqual({ total: 2, measured: 2, unstable: 1, allBad: false });
+    },
+  );
+
+  it('does not count an unwatched record below the failure threshold as measured', () => {
+    const verdict = channelStability([1], records([[1, { breaks: 1 }]]), 1);
+    expect(verdict).toEqual({ total: 1, measured: 0, unstable: 0, allBad: false });
+  });
+
   it('does not call a channel bad on partial evidence', () => {
     // Three of six measured and all three dreadful is a strong hint, but the
     // three nobody has watched might be fine.
