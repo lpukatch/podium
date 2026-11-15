@@ -349,6 +349,7 @@ export default function Page() {
     Record<string, ProviderGroupFilter>
   >({});
   const [editingAlias, setEditingAlias] = useState<string | null>(null);
+  const [aliasDraft, setAliasDraft] = useState<{ position: number; text: string } | null>(null);
   const [sourceSearch, setSourceSearch] = useState('');
   const [aliases, setAliases] = useState('');
   const [draftAlias, setDraftAlias] = useState('');
@@ -523,6 +524,7 @@ export default function Page() {
     setAliasProviders(c.aliasProviders ?? {});
     setAliasProviderGroupFilters(c.aliasProviderGroupFilters ?? {});
     setEditingAlias(null);
+    setAliasDraft(null);
     setContainsGroupFilters(c.containsGroupFilters ?? {});
     setMinResolution(c.minResolution ?? 'inherit');
     setMaxResolution(c.maxResolution ?? 'inherit');
@@ -1089,7 +1091,11 @@ export default function Page() {
   }, [preview, ruleIsEmpty]);
 
   const setAlias = (old: string, next: string) => {
-    if (!next.trim() || (old !== next && aliases.split('\n').includes(next))) return;
+    next = next.trim();
+    if (!next || (old !== next && aliases.split('\n').includes(next))) {
+      removeAlias(old);
+      return;
+    }
     const aliasesNow = aliases.split('\n');
     const position = aliasesNow.indexOf(old);
     if (position < 0) return;
@@ -1114,11 +1120,12 @@ export default function Page() {
         delete updated[old];
         setAliasProviderGroupFilters(updated);
       }
-      setEditingAlias(next);
+      setEditingAlias((current) => (current === old ? next : current));
     }
   };
 
   const removeAlias = (alias: string) => {
+    setAliasDraft(null);
     setAliases(
       lines(aliases)
         .filter((line) => line !== alias)
@@ -2048,8 +2055,13 @@ export default function Page() {
                           </span>
                           <input
                             aria-label={`Alias ${position + 1}`}
-                            value={alias}
-                            onChange={(e) => setAlias(alias, e.target.value)}
+                            value={aliasDraft?.position === position ? aliasDraft.text : alias}
+                            onChange={(e) => setAliasDraft({ position, text: e.target.value })}
+                            onBlur={() => {
+                              if (aliasDraft?.position !== position) return;
+                              setAlias(alias, aliasDraft.text);
+                              setAliasDraft(null);
+                            }}
                             className="mono min-w-0 flex-1 bg-transparent outline-none focus:text-[var(--color-accent)]"
                           />
                           <button
@@ -2067,6 +2079,7 @@ export default function Page() {
                           <button
                             type="button"
                             aria-label={`Remove alias ${alias}`}
+                            onPointerDown={(event) => event.preventDefault()}
                             className="text-[var(--color-muted)] hover:text-[var(--color-bad)]"
                             onClick={() => removeAlias(alias)}
                           >
