@@ -262,6 +262,15 @@ export function inScope(sample: StoredQualitySample, scope: QualityScope): boole
   return judge(sample, compileScope(scope)) === 'in';
 }
 
+/** Filter a sample set while compiling its glob policy only once. */
+export function filterInScope(
+  samples: StoredQualitySample[],
+  scope: QualityScope,
+): StoredQualitySample[] {
+  const compiled = compileScope(scope);
+  return samples.filter((sample) => judge(sample, compiled) === 'in');
+}
+
 /** What the gate did to a run of samples, as the UI and the export both report it. */
 export interface ScopeSummary extends QualityScope {
   /** Samples the fit is built from. */

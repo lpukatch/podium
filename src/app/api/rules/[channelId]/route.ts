@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { responseErrorText } from '@/lib/error-text';
 import { readJson } from '@/lib/http-body';
 import { parseMaxResolution, parseMinResolution, RESOLUTION_CHOICES } from '@/lib/resolution';
-import { readRulesDoc, writeRulesDoc } from '@/lib/server/state';
+import { readRulesDoc, withRulesLock, writeRulesDoc } from '@/lib/server/state';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,7 +16,7 @@ interface ChannelEntry {
 
 export async function PUT(request: Request, context: { params: Promise<{ channelId: string }> }) {
   try {
-    return await putChannelRule(request, context);
+    return await withRulesLock(() => putChannelRule(request, context));
   } catch (error) {
     // A rules-file read or write failure is a 500 with a reason, not the
     // framework's generic error page: the settings page surfaces the message

@@ -5,8 +5,9 @@
  * which also makes it the one HTTP surface that will fetch an arbitrary
  * address for the asking. The Dispatcharr test gates that behind having
  * something to authenticate with; Teamarr takes no credential, so the bar
- * here is the integration being switched on in *saved* settings or the
- * environment. The request's own fields do not count -- they are exactly
+ * here is the install having committed to Teamarr already -- sync switched on
+ * in *saved* settings or the environment, or the URL under test being the one
+ * already saved. The request's own fields do not count -- they are exactly
  * what a drive-by POST controls -- so a patch that flips PODIUM_TEAMARR_SYNC
  * on inside the same request is refused like any other.
  */
@@ -43,15 +44,21 @@ describe('the teamarr test gate', () => {
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'podium-teamarr-test-'));
     process.env.PODIUM_DATA_DIR = dir;
+    vi.mocked(TeamarrClient).mockImplementation(
+      class {
+        rules = async () => [];
+      } as unknown as FakeClientCtor,
+    );
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     delete process.env.PODIUM_DATA_DIR;
+    delete process.env.PODIUM_TEAMARR_SYNC;
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('refuses to dial out while sync is off in saved settings', async () => {
+  it('refuses to dial a fresh URL while sync is off in saved settings', async () => {
     // No settings at all: the fresh-install state, and the state an unsaved
     // patch cannot move.
     const resp = await call({ PODIUM_TEAMARR_URL: 'http://teamarr:9195' });
@@ -72,6 +79,42 @@ describe('the teamarr test gate', () => {
     expect(body.ok).toBe(false);
     expect(body.needsEnabled).toBe(true);
     expect(vi.mocked(TeamarrClient)).not.toHaveBeenCalled();
+  });
+
+  it('tests the URL that is already saved even while sync is off', async () => {
+    // The one URL the install has committed to is not somewhere new, so
+    // answering "is it still there?" costs the endpoint nothing it should not
+    // spend. What is refused is pointing it somewhere it has never been.
+    const store = new Store(join(dir, 'podium.db'));
+    store.setSettings({ PODIUM_TEAMARR_URL: 'http://teamarr:9195' });
+    store.close();
+
+    const resp = await call({ PODIUM_TEAMARR_URL: 'http://teamarr:9195' });
+    const body = await resp.json();
+    expect(body.ok).toBe(true);
+    expect(vi.mocked(TeamarrClient)).toHaveBeenCalledWith('http://teamarr:9195');
+  });
+
+  it('a different port on the saved host is somewhere new while sync is off', async () => {
+    const store = new Store(join(dir, 'podium.db'));
+    store.setSettings({ PODIUM_TEAMARR_URL: 'http://teamarr:9195' });
+    store.close();
+
+    const resp = await call({ PODIUM_TEAMARR_URL: 'http://teamarr:9196' });
+    const body = await resp.json();
+    expect(body.ok).toBe(false);
+    expect(body.needsEnabled).toBe(true);
+    expect(vi.mocked(TeamarrClient)).not.toHaveBeenCalled();
+  });
+
+  it('tests a fresh URL once sync is on in the environment', async () => {
+    // The environment is as unmovable by a request as the settings table --
+    // exactly why either side of it is a bar a drive-by POST cannot meet.
+    process.env.PODIUM_TEAMARR_SYNC = 'true';
+    const resp = await call({ PODIUM_TEAMARR_URL: 'http://teamarr:9195' });
+    const body = await resp.json();
+    expect(body.ok).toBe(true);
+    expect(vi.mocked(TeamarrClient)).toHaveBeenCalledWith('http://teamarr:9195');
   });
 
   it('tests for real once sync is saved', async () => {

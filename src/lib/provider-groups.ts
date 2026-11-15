@@ -6,6 +6,19 @@ export interface ProviderGroupFilter {
   excludeGroups?: string[];
 }
 
+const GLOB_CACHE_MAX = 512;
+const globCache = new Map<string, ReturnType<typeof compileGlob>>();
+
+function cachedGlob(pattern: string): ReturnType<typeof compileGlob> {
+  let compiled = globCache.get(pattern);
+  if (!compiled) {
+    if (globCache.size >= GLOB_CACHE_MAX) globCache.clear();
+    compiled = compileGlob(pattern);
+    globCache.set(pattern, compiled);
+  }
+  return compiled;
+}
+
 export function groupFilter(raw: unknown): ProviderGroupFilter {
   if (!raw || typeof raw !== 'object') return {};
   const row = raw as Record<string, unknown>;
@@ -29,9 +42,9 @@ export function groupFilter(raw: unknown): ProviderGroupFilter {
 export function groupAllowed(name: string | undefined, filter: ProviderGroupFilter): boolean {
   if (
     filter.includeGroups !== undefined &&
-    (!name || !filter.includeGroups.some((g) => compileGlob(g).test(name)))
+    (!name || !filter.includeGroups.some((g) => cachedGlob(g).test(name)))
   )
     return false;
-  if (name && filter.excludeGroups?.some((g) => compileGlob(g).test(name))) return false;
+  if (name && filter.excludeGroups?.some((g) => cachedGlob(g).test(name))) return false;
   return true;
 }

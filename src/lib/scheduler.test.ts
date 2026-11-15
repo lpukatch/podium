@@ -314,5 +314,6 @@ describe('provider lanes', () => {
     expect(stats.skipped).toBeGreaterThan(0);
     // Nothing is left permanently outstanding.
     expect(stats.channelsDone).toBe(20);
+    expect(stats.lanes.get('1:0')?.endedAt).toBeTypeOf('number');
   });
 });

@@ -10,7 +10,7 @@ import {
   NEW_INSTALL_STABILITY,
   NEW_INSTALL_UHD_BITRATE_KBPS,
 } from '@/lib/scoring';
-import { ordering, readRulesDoc, snapshot, writeRulesDoc } from '@/lib/server/state';
+import { ordering, readRulesDoc, snapshot, withRulesLock, writeRulesDoc } from '@/lib/server/state';
 
 export const dynamic = 'force-dynamic';
 
@@ -122,88 +122,90 @@ export async function GET() {
  * rather than validated against the live providers.
  */
 export async function PUT(request: Request) {
-  try {
-    // Malformed JSON is the client's mistake; the 400 says so before any
-    // reading of the body can turn it into a 500 or, worse, a silent reset.
-    // A body over the cap answers 413 at the read, not wherever the buffer
-    // happened to give out.
-    const parsed = await readJson<{
-      mode?: string;
-      providerPreference?: string[];
-      weights?: Record<string, unknown>;
-    }>(request);
-    if (!parsed.ok) {
-      return NextResponse.json({ error: parsed.message }, { status: parsed.status });
+  return withRulesLock(async () => {
+    try {
+      // Malformed JSON is the client's mistake; the 400 says so before any
+      // reading of the body can turn it into a 500 or, worse, a silent reset.
+      // A body over the cap answers 413 at the read, not wherever the buffer
+      // happened to give out.
+      const parsed = await readJson<{
+        mode?: string;
+        providerPreference?: string[];
+        weights?: Record<string, unknown>;
+      }>(request);
+      if (!parsed.ok) {
+        return NextResponse.json({ error: parsed.message }, { status: parsed.status });
+      }
+      const body = parsed.value;
+
+      const mode: OrderingResponse['mode'] =
+        body.mode === 'provider' || body.mode === 'alias' ? body.mode : 'quality';
+
+      // PUT replaces the ordering block wholesale, so a payload the client
+      // fumbled is indistinguishable from a deliberate reset. Absent fields keep
+      // their documented fallbacks -- an older client that omits them leaves the
+      // install on today's behaviour -- but a field that is *present* and the
+      // wrong shape is a mistake worth naming, not folding away: the one thing
+      // this route must never do is answer 200 with an ordering nobody asked
+      // for. (A non-array providerPreference used to throw on .map and land in
+      // the 500 catch; a non-object weights used to read as all-defaults.)
+      if (
+        body.providerPreference !== undefined &&
+        (!Array.isArray(body.providerPreference) ||
+          body.providerPreference.some((n) => typeof n !== 'string'))
+      ) {
+        return NextResponse.json(
+          { error: 'providerPreference must be a list of names' },
+          { status: 400 },
+        );
+      }
+      if (
+        body.weights !== undefined &&
+        (typeof body.weights !== 'object' || body.weights === null || Array.isArray(body.weights))
+      ) {
+        return NextResponse.json({ error: 'weights must be an object' }, { status: 400 });
+      }
+
+      const providerPreference = [
+        ...new Set((body.providerPreference ?? []).map((n) => String(n).trim()).filter(Boolean)),
+      ];
+
+      const w = body.weights ?? {};
+      const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+      // These two fall back to the code defaults rather than to 0, which is not a
+      // value either can take: a 0 factor would erase every HEVC stream's bitrate
+      // and a 0 ceiling would divide by nothing. An older client that does not
+      // send them leaves the install on today's behaviour instead of a broken one.
+      const positive = (v: unknown, fallback: number) =>
+        typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : fallback;
+      const weights = {
+        resolution: num(w.resolution),
+        bitrate: num(w.bitrate),
+        fps: num(w.fps),
+        codec: num(w.codec),
+        audio: num(w.audio),
+        hdr: num(w.hdr),
+        stability: num(w.stability),
+        // Strictly `true`, not `Boolean(...)`: the old coercion scored the
+        // *string* "false" as truthy and switched the preference on, and a JSON
+        // "false" is exactly what a fumbled checkbox sends.
+        prefer_h265: w.preferH265 === true,
+        hdr_preference:
+          w.hdrPreference === 'hlg' || w.hdrPreference === 'pq' ? w.hdrPreference : 'none',
+        hevc_bitrate_factor: positive(w.hevcBitrateFactor, DEFAULT_WEIGHTS.hevcBitrateFactor),
+        uhd_bitrate_kbps: positive(w.uhdBitrateKbps, DEFAULT_WEIGHTS.uhdBitrateKbps),
+        // `num`, not `positive`: 0 is a real value here and means "off", so the
+        // fallback the other two need would make this knob impossible to clear.
+        max_drops_per_hour: num(w.maxDropsPerHour),
+      };
+
+      const doc = readRulesDoc();
+      doc.ordering = { mode, provider_preference: providerPreference, weights };
+      writeRulesDoc(doc);
+
+      return NextResponse.json({ status: 'saved' });
+    } catch (error) {
+      return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
     }
-    const body = parsed.value;
-
-    const mode: OrderingResponse['mode'] =
-      body.mode === 'provider' || body.mode === 'alias' ? body.mode : 'quality';
-
-    // PUT replaces the ordering block wholesale, so a payload the client
-    // fumbled is indistinguishable from a deliberate reset. Absent fields keep
-    // their documented fallbacks -- an older client that omits them leaves the
-    // install on today's behaviour -- but a field that is *present* and the
-    // wrong shape is a mistake worth naming, not folding away: the one thing
-    // this route must never do is answer 200 with an ordering nobody asked
-    // for. (A non-array providerPreference used to throw on .map and land in
-    // the 500 catch; a non-object weights used to read as all-defaults.)
-    if (
-      body.providerPreference !== undefined &&
-      (!Array.isArray(body.providerPreference) ||
-        body.providerPreference.some((n) => typeof n !== 'string'))
-    ) {
-      return NextResponse.json(
-        { error: 'providerPreference must be a list of names' },
-        { status: 400 },
-      );
-    }
-    if (
-      body.weights !== undefined &&
-      (typeof body.weights !== 'object' || body.weights === null || Array.isArray(body.weights))
-    ) {
-      return NextResponse.json({ error: 'weights must be an object' }, { status: 400 });
-    }
-
-    const providerPreference = [
-      ...new Set((body.providerPreference ?? []).map((n) => String(n).trim()).filter(Boolean)),
-    ];
-
-    const w = body.weights ?? {};
-    const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
-    // These two fall back to the code defaults rather than to 0, which is not a
-    // value either can take: a 0 factor would erase every HEVC stream's bitrate
-    // and a 0 ceiling would divide by nothing. An older client that does not
-    // send them leaves the install on today's behaviour instead of a broken one.
-    const positive = (v: unknown, fallback: number) =>
-      typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : fallback;
-    const weights = {
-      resolution: num(w.resolution),
-      bitrate: num(w.bitrate),
-      fps: num(w.fps),
-      codec: num(w.codec),
-      audio: num(w.audio),
-      hdr: num(w.hdr),
-      stability: num(w.stability),
-      // Strictly `true`, not `Boolean(...)`: the old coercion scored the
-      // *string* "false" as truthy and switched the preference on, and a JSON
-      // "false" is exactly what a fumbled checkbox sends.
-      prefer_h265: w.preferH265 === true,
-      hdr_preference:
-        w.hdrPreference === 'hlg' || w.hdrPreference === 'pq' ? w.hdrPreference : 'none',
-      hevc_bitrate_factor: positive(w.hevcBitrateFactor, DEFAULT_WEIGHTS.hevcBitrateFactor),
-      uhd_bitrate_kbps: positive(w.uhdBitrateKbps, DEFAULT_WEIGHTS.uhdBitrateKbps),
-      // `num`, not `positive`: 0 is a real value here and means "off", so the
-      // fallback the other two need would make this knob impossible to clear.
-      max_drops_per_hour: num(w.maxDropsPerHour),
-    };
-
-    const doc = readRulesDoc();
-    doc.ordering = { mode, provider_preference: providerPreference, weights };
-    writeRulesDoc(doc);
-
-    return NextResponse.json({ status: 'saved' });
-  } catch (error) {
-    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
-  }
+  });
 }

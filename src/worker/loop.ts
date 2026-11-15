@@ -852,6 +852,7 @@ export async function startWorker(config: Config, log: Log): Promise<() => Promi
     if (ours) return true;
 
     log('another worker has taken the lock; standing down and waiting for it');
+    runner.abort();
     holding = false;
     waited = false;
     if (beat) clearInterval(beat);

@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
+import { assignmentIsRule, Eligibility, NEVER } from '@/lib/eligibility';
 import { errorText } from '@/lib/error-text';
 import { readJson } from '@/lib/http-body';
-import { snapshot } from '@/lib/server/state';
+import { groupPatterns, matcher, policies, snapshot } from '@/lib/server/state';
 import { type SoakRequest, type SoakSource, Store } from '@/lib/store';
 
 export const dynamic = 'force-dynamic';
@@ -79,9 +80,20 @@ async function streamsForChannels(channelIds: number[], store: Store): Promise<S
   const out: SoakRequest[] = [];
   const seen = new Set<number>();
   if (snap) {
+    const m = matcher();
+    const groupNames = new Map(snap.groups.map((group) => [group.id, group.name]));
+    const idx = m.buildIndex(snap.streams, groupNames);
+    const resolver = new Eligibility(policies(), undefined, groupPatterns());
     for (const channel of snap.channels) {
       if (!wanted.has(channel.id)) continue;
-      for (const streamId of channel.streams) {
+      const rule = m.rules.get(channel.id);
+      const resolved = resolver.policyFor(channel.groupId, groupNames.get(channel.groupId ?? -1));
+      const candidateIds = new Set(channel.streams);
+      if (rule && resolved.mode !== NEVER) {
+        for (const [streamId] of m.match(rule, idx, resolved.groupFilter))
+          candidateIds.add(streamId);
+      }
+      for (const streamId of candidateIds) {
         if (seen.has(streamId)) continue;
         seen.add(streamId);
         out.push({ streamId, channelId: channel.id });
@@ -148,7 +160,19 @@ async function resolveScope(
     // not "this group has no channels": swallowing it here used to answer 404
     // about a fifty-channel group while Dispatcharr was merely unreachable.
     const snap = await snapshot();
-    const channelIds = snap.channels.filter((c) => c.groupId === id).map((c) => c.id);
+    const m = matcher();
+    const resolver = new Eligibility(policies(), undefined, groupPatterns());
+    const groupNames = new Map(snap.groups.map((group) => [group.id, group.name]));
+    const channelIds = snap.channels
+      .filter((channel) => {
+        if (channel.groupId !== id) return false;
+        const resolved = resolver.policyFor(channel.groupId, groupNames.get(id));
+        return (
+          resolved.mode !== NEVER &&
+          (Boolean(m.rules.get(channel.id)) || assignmentIsRule(resolved.mode))
+        );
+      })
+      .map((channel) => channel.id);
     return {
       streams: await streamsForChannels(channelIds, store),
       label: `group ${id} (${channelIds.length} channel(s))`,

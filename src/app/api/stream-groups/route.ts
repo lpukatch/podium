@@ -10,6 +10,7 @@ import {
   readRulesDoc,
   snapshot,
   streamGroups,
+  withRulesLock,
   writeRulesDoc,
 } from '@/lib/server/state';
 
@@ -78,22 +79,24 @@ export async function GET() {
 
 /** Replace the exclusion list wholesale -- the UI always sends the full set. */
 export async function PUT(request: Request) {
-  try {
-    const parsed = await readJson<{ excludeGroups?: string[] }>(request);
-    if (!parsed.ok) {
-      return NextResponse.json({ error: parsed.message }, { status: parsed.status });
+  return withRulesLock(async () => {
+    try {
+      const parsed = await readJson<{ excludeGroups?: string[] }>(request);
+      if (!parsed.ok) {
+        return NextResponse.json({ error: parsed.message }, { status: parsed.status });
+      }
+      const body = parsed.value;
+      const clean = [...new Set((body.excludeGroups ?? []).map((g) => g.trim()).filter(Boolean))];
+
+      const doc = readRulesDoc();
+      const defaults = (doc.defaults ?? {}) as Record<string, unknown>;
+      defaults.exclude_groups = clean;
+      doc.defaults = defaults;
+      writeRulesDoc(doc);
+
+      return NextResponse.json({ status: 'saved', excludeGroups: clean });
+    } catch (error) {
+      return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
     }
-    const body = parsed.value;
-    const clean = [...new Set((body.excludeGroups ?? []).map((g) => g.trim()).filter(Boolean))];
-
-    const doc = readRulesDoc();
-    const defaults = (doc.defaults ?? {}) as Record<string, unknown>;
-    defaults.exclude_groups = clean;
-    doc.defaults = defaults;
-    writeRulesDoc(doc);
-
-    return NextResponse.json({ status: 'saved', excludeGroups: clean });
-  } catch (error) {
-    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
-  }
+  });
 }

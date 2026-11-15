@@ -1,7 +1,14 @@
 import { NextResponse } from 'next/server';
 import { responseErrorText } from '@/lib/error-text';
 import { readJson } from '@/lib/http-body';
-import { index, matcher, readRulesDoc, snapshot, writeRulesDoc } from '@/lib/server/state';
+import {
+  index,
+  matcher,
+  readRulesDoc,
+  snapshot,
+  withRulesLock,
+  writeRulesDoc,
+} from '@/lib/server/state';
 
 export const dynamic = 'force-dynamic';
 
@@ -87,22 +94,24 @@ export async function GET(request: Request) {
 
 /** Replace the list wholesale -- the UI always sends the full set. */
 export async function PUT(request: Request) {
-  try {
-    const parsed = await readJson<{ strip?: string[] }>(request);
-    if (!parsed.ok) {
-      return NextResponse.json({ error: parsed.message }, { status: parsed.status });
+  return withRulesLock(async () => {
+    try {
+      const parsed = await readJson<{ strip?: string[] }>(request);
+      if (!parsed.ok) {
+        return NextResponse.json({ error: parsed.message }, { status: parsed.status });
+      }
+      const body = parsed.value;
+      const clean = [...new Set((body.strip ?? []).map((s) => s.trim()).filter(Boolean))];
+
+      const doc = readRulesDoc();
+      const defaults = (doc.defaults ?? {}) as Record<string, unknown>;
+      defaults.strip = clean;
+      doc.defaults = defaults;
+      writeRulesDoc(doc);
+
+      return NextResponse.json({ status: 'saved', strip: clean });
+    } catch (error) {
+      return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
     }
-    const body = parsed.value;
-    const clean = [...new Set((body.strip ?? []).map((s) => s.trim()).filter(Boolean))];
-
-    const doc = readRulesDoc();
-    const defaults = (doc.defaults ?? {}) as Record<string, unknown>;
-    defaults.strip = clean;
-    doc.defaults = defaults;
-    writeRulesDoc(doc);
-
-    return NextResponse.json({ status: 'saved', strip: clean });
-  } catch (error) {
-    return NextResponse.json({ error: responseErrorText(error) }, { status: 500 });
-  }
+  });
 }

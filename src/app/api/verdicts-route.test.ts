@@ -242,18 +242,17 @@ describe('GET /api/verdicts', () => {
 
   it('carries the probe, the dead streak and the soak', async () => {
     const { body } = await get();
-    // `verdicts()` folds every row it holds for a stream, a hash the stream
-    // has moved on from included, so the stale 4K row wins here -- as it does
-    // on /api/preview, which the comparison above holds this to.
+    // Only the stream's current URL contributes a verdict. The previous URL's
+    // cached 4K result cannot keep a newly dead stream reading alive.
     expect(byId(body, A)).toMatchObject({
       name: `S${A}`,
       provider: 'P',
       providerGroup: 'UK | Sport',
       lastAlive: true,
-      lastHeight: 2160,
-      lastBitrateKbps: 9_000,
+      lastHeight: 1080,
+      lastBitrateKbps: 6_400,
       lastFps: 25,
-      lastHdrFormat: 2,
+      lastHdrFormat: null,
       lastLowBitrate: false,
       deadStreak: 0,
       lastSoak: null,

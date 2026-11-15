@@ -19,7 +19,13 @@
 
 import type { Config } from './config';
 import { mineNames } from './miner';
-import { buildProfile, inScope, mergeTeamarrRules, scopeFromConfig, teamarrRules } from './quality';
+import {
+  buildProfile,
+  filterInScope,
+  mergeTeamarrRules,
+  scopeFromConfig,
+  teamarrRules,
+} from './quality';
 import { applyMatches, checkInputs, scoredChannelIds } from './rule-check-inputs';
 import { snapshot } from './server/state';
 import type { Store } from './store';
@@ -298,7 +304,7 @@ export async function syncToTeamarr(
 
   const scope = scopeFromConfig(config);
   const samples = store.qualitySamples();
-  const scoped = samples.filter((sample) => inScope(sample, scope));
+  const scoped = filterInScope(samples, scope);
 
   if (scoped.length < config.PODIUM_TEAMARR_MIN_SAMPLES) {
     return fail(
@@ -318,7 +324,10 @@ export async function syncToTeamarr(
   // the verdicts and nothing else, so the guard is asked here, before any of
   // that runs -- and the assembly is reused below rather than repeated, because
   // a second assembly is the comparison bug `checkInputs` exists to prevent.
-  const snap = await snapshot();
+  // Scheduled runs can be a day apart. Teamarr may have deleted event
+  // channels since the previous pass, so do not score against yesterday's
+  // stale-while-revalidate catalogue.
+  const snap = await snapshot(Boolean(options.scheduled));
   const { channels, strategy } = checkInputs(snap, store);
 
   // Asked before the fitting as well as before the write, for the same reason

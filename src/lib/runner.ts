@@ -53,6 +53,7 @@ import {
 import { pruneDeletedChannelRules } from './rule-sync';
 import type { RulesSource } from './rules-source';
 import { AbortFlag, laneKey, type ProbeJob, runLanes } from './scheduler';
+import { withRulesLock } from './server/state';
 import {
   laneQuotas,
   makeKickDetector,
@@ -1200,6 +1201,7 @@ export interface RunnerDeps {
 export class Runner {
   lastRun: RunSummary | null = null;
   private running = false;
+  private activeAbort: AbortFlag | null = null;
   /** The EPG grid is large and slow-changing; reuse it across passes. */
   private readonly epg = new EpgCache<unknown[]>();
   /**
@@ -1271,6 +1273,11 @@ export class Runner {
     return this.running;
   }
 
+  /** Stop the active pass after any in-flight probe finishes. */
+  abort(): void {
+    this.activeAbort?.abort();
+  }
+
   /**
    * Publish progress for the UI.
    *
@@ -1302,10 +1309,12 @@ export class Runner {
     log: (message: string) => void,
   ): Promise<void> {
     try {
-      const outcome = await pruneDeletedChannelRules(
-        rulesPath,
-        channels.map((c) => c.id),
-        async (id) => (await client.channel(id)) === null,
+      const outcome = await withRulesLock(() =>
+        pruneDeletedChannelRules(
+          rulesPath,
+          channels.map((c) => c.id),
+          async (id) => (await client.channel(id)) === null,
+        ),
       );
       if (outcome?.refused) {
         if (outcome.refused !== this.ruleSyncRefusal) log(`rules not synced: ${outcome.refused}`);
@@ -2110,6 +2119,7 @@ export class Runner {
       });
 
       const abort = new AbortFlag();
+      this.activeAbort = abort;
       // While yielding per provider, only a viewer arriving on a provider this
       // pass is actually using has to stop it -- the whole point of the mode is
       // that someone watching provider B does not interrupt work on A and C.
@@ -2458,6 +2468,7 @@ export class Runner {
       this.emit({ phase: 'failed', message: errorText(error).slice(0, 200) });
       throw error;
     } finally {
+      this.activeAbort = null;
       this.running = false;
     }
   }
@@ -2591,8 +2602,11 @@ export class Runner {
     if (!config.PODIUM_PAUSE_WHEN_WATCHING) {
       return setInterval(() => {}, 1 << 30);
     }
+    let checking = false;
     return setInterval(
       async () => {
+        if (checking) return;
+        checking = true;
         try {
           const sessions = await client.activeSessions(uuidMap, activityOptions(config));
           const first = guard ? blockingSession(sessions, guard) : sessions[0];
@@ -2603,6 +2617,8 @@ export class Runner {
         } catch {
           // A transient failure should not abort a healthy run; the next tick's
           // fail-closed activity read will catch a real outage.
+        } finally {
+          checking = false;
         }
         // Deliberately not the tick interval: how promptly we get out of a
         // viewer's way is not the same question as how often a pass starts, and
