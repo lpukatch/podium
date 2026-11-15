@@ -34,9 +34,10 @@ them:
 | **Exclude** | Reject a name — or one quality variant of it — even if an alias matches. |
 | **Regex** | An escape hatch for what the first three cannot express. |
 
-The UI shows what each rule matches *as you type*, alongside what Dispatcharr
-currently has assigned, so you can see what a change would actually do. This is
-the fastest way to find out that a `contains` you were about to save claims half
+The UI shows what each rule matches alongside what Dispatcharr currently has
+assigned, so you can see what a change would actually do. Contains and exclude
+update as you type; alias rows commit when you leave the row. This is the
+fastest way to find out that a `contains` you were about to save claims half
 a category.
 
 ![The rules editor for one channel, with its aliases and every stream they match](images/rules-editor.png)
