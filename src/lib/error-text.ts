@@ -10,6 +10,8 @@
  * The cause's `code` comes first because it is the part worth grepping for;
  * its message is added when it says more than the code does.
  */
+import { isIP } from 'node:net';
+
 export function errorText(error: unknown): string {
   const text = String(error);
   const cause = (error as { cause?: unknown } | null | undefined)?.cause;
@@ -45,6 +47,16 @@ export function errorText(error: unknown): string {
  */
 export function responseErrorText(error: unknown): string {
   const text = errorText(error)
+    .replace(/\b(https?:\/\/)[^\s/?#]*@/gi, '$1[credentials]@')
+    .replace(
+      /\[[0-9a-f:.]+(?:%[\w.-]+)?\](?::\d+)?|(?<![\w:])(?:[0-9a-f]{0,4}:){2,}[0-9a-f:.]+(?:%[\w.-]+)?/gi,
+      (candidate) => {
+        const address = candidate.startsWith('[')
+          ? candidate.slice(1, candidate.indexOf(']'))
+          : candidate;
+        return isIP(address.split('%')[0] ?? '') === 6 ? '[address]' : candidate;
+      },
+    )
     // IPv4 with an optional port: the shape of every internal endpoint a
     // failed fetch names. Redacted before the path pass, so a URL's host is
     // gone by the time paths are considered.

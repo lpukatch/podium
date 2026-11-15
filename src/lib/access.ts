@@ -75,6 +75,8 @@ const PRIVATE_SUFFIXES = [
  * attack -- rebinding is a browser sending one -- so callers treat null as
  * allowed rather than as a failure.
  */
+import { createHash, timingSafeEqual } from 'node:crypto';
+
 export function hostOf(header: string | null | undefined): string | null {
   const raw = (header ?? '').trim().toLowerCase();
   if (!raw) return null;
@@ -206,10 +208,8 @@ export function parseHostList(raw: string | undefined): string[] {
  * shared secret with no rate limit in front of it, and this is four lines.
  */
 export function secretEquals(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
+  const digest = (value: string) => createHash('sha256').update(value, 'utf16le').digest();
+  return timingSafeEqual(digest(a), digest(b));
 }
 
 export interface AccessRequest {

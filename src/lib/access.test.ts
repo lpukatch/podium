@@ -244,6 +244,13 @@ describe('checkAccess', () => {
 });
 
 describe('secretEquals', () => {
+  it('compares long, Unicode, and unequal-length secrets', () => {
+    expect(secretEquals('a'.repeat(4096), 'a'.repeat(4096))).toBe(true);
+    expect(secretEquals('abc', 'abc ')).toBe(false);
+    expect(secretEquals('é', 'e')).toBe(false);
+    expect(secretEquals('\ud800', '\ud801')).toBe(false);
+  });
+
   it('matches only an exact string', () => {
     expect(secretEquals('abc', 'abc')).toBe(true);
     expect(secretEquals('abc', 'abd')).toBe(false);
