@@ -51,10 +51,21 @@ export function responseErrorText(error: unknown): string {
     .replace(
       /\[[0-9a-f:.]+(?:%[\w.-]+)?\](?::\d+)?|(?<![\w:])(?:[0-9a-f]{0,4}:){2,}[0-9a-f:.]+(?:%[\w.-]+)?/gi,
       (candidate) => {
-        const address = candidate.startsWith('[')
-          ? candidate.slice(1, candidate.indexOf(']'))
+        if (candidate.startsWith('[')) {
+          const address = candidate.slice(1, candidate.indexOf(']'));
+          return isIP(address.split('%')[0] ?? '') === 6 ? '[address]' : candidate;
+        }
+        // A bare address that swallowed a trailing port can fail isIP as a
+        // whole: a five-digit port is five characters, one past what a hex
+        // group may hold, so address and port together are not an address.
+        // Judge the address alone before giving up, and redact the port with
+        // it.
+        const bare = candidate.split('%')[0] ?? '';
+        const withoutPort = candidate.replace(/:\d{1,5}$/, '');
+        return isIP(bare) === 6 ||
+          (withoutPort !== candidate && isIP(withoutPort.split('%')[0] ?? '') === 6)
+          ? '[address]'
           : candidate;
-        return isIP(address.split('%')[0] ?? '') === 6 ? '[address]' : candidate;
       },
     )
     // IPv4 with an optional port: the shape of every internal endpoint a

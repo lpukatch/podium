@@ -68,6 +68,20 @@ describe('responseErrorText', () => {
     },
   );
 
+  it.each([
+    '2001:db8::1:9191',
+    // A five-digit port cannot be a hex group, so address and port together
+    // fail isIP; the address must not ride through on that failure.
+    '2001:db8::1:65535',
+    '::1:65535',
+    '1:2:3:4:5:6:7:8:65535',
+    '[2001:db8::1]:65535',
+  ])('redacts an address with a port attached: %s', (address) => {
+    expect(responseErrorText(new Error(`connect ECONNREFUSED ${address}`))).toBe(
+      'Error: connect ECONNREFUSED [address]',
+    );
+  });
+
   it('keeps clock values readable', () => {
     expect(responseErrorText(new Error('failed at 12:34:56'))).toContain('12:34:56');
   });
