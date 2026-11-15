@@ -707,6 +707,7 @@ export class DispatcharrClient {
     try {
       return await fetch(`${this.base}${path}`, {
         method,
+        redirect: 'error',
         signal: controller.signal,
         headers: body ? { ...this.headers(), 'Content-Type': 'application/json' } : this.headers(),
         body: body === undefined ? undefined : JSON.stringify(body),
