@@ -220,6 +220,23 @@ describe('checkAccess', () => {
     expect(checkAccess(write({ credentials: ['wrong'] }), guarded).ok).toBe(false);
   });
 
+  it('exempts only known Connect receiver paths from the front-door token', () => {
+    const guarded: AccessPolicy = { allowedHosts: [], token: 'sekret' };
+    for (const path of ['/api/connect/events/stream_switch', '/api/connect/events/channel_error']) {
+      expect(checkAccess(write({ path, credentials: [] }), guarded)).toEqual({ ok: true });
+      expect(
+        checkAccess(write({ path, secFetchSite: 'cross-site', credentials: [] }), guarded).ok,
+      ).toBe(false);
+    }
+    for (const path of [
+      '/api/connect/events/other',
+      '/api/connect/events/stream_switch/extra',
+      '/api/connect',
+    ]) {
+      expect(checkAccess(write({ path, credentials: [] }), guarded).ok).toBe(false);
+    }
+  });
+
   it('lets the container health check through without one', () => {
     // Otherwise a token-protected install fails its own healthcheck and gets
     // restarted forever.

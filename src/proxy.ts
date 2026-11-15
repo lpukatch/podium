@@ -89,7 +89,7 @@ function clientView(
 function harden(response: NextResponse): NextResponse {
   response.headers.set('X-Frame-Options', 'DENY');
   response.headers.set('X-Content-Type-Options', 'nosniff');
-  response.headers.set('Referrer-Policy', 'same-origin');
+  response.headers.set('Referrer-Policy', 'no-referrer');
   return response;
 }
 

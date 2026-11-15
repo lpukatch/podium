@@ -10,6 +10,18 @@ const version =
   (JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')).version as string);
 
 const config: NextConfig = {
+  async headers() {
+    return [
+      {
+        source: '/:path*',
+        headers: [
+          { key: 'X-Content-Type-Options', value: 'nosniff' },
+          { key: 'X-Frame-Options', value: 'DENY' },
+          { key: 'Referrer-Policy', value: 'no-referrer' },
+        ],
+      },
+    ];
+  },
   // Standalone keeps the runtime image to the production dependency closure,
   // so ffmpeg stays the dominant layer rather than node_modules.
   output: 'standalone',
