@@ -13,6 +13,11 @@
  * body only ever turns optional flags on, so a malformed body reads as
  * absent, the way the refresh route's optional body does -- only 413
  * refuses.
+ *
+ * The two Teamarr import routes are the other exception, pinned in theirs:
+ * they accept a bare JSON array, which the bounded reader refuses by
+ * default, so each must opt in with {allowArray: true} before its own shape
+ * check can run.
  */
 
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
@@ -197,8 +202,10 @@ describe('the check route, whose body only carries flags', () => {
   // a malformed or non-object body reads as absent flags -- the same bargain
   // the refresh route documents -- and only 413 refuses. A truncated
   // `{"force": tru` must answer exactly what a body-less request answers,
-  // not the write routes' `body is not JSON`.
-  const raw = (body: string) =>
+  // not the write routes' `body is not JSON`. Probe-loop's own POST is in
+  // the list too: fetch sends the JSON content-type with no body at all,
+  // which is easy to confuse with the empty-string body beside it.
+  const raw = (body?: string) =>
     new Request('http://podium/api/x', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -210,7 +217,7 @@ describe('the check route, whose body only carries flags', () => {
     const { POST } = await import('../app/api/check/[channelId]/route');
     const absent = await POST(new Request('http://podium/api/x', { method: 'POST' }), context);
     const absentBody = await absent.json();
-    for (const body of ['{"force": tru', '', 'null', '123', '"force"', '[]']) {
+    for (const body of ['{"force": tru', '', undefined, 'null', '123', '"force"', '[]']) {
       const answer = await POST(raw(body), context);
       expect(answer.status).toBe(absent.status);
       expect(await answer.json()).toEqual(absentBody);
@@ -257,4 +264,32 @@ describe('audit request validation', () => {
       expect(readFileSync(rulesPath, 'utf8')).toBe(before);
     },
   );
+});
+
+describe('a bare Teamarr rules array', () => {
+  // The import routes promise the file Teamarr's Export button produced --
+  // a bare array or a {rules: [...]} envelope. The bounded reader refuses
+  // arrays by default, so each route must opt in with {allowArray: true} or
+  // the export file dies as "body is not JSON" before the route's own
+  // bare-array handling ever runs. Each pin compares the bare file against
+  // its envelope, so whatever the environment answers downstream, the two
+  // shapes must answer alike -- modulo the run stamp both routes bake into
+  // their payloads, which differs between the two POSTs by milliseconds and
+  // is not what this pin is about.
+  const rules = JSON.stringify([{ type: 'contains', value: 'usa', mode: 'include' }]);
+  const envelope = JSON.stringify({ rules: JSON.parse(rules) });
+  const withoutRunStamp = (body: unknown): unknown =>
+    JSON.parse(JSON.stringify(body), (key, value) => (key === 'generatedAt' ? undefined : value));
+
+  it.each([
+    ['rule-check', '../app/api/rule-check/route'],
+    ['quality-profile', '../app/api/quality-profile/route'],
+  ])('is accepted by the %s route exactly like its envelope', async (_route, module) => {
+    const { POST } = await import(module);
+    const bare = await POST(post(rules));
+    const wrapped = await POST(post(envelope));
+    expect(bare.status).not.toBe(400);
+    expect(bare.status).toBe(wrapped.status);
+    expect(withoutRunStamp(await bare.json())).toEqual(withoutRunStamp(await wrapped.json()));
+  });
 });
