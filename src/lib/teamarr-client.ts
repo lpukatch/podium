@@ -15,6 +15,7 @@
  */
 
 import { normaliseBaseUrl } from './base-url';
+import { boundedResponse, CONTROL_RESPONSE_BYTES } from './upstream-body';
 
 /** Teamarr's settings API, as of its v1 routes. */
 const RULES_PATH = '/api/v1/settings/stream-ordering';
@@ -190,6 +191,7 @@ export class TeamarrClient {
         headers: body ? { 'Content-Type': 'application/json' } : undefined,
         body: body ? JSON.stringify(body) : undefined,
       });
+      response = await boundedResponse(response, CONTROL_RESPONSE_BYTES);
     } catch (error) {
       // Everything below this line is a message somebody reads while deciding
       // whether they typed the address wrong. `fetch` on its own answers that

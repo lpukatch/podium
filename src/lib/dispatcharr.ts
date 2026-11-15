@@ -18,6 +18,7 @@
  */
 
 import { normaliseBaseUrl } from './base-url';
+import { BULK_RESPONSE_BYTES, boundedResponse, CONTROL_RESPONSE_BYTES } from './upstream-body';
 
 export const PAGE_SIZE = 500;
 /**
@@ -705,13 +706,15 @@ export class DispatcharrClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      return await fetch(`${this.base}${path}`, {
+      const response = await fetch(`${this.base}${path}`, {
         method,
         redirect: 'error',
         signal: controller.signal,
         headers: body ? { ...this.headers(), 'Content-Type': 'application/json' } : this.headers(),
         body: body === undefined ? undefined : JSON.stringify(body),
       });
+      const bulk = path.startsWith('/api/channels/') || path.startsWith('/api/epg/');
+      return await boundedResponse(response, bulk ? BULK_RESPONSE_BYTES : CONTROL_RESPONSE_BYTES);
     } finally {
       clearTimeout(timer);
     }
