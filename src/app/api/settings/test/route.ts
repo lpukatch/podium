@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { loadConfig, NO_CREDENTIALS } from '@/lib/config';
 import { DispatcharrClient } from '@/lib/dispatcharr';
+import { readJson } from '@/lib/http-body';
 import { mergeForTest, resolveEnv, validateSettings } from '@/lib/settings';
 import { Store } from '@/lib/store';
 
@@ -17,7 +18,11 @@ export const maxDuration = 60;
 export async function POST(request: Request) {
   let store: Store | null = null;
   try {
-    const patch = (await request.json()) as Record<string, unknown>;
+    const parsed = await readJson<Record<string, unknown>>(request);
+    if (!parsed.ok) {
+      return NextResponse.json({ error: parsed.message }, { status: parsed.status });
+    }
+    const patch = parsed.value;
     const { values, errors } = validateSettings(patch);
     if (errors.length > 0) {
       return NextResponse.json({ ok: false, error: errors[0]?.message ?? 'invalid' });

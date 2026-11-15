@@ -8,6 +8,16 @@
  * Every route here expects a body, so the guard is `.catch(() => null)` plus
  * an explicit 400 -- not the `.catch(() => ({}))` the optional-body routes
  * use, which would paper over the client's mistake and then fail stranger.
+ *
+ * The check route is the exception, pinned in its own describe below: its
+ * body only ever turns optional flags on, so a malformed body reads as
+ * absent, the way the refresh route's optional body does -- only 413
+ * refuses.
+ *
+ * The two Teamarr import routes are the other exception, pinned in theirs:
+ * they accept a bare JSON array, which the bounded reader refuses by
+ * default, so each must opt in with {allowArray: true} before its own shape
+ * check can run.
  */
 
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
@@ -184,5 +194,102 @@ describe('a body bigger than the cap', () => {
     expect(response.status).toBe(413);
     expect(await response.json()).toEqual({ error: 'Request body too large (limit 5 MB).' });
     expect(readFileSync(rulesPath, 'utf8')).toBe(RULES);
+  });
+});
+
+describe('the check route, whose body only carries flags', () => {
+  // Both flags come off the query string too, so the body is never required:
+  // a malformed or non-object body reads as absent flags -- the same bargain
+  // the refresh route documents -- and only 413 refuses. A truncated
+  // `{"force": tru` must answer exactly what a body-less request answers,
+  // not the write routes' `body is not JSON`. Probe-loop's own POST is in
+  // the list too: fetch sends the JSON content-type with no body at all,
+  // which is easy to confuse with the empty-string body beside it.
+  const raw = (body?: string) =>
+    new Request('http://podium/api/x', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+  const context = { params: Promise.resolve({ channelId: '5' }) };
+
+  it('reads a malformed or non-object body as absent flags, like no body', async () => {
+    const { POST } = await import('../app/api/check/[channelId]/route');
+    const absent = await POST(new Request('http://podium/api/x', { method: 'POST' }), context);
+    const absentBody = await absent.json();
+    for (const body of ['{"force": tru', '', undefined, 'null', '123', '"force"', '[]']) {
+      const answer = await POST(raw(body), context);
+      expect(answer.status).toBe(absent.status);
+      expect(await answer.json()).toEqual(absentBody);
+      expect(answer.status).not.toBe(400);
+    }
+  });
+});
+
+describe('audit request validation', () => {
+  it.each(['{', 'null', '123', 'true', '"str"', '[]'])(
+    'rejects invalid object bodies before connection tests: %s',
+    async (body) => {
+      const settings = await import('../app/api/settings/test/route');
+      const teamarr = await import('../app/api/teamarr-sync/test/route');
+      await expect400(await settings.POST(post(body)));
+      await expect400(await teamarr.POST(post(body)));
+    },
+  );
+
+  it('bounds connection-test and check bodies before doing work', async () => {
+    const settings = await import('../app/api/settings/test/route');
+    const teamarr = await import('../app/api/teamarr-sync/test/route');
+    const check = await import('../app/api/check/[channelId]/route');
+    const oversized = () =>
+      new Request('http://podium/api/x', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: 'x'.repeat(6 * 1024 * 1024) }),
+      });
+    expect((await settings.POST(oversized())).status).toBe(413);
+    expect((await teamarr.POST(oversized())).status).toBe(413);
+    expect(
+      (await check.POST(oversized(), { params: Promise.resolve({ channelId: '5' }) })).status,
+    ).toBe(413);
+  });
+
+  it.each([null, 'bad', 1, [null], ['ok', 2], {}])(
+    'rejects invalid strip lists: %j',
+    async (strip) => {
+      const { PUT } = await import('../app/api/name-noise/route');
+      const before = readFileSync(rulesPath, 'utf8');
+      const response = await PUT(put(JSON.stringify({ strip })));
+      expect(response.status).toBe(400);
+      expect(readFileSync(rulesPath, 'utf8')).toBe(before);
+    },
+  );
+});
+
+describe('a bare Teamarr rules array', () => {
+  // The import routes promise the file Teamarr's Export button produced --
+  // a bare array or a {rules: [...]} envelope. The bounded reader refuses
+  // arrays by default, so each route must opt in with {allowArray: true} or
+  // the export file dies as "body is not JSON" before the route's own
+  // bare-array handling ever runs. Each pin compares the bare file against
+  // its envelope, so whatever the environment answers downstream, the two
+  // shapes must answer alike -- modulo the run stamp both routes bake into
+  // their payloads, which differs between the two POSTs by milliseconds and
+  // is not what this pin is about.
+  const rules = JSON.stringify([{ type: 'contains', value: 'usa', mode: 'include' }]);
+  const envelope = JSON.stringify({ rules: JSON.parse(rules) });
+  const withoutRunStamp = (body: unknown): unknown =>
+    JSON.parse(JSON.stringify(body), (key, value) => (key === 'generatedAt' ? undefined : value));
+
+  it.each([
+    ['rule-check', '../app/api/rule-check/route'],
+    ['quality-profile', '../app/api/quality-profile/route'],
+  ])('is accepted by the %s route exactly like its envelope', async (_route, module) => {
+    const { POST } = await import(module);
+    const bare = await POST(post(rules));
+    const wrapped = await POST(post(envelope));
+    expect(bare.status).not.toBe(400);
+    expect(bare.status).toBe(wrapped.status);
+    expect(withoutRunStamp(await bare.json())).toEqual(withoutRunStamp(await wrapped.json()));
   });
 });

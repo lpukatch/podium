@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
+import { readJson } from '@/lib/http-body';
 import { mergeForTest, resolveEnv, validateSettings } from '@/lib/settings';
 import { Store } from '@/lib/store';
 import { compareRules, summarise, TeamarrClient, type TeamarrRuleRow } from '@/lib/teamarr-client';
@@ -49,7 +50,11 @@ function sameOrigin(a: string, b: string): boolean {
 export async function POST(request: Request) {
   let store: Store | null = null;
   try {
-    const patch = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const parsed = await readJson<Record<string, unknown>>(request);
+    if (!parsed.ok) {
+      return NextResponse.json({ error: parsed.message }, { status: parsed.status });
+    }
+    const patch = parsed.value;
     const { values, errors } = validateSettings(patch);
     if (errors.length > 0) {
       return NextResponse.json({ ok: false, error: errors[0]?.message ?? 'invalid' });

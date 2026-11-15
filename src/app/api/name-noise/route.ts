@@ -101,6 +101,12 @@ export async function PUT(request: Request) {
         return NextResponse.json({ error: parsed.message }, { status: parsed.status });
       }
       const body = parsed.value;
+      if (
+        body.strip !== undefined &&
+        (!Array.isArray(body.strip) || body.strip.some((entry) => typeof entry !== 'string'))
+      ) {
+        return NextResponse.json({ error: 'strip must be an array of strings' }, { status: 400 });
+      }
       const clean = [...new Set((body.strip ?? []).map((s) => s.trim()).filter(Boolean))];
 
       const doc = readRulesDoc();

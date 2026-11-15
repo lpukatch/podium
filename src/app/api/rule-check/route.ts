@@ -54,7 +54,10 @@ export function GET() {
 export async function POST(request: Request) {
   let store: Store | null = null;
   try {
-    const read = await readJson(request);
+    // The bounded reader refuses arrays by default, but the Export file this
+    // route promises is often a bare array -- allow it so the route's own
+    // shape check below is what judges the body.
+    const read = await readJson(request, undefined, { allowArray: true });
     if (!read.ok) {
       return NextResponse.json({ error: read.message }, { status: read.status });
     }
