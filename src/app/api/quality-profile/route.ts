@@ -68,7 +68,8 @@ export function GET(request: Request) {
   let store: Store | null = null;
   try {
     const url = new URL(request.url);
-    store = new Store(loadConfig().dbPath);
+    const dbPath = loadConfig().dbPath;
+    store = new Store(dbPath);
     // Settings-resolved, not the raw environment: the scope is edited in the UI
     // and stored, and reading it from `process.env` would report the gate the
     // container booted with rather than the one in force.
@@ -78,7 +79,13 @@ export function GET(request: Request) {
       pointsPerMbps: config.PODIUM_QUALITY_POINTS_PER_MBPS,
     });
     const scope = scopeOf(url, config);
-    const cacheKey = `${store.qualityStamp()}|${JSON.stringify(scope)}|${minSamples}|${pointsPerMbps}`;
+    // The stamp only knows the sample count and the newest one, which cannot
+    // tell a live database from a different file that happens to agree with it
+    // -- PODIUM_DATA_DIR moving under a long-lived process, or a backup
+    // restore pointed at a fresh path. The path is part of the key, so a
+    // different database never inherits a fit this process computed from
+    // another one.
+    const cacheKey = `${dbPath}|${store.qualityStamp()}|${JSON.stringify(scope)}|${minSamples}|${pointsPerMbps}`;
     if (fitCache?.key !== cacheKey) {
       const samples = store.qualitySamples();
       const profile = buildProfile(samples, { minSamples, scope });

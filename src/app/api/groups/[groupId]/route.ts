@@ -10,13 +10,25 @@ import {
 import { responseErrorText } from '@/lib/error-text';
 import { readJson } from '@/lib/http-body';
 import { parseMaxResolution, parseMinResolution, RESOLUTION_CHOICES } from '@/lib/resolution';
-import { readRulesDoc, snapshot, withRulesLock, writeRulesDoc } from '@/lib/server/state';
+import {
+  readRulesDoc,
+  type Snapshot,
+  snapshot,
+  withRulesLock,
+  writeRulesDoc,
+} from '@/lib/server/state';
 
 export const dynamic = 'force-dynamic';
 
 export async function PUT(request: Request, context: { params: Promise<{ groupId: string }> }) {
   try {
-    return await withRulesLock(() => putGroupRule(request, context));
+    // Fetched before the lock: it is a read of Dispatcharr, not of the rules
+    // file, and a cold cache costs a full crawl. Held inside, the crawl would
+    // stall every other rules write in this process behind a fetch that has
+    // nothing to do with them. Worst case from racing is a group name minutes
+    // old, which is what the five-minute snapshot serves everywhere else.
+    const snap = await snapshot().catch(() => null);
+    return await withRulesLock(() => putGroupRule(request, context, snap));
   } catch (error) {
     // Same reason as the channel rule route: a rules-file failure is a 500
     // with a reason the settings page can show, not a bare framework error.
@@ -24,7 +36,11 @@ export async function PUT(request: Request, context: { params: Promise<{ groupId
   }
 }
 
-async function putGroupRule(request: Request, context: { params: Promise<{ groupId: string }> }) {
+async function putGroupRule(
+  request: Request,
+  context: { params: Promise<{ groupId: string }> },
+  snap: Snapshot | null,
+) {
   const { groupId } = await context.params;
   const id = Number(groupId);
   if (!Number.isInteger(id)) {
@@ -50,9 +66,8 @@ async function putGroupRule(request: Request, context: { params: Promise<{ group
     return NextResponse.json({ error: parsed.message }, { status: parsed.status });
   }
   const body = parsed.value;
-  const mode = body.mode ?? ALWAYS;
-  if (!VALID_MODES.includes(mode as never)) {
-    return NextResponse.json({ error: `unknown mode ${mode}` }, { status: 400 });
+  if (body.mode !== undefined && !VALID_MODES.includes(body.mode as never)) {
+    return NextResponse.json({ error: `unknown mode ${body.mode}` }, { status: 400 });
   }
   if (body.graceMinutes !== undefined && !validGraceMinutes(body.graceMinutes)) {
     return NextResponse.json(
@@ -84,7 +99,6 @@ async function putGroupRule(request: Request, context: { params: Promise<{ group
   const stored = groups[String(id)];
   const storedObj =
     stored && typeof stored === 'object' ? (stored as Record<string, unknown>) : undefined;
-  const snap = await snapshot().catch(() => null);
   const groupName = snap?.groups.find((group) => group.id === id)?.name;
   const matchedPattern = groupName
     ? parseGroupPatterns(doc.group_patterns).find((pattern) =>
@@ -92,6 +106,16 @@ async function putGroupRule(request: Request, context: { params: Promise<{ group
       )
     : undefined;
   const baseline = storedObj ?? (matchedPattern as unknown as Record<string, unknown> | undefined);
+  // Inherited like the flags below: every chip on the group posts only the one
+  // thing it changes, and a chip on a group that a pattern holds in `never`
+  // must not quietly flip it back to `always`. Hand-edited garbage falls back
+  // to `always` rather than being written back, the same repair
+  // `parseGroupPatterns` makes for a pattern it cannot read.
+  const baselineMode =
+    typeof baseline?.mode === 'string' && VALID_MODES.includes(baseline.mode as never)
+      ? baseline.mode
+      : undefined;
+  const mode = body.mode ?? baselineMode ?? ALWAYS;
   const keptLive = baseline?.require_live ?? baseline?.requireLive;
   const audioOnly =
     body.audioOnly !== undefined
