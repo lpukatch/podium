@@ -83,12 +83,19 @@ export async function readText(
 export async function readJson<T = unknown>(
   request: Request,
   limit: number = MAX_BODY_BYTES,
+  options: { allowArray?: boolean } = {},
 ): Promise<ParsedBody<T>> {
   const read = await readText(request, limit);
   if (!read.ok) return read;
   try {
     const value = JSON.parse(read.value) as T;
-    if (value === null) return { ok: false, status: 400, message: 'body is not JSON' };
+    if (
+      value === null ||
+      typeof value !== 'object' ||
+      (Array.isArray(value) && !options.allowArray)
+    ) {
+      return { ok: false, status: 400, message: 'body is not JSON' };
+    }
     return { ok: true, value };
   } catch {
     return { ok: false, status: 400, message: 'body is not JSON' };

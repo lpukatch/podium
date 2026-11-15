@@ -66,6 +66,22 @@ describe('readJson', () => {
     expect(read).toEqual({ ok: false, status: 400, message: 'body is not JSON' });
   });
 
+  it.each([123, 'str', true, false, []])('rejects a non-object body: %j', async (value) => {
+    expect(await readJson(json(value))).toEqual({
+      ok: false,
+      status: 400,
+      message: 'body is not JSON',
+    });
+  });
+
+  it('allows arrays only when requested', async () => {
+    expect(await readJson(json([1]), MAX_BODY_BYTES, { allowArray: true })).toEqual({
+      ok: true,
+      value: [1],
+    });
+    expect((await readJson(json(true), MAX_BODY_BYTES, { allowArray: true })).ok).toBe(false);
+  });
+
   it('answers 400 for a missing body', async () => {
     const read = await readJson(new Request('http://podium/api/x'));
     expect(read).toEqual({ ok: false, status: 400, message: 'body is not JSON' });

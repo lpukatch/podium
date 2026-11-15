@@ -9,6 +9,7 @@ import {
   Eligibility,
 } from '@/lib/eligibility';
 import { errorText, responseErrorText } from '@/lib/error-text';
+import { readJson } from '@/lib/http-body';
 import { Mutex } from '@/lib/mutex';
 import { resolveOrdering, withResolutionCeiling, withResolutionFloor } from '@/lib/ordering';
 import { isInterlaced, type ProbeResult, probe } from '@/lib/probe';
@@ -106,13 +107,12 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     let force = url.searchParams.get('force') === 'true';
     let runConsensus = url.searchParams.get('consensus') === 'true';
     if (request.headers.get('content-type')?.includes('application/json')) {
-      try {
-        const body = (await request.clone().json()) as { force?: boolean; consensus?: boolean };
-        if (body?.force) force = true;
-        if (body?.consensus) runConsensus = true;
-      } catch {
-        // Ignored if JSON parsing fails
+      const parsed = await readJson<{ force?: boolean; consensus?: boolean }>(request);
+      if (!parsed.ok) {
+        return NextResponse.json({ error: parsed.message }, { status: parsed.status });
       }
+      if (parsed.value.force) force = true;
+      if (parsed.value.consensus) runConsensus = true;
     }
 
     const config = serverConfig();

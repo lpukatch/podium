@@ -186,3 +186,47 @@ describe('a body bigger than the cap', () => {
     expect(readFileSync(rulesPath, 'utf8')).toBe(RULES);
   });
 });
+
+describe('audit request validation', () => {
+  it.each(['{', 'null', '123', 'true', '"str"', '[]'])(
+    'rejects invalid object bodies before connection tests or probes: %s',
+    async (body) => {
+      const settings = await import('../app/api/settings/test/route');
+      const teamarr = await import('../app/api/teamarr-sync/test/route');
+      const check = await import('../app/api/check/[channelId]/route');
+      await expect400(await settings.POST(post(body)));
+      await expect400(await teamarr.POST(post(body)));
+      await expect400(
+        await check.POST(post(body), { params: Promise.resolve({ channelId: '5' }) }),
+      );
+    },
+  );
+
+  it('bounds connection-test and check bodies before doing work', async () => {
+    const settings = await import('../app/api/settings/test/route');
+    const teamarr = await import('../app/api/teamarr-sync/test/route');
+    const check = await import('../app/api/check/[channelId]/route');
+    const oversized = () =>
+      new Request('http://podium/api/x', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: 'x'.repeat(6 * 1024 * 1024) }),
+      });
+    expect((await settings.POST(oversized())).status).toBe(413);
+    expect((await teamarr.POST(oversized())).status).toBe(413);
+    expect(
+      (await check.POST(oversized(), { params: Promise.resolve({ channelId: '5' }) })).status,
+    ).toBe(413);
+  });
+
+  it.each([null, 'bad', 1, [null], ['ok', 2], {}])(
+    'rejects invalid strip lists: %j',
+    async (strip) => {
+      const { PUT } = await import('../app/api/name-noise/route');
+      const before = readFileSync(rulesPath, 'utf8');
+      const response = await PUT(put(JSON.stringify({ strip })));
+      expect(response.status).toBe(400);
+      expect(readFileSync(rulesPath, 'utf8')).toBe(before);
+    },
+  );
+});
