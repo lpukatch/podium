@@ -411,6 +411,7 @@ at the defaults. They are settings now, and both paths read the same value.
 | `PODIUM_TEAMARR_SYNC_MS` | `86400000` | how often the scheduled push runs. A day |
 | `PODIUM_TEAMARR_MIN_SAMPLES` | `200` | in-scope samples the profile must be fitted on before anything is pushed |
 | `PODIUM_TEAMARR_MIN_CHANNELS` | `20` | channels the comparison below must cover before a *scheduled* push is trusted |
+| `PODIUM_TEAMARR_PEAK_FRACTION` | `0` | Fraction (0–1) of the largest population measured over the last seven days. Raises the minimum population for scheduled pushes and previews. Zero keeps the absolute minimum. |
 
 Every push — button or scheduled — scores the rules Teamarr is running against
 the set about to replace them, over the same channels from the same verdicts,
@@ -434,6 +435,11 @@ busiest the install has been in the last week, so an install that never has that
 many orderable channels is at its normal size rather than having a quiet hour,
 and is never held back. Pressing the button on the Quality page is unaffected:
 the floor stands in for an operator who is not there.
+
+With `PODIUM_TEAMARR_PEAK_FRACTION` above zero, the required population also
+includes that share of the recent peak. The larger minimum applies. If no push
+succeeds for seven days, Podium uses the absolute minimum again. A manual push
+on the Quality page bypasses this population guard.
 
 The globs are comma- or newline-separated and are matched against **both** the
 provider group and the channel group, using the same `*`/`?` syntax as the group

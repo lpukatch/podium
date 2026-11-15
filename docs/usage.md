@@ -46,13 +46,14 @@ how long ago it was checked — so the cost of a rule change is visible in the
 same place you make it. `new` is a stream your rules claim that Dispatcharr has
 not been given yet; it stays unwritten until you save.
 
-A stream the channel carries but no rule claims is marked `NOT MATCHED`, and has
-the two answers next to it: **+ alias** claims it, **✕** takes it off the channel
-in Dispatcharr. The ✕ writes immediately — it removes that one stream and leaves
-the order of the rest exactly as Dispatcharr has it. Podium never assigns, so
-putting one back is a job for Dispatcharr. To clear several at once, use the
-tick under **Check now** instead, which removes everything the rule does not
-claim as part of applying the new order.
+A stream that the channel carries but no rule claims is marked `NOT MATCHED`.
+Use **+ alias** to claim it. To remove it from Dispatcharr, select **Remove**,
+then select **Remove** again in the confirmation controls. Select **Cancel** to
+keep the stream. Removal changes that channel immediately and keeps the order
+of the other streams.
+
+To remove several unclaimed streams, select the removal checkbox under
+**Check now**, then apply the proposed order.
 
 ### Badges and noise words
 
@@ -385,7 +386,7 @@ order would have been, which is what the quality priors are fitted from and what
 the exported rules hand back to the app that owns the channel.
 
 Toggling **Check only** on a group — or `"measure_only": true` in
-`rules.json` / `rules.yml`, on a group or a name pattern — keeps everything
+`rules.json`, on a group or a name pattern — keeps everything
 except the writes:
 
 | still happens | suppressed |
@@ -417,7 +418,7 @@ ranking was withheld.
 
 Channels carrying radio stations, Sirius XM, or music feeds have audio tracks but no video stream. By default, Podium expects video streams and treats video-less feeds as dead, black-screened, or sub-floor.
 
-Toggling **Audio only** on a group (or adding `"audio_only": true` in `rules.json` / `rules.yml` or group name patterns) tells Podium to:
+Toggling **Audio only** on a group (or adding `"audio_only": true` in `rules.json` or group name patterns) tells Podium to:
 - Accept streams with valid audio tracks as healthy (`alive: true`).
 - Skip video black-screen detection during probing to prevent stream mapping errors.
 - Bypass the video bitrate floor (e.g. 500kbps) while still validating audio channel counts and audio bitrates.
@@ -736,11 +737,31 @@ a stream over the line is ranked after every stream that is not, whatever its
 picture looks like, and is never served first. It stays ahead of streams that do
 not play at all — it is sunk, not condemned. Off by default.
 
+### Compare audio across feeds
+
+Audio comparison looks for feeds that carry the same broadcast. An audio
+fingerprint is a compact description of a short sound sample. Podium compares
+these fingerprints to find matching feeds and feeds with different audio.
+
+1. Open a channel in the channel editor.
+2. Under **Check now**, select **Compare audio across feeds**.
+3. Select **Check this channel** and wait for the results.
+4. Read the audio result and the labels beside each stream.
+
+The result can confirm agreement, identify audio outliers, show partial
+agreement, or report an inconclusive comparison. An audio outlier carries audio
+that differs from the matching feeds. It can indicate the wrong broadcast, but
+a different commentary track can also differ. Review the feed before acting.
+
+An inconclusive result does not prove that a feed carries the wrong content.
+Podium needs enough readable audio and matching feeds to compare them. The
+check shows the proposed order without writing it. Apply the order separately.
+
 ### Soaking a stream
 
 The ledger can only learn about streams somebody has watched, which on a
 six-stream channel is usually the one already in slot 0 — exactly the stream
-whose replacement you want to know about. **Soak 3m**, on each row of the check
+whose replacement you want to know about. **Soak**, on each row of the check
 panel, is the way out: it holds that stream open for three minutes and records
 how long it lasts.
 
@@ -754,7 +775,7 @@ and it is how a stream with an old bad record is shown to have recovered.
 Four places ask for one:
 
 - **Soak** on a stream's row in the check panel — that stream alone.
-- **Soak every stream on this channel** — above the check panel.
+- **Soak every stream** — in the channel check panel.
 - **Soak every stream here** — on a group, which is every stream on every
   channel in it.
 - **Soak everything** — on the Progress tab, which is every stream on the
