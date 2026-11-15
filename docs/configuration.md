@@ -449,6 +449,54 @@ carry none, and naming their groups is what puts them back in scope.
 Why the gate exists at all, and how to read what it dropped, is in
 [Usage → What it learns from](usage.md#what-it-learns-from).
 
+## Webhook notifications
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `PODIUM_WEBHOOK_URL` | *(empty)* | a JSON `POST` is sent here when Podium writes a channel, when a managed channel is left with nothing watchable, or when a pass fails. Empty turns notifications off. The URL is used verbatim — for an ntfy topic or a Home Assistant trigger the path *is* the destination — and a `user:pass@` in it is refused, because credentials in a URL sit in plaintext in both servers' logs |
+
+Everything else is fixed. The events Podium sends, and when:
+
+| Event | When | Once per |
+| --- | --- | --- |
+| `channel_updated` | the worker reordered a channel, assigned streams to it, or removed streams from it | write |
+| `channel_down` | a managed channel ended a pass with no stream alive and in picture — a black slate counts as not watchable, an unmeasured channel does not count as down | transition into that state |
+| `channel_recovered` | a channel that was down carries something watchable again, or has left the catalogue | transition |
+| `run_failed` | a whole pass threw | the start of that failing streak |
+| `test` | the settings page's **Send a test event** button | you pressing it |
+
+Every event is one JSON object — `source: "podium"`, an ISO `sentAt`, and the
+event's own fields. A channel id and name are always present; a
+`channel_updated` carries the streams the write added or removed, with names
+and providers; `channel_down` names the lead stream and why a viewer would
+miss:
+
+```json
+{"source":"podium","sentAt":"2026-11-15T03:04:05.000Z","event":"channel_down",
+ "channelId":743,"channelName":"HBO East","slots":3,
+ "lead":{"streamId":75666,"provider":"Provider C","status":"dead"}}
+```
+
+Delivery is **at most once**: a failed send is logged and dropped, never
+retried, because a retry turns "at most once" into "at least once" and a
+consumer's automation does not want yesterday's news twice. A channel that
+stays down is announced when it goes down, not once per pass — the tracking
+survives a worker restart, so an ongoing outage is not re-announced every
+time the pod cycles, and a recovery while the worker was down is announced at
+the next pass instead of being lost. The URL is read per event, so editing it
+in Settings takes effect on the next event rather than on the next restart.
+
+A burst is capped at 20 events a minute; over that, events are dropped with
+one log line rather than queued — a first pass with auto-assign on can
+legitimately write hundreds of channels in minutes, and a consumer receiving
+that burst is being attacked by a friend. The writes themselves are always in
+the worker log, and [every verdict](usage.md#reading-every-verdict) is still
+the complete API: the webhook is the tap on the shoulder, not the record.
+
+Dry run writes nothing, so it also notifies nothing. Writes made from the UI
+— a rules editor apply, the dead view's buttons — are not announced either;
+the person who made them is looking at the result.
+
 ## Writing back
 
 | Variable | Default | Notes |

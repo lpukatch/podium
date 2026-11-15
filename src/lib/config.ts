@@ -299,6 +299,18 @@ export const configSchema = z.object({
    */
   PODIUM_TEAMARR_SYNC_MS: num(86_400_000),
   /**
+   * Where webhook notifications are POSTed, verbatim -- path included, since
+   * for an ntfy topic or a Home Assistant trigger the path *is* the
+   * destination. Empty disables notifications entirely.
+   *
+   * Unlike the three base URLs above this is not normalised and no path is
+   * appended, so its validation lives in `notify.ts` and refuses credentials
+   * in the URL rather than fragments. Read per event, not captured once:
+   * notifications are event-driven, so an edit in the UI takes effect on the
+   * next event and turning the URL off mid-incident silences the rest of it.
+   */
+  PODIUM_WEBHOOK_URL: z.string().default(''),
+  /**
    * In-scope samples the profile must be built from before anything is pushed.
    *
    * The guard exists because of a real accident: a database cleared overnight

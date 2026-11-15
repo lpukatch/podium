@@ -658,6 +658,22 @@ CREATE TABLE IF NOT EXISTS connect_delivery_history (
 CREATE INDEX IF NOT EXISTS connect_delivery_history_received
     ON connect_delivery_history (received_at);
 
+-- Which webhook transitions have already been announced.
+--
+-- The degraded-channel sweep is diff-based: a channel is announced when it
+-- *enters* the down state and recovered when it leaves it, which needs last
+-- sweep's answer to compare against. That answer survives here rather than in
+-- the worker's memory, so a restart mid-outage does not re-announce every
+-- down channel and a recovery that happened while the worker was down is
+-- announced at the next pass instead of being lost. The value column carries
+-- the channel name as it was when the row was written, because a recovery has
+-- to be able to name a channel the catalogue may no longer carry.
+CREATE TABLE IF NOT EXISTS notify_state (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    at    INTEGER NOT NULL
+);
+
 DROP INDEX IF EXISTS quality_samples_bucket;
 CREATE INDEX IF NOT EXISTS quality_samples_partition
     ON quality_samples (provider_id, tier, policy_mode, sampled_at DESC);
@@ -1408,6 +1424,23 @@ export interface DeadStreamRow {
   probedAt: number;
   deadStreak: number;
   result: ProbeResult;
+}
+
+/**
+ * One row of `degradedChannels`: a managed channel that ended with nothing
+ * watchable on it. `usable` counts streams whose current verdict is alive and
+ * not a black slate; the query only returns channels where at least one stream
+ * carries a verdict, so a channel that has never been measured is unknown
+ * rather than down. Read by the webhook sweep -- see `notify.ts`.
+ */
+export interface DegradedChannelRow {
+  channelId: number;
+  channelName: string;
+  slots: number;
+  usable: number;
+  /** Slot 0 -- what a viewer is served first -- and its provider. */
+  leadStreamId: number | null;
+  leadProvider: string | null;
 }
 
 export class Store {
@@ -2193,6 +2226,158 @@ export class Store {
       stream_id: number;
     }>;
     return new Set(rows.map((row) => row.stream_id));
+  }
+
+  /**
+   * Managed channels that ended with nothing watchable on them.
+   *
+   * "Watchable" is the current verdict being alive and not a black slate --
+   * the same bar the ranking applies, and for the same reason: a slate is not
+   * a fallback. A channel where every stream answers that description has no
+   * position a viewer can be put on, whatever the order says.
+   *
+   * A channel no stream has ever been measured on is *unknown*, not down, and
+   * is excluded (`measured > 0`): announcing a channel as down on the strength
+   * of an empty cache would be a lie about evidence nobody has gathered yet.
+   *
+   * Scoped to the `catalogue` table, which holds only the channels Podium
+   * manages -- the degraded sweep exists to tell the operator about channels
+   * Podium is responsible for, not about the rest of the lineups.
+   *
+   * The current-verdict CTE is the one `deadStreams` uses: variants share a
+   * stream id, so the newest row's hash decides which rows are current, and
+   * a stream is usable if any current row watched alive with picture. The
+   * lead columns ride the same GROUP BY -- slot 0 is what a viewer is served
+   * first, and the notification should say what they would actually hit.
+   */
+  degradedChannels(): DegradedChannelRow[] {
+    const rows = this.sql(
+      `WITH ranked AS (
+         SELECT stream_id,
+                stream_hash,
+                ROW_NUMBER() OVER (
+                  PARTITION BY stream_id ORDER BY probed_at DESC, rowid DESC
+                ) AS rank,
+                FIRST_VALUE(stream_hash) OVER (
+                  PARTITION BY stream_id ORDER BY probed_at DESC, rowid DESC
+                ) AS current_hash
+           FROM probe_cache
+       ),
+       current_hash AS (
+         SELECT stream_id, current_hash FROM ranked WHERE rank = 1
+       ),
+       usable AS (
+         SELECT DISTINCT p.stream_id
+           FROM probe_cache p
+           JOIN current_hash c ON c.stream_id = p.stream_id AND c.current_hash = p.stream_hash
+          WHERE p.alive = 1 AND p.black = 0
+       ),
+       measured AS (
+         SELECT DISTINCT stream_id FROM current_hash
+       )
+       SELECT g.channel_id,
+              g.channel_name,
+              COUNT(*) AS slots,
+              SUM(CASE WHEN u.stream_id IS NOT NULL THEN 1 ELSE 0 END) AS usable,
+              SUM(CASE WHEN m.stream_id IS NOT NULL THEN 1 ELSE 0 END) AS measured,
+              MAX(CASE WHEN g.slot = 0 THEN g.stream_id END) AS lead_stream_id,
+              MAX(CASE WHEN g.slot = 0 THEN g.provider_name END) AS lead_provider
+         FROM catalogue g
+         LEFT JOIN usable u ON u.stream_id = g.stream_id
+         LEFT JOIN measured m ON m.stream_id = g.stream_id
+        GROUP BY g.channel_id, g.channel_name
+       HAVING usable = 0 AND measured > 0`,
+    ).all() as Array<{
+      channel_id: number;
+      channel_name: string;
+      slots: number;
+      usable: number;
+      measured: number;
+      lead_stream_id: number | null;
+      lead_provider: string | null;
+    }>;
+    return rows.map((row) => ({
+      channelId: row.channel_id,
+      channelName: row.channel_name,
+      slots: row.slots,
+      usable: row.usable,
+      leadStreamId: row.lead_stream_id,
+      leadProvider: row.lead_provider,
+    }));
+  }
+
+  /**
+   * What the current verdict on one stream says, in the three words the
+   * webhook payload uses, or null when the stream has none.
+   *
+   * "Live" needs an alive row that is not black; if every current row is
+   * alive-but-black the stream is black, and otherwise dead. This is the
+   * per-stream cut of the same CTE `deadStreams` and `degradedChannels` run,
+   * for naming the lead stream of a channel in one notification.
+   */
+  streamVerdictStatus(streamId: number): 'live' | 'black' | 'dead' | null {
+    const row = this.sql(
+      `WITH ranked AS (
+         SELECT stream_hash,
+                ROW_NUMBER() OVER (
+                  PARTITION BY stream_id ORDER BY probed_at DESC, rowid DESC
+                ) AS rank,
+                FIRST_VALUE(stream_hash) OVER (
+                  PARTITION BY stream_id ORDER BY probed_at DESC, rowid DESC
+                ) AS current_hash
+           FROM probe_cache
+          WHERE stream_id = ?
+       ),
+       current_hash AS (
+         SELECT current_hash FROM ranked WHERE rank = 1
+       )
+       SELECT CASE
+                WHEN SUM(CASE WHEN p.alive = 1 AND p.black = 0 THEN 1 ELSE 0 END) > 0
+                  THEN 'live'
+                WHEN SUM(CASE WHEN p.alive = 1 THEN 1 ELSE 0 END) > 0
+                  THEN 'black'
+                WHEN COUNT(*) > 0
+                  THEN 'dead'
+                ELSE NULL
+              END AS status
+         FROM probe_cache p
+         JOIN current_hash c ON c.current_hash = p.stream_hash
+        WHERE p.stream_id = ?`,
+    ).get(streamId, streamId) as { status: 'live' | 'black' | 'dead' | null };
+    return row?.status ?? null;
+  }
+
+  /**
+   * What the catalogue would serve first on a channel, or null when the
+   * channel is no longer catalogued at all -- which is its own kind of
+   * recovery, and gets a recovery event with no lead rather than silence.
+   */
+  catalogueLead(channelId: number): { streamId: number; provider: string } | null {
+    const row = this.sql(
+      'SELECT stream_id, provider_name FROM catalogue WHERE channel_id = ? AND slot = 0',
+    ).get(channelId) as { stream_id: number; provider_name: string } | undefined;
+    return row ? { streamId: row.stream_id, provider: row.provider_name } : null;
+  }
+
+  /** Every webhook-transition tracking row. The table is tiny by design. */
+  notifyStateAll(): Array<{ key: string; value: string; at: number }> {
+    return this.sql('SELECT key, value, at FROM notify_state').all() as Array<{
+      key: string;
+      value: string;
+      at: number;
+    }>;
+  }
+
+  notifyStateSet(key: string, value: string, at: number): void {
+    this.sql('INSERT OR REPLACE INTO notify_state (key, value, at) VALUES (?, ?, ?)').run(
+      key,
+      value,
+      at,
+    );
+  }
+
+  notifyStateDelete(key: string): void {
+    this.sql('DELETE FROM notify_state WHERE key = ?').run(key);
   }
 
   /**

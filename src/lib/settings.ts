@@ -16,6 +16,7 @@
 
 import { baseUrlProblem, normaliseBaseUrl } from './base-url';
 import { CONFIG_DEFAULTS } from './config';
+import { webhookUrlProblem } from './notify';
 import type { RequireClause } from './setting-requirements';
 import type { Store } from './store';
 
@@ -155,6 +156,13 @@ export const GROUPS: GroupSpec[] = [
     section: 'behaviour',
     title: 'Publishing measurements',
     description: 'Where Podium reports what it measured.',
+  },
+  {
+    id: 'notifications',
+    section: 'behaviour',
+    title: 'Webhook notifications',
+    description:
+      'POSTing a JSON event when Podium changes a channel or finds one with nothing watchable.',
   },
   {
     id: 'watching',
@@ -912,6 +920,15 @@ export const FIELDS: FieldSpec[] = [
     min: 0,
     max: 1,
   },
+  {
+    key: 'PODIUM_WEBHOOK_URL',
+    kind: 'string',
+    label: 'Webhook URL',
+    help: 'POSTs a JSON event here when Podium writes a channel, when a channel is left with nothing watchable, or when a pass fails. Empty turns notifications off.',
+    more: 'Works with anything that accepts a JSON POST -- an ntfy topic, a Home Assistant webhook trigger, a script of your own. The URL is used verbatim, so its path is the destination; put no credentials in it (they would sit in plaintext in both servers’ logs). A Test button appears with this field.',
+    section: 'behaviour',
+    group: 'notifications',
+  },
 ];
 
 export const FIELD_KEYS = new Set(FIELDS.map((f) => f.key));
@@ -1025,6 +1042,12 @@ export function validateSettings(patch: Record<string, unknown>): {
       values[key] = String(field.scale ? Math.round(n * field.scale) : n);
     } else if (field.kind === 'boolean') {
       values[key] = ['1', 'true', 'yes', 'on'].includes(text.toLowerCase()) ? 'true' : 'false';
+    } else if (key === 'PODIUM_WEBHOOK_URL') {
+      // Posted to verbatim rather than used as a base, so it is checked by its
+      // own rules -- see webhookUrlProblem -- and stored as typed, path and all.
+      const problem = webhookUrlProblem(text);
+      if (problem) errors.push({ key, message: problem });
+      else values[key] = text;
     } else if (
       key === 'DISPATCHARR_URL' ||
       key === 'PODIUM_TEAMARR_URL' ||
