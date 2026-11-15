@@ -12,7 +12,7 @@ order with the measurement behind each one](docs/images/rules-editor.png)
 
 One channel, its streams in the order Dispatcharr currently serves them, and
 what each one actually is. The stream named `1080p` at #2 measures 720p; the one
-named `UHD` at #5 is a black screen; #6 is dead. Matches update as you type, and
+named `UHD` at #5 is a black screen; #6 is dead. Matches update as you edit, and
 nothing is written until you say so.
 
 ## Quick start

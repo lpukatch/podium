@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { needsCatalogue, probeableChannelsForGroup } from './page';
+import {
+  commitAliasEdit,
+  needsCatalogue,
+  probeableChannelsForGroup,
+  renameFilterKey,
+} from './page';
 
 describe('initial catalogue fetch', () => {
   it('defers it for independently backed monitoring and settings pages', () => {
@@ -64,5 +69,56 @@ describe('probeableChannelsForGroup', () => {
     ];
     const probeable = probeableChannelsForGroup({ mode: 'after_epg_start', rows: channels });
     expect(probeable.map((c) => c.id)).toEqual([1, 2]);
+  });
+});
+
+describe('commitAliasEdit', () => {
+  const aliases = 'alpha\nbravo';
+
+  it('keeps the alias when the blurred draft is empty', () => {
+    expect(commitAliasEdit(aliases, 'alpha', '')).toEqual({ action: 'keep' });
+  });
+
+  it('keeps the alias when the blurred draft is only whitespace', () => {
+    expect(commitAliasEdit(aliases, 'alpha', '   ')).toEqual({ action: 'keep' });
+  });
+
+  it('keeps the alias when the blurred draft collides with another alias', () => {
+    expect(commitAliasEdit(aliases, 'alpha', 'bravo')).toEqual({ action: 'keep' });
+  });
+
+  it('collides on the trimmed draft, not the raw text', () => {
+    expect(commitAliasEdit(aliases, 'alpha', ' bravo ')).toEqual({ action: 'keep' });
+  });
+
+  it('renames to the trimmed draft when the name is free', () => {
+    expect(commitAliasEdit(aliases, 'alpha', '  charlie  ')).toEqual({
+      action: 'rename',
+      next: 'charlie',
+    });
+  });
+
+  it('lets a draft restate the alias it started from', () => {
+    expect(commitAliasEdit(aliases, 'alpha', 'alpha')).toEqual({ action: 'rename', next: 'alpha' });
+  });
+});
+
+describe('renameFilterKey', () => {
+  it('carries the entry from the old key to the new one', () => {
+    expect(renameFilterKey({ alpha: ['g1'], bravo: ['g2'] }, 'alpha', 'charlie')).toEqual({
+      bravo: ['g2'],
+      charlie: ['g1'],
+    });
+  });
+
+  it('overwrites an entry already sitting on the new key', () => {
+    expect(renameFilterKey({ alpha: ['g1'], charlie: ['g9'] }, 'alpha', 'charlie')).toEqual({
+      charlie: ['g1'],
+    });
+  });
+
+  it('returns the same filters when the old key is absent', () => {
+    const filters = { bravo: ['g2'] };
+    expect(renameFilterKey(filters, 'alpha', 'charlie')).toBe(filters);
   });
 });

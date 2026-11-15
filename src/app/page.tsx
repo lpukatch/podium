@@ -273,6 +273,33 @@ const lines = (text: string) =>
     .map((s) => s.trim())
     .filter(Boolean);
 
+// An alias input holds a draft until blur, so the blur decides: a draft left
+// empty or colliding with another alias keeps the alias it started from.
+// Deletion stays on the row's remove button -- a stray blur must not drop an
+// alias along with the filters keyed to it.
+export function commitAliasEdit(
+  aliases: string,
+  old: string,
+  draft: string,
+): { action: 'keep' } | { action: 'rename'; next: string } {
+  const next = draft.trim();
+  if (!next || (old !== next && aliases.split('\n').includes(next))) return { action: 'keep' };
+  return { action: 'rename', next };
+}
+
+// A rename carries the per-alias filters to the new name; without this, the
+// drawer's per-alias work would silently detach on the first rename.
+export function renameFilterKey<T>(
+  filters: Record<string, T>,
+  from: string,
+  to: string,
+): Record<string, T> {
+  if (!filters[from]) return filters;
+  const next = { ...filters, [to]: filters[from]! };
+  delete next[from];
+  return next;
+}
+
 export default function Page() {
   const [groups, setGroups] = useState<GroupRow[]>([]);
   const [patterns, setPatterns] = useState<PatternRule[]>([]);
@@ -1091,36 +1118,18 @@ export default function Page() {
   }, [preview, ruleIsEmpty]);
 
   const setAlias = (old: string, next: string) => {
-    next = next.trim();
-    if (!next || (old !== next && aliases.split('\n').includes(next))) {
-      removeAlias(old);
-      return;
-    }
+    const commit = commitAliasEdit(aliases, old, next);
+    if (commit.action === 'keep') return;
     const aliasesNow = aliases.split('\n');
     const position = aliasesNow.indexOf(old);
     if (position < 0) return;
-    aliasesNow[position] = next;
+    aliasesNow[position] = commit.next;
     setAliases(aliasesNow.join('\n'));
-    if (old !== next && next.trim()) {
-      if (aliasGroupFilters[old]) {
-        const updated = { ...aliasGroupFilters };
-        updated[next] = updated[old]!;
-        delete updated[old];
-        setAliasGroupFilters(updated);
-      }
-      if (aliasProviders[old]) {
-        const updated = { ...aliasProviders };
-        updated[next] = updated[old]!;
-        delete updated[old];
-        setAliasProviders(updated);
-      }
-      if (aliasProviderGroupFilters[old]) {
-        const updated = { ...aliasProviderGroupFilters };
-        updated[next] = updated[old]!;
-        delete updated[old];
-        setAliasProviderGroupFilters(updated);
-      }
-      setEditingAlias((current) => (current === old ? next : current));
+    if (old !== commit.next) {
+      setAliasGroupFilters(renameFilterKey(aliasGroupFilters, old, commit.next));
+      setAliasProviders(renameFilterKey(aliasProviders, old, commit.next));
+      setAliasProviderGroupFilters(renameFilterKey(aliasProviderGroupFilters, old, commit.next));
+      setEditingAlias((current) => (current === old ? commit.next : current));
     }
   };
 
@@ -1997,8 +2006,8 @@ export default function Page() {
               </p>
             )}
 
-            {/* Aliases and their live result sit together: the whole point is
-                watching the match set change as you type. */}
+            {/* Aliases and their result sit together: leaving a row moves the
+                match set where you are already looking. */}
             <div className={`${card} mt-4 p-5`}>
               <div className="flex flex-wrap items-baseline justify-between gap-2">
                 <h3 className="text-sm font-semibold uppercase tracking-wide text-[var(--color-muted)]">
@@ -2356,7 +2365,7 @@ export default function Page() {
               </div>
               <p className="mt-2 text-sm text-[var(--color-muted)]">
                 Each row is one alias, in preference order. Casing, accents, “USA:” prefixes and
-                “FHD H265” suffixes are handled for you. Matches update as you type.
+                “FHD H265” suffixes are handled for you. Matches update when you leave a row.
               </p>
               {/* A reference, not an instruction: read once, then in the way of
                   the list it sits above every time after. */}
