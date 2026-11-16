@@ -44,6 +44,16 @@ describe('bounded upstream responses', () => {
     expect(await (await boundedResponse(new Response('éé'), 4)).text()).toBe('éé');
   });
 
+  it('replaces wire encoding headers with the decoded length', async () => {
+    const rebuilt = await boundedResponse(
+      new Response('plain', { headers: { 'content-encoding': 'gzip', 'content-length': '9' } }),
+      64,
+    );
+    expect(rebuilt.headers.get('content-encoding')).toBeNull();
+    expect(rebuilt.headers.get('content-length')).toBe('5');
+    expect(await rebuilt.text()).toBe('plain');
+  });
+
   it('keeps the Dispatcharr timeout active after headers arrive', async () => {
     let started = false;
     const server = createServer((_request, response) => {
@@ -71,13 +81,16 @@ describe('bounded upstream responses', () => {
   it('bounds Dispatcharr login and Teamarr bodies through their clients', async () => {
     const original = globalThis.fetch;
     globalThis.fetch = vi.fn(async () => new Response('x'.repeat(CONTROL_RESPONSE_BYTES + 1)));
+    // The exact message: a substring like 'exceeds' would also match some
+    // reach failure, and the point here is which failure fired.
+    const oversized = `Upstream response exceeds ${CONTROL_RESPONSE_BYTES} bytes`;
     try {
       await expect(
         new DispatcharrClient('http://d', { username: 'u', password: 'p' }).login(),
-      ).rejects.toThrow('exceeds');
-      await expect(new TeamarrClient('http://t').rules()).rejects.toThrow(
-        'Could not reach Teamarr',
-      );
+      ).rejects.toThrow(oversized);
+      // Teamarr reached its server and got too much back — the limit error
+      // survives, not the "Could not reach" wrong-address message.
+      await expect(new TeamarrClient('http://t').rules()).rejects.toThrow(oversized);
     } finally {
       globalThis.fetch = original;
     }

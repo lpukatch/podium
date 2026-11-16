@@ -713,7 +713,14 @@ export class DispatcharrClient {
         headers: body ? { ...this.headers(), 'Content-Type': 'application/json' } : this.headers(),
         body: body === undefined ? undefined : JSON.stringify(body),
       });
-      const bulk = path.startsWith('/api/channels/') || path.startsWith('/api/epg/');
+      // Catalogue and EPG listings scale with library size, and the status
+      // read the pacer polls every ten seconds scales with concurrent viewer
+      // sessions; all three get the bulk cap. Everything else is small and
+      // bounded by the request itself, so the control cap holds there.
+      const bulk =
+        path.startsWith('/api/channels/') ||
+        path.startsWith('/api/epg/') ||
+        path.startsWith('/proxy/ts/status');
       return await boundedResponse(response, bulk ? BULK_RESPONSE_BYTES : CONTROL_RESPONSE_BYTES);
     } finally {
       clearTimeout(timer);
