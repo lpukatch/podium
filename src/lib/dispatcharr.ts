@@ -729,11 +729,25 @@ export class DispatcharrClient {
 
   /** A request that transparently refreshes an expired JWT once. */
   private async request(method: string, path: string, body?: unknown): Promise<Response> {
-    let resp = await this.raw(method, path, body);
-    if (resp.status === 401 && (await this.refresh())) {
-      resp = await this.raw(method, path, body);
+    const retryableStatuses = new Set([500, 502, 503, 504]);
+    const retryableCodes = new Set(['ECONNRESET', 'UND_ERR_SOCKET', 'EPIPE']);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        let response = await this.raw(method, path, body);
+        if (response.status === 401 && (await this.refresh())) {
+          response = await this.raw(method, path, body);
+        }
+        if (method !== 'GET' || attempt >= 2 || !retryableStatuses.has(response.status)) {
+          return response;
+        }
+      } catch (error) {
+        const failure = error as { code?: string; cause?: { code?: string } } | null;
+        const code = failure?.cause?.code ?? failure?.code ?? '';
+        if (method !== 'GET' || attempt >= 2 || !retryableCodes.has(code)) throw error;
+      }
+      const delay = [500, 1500][attempt]! * (0.8 + Math.random() * 0.4);
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
-    return resp;
   }
 
   private async getJson<T>(path: string): Promise<T> {
