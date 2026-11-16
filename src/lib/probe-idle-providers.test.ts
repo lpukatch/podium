@@ -357,6 +357,72 @@ describe('a watching pass, end to end', () => {
     expect(paths).toContain('/proxy/ts/status');
   });
 
+  it('skips repeated catalogues for deferred-only work until capacity or due time changes', async () => {
+    const paths = stubDispatcharr(12);
+    const worker = runner();
+    const previous = await worker.runOnce();
+    // The previous planner's deferred-only result is the gate's input contract.
+    worker.lastRun = {
+      ...previous,
+      probed: 0,
+      runnableBacklog: 0,
+      deferred: 5,
+      soakBacklog: 0,
+      nextDueAt: Date.now() + 60_000,
+      nextEligibleAt: null,
+    };
+    const crawls = () => paths.filter((path) => path === '/api/channels/streams/').length;
+    const before = crawls();
+    const runs = store.recentRuns().length;
+    expect((await worker.runOnce()).paused).toBe(true);
+    expect((await worker.runOnce()).paused).toBe(true);
+    expect(crawls()).toBe(before);
+    expect(store.recentRuns()).toHaveLength(runs);
+    worker.lastRun = { ...worker.lastRun!, nextDueAt: Date.now() - 1 };
+    await worker.runOnce();
+    expect(crawls()).toBe(before + 1);
+  });
+
+  it('re-fetches the catalogue when activity changes after deferred-only work', async () => {
+    stubDispatcharr(12);
+    const worker = runner();
+    const previous = await worker.runOnce();
+    worker.lastRun = {
+      ...previous,
+      probed: 0,
+      runnableBacklog: 0,
+      deferred: 5,
+      soakBacklog: 0,
+      nextDueAt: null,
+      nextEligibleAt: null,
+    };
+    const paths = stubDispatcharr(13);
+    await worker.runOnce();
+    expect(paths).toContain('/api/channels/streams/');
+  });
+
+  it.each(['refresh', 'soak', 'config'])('re-fetches after a %s change', async (change) => {
+    const paths = stubDispatcharr(12);
+    const env: Record<string, string> = {};
+    const worker = runner(env);
+    const previous = await worker.runOnce();
+    worker.lastRun = {
+      ...previous,
+      probed: 0,
+      runnableBacklog: 0,
+      deferred: 5,
+      soakBacklog: 0,
+      nextDueAt: null,
+      nextEligibleAt: null,
+    };
+    const before = paths.filter((path) => path === '/api/channels/streams/').length;
+    if (change === 'refresh') store.setRefreshMark(-1);
+    if (change === 'soak') store.queueSoaks([{ streamId: 1, channelId: 1 }]);
+    if (change === 'config') env.PODIUM_MAX_AGE_MS = '123456';
+    await worker.runOnce();
+    expect(paths.filter((path) => path === '/api/channels/streams/')).toHaveLength(before + 1);
+  });
+
   it('pauses, and says why, when the session names no profile', async () => {
     const messages: string[] = [];
     const paths = stubDispatcharr(null);

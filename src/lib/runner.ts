@@ -1201,6 +1201,7 @@ export interface RunnerDeps {
 export class Runner {
   lastRun: RunSummary | null = null;
   private running = false;
+  private catalogueContext: { key: string; matcher: Matcher; fetchedAt: number } | null = null;
   private progressWrittenAt = -Infinity;
   private progressFlush: ReturnType<typeof setTimeout> | null = null;
   private activeAbort: AbortFlag | null = null;
@@ -1424,7 +1425,7 @@ export class Runner {
     const log = this.deps.log ?? (() => {});
     const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const started = Date.now();
-    store.startRun(runId);
+    let runRecorded = false;
     delete this.progress.measured;
     delete this.progress.soaked;
     delete this.progress.soakTotal;
@@ -1523,11 +1524,60 @@ export class Runner {
         );
       }
 
+      const currentMatcher = this.deps.rules.get().matcher;
+      const contextKey = JSON.stringify([
+        config,
+        channels,
+        providers,
+        [...activity.channelIds].sort((a, b) => a - b),
+        [...activity.viewersByProfile].sort(([a], [b]) => a - b),
+        activity.unplacedSessions,
+        store.refreshMarksVersion(),
+        store.soakQueueVersion(),
+      ]);
+      const previous = this.lastRun;
+      const context = this.catalogueContext;
+      const now = Date.now();
+      if (
+        !activity.idle &&
+        !activity.probeFailed &&
+        previous &&
+        context &&
+        previous.deferred > 0 &&
+        previous.probed === 0 &&
+        previous.runnableBacklog === 0 &&
+        previous.reordered === 0 &&
+        previous.assigned === 0 &&
+        previous.removed === 0 &&
+        previous.soakBacklog === 0 &&
+        store.pendingSoakCount().total === 0 &&
+        context.key === contextKey &&
+        context.matcher === currentMatcher &&
+        now >= context.fetchedAt &&
+        now - context.fetchedAt < Math.max(config.PODIUM_IDLE_MAX_MS, config.PODIUM_TICK_MS) &&
+        (previous.nextDueAt === null || previous.nextDueAt > now) &&
+        (previous.nextEligibleAt === null || previous.nextEligibleAt > now)
+      ) {
+        this.emit({
+          phase: 'paused',
+          deferred: previous.deferred,
+          backlog: previous.backlog,
+          dueAt: previous.nextDueAt,
+          message: 'waiting for deferred provider capacity; catalogue unchanged',
+        });
+        const summary = { ...previous, runId, elapsedMs: Date.now() - started, paused: true };
+        this.lastRun = summary;
+        return summary;
+      }
+
+      store.startRun(runId);
+      runRecorded = true;
       const [streams, epg, groups] = await Promise.all([
         client.streams(),
         this.epgRows(client, config),
         client.groups(),
       ]);
+      this.catalogueContext = { key: contextKey, matcher: currentMatcher, fetchedAt: Date.now() };
       const profileUserAgents =
         config.PODIUM_DIRECT_PROFILE_USER_AGENT && !config.PODIUM_PROBE_VIA_DISPATCHARR
           ? await client.streamProfileUserAgents().catch((error) => {
@@ -2482,6 +2532,8 @@ export class Runner {
         blockedSoaks,
       );
     } catch (error) {
+      this.catalogueContext = null;
+      if (!runRecorded) store.startRun(runId);
       store.finishRun(runId, { ...counters, error: errorText(error).slice(0, 500) });
       this.emit({ phase: 'failed', message: errorText(error).slice(0, 200) });
       throw error;

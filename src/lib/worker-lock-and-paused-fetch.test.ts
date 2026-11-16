@@ -322,6 +322,7 @@ describe('a pass that will pause does not fetch the catalogue', () => {
     const summary = await runner().runOnce();
 
     expect(summary.paused).toBe(true);
+    expect(store.recentRuns()).toEqual([]);
     // The whole point: 22,000 streams across 44 pages, fetched and then thrown
     // away, at the exact moment Dispatcharr is busy serving the viewer.
     expect(paths).not.toContain('/api/channels/streams/');
