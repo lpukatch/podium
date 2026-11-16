@@ -1490,6 +1490,7 @@ export class Store {
       }
       this.splitProbeCacheByVariant();
       this.addProbeCacheBlackColumn();
+      this.addProbeCacheBitrateColumn();
       // The lifetime seeds run here rather than inside SCHEMA because they sum
       // columns the ALTER loop above may still be adding -- a database from a
       // version without `removed` has no such column until the loop has run,
@@ -1595,6 +1596,27 @@ export class Store {
    * Immediate with an in-transaction re-check, for the same reason as the
    * variant split: both processes construct a Store at boot against one file.
    */
+  /** Backfill once so frequent health polls do not parse every cached verdict. */
+  private addProbeCacheBitrateColumn(): void {
+    const present = () =>
+      (this.db.pragma('table_info(probe_cache)') as Array<{ name: string }>).some(
+        (column) => column.name === 'bitrate_kbps',
+      );
+    if (present()) return;
+    this.db
+      .transaction(() => {
+        if (present()) return;
+        this.db.exec(`
+        ALTER TABLE probe_cache ADD COLUMN bitrate_kbps INTEGER;
+        UPDATE probe_cache SET bitrate_kbps =
+          CASE WHEN json_valid(result)
+               THEN COALESCE(json_extract(result, '$.bitrateKbps'), 0)
+               ELSE NULL END;
+      `);
+      })
+      .immediate();
+  }
+
   private addProbeCacheBlackColumn(): void {
     const hasBlackColumn = () =>
       (this.db.pragma('table_info(probe_cache)') as Array<{ name: string }>).some(
@@ -1815,16 +1837,27 @@ export class Store {
         streamHash,
       );
       this.sql(
-        `INSERT INTO probe_cache (stream_id, stream_hash, variant_id, probed_at, alive, black, result, dead_streak)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO probe_cache (stream_id, stream_hash, variant_id, probed_at, alive, black, result, dead_streak, bitrate_kbps)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(stream_id, stream_hash, variant_id) DO UPDATE SET
            probed_at   = excluded.probed_at,
            alive       = excluded.alive,
            black       = excluded.black,
+           bitrate_kbps = excluded.bitrate_kbps,
            result      = excluded.result,
            dead_streak = CASE WHEN excluded.alive = 1 THEN 0
                               ELSE probe_cache.dead_streak + 1 END`,
-      ).run(streamId, streamHash, variantId, now, alive, black, json, alive ? 0 : 1);
+      ).run(
+        streamId,
+        streamHash,
+        variantId,
+        now,
+        alive,
+        black,
+        json,
+        alive ? 0 : 1,
+        Number.isFinite(result.bitrateKbps) ? result.bitrateKbps : 0,
+      );
       this.sql(
         'INSERT INTO probe_history (stream_id, probed_at, alive, black, result) VALUES (?, ?, ?, ?, ?)',
       ).run(streamId, now, alive, black, json);
@@ -2561,16 +2594,14 @@ export class Store {
     // `ttlFor` in SQL, so "when is this due" answers the same here as it does in
     // the planner. Two-argument MIN/MAX are SQLite's scalar forms, not
     // aggregates; the shift is the doubling and is clamped for the same reason
-    // the TypeScript is. `json_valid` guards the extract because a corrupt row
-    // would otherwise raise and take the whole health query down -- and it lands
-    // on the plain live lifetime, which is what `ttlFor` does with a result it
-    // could not parse.
+    // the TypeScript is. The materialized bitrate is NULL for a migrated
+    // corrupt verdict, which leaves it on the plain live lifetime.
     const ttl = `CASE
                    WHEN alive = 0
                      THEN MIN(:deadMax, :dead * (1 << MIN(MAX(dead_streak - 1, 0), 30)))
                    WHEN :unknown > 0
-                        AND json_valid(result)
-                        AND COALESCE(json_extract(result, '$.bitrateKbps'), 0) <= 0
+                        AND bitrate_kbps IS NOT NULL
+                        AND bitrate_kbps <= 0
                      THEN MIN(:live, :unknown)
                    ELSE :live
                  END`;
