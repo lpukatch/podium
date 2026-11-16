@@ -27,6 +27,7 @@
  * opens the database or reaches Dispatcharr, and it must not depend on
  * settings -- which are editable through the very API it is protecting.
  */
+import { createHash, timingSafeEqual } from 'node:crypto';
 
 /** Methods that change something. GET/HEAD are read-only across every route. */
 const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -203,13 +204,17 @@ export function parseHostList(raw: string | undefined): string[] {
  * Compare without leaking the answer through timing.
  *
  * Overkill against a LAN attacker who can just try again, but the token is a
- * shared secret with no rate limit in front of it, and this is four lines.
+ * shared secret with no rate limit in front of it. Both sides are digested
+ * first: timingSafeEqual throws on inputs of different lengths, and a wrong
+ * token is usually the wrong length -- hashing gives every comparison the
+ * same 32-byte operands, so the mismatch walks the same path as a match.
+ * UTF-16LE encodes the string exactly as JavaScript holds it; the default
+ * UTF-8 would replace an unpaired surrogate with U+FFFD and fold two distinct
+ * strings to the same bytes.
  */
 export function secretEquals(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
+  const digest = (value: string) => createHash('sha256').update(value, 'utf16le').digest();
+  return timingSafeEqual(digest(a), digest(b));
 }
 
 export interface AccessRequest {

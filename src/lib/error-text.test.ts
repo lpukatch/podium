@@ -54,6 +54,38 @@ describe('errorText', () => {
 });
 
 describe('responseErrorText', () => {
+  it('redacts credentials embedded in URLs', () => {
+    const text = responseErrorText(new Error('GET https://user:p%40ss@example.com/api failed'));
+    expect(text).toBe('Error: GET https://[credentials]@example.com/api failed');
+  });
+
+  it.each(['::1', '2001:db8::1234', '[2001:db8::1234]:9191', 'fe80::1%eth0', '::ffff:192.0.2.1'])(
+    'redacts IPv6 addresses: %s',
+    (address) => {
+      expect(responseErrorText(new Error(`connect ECONNREFUSED ${address}`))).toBe(
+        'Error: connect ECONNREFUSED [address]',
+      );
+    },
+  );
+
+  it.each([
+    '2001:db8::1:9191',
+    // A five-digit port cannot be a hex group, so address and port together
+    // fail isIP; the address must not ride through on that failure.
+    '2001:db8::1:65535',
+    '::1:65535',
+    '1:2:3:4:5:6:7:8:65535',
+    '[2001:db8::1]:65535',
+  ])('redacts an address with a port attached: %s', (address) => {
+    expect(responseErrorText(new Error(`connect ECONNREFUSED ${address}`))).toBe(
+      'Error: connect ECONNREFUSED [address]',
+    );
+  });
+
+  it('keeps clock values readable', () => {
+    expect(responseErrorText(new Error('failed at 12:34:56'))).toContain('12:34:56');
+  });
+
   it('keeps the failure class and the message', () => {
     const error = new Error('settings table is read-only');
     expect(responseErrorText(error)).toBe('Error: settings table is read-only');
