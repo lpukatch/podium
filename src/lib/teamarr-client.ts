@@ -15,6 +15,7 @@
  */
 
 import { normaliseBaseUrl } from './base-url';
+import { boundedResponse, CONTROL_RESPONSE_BYTES, ResponseTooLargeError } from './upstream-body';
 
 /** Teamarr's settings API, as of its v1 routes. */
 const RULES_PATH = '/api/v1/settings/stream-ordering';
@@ -190,7 +191,12 @@ export class TeamarrClient {
         headers: body ? { 'Content-Type': 'application/json' } : undefined,
         body: body ? JSON.stringify(body) : undefined,
       });
+      response = await boundedResponse(response, CONTROL_RESPONSE_BYTES);
     } catch (error) {
+      // An oversized body is not a reach failure: Teamarr answered, just with
+      // more than Podium will buffer. Reraise it as what it is rather than
+      // sending the reader off to double-check the address.
+      if (error instanceof ResponseTooLargeError) throw error;
       // Everything below this line is a message somebody reads while deciding
       // whether they typed the address wrong. `fetch` on its own answers that
       // with "TypeError: fetch failed", which names neither the address nor the
