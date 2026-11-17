@@ -22,6 +22,7 @@ import {
 import { MAX_CONNECT_EVENT_AGE_MS, toLedgerEvents } from '../lib/connect-events';
 import { DispatcharrClient } from '../lib/dispatcharr';
 import { errorText } from '../lib/error-text';
+import { createWebhook, sweepDegraded, type Webhook } from '../lib/notify';
 import { activityOptions } from '../lib/probe-routing';
 import { RulesSource } from '../lib/rules-source';
 import { Runner, type RunSummary } from '../lib/runner';
@@ -118,7 +119,7 @@ export function nextWait(
 export function buildRunner(
   config: Config,
   log: Log,
-): { runner: Runner; store: Store; liveConfig: () => Config } {
+): { runner: Runner; store: Store; liveConfig: () => Config; webhook: Webhook } {
   const rules = new RulesSource(config.rulesPath, log);
   const loaded = rules.get();
   if (!loaded.present) {
@@ -142,7 +143,13 @@ export function buildRunner(
     return loadConfig(resolveEnv(process.env, store.settings()));
   };
 
-  return { store, liveConfig, runner: new Runner({ config: liveConfig, store, rules, log }) };
+  const webhook = createWebhook(liveConfig, log);
+  return {
+    store,
+    liveConfig,
+    webhook,
+    runner: new Runner({ config: liveConfig, store, rules, notify: webhook, log }),
+  };
 }
 
 /**
@@ -193,7 +200,7 @@ const LOCK_RETRY_MS = 30_000;
  * window.
  */
 export async function startWorker(config: Config, log: Log): Promise<() => Promise<void>> {
-  const { runner, store, liveConfig } = buildRunner(config, log);
+  const { runner, store, liveConfig, webhook } = buildRunner(config, log);
 
   const owner = lockOwner();
   let stopping = false;
@@ -242,6 +249,11 @@ export async function startWorker(config: Config, log: Log): Promise<() => Promi
   // cannot refresh.
   let client: DispatcharrClient | null = null;
   let clientSignature = '';
+  // Whether the previous pass threw. Run-failed notifications fire on the
+  // transition into failing, not per retry: an outage fails every tick, and
+  // the consumer needs the first news, not the fiftieth copy of it. Cleared
+  // by the next pass that completes.
+  let lastPassFailed = false;
 
   /**
    * Read live, so changing the check interval in the UI takes effect on the
@@ -477,10 +489,27 @@ export async function startWorker(config: Config, log: Log): Promise<() => Promi
         if (held.length > 0) {
           log(`held back: ${held.map(([why, n]) => `${n} ${why}`).join(', ')}`);
         }
+        // Degraded-channel transitions, diffed against the durable tracking
+        // state. Over the whole managed catalogue, not over what this pass
+        // happened to probe: a pass that drained one provider's lane still
+        // changed the verdicts every channel carrying that provider runs on.
+        // One query and one small state-table read; the sends themselves are
+        // fire-and-forget, so this adds no network time to the pass.
+        const swept = sweepDegraded(store, webhook, Date.now());
+        if (swept.announced > 0 || swept.recovered > 0) {
+          log(`webhook: ${swept.announced} channel(s) down, ` + `${swept.recovered} recovered`);
+        }
+        lastPassFailed = false;
       }
     } catch (error) {
       // A failed pass must not kill the loop -- the next tick retries.
-      log(`pass at ${clock(startedAt)} failed: ${errorText(error)}`);
+      const message = errorText(error);
+      log(`pass at ${clock(startedAt)} failed: ${message}`);
+      // Once per failing streak. Sent on the way into the streak, so a
+      // consumer learns of an outage when it starts rather than once a
+      // minute for as long as it lasts.
+      if (!lastPassFailed) webhook.send({ event: 'run_failed', error: message });
+      lastPassFailed = true;
     }
     // Before the reschedule and with nothing awaited in between, so
     // `checkWake` cannot see a pass that has finished but not yet booked its

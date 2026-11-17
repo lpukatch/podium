@@ -26,6 +26,7 @@ import {
 import { EpgCache } from './epg-cache';
 import { errorText } from './error-text';
 import type { Matcher, StreamIndex } from './matcher';
+import type { StreamRef, WebhookEvent } from './notify';
 import { resolveOrdering, withResolutionCeiling, withResolutionFloor } from './ordering';
 import { Pacer, type PacerConfig, viewersByProvider } from './pacer';
 import {
@@ -1201,6 +1202,15 @@ export interface RunnerDeps {
    * on the next pass rather than on the next restart.
    */
   rules: RulesSource;
+  /**
+   * Outbound webhook notifications, when one is configured. Optional so a
+   * Runner built without one -- most tests, and any tooling that ranks
+   * without writing -- simply stays quiet. Only the fire-and-forget half is
+   * needed here: a write never waits on a consumer. The URL is read from the
+   * same live `config` above at send time, so a URL edited in the UI takes
+   * effect on the next event rather than on the next restart.
+   */
+  notify?: { send: (event: WebhookEvent) => void };
   log?: (message: string) => void;
 }
 
@@ -4131,6 +4141,38 @@ export class Runner {
             ? `lead unchanged ${head(writeOrder)}`
             : `now leads with ${head(writeOrder)} (was ${head(baseline)})`),
       );
+      // Mirrored to the webhook when one is set: one event per write carrying
+      // everything the write did, which is the audit trail the log lines
+      // above only print once, delivered to wherever the operator actually
+      // looks. Fire and forget, and after the write -- it succeeded, so a
+      // slow or dead consumer must not delay the pass or pretend the write
+      // is in question. Names ride along where this scope has them; the
+      // degraded-channel events, which have no snapshot to name streams
+      // from, carry ids and providers.
+      const ref = (id: number, reason?: string): StreamRef | null => {
+        const stream = snapshot.byId.get(id);
+        if (!stream) return null;
+        return {
+          id,
+          name: stream.name,
+          provider: snapshot.providerNames.get(stream.providerId) ?? String(stream.providerId),
+          reason,
+        };
+      };
+      const refs = (ids: number[], reason?: string): StreamRef[] =>
+        ids.map((id) => ref(id, reason)).filter((r): r is StreamRef => r !== null);
+      const leadId = writeOrder[0] ?? null;
+      const wasId = baseline[0] ?? null;
+      this.deps.notify?.send({
+        event: 'channel_updated',
+        channelId,
+        channelName: snapshot.channelName,
+        reordered: true,
+        added: refs(added),
+        removed: [...refs(removedDead, 'dead'), ...refs(removedPruned, 'per-provider cap')],
+        lead: leadId !== null ? ref(leadId) : null,
+        was: wasId !== null ? ref(wasId) : null,
+      });
       counters.reordered += 1;
       counters.assigned += added.length;
       counters.removed += removedDead.length + removedPruned.length;

@@ -201,6 +201,7 @@ export function SettingsView({ active }: { active?: boolean } = {}) {
   const [error, setError] = useState('');
   const [test, setTest] = useState<{ ok: boolean; text: string } | null>(null);
   const [teamarrTest, setTeamarrTest] = useState<{ ok: boolean; text: string } | null>(null);
+  const [webhookTest, setWebhookTest] = useState<{ ok: boolean; text: string } | null>(null);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   /** The field a failed save wants scrolled into view; consumed by the effect below. */
   const scrollToKeyRef = useRef<string | null>(null);
@@ -398,6 +399,36 @@ export function SettingsView({ active }: { active?: boolean } = {}) {
       setTeamarrTest({ ok: true, text });
     } catch (e) {
       setTeamarrTest({ ok: false, text: String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Notifications are fire-and-forget everywhere else -- a delivery that
+  // nobody waits on -- so this is the one place an operator can ask a
+  // webhook URL a question and hear the answer. The status code is the part
+  // that proves it reached something that speaks HTTP at the address typed;
+  // anything answering 2xx delivered the event.
+  const runWebhookTest = async () => {
+    setBusy(true);
+    setWebhookTest(null);
+    try {
+      const resp = await fetch('/api/webhook/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(edits),
+      });
+      const body = await resp.json();
+      if (!body.ok) {
+        setWebhookTest({ ok: false, text: body.error ?? 'failed' });
+        return;
+      }
+      setWebhookTest({
+        ok: true,
+        text: `Test event delivered (HTTP ${body.status}). Check the receiving end for it.`,
+      });
+    } catch (e) {
+      setWebhookTest({ ok: false, text: String(e) });
     } finally {
       setBusy(false);
     }
@@ -699,6 +730,26 @@ export function SettingsView({ active }: { active?: boolean } = {}) {
                                   className={`text-sm ${teamarrTest.ok ? 'text-[var(--color-accent)]' : 'text-[var(--color-bad)]'}`}
                                 >
                                   {teamarrTest.text}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                          {group.id === 'notifications' && (
+                            <div className="mt-4 flex flex-wrap items-center gap-3">
+                              <button
+                                type="button"
+                                className={btn}
+                                disabled={busy}
+                                onClick={() => void runWebhookTest()}
+                              >
+                                {busy ? 'Testing…' : 'Send a test event'}
+                              </button>
+                              {webhookTest && (
+                                <span
+                                  role="status"
+                                  className={`text-sm ${webhookTest.ok ? 'text-[var(--color-accent)]' : 'text-[var(--color-bad)]'}`}
+                                >
+                                  {webhookTest.text}
                                 </span>
                               )}
                             </div>

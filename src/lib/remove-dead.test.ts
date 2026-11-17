@@ -19,6 +19,7 @@ import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadConfig } from './config';
 import type { Channel, DispatcharrClient, Stream } from './dispatcharr';
+import type { WebhookEvent } from './notify';
 import type { ProbeResult } from './probe';
 import { RulesSource } from './rules-source';
 import {
@@ -495,6 +496,181 @@ describe('a pass writing a channel with a long-dead stream', () => {
 
     expect(writes).toEqual([]);
     expect(counters.removed).toBe(0);
+  });
+});
+
+/**
+ * The same write, mirrored to the webhook when one is configured.
+ *
+ * These events are the audit trail that outlives the log rotation, so what
+ * they carry is pinned: one event per write, a name and a provider on every
+ * stream it names, the reason on a removal -- and nothing at all from a dry
+ * run, which writes nothing and must not announce writes it did not make.
+ */
+describe('mirroring the write to the webhook', () => {
+  let dir: string;
+  let store: Store;
+
+  const byId = new Map([1, 2, 3, 4, 5, 6].map((id) => [id, stream(id)]));
+  const channel: Channel = {
+    id: 1,
+    name: 'Channel One',
+    tvgId: 'one',
+    streams: [1, 2],
+    groupId: 100,
+  };
+
+  const plannedFor = (verdict: ProbeResult): PlannedChannel => ({
+    channel,
+    hits: [
+      [1, 0],
+      [2, 1],
+    ],
+    fresh: new Map([
+      [1, new Map([[0, alive]])],
+      [2, new Map([[0, verdict]])],
+    ]),
+    settled: new Set([1, 2]),
+    cacheComplete: true,
+  });
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'podium-webhook-'));
+    const rulesPath = join(dir, 'rules.json');
+    const tmp = `${rulesPath}.tmp`;
+    writeFileSync(tmp, JSON.stringify({ schema: 2, channels: [] }), 'utf8');
+    renameSync(tmp, rulesPath);
+    store = new Store(join(dir, 'podium.db'));
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const spyClient = (writes: number[][]) =>
+    ({
+      channel: async () => null,
+      setStreamOrder: async (_channelId: number, order: number[]) => {
+        writes.push(order);
+      },
+    }) as unknown as DispatcharrClient;
+
+  const runnerWith = (sent: WebhookEvent[], dryRun = false): Runner =>
+    new Runner({
+      config: () =>
+        loadConfig({ DISPATCHARR_API_KEY: 'k', PODIUM_DRY_RUN: dryRun ? 'true' : 'false' }),
+      store,
+      rules: new RulesSource(join(dir, 'rules.json')),
+      notify: { send: (event) => sent.push(event) },
+    });
+
+  const write = async (runner: Runner, planned: PlannedChannel, removal?: DeadRemoval) => {
+    const writes: number[][] = [];
+    const counters = { reordered: 0, unchanged: 0, assigned: 0, removed: 0, measured: 0 };
+    await (
+      runner as unknown as { reorderCachedOnly: (...args: unknown[]) => Promise<void> }
+    ).reorderCachedOnly.call(
+      runner,
+      spyClient(writes),
+      [planned],
+      counters,
+      DEFAULT_STRATEGY,
+      new Map(),
+      byId,
+      new Map([[5, 'Provider A']]),
+      removal,
+    );
+    return { writes, counters };
+  };
+
+  it('announces the write with the removal named', async () => {
+    const sent: WebhookEvent[] = [];
+    const runner = runnerWith(sent);
+    for (let i = 0; i < 5; i += 1) store.put(2, 'h', dead);
+    store.put(1, 'h', alive);
+
+    const { counters } = await write(
+      runner,
+      plannedFor(dead),
+      deadRemovalPlan(3, store.deadStreams(), byId, store.probedStreamIds()),
+    );
+
+    expect(counters.removed).toBe(1);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual({
+      event: 'channel_updated',
+      channelId: 1,
+      channelName: 'Channel One',
+      reordered: true,
+      added: [],
+      removed: [{ id: 2, name: 'Feed 2', provider: 'Provider A', reason: 'dead' }],
+      lead: { id: 1, name: 'Feed 1', provider: 'Provider A', reason: undefined },
+      was: { id: 1, name: 'Feed 1', provider: 'Provider A', reason: undefined },
+    });
+  });
+
+  it('carries an addition the write made', async () => {
+    // Auto-assign is on by default, so a matched healthy stream joins the
+    // channel on this write; the event names it as an addition, with no
+    // reason -- reasons are for what a write took away.
+    const sent: WebhookEvent[] = [];
+    const runner = runnerWith(sent);
+    store.put(1, 'h', alive);
+    store.put(2, 'h', alive);
+
+    const planned: PlannedChannel = {
+      ...plannedFor(alive),
+      hits: [
+        [1, 0],
+        [2, 1],
+        [3, 2],
+      ],
+      fresh: new Map([
+        [1, new Map([[0, alive]])],
+        [2, new Map([[0, alive]])],
+        [3, new Map([[0, alive]])],
+      ]),
+    };
+
+    const { counters } = await write(runner, planned);
+    expect(counters.assigned).toBe(1);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      event: 'channel_updated',
+      added: [{ id: 3, name: 'Feed 3', provider: 'Provider A' }],
+      removed: [],
+    });
+    expect((sent[0] as { added: Array<{ reason?: string }> }).added[0]?.reason).toBeUndefined();
+  });
+
+  it('says nothing in a dry run', async () => {
+    // A dry run writes nothing, and an event announcing a write that did not
+    // happen would be a lie travelling further than the log line it mimics.
+    const sent: WebhookEvent[] = [];
+    const runner = runnerWith(sent, true);
+    for (let i = 0; i < 5; i += 1) store.put(2, 'h', dead);
+    store.put(1, 'h', alive);
+
+    const { writes } = await write(
+      runner,
+      plannedFor(dead),
+      deadRemovalPlan(3, store.deadStreams(), byId, store.probedStreamIds()),
+    );
+
+    expect(writes).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+
+  it('says nothing when the channel is already in the ranked order', async () => {
+    const sent: WebhookEvent[] = [];
+    const runner = runnerWith(sent);
+    store.put(1, 'h', alive);
+    store.put(2, 'h', alive);
+
+    const { counters } = await write(runner, plannedFor(alive));
+    expect(counters.unchanged).toBe(1);
+    expect(sent).toEqual([]);
   });
 });
 
