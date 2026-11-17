@@ -63,7 +63,10 @@ jobs:
       # while scanning nothing for four days after the Actions migration
       # (enforced by .ci/scripts/docker-workspace-mounts.test.cjs).
       - name: Scan history for secrets
-        run: tar -c --exclude=./node_modules . | docker run --rm -i --entrypoint /bin/sh ghcr.io/gitleaks/gitleaks:v8.30.1 -ec 'mkdir -p /repo && tar -x -C /repo && cd /repo && exec gitleaks git --no-banner'
+        env:
+          # renovate: datasource=docker depName=ghcr.io/gitleaks/gitleaks
+          GITLEAKS_VERSION: "v8.30.1"
+        run: tar -c --exclude=./node_modules . | docker run --rm -i --entrypoint /bin/sh "ghcr.io/gitleaks/gitleaks:${GITLEAKS_VERSION}" -ec 'mkdir -p /repo && tar -x -C /repo && cd /repo && exec gitleaks git --no-banner'
 
       - name: Lint and format check
         run: npm run format:check

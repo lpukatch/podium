@@ -67,7 +67,10 @@ jobs:
         # Tar stream over stdin, not a -v "$PWD" bind mount -- see ci.yml for
         # the full story; the short version is that gitleaks exits 0 when it
         # cannot scan, so a broken mount passes green while scanning nothing.
-        run: tar -c --exclude=./node_modules . | docker run --rm -i --entrypoint /bin/sh ghcr.io/gitleaks/gitleaks:v8.30.1 -ec 'mkdir -p /repo && tar -x -C /repo && cd /repo && exec gitleaks git --no-banner'
+        env:
+          # renovate: datasource=docker depName=ghcr.io/gitleaks/gitleaks
+          GITLEAKS_VERSION: "v8.30.1"
+        run: tar -c --exclude=./node_modules . | docker run --rm -i --entrypoint /bin/sh "ghcr.io/gitleaks/gitleaks:${GITLEAKS_VERSION}" -ec 'mkdir -p /repo && tar -x -C /repo && cd /repo && exec gitleaks git --no-banner'
 
       - name: Lint and format check
         run: npm run format:check
@@ -173,12 +176,14 @@ jobs:
       # trivy-report.txt that save-scan-report publishes and the log prints.
       - name: Scan candidate
         env:
+          # renovate: datasource=docker depName=aquasec/trivy
+          TRIVY_VERSION: "0.76.2"
           IMAGE_REF: ${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
           TRIVY_USERNAME: ${{ vars.REGISTRY_USERNAME }}
           TRIVY_PASSWORD: ${{ secrets.REGISTRY_TOKEN }}
           TRIVY_CACHE_DIR: /tmp/trivy-cache
         run: |
-          docker run --rm -e IMAGE_REF -e TRIVY_USERNAME -e TRIVY_PASSWORD -e TRIVY_CACHE_DIR -e PODIUM_TRIVY_IGNORES="$(cat .trivyignore)" --entrypoint /bin/sh aquasec/trivy:0.76.2 -ec 'printf "%s" "$PODIUM_TRIVY_IGNORES" > /tmp/.trivyignore; trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --scanners vuln --ignorefile /tmp/.trivyignore --format table --output /tmp/trivy-report.txt "$IMAGE_REF" || RC=$?; cat /tmp/trivy-report.txt || true; exit "${RC:-0}"' > trivy-report.txt || RC=$?
+          docker run --rm -e IMAGE_REF -e TRIVY_USERNAME -e TRIVY_PASSWORD -e TRIVY_CACHE_DIR -e PODIUM_TRIVY_IGNORES="$(cat .trivyignore)" --entrypoint /bin/sh "aquasec/trivy:${TRIVY_VERSION}" -ec 'printf "%s" "$PODIUM_TRIVY_IGNORES" > /tmp/.trivyignore; trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --scanners vuln --ignorefile /tmp/.trivyignore --format table --output /tmp/trivy-report.txt "$IMAGE_REF" || RC=$?; cat /tmp/trivy-report.txt || true; exit "${RC:-0}"' > trivy-report.txt || RC=$?
           cat trivy-report.txt || true
           exit "${RC:-0}"
 
@@ -201,12 +206,14 @@ jobs:
       # one so read processes the final tag (including a single :main tag).
       - name: Promote scanned image
         env:
+          # renovate: datasource=docker depName=regclient/regctl
+          REGCTL_VERSION: "v0.11.7"
           REGISTRY: ${{ vars.REGISTRY }}
           IMAGE_NAME: ${{ vars.IMAGE_NAME }}
           REGISTRY_USERNAME: ${{ vars.REGISTRY_USERNAME }}
           REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
         run: |
-          docker run --rm --entrypoint /bin/sh -e REGISTRY -e IMAGE_NAME -e REGISTRY_USERNAME -e REGISTRY_TOKEN -e IMAGE_REF="$(cat .image-ref)" -e PROMOTION_TAGS="$(cat .promotion-tags)" regclient/regctl:v0.11.7-alpine -ec 'printf "%s" "$REGISTRY_TOKEN" | regctl registry login "$REGISTRY" -u "$REGISTRY_USERNAME" --pass-stdin; printf "%s\n" "$PROMOTION_TAGS" | while IFS= read -r tag; do [ -n "$tag" ] || continue; echo "Promoting $IMAGE_REF to $REGISTRY/$IMAGE_NAME:$tag"; regctl image copy "$IMAGE_REF" "$REGISTRY/$IMAGE_NAME:$tag"; echo "Promoted $REGISTRY/$IMAGE_NAME:$tag"; done'
+          docker run --rm --entrypoint /bin/sh -e REGISTRY -e IMAGE_NAME -e REGISTRY_USERNAME -e REGISTRY_TOKEN -e IMAGE_REF="$(cat .image-ref)" -e PROMOTION_TAGS="$(cat .promotion-tags)" "regclient/regctl:${REGCTL_VERSION}-alpine" -ec 'printf "%s" "$REGISTRY_TOKEN" | regctl registry login "$REGISTRY" -u "$REGISTRY_USERNAME" --pass-stdin; printf "%s\n" "$PROMOTION_TAGS" | while IFS= read -r tag; do [ -n "$tag" ] || continue; echo "Promoting $IMAGE_REF to $REGISTRY/$IMAGE_NAME:$tag"; regctl image copy "$IMAGE_REF" "$REGISTRY/$IMAGE_NAME:$tag"; echo "Promoted $REGISTRY/$IMAGE_NAME:$tag"; done'
 
       # Forgejo has no code-scanning tab, so the report is published to this
       # server's generic package registry instead: one report per commit at
