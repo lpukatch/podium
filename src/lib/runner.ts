@@ -2957,6 +2957,13 @@ export class Runner {
           // Dispatcharr reclassified it, or an operator toggled the group --
           // replaces these; nothing waits out a TTL that could back off for
           // days.
+          //
+          // A stream one radio and one video channel both claim alternates
+          // instead of settling: whichever channel the deduped job ran for
+          // wrote its assumption, so the other one mismatches next pass and
+          // re-probes. One extra probe a pass, in exchange for neither
+          // channel silently ranking on the other's answer -- which is what
+          // the cache served both of them before the assumption was recorded.
           if (cached.audioOnly !== audioOnly) continue;
           const ttl = ttlFor(
             cached,
