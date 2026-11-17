@@ -426,6 +426,18 @@ Toggling **Audio only** on a group (or adding `"audio_only": true` in `rules.jso
 - Score and rank streams by audio quality (channel count, codec, sample rate, and audio bitrate).
 - Auto-assign matched radio streams to radio channels normally.
 
+Podium records every audio track from each new probe, including its language,
+codec, channel count, layout, bitrate, sample rate, and stream index when available.
+Ranking still uses the track with the highest channel count. Ties use the first track.
+
+With stats publishing enabled (`PODIUM_WRITE_STATS=true`), Podium sends the full
+track list to Dispatcharr. Dispatcharr v0.34 or later can display these tracks
+and group them by language. Podium also exposes them as `audioTracks` in probe
+history and `lastAudioTracks` in verdicts. Unknown languages remain unlabeled.
+
+Older cached results have no track list. The next probe fills it in.
+To collect it sooner, queue a re-check for the channel or group.
+
 #### Minimum resolution
 
 Ranking alone will put a provider's 720p copy of a channel first whenever it
