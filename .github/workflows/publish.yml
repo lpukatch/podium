@@ -173,8 +173,11 @@ jobs:
             -t "${CANDIDATE_PREFIX}" \
             "${CANDIDATE_PREFIX}-amd64" \
             "${CANDIDATE_PREFIX}-arm64"
-          digest="$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))['containerimage.digest']" "${RUNNER_TEMP}/imagetools-metadata.json")"
-          test -n "$digest"
+          digest="$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))['containerimage.descriptor']?.digest ?? ''" "${RUNNER_TEMP}/imagetools-metadata.json")"
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "Expected sha256 digest in imagetools metadata, got: '$digest'" >&2; exit 1 ;;
+          esac
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Plan promotion
