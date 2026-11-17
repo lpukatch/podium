@@ -28,16 +28,22 @@ jobs:
     permissions:
       contents: read
 
-  publish:
+  build:
     needs: validate
-    # One publisher for all refs; never interrupt a multi-tag promotion.
-    concurrency:
-      group: image-publication
-      cancel-in-progress: false
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
-      contents: write # softprops/action-gh-release
-      packages: write # push to ghcr
+      contents: read
+      packages: write # push candidate to ghcr
       security-events: write # upload-sarif: code-scanning alerts
 
     steps:
@@ -56,16 +62,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Docker tags and labels
+      - name: Docker labels
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
           labels: |
             org.opencontainers.image.title=podium
             org.opencontainers.image.description=Provider-aware stream checker and reorderer for Dispatcharr
@@ -88,10 +89,9 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          # amd64 only: an arm64 pass costs a full QEMU-emulated Next.js build.
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: PODIUM_BUILD_VERSION=${{ env.PODIUM_BUILD_VERSION }}
           # Skips the attestation manifest, which otherwise shows up on the
@@ -103,8 +103,8 @@ jobs:
           # export -- buildx sets push on an explicit image export rather than
           # adding a second registry one.
           outputs: type=image,oci-mediatypes=false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
 
       # Scan the exact candidate digest. Consumer tags have not moved yet.
       #
@@ -117,7 +117,7 @@ jobs:
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
           format: sarif
-          output: trivy-results.sarif
+          output: trivy-results-${{ matrix.arch }}.sarif
           exit-code: '1'
           scanners: vuln
           vuln-type: os,library
@@ -129,17 +129,59 @@ jobs:
       # scan whose findings belong on the Security tab. The hashFiles guard
       # skips this if an earlier step died before trivy ever ran.
       - name: Upload scan results
-        if: always() && hashFiles('trivy-results.sarif') != ''
+        if: always() && hashFiles(format('trivy-results-{0}.sarif', matrix.arch)) != ''
         continue-on-error: true
         uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4
         with:
-          sarif_file: trivy-results.sarif
+          sarif_file: trivy-results-${{ matrix.arch }}.sarif
+          category: podium-${{ matrix.arch }}
+
+  publish:
+    needs: [validate, build]
+    # One publisher for all refs; never interrupt a multi-tag promotion.
+    concurrency:
+      group: image-publication
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # softprops/action-gh-release
+      packages: write # push to ghcr
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-arch candidate
+        id: manifest
+        env:
+          CANDIDATE_PREFIX: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          docker buildx imagetools create \
+            --metadata-file "${RUNNER_TEMP}/imagetools-metadata.json" \
+            -t "${CANDIDATE_PREFIX}" \
+            "${CANDIDATE_PREFIX}-amd64" \
+            "${CANDIDATE_PREFIX}-arm64"
+          digest="$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))['containerimage.digest']" "${RUNNER_TEMP}/imagetools-metadata.json")"
+          test -n "$digest"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Plan promotion
         env:
           CI_PIPELINE_EVENT: ${{ startsWith(github.ref, 'refs/tags/') && 'tag' || 'push' }}
           CI_COMMIT_TAG: ${{ github.ref_name }}
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_DIGEST: ${{ steps.manifest.outputs.digest }}
         run: |
           node .ci/scripts/promotion-plan.cjs
           printf '%s/%s@%s\n' "$REGISTRY" "$IMAGE_NAME" "$IMAGE_DIGEST" > .image-ref
