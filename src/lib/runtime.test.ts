@@ -1388,9 +1388,9 @@ describe('Runner.plan (managed set + oldest check)', () => {
     },
   ];
   const channels: Channel[] = [
-    { id: 1, name: 'ESPN', tvgId: 'espn.id', streams: [10], groupId: 100 },
-    { id: 2, name: 'HBO', tvgId: 'hbo.id', streams: [20], groupId: 200 },
-    { id: 3, name: 'TNT', tvgId: 'tnt.id', streams: [30], groupId: 300 },
+    { id: 1, name: 'ESPN', tvgId: 'espn.id', streams: [10], groupId: 100, isRadio: false },
+    { id: 2, name: 'HBO', tvgId: 'hbo.id', streams: [20], groupId: 200, isRadio: false },
+    { id: 3, name: 'TNT', tvgId: 'tnt.id', streams: [30], groupId: 300, isRadio: false },
   ];
   const groupNames = new Map([
     [100, 'sports'],
@@ -1751,6 +1751,7 @@ describe('Runner.plan (rule-less channels ranked off their assignment)', () => {
     tvgId: 'GAME.us',
     streams: [40, 41, 42],
     groupId: 700,
+    isRadio: false,
   };
   const plain: Channel = {
     id: 2,
@@ -1758,6 +1759,7 @@ describe('Runner.plan (rule-less channels ranked off their assignment)', () => {
     tvgId: 'movie.us',
     streams: [40, 41],
     groupId: 800,
+    isRadio: false,
   };
 
   // `plan` reads the wall clock itself, so every programme here is built

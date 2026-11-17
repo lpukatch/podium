@@ -306,6 +306,61 @@ describe('GET /api/verdicts', () => {
     expect(byId((await get()).body, SHARED)?.lastLowBitrate).toBe(false);
   });
 
+  it('calls a shared stream low unless every carrier is exempt, radio classification included', async () => {
+    // Dispatcharr's own classification answers the same question the group
+    // toggle does -- see `channelIsAudioOnly`. Neither group carries a toggle,
+    // but both channels read as radio, so every carrier is audio-only and the
+    // stream is exempt with no policy anywhere.
+    state.policies.mockReturnValue(new Map());
+    state.snapshot.mockResolvedValue({
+      fetchedAt: 1_000,
+      providers: [{ id: 1, name: 'P' }],
+      channels: [
+        {
+          id: SPORTS,
+          name: 'Sports One',
+          groupId: 7,
+          streams: [A, SHARED, UNPROBED, GONE],
+          isRadio: true,
+        },
+        { id: RADIO, name: 'Radio One', groupId: 8, streams: [SHARED, B], isRadio: true },
+      ],
+      groups: [
+        { id: 7, name: 'Sports' },
+        { id: 8, name: 'Radio' },
+      ],
+      streams: [A, B, SHARED, UNPROBED].map((id) => ({
+        id,
+        name: `S${id}`,
+        providerId: 1,
+        groupId: id === A ? 99 : null,
+      })),
+    });
+    expect(byId((await get()).body, SHARED)?.lastLowBitrate).toBe(false);
+
+    // Only Radio reads as radio, and Sports -- video, with no toggle --
+    // judges it low again.
+    state.snapshot.mockResolvedValue({
+      fetchedAt: 1_000,
+      providers: [{ id: 1, name: 'P' }],
+      channels: [
+        { id: SPORTS, name: 'Sports One', groupId: 7, streams: [A, SHARED, UNPROBED, GONE] },
+        { id: RADIO, name: 'Radio One', groupId: 8, streams: [SHARED, B], isRadio: true },
+      ],
+      groups: [
+        { id: 7, name: 'Sports' },
+        { id: 8, name: 'Radio' },
+      ],
+      streams: [A, B, SHARED, UNPROBED].map((id) => ({
+        id,
+        name: `S${id}`,
+        providerId: 1,
+        groupId: id === A ? 99 : null,
+      })),
+    });
+    expect(byId((await get()).body, SHARED)?.lastLowBitrate).toBe(true);
+  });
+
   it('still answers when the store cannot be opened, and says so', async () => {
     rmSync(dir, { recursive: true, force: true });
     // A directory where the database should be: the open itself fails.

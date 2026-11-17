@@ -419,6 +419,16 @@ ranking was withheld.
 
 Channels carrying radio stations, Sirius XM, or music feeds have audio tracks but no video stream. By default, Podium expects video streams and treats video-less feeds as dead, black-screened, or sub-floor.
 
+Podium can also detect these channels on its own. Dispatcharr v0.32 and later
+mark radio streams (from the M3U's `radio` attribute, or an override set on the
+channel in Dispatcharr) and expose the result per channel as `effective_is_radio`.
+Podium reads that on every catalogue refresh and checks those channels as audio
+only with no toggle and no rules entry — a provider that files its radio
+stations under a group nobody named is still classified correctly. These
+channels show as `· radio` in the group's channel list. The group toggle still
+wins over Dispatcharr's classification, and nothing is auto-detected on older
+Dispatcharr versions, which simply do not report the field.
+
 Toggling **Audio only** on a group (or adding `"audio_only": true` in `rules.json` or group name patterns) tells Podium to:
 - Accept streams with valid audio tracks as healthy (`alive: true`).
 - Skip video black-screen detection during probing to prevent stream mapping errors.
@@ -437,6 +447,11 @@ history and `lastAudioTracks` in verdicts. Unknown languages remain unlabeled.
 
 Older cached results have no track list. The next probe fills it in.
 To collect it sooner, queue a re-check for the channel or group.
+
+A cached verdict also remembers whether it was taken under the audio-only
+assumption. When a channel flips — Dispatcharr reclassified it, or the toggle
+changed — every verdict taken the other way is re-checked on the first pass,
+rather than waiting out a TTL that can back off for days.
 
 #### Minimum resolution
 

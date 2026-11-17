@@ -267,6 +267,7 @@ describe('a pass writing a channel with a long-dead stream', () => {
     tvgId: 'one',
     streams: [1, 2],
     groupId: 100,
+    isRadio: false,
   };
 
   const planned: PlannedChannel = {

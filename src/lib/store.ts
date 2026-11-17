@@ -70,6 +70,15 @@ CREATE TABLE IF NOT EXISTS probe_cache (
     -- backoff in deadTtlFor(). Per variant: one login dying says nothing
     -- about when another login should be rechecked.
     dead_streak  INTEGER NOT NULL DEFAULT 0,
+    -- Whether this verdict was taken under the audio-only assumption (the
+    -- channel counts as radio, or its group does). A probe told to expect no
+    -- video and a probe told to require it can reach opposite verdicts about
+    -- the same URL, so a cached row answers only the question it was asked:
+    -- a reader whose assumption has flipped treats the row as stale, and the
+    -- first pass after the flip re-probes. Rows written before the column
+    -- existed all read 0, which is the truth -- audio-only was opt-in per
+    -- group, so every verdict then in the cache was taken video-strict.
+    audio_only   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (stream_id, stream_hash, variant_id)
 );
 CREATE INDEX IF NOT EXISTS probe_cache_probed_at ON probe_cache (probed_at);
@@ -1130,6 +1139,7 @@ interface CacheRow {
   alive: number;
   result: string;
   dead_streak: number;
+  audio_only: number;
 }
 
 /** A cached verdict with the bookkeeping `ttlFor` needs. */
@@ -1349,6 +1359,12 @@ export interface CacheEntry {
   probedAt: number;
   alive: boolean;
   deadStreak: number;
+  /**
+   * Whether the probe was told to expect audio-only. A verdict answers the
+   * question it was asked: against a reader that resolves the other answer,
+   * this row is stale no matter how recently it was taken.
+   */
+  audioOnly: boolean;
   result: ProbeResult | null;
 }
 
@@ -1491,6 +1507,7 @@ export class Store {
       this.splitProbeCacheByVariant();
       this.addProbeCacheBlackColumn();
       this.addProbeCacheBitrateColumn();
+      this.addProbeCacheAudioOnlyColumn();
       // The lifetime seeds run here rather than inside SCHEMA because they sum
       // columns the ALTER loop above may still be adding -- a database from a
       // version without `removed` has no such column until the loop has run,
@@ -1638,6 +1655,34 @@ export class Store {
   }
 
   /**
+   * The audio-only assumption a verdict was taken under, as a column.
+   *
+   * Unlike the black and bitrate columns there is nothing to backfill: 0 *is*
+   * the recovered value. Audio-only probing was opt-in per group, so every row
+   * written before this column existed was taken video-strict -- including the
+   * rows under a group an operator had set `audio_only` on, which is the point.
+   * Those rows read 0, the reader resolving `audio_only: true` now sees a
+   * mismatch, and the next pass re-probes them under the assumption they should
+   * have had all along -- the catch-up the flag never had.
+   *
+   * Added after the variant split (which rebuilds the table from the columns it
+   * knows) for the same reason black and bitrate are.
+   */
+  private addProbeCacheAudioOnlyColumn(): void {
+    const present = () =>
+      (this.db.pragma('table_info(probe_cache)') as Array<{ name: string }>).some(
+        (column) => column.name === 'audio_only',
+      );
+    if (present()) return;
+    this.db
+      .transaction(() => {
+        if (present()) return;
+        this.db.exec('ALTER TABLE probe_cache ADD COLUMN audio_only INTEGER NOT NULL DEFAULT 0');
+      })
+      .immediate();
+  }
+
+  /**
    * A prepared statement, compiled once per connection and reused after that.
    *
    * `db.prepare` compiles SQL every time it is called, and the planner calls
@@ -1678,7 +1723,7 @@ export class Store {
    */
   entry(streamId: number, streamHash: string, variantId = 0): CacheEntry | null {
     const row = this.sql(
-      `SELECT probed_at, alive, result, dead_streak FROM probe_cache
+      `SELECT probed_at, alive, result, dead_streak, audio_only FROM probe_cache
        WHERE stream_id = ? AND stream_hash = ? AND variant_id = ?`,
     ).get(streamId, streamHash, variantId) as CacheRow | undefined;
     if (!row) return null;
@@ -1694,6 +1739,7 @@ export class Store {
       probedAt: row.probed_at,
       alive: Boolean(row.alive),
       deadStreak: row.dead_streak ?? 0,
+      audioOnly: Boolean(row.audio_only),
       result,
     };
   }
@@ -1707,7 +1753,7 @@ export class Store {
    */
   variants(streamId: number, streamHash: string): Map<number, CacheEntry> {
     const rows = this.sql(
-      `SELECT variant_id, probed_at, alive, result, dead_streak FROM probe_cache
+      `SELECT variant_id, probed_at, alive, result, dead_streak, audio_only FROM probe_cache
        WHERE stream_id = ? AND stream_hash = ?`,
     ).all(streamId, streamHash) as Array<CacheRow & { variant_id: number }>;
     const out = new Map<number, CacheEntry>();
@@ -1722,6 +1768,7 @@ export class Store {
         probedAt: row.probed_at,
         alive: Boolean(row.alive),
         deadStreak: row.dead_streak ?? 0,
+        audioOnly: Boolean(row.audio_only),
         result,
       });
     }
@@ -1737,7 +1784,7 @@ export class Store {
     if (hashes.size === 0) return out;
     if (hashes.size > 500) {
       const rows = this.sql(
-        `SELECT stream_id, stream_hash, variant_id, probed_at, alive, result, dead_streak
+        `SELECT stream_id, stream_hash, variant_id, probed_at, alive, result, dead_streak, audio_only
            FROM probe_cache`,
       ).all() as Array<CacheRow & { stream_id: number; stream_hash: string; variant_id: number }>;
       for (const row of rows) {
@@ -1757,6 +1804,7 @@ export class Store {
           probedAt: row.probed_at,
           alive: Boolean(row.alive),
           deadStreak: row.dead_streak ?? 0,
+          audioOnly: Boolean(row.audio_only),
           result,
         });
       }
@@ -1785,7 +1833,7 @@ export class Store {
           .run(...chunk.flat());
       }
       const rows = this.sql(
-        `SELECT p.stream_id, p.variant_id, p.probed_at, p.alive, p.result, p.dead_streak
+        `SELECT p.stream_id, p.variant_id, p.probed_at, p.alive, p.result, p.dead_streak, p.audio_only
          FROM probe_cache p JOIN _podium_candidates c
            ON c.id = p.stream_id AND c.hash = p.stream_hash`,
       ).all() as Array<CacheRow & { stream_id: number; variant_id: number }>;
@@ -1805,6 +1853,7 @@ export class Store {
           probedAt: row.probed_at,
           alive: Boolean(row.alive),
           deadStreak: row.dead_streak ?? 0,
+          audioOnly: Boolean(row.audio_only),
           result,
         });
       }
@@ -1826,7 +1875,20 @@ export class Store {
    * `PROBE_HISTORY_PER_STREAM` rows: a seek on `probe_history_stream` over at
    * most one row more than the cap.
    */
-  put(streamId: number, streamHash: string, result: ProbeResult, variantId = 0): void {
+  /**
+   * `audioOnly` is the assumption this probe ran under -- see the column
+   * comment and `CacheEntry.audioOnly`. It rides on the verdict rather than
+   * being re-derived at read time, because a dead verdict taken video-strict
+   * and a dead verdict taken audio-only are indistinguishable in the result
+   * itself, and only the write knows which question was asked.
+   */
+  put(
+    streamId: number,
+    streamHash: string,
+    result: ProbeResult,
+    variantId = 0,
+    audioOnly = false,
+  ): void {
     const now = Date.now();
     const alive = result.alive ? 1 : 0;
     const black = result.black ? 1 : 0;
@@ -1837,14 +1899,15 @@ export class Store {
         streamHash,
       );
       this.sql(
-        `INSERT INTO probe_cache (stream_id, stream_hash, variant_id, probed_at, alive, black, result, dead_streak, bitrate_kbps)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO probe_cache (stream_id, stream_hash, variant_id, probed_at, alive, black, result, dead_streak, bitrate_kbps, audio_only)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(stream_id, stream_hash, variant_id) DO UPDATE SET
            probed_at   = excluded.probed_at,
            alive       = excluded.alive,
            black       = excluded.black,
            bitrate_kbps = excluded.bitrate_kbps,
            result      = excluded.result,
+           audio_only  = excluded.audio_only,
            dead_streak = CASE WHEN excluded.alive = 1 THEN 0
                               ELSE probe_cache.dead_streak + 1 END`,
       ).run(
@@ -1857,6 +1920,7 @@ export class Store {
         json,
         alive ? 0 : 1,
         Number.isFinite(result.bitrateKbps) ? result.bitrateKbps : 0,
+        audioOnly ? 1 : 0,
       );
       this.sql(
         'INSERT INTO probe_history (stream_id, probed_at, alive, black, result) VALUES (?, ?, ?, ?, ?)',

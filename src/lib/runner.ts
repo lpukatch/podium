@@ -15,6 +15,7 @@ import { type ActiveSession, type Channel, DispatcharrClient, type Stream } from
 import {
   AFTER_EPG_START,
   assignmentIsRule,
+  channelIsAudioOnly,
   currentProgrammes,
   type Eligibility,
   NEVER,
@@ -787,6 +788,11 @@ export interface PlannedChannel {
   settled: Set<number>;
   /** Every hit is settled, so this channel needs no probing. */
   cacheComplete: boolean;
+  /**
+   * The audio-only answer this channel ranks under: the group's toggle, or
+   * Dispatcharr's own radio classification -- `channelIsAudioOnly` in `plan`,
+   * the same value every probe job for the channel carries.
+   */
   audioOnly?: boolean;
   /**
    * Probe this channel, rank it, and write nothing back -- see `measureOnly`
@@ -2291,7 +2297,13 @@ export class Runner {
               // split one stream's freshness across as many rows as the account
               // has logins -- each expiring on its own clock and each costing a
               // probe to refresh. See `StreamVariant`.
-              store.put(job.streamId, stream.streamHash, result, POOLED_VARIANT);
+              store.put(
+                job.streamId,
+                stream.streamHash,
+                result,
+                POOLED_VARIANT,
+                job.audioOnly === true,
+              );
             }
             // `done` advances for every verdict (alive or dead); `dead` is the
             // breakdown of the ones that came back dead.
@@ -2482,7 +2494,8 @@ export class Runner {
           strategy,
           stability,
           {
-            audioOnly: (groupId, groupName) => eligibility.policyFor(groupId, groupName).audioOnly,
+            audioOnly: (channel, groupName) =>
+              channelIsAudioOnly(eligibility.policyFor(channel.groupId, groupName), channel),
             minResolution: (channelId, groupId, groupName) =>
               channelResolutionFloor(
                 this.deps.rules.get().channelFloors,
@@ -2829,6 +2842,12 @@ export class Runner {
       const rule = matcher.rules.get(channel.id);
       const groupName = channel.groupId === null ? undefined : groupNames.get(channel.groupId);
       const policy = eligibility.policyFor(channel.groupId, groupName);
+      // One answer per channel: the group toggle, or Dispatcharr's own radio
+      // classification -- see `channelIsAudioOnly`. Everything downstream of
+      // this line (which variants count as fresh, what the probe jobs expect,
+      // how the pass ranks) reads the same boolean, so a channel cannot be
+      // probed under one assumption and ranked under another.
+      const audioOnly = channelIsAudioOnly(policy, channel);
       // A channel with no rule is normally not ours to touch. The exceptions are
       // the groups set to `after_epg_start` or `assigned`, where the channel's
       // own assignment stands in for the rule -- see `assignedCandidates`.
@@ -2927,6 +2946,18 @@ export class Runner {
           const cached = streamCache?.get(variant.variantId);
           if (!cached) continue;
           if (oldest === null || cached.probedAt < oldest) oldest = cached.probedAt;
+          // A verdict answers the question it was asked. Taken video-strict,
+          // it says nothing about the audio-only read -- the dead verdict a
+          // radio stream earns under the old assumption is the exact
+          // mis-scoring the classification exists to fix -- and taken
+          // audio-only, it skipped the video checks a video channel needs. So
+          // a mismatch is stale in both directions, however fresh the row:
+          // its age still paces this stream above, but the verdict itself
+          // waits for the re-probe. The first pass after a channel flips --
+          // Dispatcharr reclassified it, or an operator toggled the group --
+          // replaces these; nothing waits out a TTL that could back off for
+          // days.
+          if (cached.audioOnly !== audioOnly) continue;
           const ttl = ttlFor(
             cached,
             config.PODIUM_LIVE_TTL_MS,
@@ -2987,7 +3018,7 @@ export class Runner {
                   ? undefined
                   : profileUserAgents.get(stream.streamProfileId),
               stepOrder,
-              audioOnly: policy.audioOnly,
+              audioOnly,
             },
             // Never-probed sorts first, and a stream somebody has explicitly
             // asked to re-check goes with it -- the request means "now", not
@@ -3030,7 +3061,7 @@ export class Runner {
           fresh: freshEntries,
           settled: settledStreams,
           cacheComplete: settledStreams.size === hits.length,
-          audioOnly: policy.audioOnly,
+          audioOnly,
           measureOnly: policy.measureOnly,
           minResolution: channelResolutionFloor(channelFloors, channel.id, policy.minResolution),
           maxResolution: channelResolutionCeiling(
@@ -3132,7 +3163,8 @@ export class Runner {
     /** The pass's one stability read, shared rather than queried again. */
     stability: Map<number, StabilityRecord>,
     policy: {
-      audioOnly: (groupId: number | null, groupName?: string) => boolean | undefined;
+      /** The audio-only answer this channel ranks under: group toggle or radio flag. */
+      audioOnly: (channel: Channel, groupName?: string) => boolean;
       /** Whether another app owns this channel's ordering. */
       managed: (groupId: number | null, groupName?: string) => boolean;
       /** The floor the channel ranks under, as `plan` resolves it. */
@@ -3185,7 +3217,7 @@ export class Runner {
       inputs.push({
         channelId: channel.id,
         channelName: channel.name,
-        audioOnly: policy.audioOnly(channel.groupId, groupName),
+        audioOnly: policy.audioOnly(channel, groupName),
         managed: policy.managed(channel.groupId, groupName),
         minResolution: policy.minResolution(channel.id, channel.groupId, groupName),
         maxResolution: policy.maxResolution(channel.id, channel.groupId, groupName),
