@@ -68,6 +68,26 @@ export function statsPayload(
     field_order: result.fieldOrder ?? '',
     video_codec: result.videoCodec,
     audio_codec: result.audioCodec,
+    audio_language: result.audioLanguage ?? '',
+    // Dispatcharr v0.34's per-track schema. Keep summary channel counts numeric
+    // for existing Teamarr rules; per-track audio_channels is a layout label.
+    ...(result.audioTracks !== undefined
+      ? {
+          audio_streams: result.audioTracks.map((track) => ({
+            ...(track.index !== undefined ? { index: track.index } : {}),
+            ...(track.language ? { audio_language: track.language } : {}),
+            audio_codec: track.codec,
+            audio_channels:
+              track.channelLayout.replace(/\([^)]*\)/g, '') ||
+              (({ 1: 'mono', 2: 'stereo', 6: '5.1', 8: '7.1' } as Record<number, string>)[
+                track.channels
+              ] ??
+                (track.channels ? String(track.channels) : '')),
+            audio_bitrate: Math.round(track.bitrateKbps),
+            sample_rate: track.sampleRate,
+          })),
+        }
+      : {}),
     pixel_format: result.pixelFormat,
     /**
      * The transfer function, which is what tells HLG (`arib-std-b67`) from

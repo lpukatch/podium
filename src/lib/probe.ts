@@ -45,6 +45,16 @@ process.on('exit', () => {
   }
 });
 
+export interface AudioTrack {
+  index?: number;
+  language?: string;
+  codec: string;
+  channels: number;
+  channelLayout: string;
+  bitrateKbps: number;
+  sampleRate: number;
+}
+
 export interface ProbeResult {
   alive: boolean;
   width: number;
@@ -53,6 +63,10 @@ export interface ProbeResult {
   bitrateKbps: number;
   videoCodec: string;
   audioCodec: string;
+  /** All audio tracks in source order. Absent on verdicts cached before multi-track support. */
+  audioTracks?: AudioTrack[];
+  /** Language of the track selected for the summary and ranking. */
+  audioLanguage?: string;
   /** Pixel format from ffprobe, e.g. "yuv420p". Published for Dispatcharr's UI. */
   pixelFormat: string;
   /** Audio channel count from ffprobe (2 = stereo, 6 = 5.1). Published for Dispatcharr's UI. */
@@ -166,6 +180,8 @@ export interface ProbeOptions {
 }
 
 export interface FfprobeStream {
+  index?: number;
+  tags?: { language?: string };
   codec_type?: string;
   codec_name?: string;
   width?: number;
@@ -345,6 +361,12 @@ function toNumber(raw: string | undefined): number {
   return Number.isFinite(value) ? value : 0;
 }
 
+/** ffprobe uses `und` when the language is undetermined. */
+function audioLanguage(stream: FfprobeStream | undefined): string | undefined {
+  const language = stream?.tags?.language?.trim().toLowerCase();
+  return language && language !== 'und' ? language : undefined;
+}
+
 export function parsePayload(
   payload: FfprobePayload,
   audioOnly = false,
@@ -376,6 +398,18 @@ export function parsePayload(
     bitrateKbps: Math.round(bitrate * 100) / 100,
     videoCodec: video?.codec_name ?? '',
     audioCodec: audio?.codec_name ?? '',
+    audioLanguage: audioLanguage(audio),
+    audioTracks: (payload.streams ?? [])
+      .filter((stream) => stream.codec_type === 'audio')
+      .map((stream) => ({
+        ...(stream.index !== undefined ? { index: stream.index } : {}),
+        ...(audioLanguage(stream) ? { language: audioLanguage(stream) } : {}),
+        codec: stream.codec_name ?? '',
+        channels: stream.channels ?? 0,
+        channelLayout: stream.channel_layout ?? '',
+        bitrateKbps: Math.round(toNumber(stream.bit_rate) / 10) / 100,
+        sampleRate: Math.round(toNumber(stream.sample_rate)),
+      })),
     pixelFormat: video?.pix_fmt ?? '',
     ...(video?.field_order ? { fieldOrder: video.field_order } : {}),
     ...(video?.color_transfer ? { colorTransfer: video.color_transfer } : {}),
