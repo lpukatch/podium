@@ -71,8 +71,8 @@ describe('multi-track audio publication', () => {
         audio_bitrate: 384,
         sample_rate: 48000,
       },
-      { index: 5, audio_codec: 'aac', audio_channels: '', audio_bitrate: 0, sample_rate: 0 },
-      { audio_codec: 'mp2', audio_channels: '', audio_bitrate: 0, sample_rate: 0 },
+      { index: 5, audio_codec: 'aac', audio_channels: '' },
+      { audio_codec: 'mp2', audio_channels: '' },
     ]);
     expect(stats.audio_language).toBe('eng');
     expect(stats.audio_channels).toBe(6);
@@ -102,7 +102,7 @@ describe('multi-track audio publication', () => {
     expect(result.alive).toBe(true);
     expect(result.audioLanguage).toBeUndefined();
     expect(statsPayload({ ...result, elapsedMs: 1, error: '' }).audio_streams).toEqual([
-      { index: 0, audio_codec: 'aac', audio_channels: 'stereo', audio_bitrate: 0, sample_rate: 0 },
+      { index: 0, audio_codec: 'aac', audio_channels: 'stereo' },
     ]);
   });
 });
