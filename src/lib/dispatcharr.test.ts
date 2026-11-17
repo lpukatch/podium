@@ -758,7 +758,28 @@ describe('channel', () => {
       tvgId: 'espn.id',
       streams: [10, 20],
       groupId: null,
+      // Absent on a Dispatcharr too old to report it: not radio.
+      isRadio: false,
     });
+  });
+
+  it('reads the radio classification, with the override winning over the channel', async () => {
+    // `effective_is_radio` folds the operator's channel override; `is_radio`
+    // is the bare channel value. Both false and both true are real answers,
+    // not defaults -- only absence means "this Dispatcharr does not say".
+    const bodies = [
+      { id: 1, effective_is_radio: true },
+      { id: 2, effective_is_radio: false, is_radio: true },
+      { id: 3, is_radio: true },
+      { id: 4, is_radio: false },
+    ];
+    let n = 0;
+    const { calls } = stubFetch(() => ({ body: bodies[n++] }));
+    const client = new DispatcharrClient('http://d', { apiKey: 'k' });
+    const read = [];
+    for (const id of [1, 2, 3, 4]) read.push(await client.channel(id));
+    expect(calls).toHaveLength(4);
+    expect(read.map((channel) => channel?.isRadio)).toEqual([true, false, true, false]);
   });
 
   it('returns null when the channel no longer exists', async () => {

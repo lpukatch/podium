@@ -43,6 +43,13 @@ export interface Channel {
   /** Ordered. Writing this array back is what reorders the channel. */
   streams: number[];
   groupId: number | null;
+  /**
+   * Dispatcharr classifies the channel as radio: audio-only, per its source
+   * stream's M3U `radio` attribute, with an operator's channel override winning.
+   * v0.32 and later expose it; anything older leaves the key out of the
+   * response, which folds to `false` -- the same answer those versions imply.
+   */
+  isRadio: boolean;
   hidden_from_output?: boolean;
 }
 
@@ -54,6 +61,8 @@ interface ChannelRow {
   effective_name?: string;
   tvg_id?: string;
   effective_tvg_id?: string;
+  is_radio?: boolean | null;
+  effective_is_radio?: boolean | null;
   streams?: number[];
   channel_group_id?: number | null;
   effective_channel_group_id?: number | null;
@@ -911,6 +920,9 @@ export class DispatcharrClient {
       uuid: row.uuid ?? '',
       name: row.effective_name || row.name || '',
       tvgId: row.effective_tvg_id || row.tvg_id || '',
+      // Not `||`: `false` is a real answer, and only null/absent means "this
+      // Dispatcharr does not say".
+      isRadio: row.effective_is_radio ?? row.is_radio ?? false,
       streams: row.streams ?? [],
       groupId: row.effective_channel_group_id ?? row.channel_group_id ?? null,
       ...(typeof row.hidden_from_output === 'boolean'

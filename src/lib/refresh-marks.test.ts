@@ -261,8 +261,8 @@ describe('the planner against a mark', () => {
     },
   ];
   const channels: Channel[] = [
-    { id: 1, name: 'ESPN', tvgId: 'espn.id', streams: [10], groupId: 100 },
-    { id: 2, name: 'TNT', tvgId: 'tnt.id', streams: [20], groupId: 200 },
+    { id: 1, name: 'ESPN', tvgId: 'espn.id', streams: [10], groupId: 100, isRadio: false },
+    { id: 2, name: 'TNT', tvgId: 'tnt.id', streams: [20], groupId: 200, isRadio: false },
   ];
   const groupNames = new Map([
     [100, 'sports'],

@@ -318,6 +318,7 @@ describe('a pass writing a channel that has a ceiling', () => {
       tvgId: 'one',
       streams: [1, 2],
       groupId: 100,
+      isRadio: false,
     };
     return {
       channel,
@@ -411,6 +412,7 @@ describe('a pass writing a channel that has a ceiling', () => {
         tvgId: 'one',
         streams: [2],
         groupId: 100,
+        isRadio: false,
       },
       hits: [
         [2, 0],

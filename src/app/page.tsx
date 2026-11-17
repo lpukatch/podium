@@ -47,6 +47,11 @@ interface ChannelRow {
   hasRule: boolean;
   /** No rule, but an `assigned`/after-kickoff group: ranked off what it carries. */
   assignmentOnly?: boolean;
+  /**
+   * Dispatcharr itself classifies this channel as radio: audio-only, no group
+   * toggle involved. Read-only here -- the classification lives upstream.
+   */
+  radio?: boolean;
   /** This channel's own floor: `null` takes the group's, `none` opts out of it. */
   minResolution?: string | null;
   /** This channel's own ceiling, same readings as the floor. */
@@ -2056,6 +2061,7 @@ export default function Page() {
                             ? ' · sources filtered'
                             : ''}
                           {c.assignmentOnly ? ' · assigned only' : !c.hasRule ? ' · no rule' : ''}
+                          {c.radio ? ' · radio' : ''}
                         </span>
                       </span>
                       <span className="flex flex-none items-center gap-2">

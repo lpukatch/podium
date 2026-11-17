@@ -88,7 +88,14 @@ describe('the pass', () => {
    * A channel carrying two streams, the second measurably better than the
    * first, so a pass that is allowed to write has something to write.
    */
-  const channel: Channel = { id: 1, name: 'EPL01', tvgId: 'epl.id', streams: [1, 2], groupId: 100 };
+  const channel: Channel = {
+    id: 1,
+    name: 'EPL01',
+    tvgId: 'epl.id',
+    streams: [1, 2],
+    groupId: 100,
+    isRadio: false,
+  };
 
   const plannedFor = (measureOnly: boolean): PlannedChannel => ({
     channel,

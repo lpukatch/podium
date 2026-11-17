@@ -96,6 +96,10 @@ export async function GET(request: Request) {
           id: channel.id,
           name: channel.name,
           tvgId: channel.tvgId,
+          // Dispatcharr's own classification, not the group toggle: what the
+          // row is *seen* as, so the dashboard can say why a channel probes
+          // without video.
+          radio: channel.isRadio === true,
           assigned: channel.streams.length,
           matched: hits.length,
           aliases: rule?.aliases ?? [],

@@ -4,6 +4,7 @@ import { type ConsensusReport, checkStreamConsensus, describeConsensus } from '@
 import { DispatcharrClient } from '@/lib/dispatcharr';
 import {
   assignmentIsRule,
+  channelIsAudioOnly,
   currentProgrammes,
   describeVerdict,
   Eligibility,
@@ -145,7 +146,10 @@ export async function POST(request: Request, context: { params: Promise<{ channe
         : undefined;
     const elig = new Eligibility(policies(), undefined, groupPatterns());
     const groupPolicy = elig.policyFor(channel.groupId, groupName);
-    const audioOnly = groupPolicy.audioOnly;
+    // Same answer the pass resolves: the group toggle, or Dispatcharr's own
+    // radio classification of this channel. This endpoint previews what the
+    // worker would do, so it cannot disagree with the worker about it.
+    const audioOnly = channelIsAudioOnly(groupPolicy, channel);
     const epgRows = (await client.epgWindow().catch(() => [])) as never[];
     const programmes = currentProgrammes(epgRows);
     const verdict = elig.allows(channel.groupId, channel.tvgId, programmes, new Date(), groupName);
@@ -405,7 +409,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
           if (stream?.streamHash) {
             // Keyed on the stream, not the login that drew it -- see
             // `StreamVariant`, and the worker's matching write.
-            store?.put(job.streamId, stream.streamHash, result, POOLED_VARIANT);
+            store?.put(job.streamId, stream.streamHash, result, POOLED_VARIANT, audioOnly);
           }
         }
         const list = variantResults.get(job.streamId) ?? [];

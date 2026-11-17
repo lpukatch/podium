@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
-import { Eligibility } from '@/lib/eligibility';
+import { channelIsAudioOnly, Eligibility } from '@/lib/eligibility';
 import { responseErrorText } from '@/lib/error-text';
 import { readJson } from '@/lib/http-body';
 import { type CachedVerdict, lastProbeFields } from '@/lib/last-probe';
@@ -210,7 +210,9 @@ export async function POST(request: Request) {
         assigned: assigned.has(id),
         matched: matchedIds.has(id),
         currentRank: currentOrder.get(id) ?? null,
-        ...lastProbeFields(verdicts.get(id), weights, groupPolicy.audioOnly),
+        // The channel's radio classification participates, exactly as a pass
+        // would resolve it -- see `channelIsAudioOnly`.
+        ...lastProbeFields(verdicts.get(id), weights, channelIsAudioOnly(groupPolicy, channel)),
         lastSoak: soakResults.get(id) ?? null,
       };
     };

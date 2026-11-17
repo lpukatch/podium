@@ -96,7 +96,7 @@ describe('the planner with several logins', () => {
     },
   ];
   const channels: Channel[] = [
-    { id: 1, name: 'ESPN', tvgId: 'espn.id', streams: [10], groupId: 100 },
+    { id: 1, name: 'ESPN', tvgId: 'espn.id', streams: [10], groupId: 100, isRadio: false },
   ];
   const groupNames = new Map([[100, 'sports']]);
 
@@ -124,6 +124,8 @@ describe('the planner with several logins', () => {
     rules: RulesSource,
     variantsByStream: Map<number, ReturnType<typeof buildVariants>>,
     counters: { cached: number } = { cached: 0 },
+    /** The channels to plan for; the fixture's one channel by default. */
+    channelList: Channel[] = channels,
   ) {
     return (
       runner as unknown as {
@@ -140,7 +142,7 @@ describe('the planner with several logins', () => {
       }
     ).plan.call(
       runner,
-      channels,
+      channelList,
       streams,
       new Map(),
       rules.get().eligibility,
@@ -228,6 +230,38 @@ describe('the planner with several logins', () => {
 
     const planned = plan(runner, rules, drawn(bothOpen));
     expect(planned.jobs.map((job) => job.streamId)).toEqual([10]);
+  });
+
+  it('re-probes when the radio classification flips, and caches once it matches', () => {
+    // A verdict answers the question it was asked. Taken video-strict, it
+    // says nothing about the audio-only read -- the dead verdict a radio
+    // stream earns under the old assumption is the exact mis-scoring the
+    // classification exists to fix -- and taken audio-only, it skipped the
+    // video checks. So the first pass after a flip re-probes, however fresh
+    // the row, and the pass after that is served from cache.
+    const { rules, runner } = build();
+    const radio: Channel[] = [
+      { id: 1, name: 'ESPN', tvgId: 'espn.id', streams: [10], groupId: 100, isRadio: true },
+    ];
+
+    // Fresh verdict taken video-strict; the channel now reads as radio.
+    store.put(10, 'h', result(), POOLED_VARIANT, false);
+    const flipped = plan(runner, rules, drawn(bothOpen), { cached: 0 }, radio);
+    expect(flipped.jobs).toHaveLength(1);
+    expect(flipped.jobs[0]?.audioOnly).toBe(true);
+
+    // The re-probe lands under the audio-only assumption; the next pass is
+    // cache-complete again.
+    store.put(10, 'h', result(), POOLED_VARIANT, true);
+    const counters = { cached: 0 };
+    const settled = plan(runner, rules, drawn(bothOpen), counters, radio);
+    expect(settled.jobs).toHaveLength(0);
+    expect(counters.cached).toBe(1);
+
+    // And the flip back: an audio-only verdict is stale against a channel
+    // that needs video, for the mirror reason.
+    store.put(10, 'h', result(), POOLED_VARIANT, true);
+    expect(plan(runner, rules, drawn(bothOpen)).jobs).toHaveLength(1);
   });
 
   it('counts a marked stream once, and clears it on one verdict', () => {

@@ -84,27 +84,33 @@ export function lastProbeFields(
  *
  * The floor is a per-channel judgement: an audio-only channel does not apply
  * it. A stream reads as low when any channel carrying it would call it low, so
- * it is exempt only when every carrier is audio-only. A channel's group comes
- * from the live snapshot, as the other readers resolve it; one the snapshot no
- * longer has falls back to the default policy.
+ * it is exempt only when every carrier is audio-only. A carrier's answer is
+ * the one the pass resolves -- `channelIsAudioOnly`: the group's toggle, or
+ * Dispatcharr's own radio classification of that channel, which the snapshot
+ * carries. A channel's group comes from the live snapshot, as the other
+ * readers resolve it; one the snapshot no longer has falls back to the
+ * default policy.
  */
 export function audioOnlyByStream(
   rows: ReadonlyArray<{ channelId: number; streamId: number }>,
   snap: {
-    channels: ReadonlyArray<{ id: number; groupId: number | null }>;
+    channels: ReadonlyArray<{ id: number; groupId: number | null; isRadio?: boolean }>;
     groups: ReadonlyArray<{ id: number; name: string }>;
   },
   eligibility: Eligibility,
 ): Map<number, boolean> {
   const groupOf = new Map(snap.channels.map((c) => [c.id, c.groupId]));
+  const radio = new Set(snap.channels.filter((c) => c.isRadio === true).map((c) => c.id));
   const groupNames = new Map(snap.groups.map((g) => [g.id, g.name]));
   const out = new Map<number, boolean>();
   for (const row of rows) {
     const groupId = groupOf.get(row.channelId) ?? null;
-    const audioOnly = Boolean(
-      eligibility.policyFor(groupId, groupId == null ? undefined : groupNames.get(groupId))
-        .audioOnly,
-    );
+    const audioOnly =
+      radio.has(row.channelId) ||
+      Boolean(
+        eligibility.policyFor(groupId, groupId == null ? undefined : groupNames.get(groupId))
+          .audioOnly,
+      );
     out.set(row.streamId, (out.get(row.streamId) ?? true) && audioOnly);
   }
   return out;

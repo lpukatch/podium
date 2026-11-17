@@ -48,6 +48,30 @@ export function assignmentIsRule(mode: PolicyMode): boolean {
   return mode === AFTER_EPG_START || mode === ASSIGNED;
 }
 
+/**
+ * Whether a channel probes and ranks as audio-only.
+ *
+ * Two sources, deliberately read at the point of use rather than folded into
+ * the policy: the group toggle an operator set, and Dispatcharr's own
+ * classification of the channel. Dispatcharr v0.32 marks radio channels from
+ * the M3U's `radio` attribute (an operator's channel override wins there), and
+ * Podium reads that on every catalogue refresh -- so a provider that shuffles
+ * its radio stations into a group nobody named is still classified correctly,
+ * with no rules-file entry and no dashboard click. The explicit toggle still
+ * wins: it covers a whole group, and it is how an operator overrules a
+ * provider that marks a music-video channel as radio.
+ *
+ * The default stays off, matching `DEFAULT_POLICY`: a Dispatcharr too old to
+ * carry the flag reports nothing, and every channel then reads as it did
+ * before this existed.
+ */
+export function channelIsAudioOnly(
+  policy: GroupPolicy,
+  channel: { isRadio?: boolean } | undefined | null,
+): boolean {
+  return Boolean(policy.audioOnly) || channel?.isRadio === true;
+}
+
 export interface GroupPolicy {
   mode: PolicyMode;
   /**

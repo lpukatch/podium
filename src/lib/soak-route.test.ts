@@ -184,7 +184,7 @@ describe('soaking everything', () => {
     // Channel 20 sits in the managed catalogue but not in the crawl: it was
     // deleted upstream, and its stale rows must not be queued.
     vi.mocked(snapshot).mockResolvedValue({
-      channels: [{ id: 10, name: 'A', tvgId: 'a', streams: [1, 2], groupId: 1 }],
+      channels: [{ id: 10, name: 'A', tvgId: 'a', streams: [1, 2], groupId: 1, isRadio: false }],
       streams: [],
       providers: [],
       groups: [],
