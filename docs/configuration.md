@@ -716,7 +716,7 @@ catalogue snapshot.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `PODIUM_METRICS_CHANNELS` | `true` | also expose the per-channel source series — every managed channel's slots with provider and verdict; the only families that scale with the catalogue, so the switch exists for a Prometheus watching its cardinality |
+| `PODIUM_METRICS_CHANNELS` | `false` | also expose the per-channel source series — every managed channel's slots with provider and verdict; off by default because it scales with the catalogue (channels × slots × 4), opt in when debugging a specific channel |
 
 A scrape job needs the path, and the token if you set one:
 

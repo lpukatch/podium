@@ -1746,7 +1746,7 @@
     {
       "type": "table",
       "title": "Every managed channel, its sources in Dispatcharr order",
-      "description": "Slot 0 is what plays first; each row below it is a fallback in the order podium wrote. State is podium's verdict for that exact stream — check a provider's name against its slots to see who is carrying whom. Needs PODIUM_METRICS_CHANNELS on (default). THE JOIN IS IN THE PROMQL, not a transformation: Grafana's join-by-field takes one field and cannot key on (channel_id, slot), so every query folds info and state onto its own series and all three carry identical labels, which the merge transformation lines up row by row. max by also drops pod, so a restart overlap cannot split a row.",
+      "description": "Slot 0 is what plays first; each row below it is a fallback in the order podium wrote. State is podium's verdict for that exact stream — check a provider's name against its slots to see who is carrying whom. Needs PODIUM_METRICS_CHANNELS=true (off by default). THE JOIN IS IN THE PROMQL, not a transformation: Grafana's join-by-field takes one field and cannot key on (channel_id, slot), so every query folds info and state onto its own series and all three carry identical labels, which the merge transformation lines up row by row. max by also drops pod, so a restart overlap cannot split a row.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

@@ -74,7 +74,7 @@ const withOneVerdict = () => {
 
 describe('GET /api/metrics', () => {
   beforeEach(() => {
-    withSettings({ PODIUM_MAX_AGE_MS: null });
+    withSettings({ PODIUM_MAX_AGE_MS: null, PODIUM_METRICS_CHANNELS: null });
     withOneVerdict();
   });
 
@@ -92,6 +92,42 @@ describe('GET /api/metrics', () => {
     // alert built on it fired against a window nobody had chosen.
     withSettings({ PODIUM_MAX_AGE_MS: String(4 * 3_600_000) });
     expect(await scrape()).toContain('podium_freshness_target_seconds 14400');
+  });
+
+  it('omits per-channel series by default and emits them when PODIUM_METRICS_CHANNELS is enabled', async () => {
+    const store = new Store(join(dir, 'podium.db'));
+    try {
+      store.replaceCatalogue(
+        [
+          {
+            channelId: 10,
+            channelName: 'ESPN',
+            slot: 0,
+            streamId: 1,
+            providerId: 1,
+            providerName: 'Provider A',
+          },
+        ],
+        'r1',
+      );
+    } finally {
+      store.close();
+    }
+
+    const defaultScrape = await scrape();
+    expect(defaultScrape).toContain(
+      'podium_provider_streams{provider="Provider A",state="alive"} 1',
+    );
+    expect(defaultScrape).not.toContain('podium_channel_source_');
+
+    withSettings({ PODIUM_METRICS_CHANNELS: 'true' });
+    const enabledScrape = await scrape();
+    expect(enabledScrape).toContain(
+      'podium_channel_source_info{channel_id="10",channel_name="ESPN",slot="0",provider="Provider A"} 1',
+    );
+    expect(enabledScrape).toContain(
+      'podium_channel_source_state{channel_id="10",slot="0",state="alive"} 1',
+    );
   });
 });
 

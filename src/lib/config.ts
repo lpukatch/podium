@@ -596,12 +596,13 @@ export const configSchema = z.object({
    * Expose the per-channel source series on /api/metrics -- the ordered list
    * of every managed channel's streams with provider and verdict.
    *
-   * On by default because it is the view the provider dashboard is for; off is
-   * the escape hatch for a Prometheus watching its cardinality; the per-channel
-   * families are the only ones that scale with the catalogue (managed channels
-   * x slots x four families, where every other family here is per provider).
+   * Off by default so Prometheus scrapes stay small (only aggregate and
+   * per-provider series); the per-channel families are the only ones that
+   * scale with the catalogue (managed channels x slots x four families). Turn
+   * on when debugging a specific channel or using the per-channel table in the
+   * provider dashboard.
    */
-  PODIUM_METRICS_CHANNELS: bool(true),
+  PODIUM_METRICS_CHANNELS: bool(false),
 });
 
 export type RawConfig = z.infer<typeof configSchema>;
