@@ -518,6 +518,7 @@ describe('mirroring the write to the webhook', () => {
     tvgId: 'one',
     streams: [1, 2],
     groupId: 100,
+    isRadio: false,
   };
 
   const plannedFor = (verdict: ProbeResult): PlannedChannel => ({
