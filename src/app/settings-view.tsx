@@ -349,16 +349,18 @@ export function SettingsView({ active }: { active?: boolean } = {}) {
         body: JSON.stringify(edits),
       });
       const body = await resp.json();
-      setTest(
-        body.ok
-          ? {
-              ok: true,
-              text: `Connected. ${body.providers.length} provider(s): ${body.providers
-                .map((p: TestProvider) => describeTestProvider(p))
-                .join(', ')}`,
-            }
-          : { ok: false, text: body.error ?? 'failed' },
-      );
+      if (!body.ok) {
+        setTest({ ok: false, text: body.error ?? 'failed' });
+      } else {
+        const summary = `Connected. ${body.providers.length} provider(s): ${body.providers
+          .map((p: TestProvider) => describeTestProvider(p))
+          .join(', ')}`;
+        setTest(
+          body.warning
+            ? { ok: false, text: `${summary} — ${body.warning}` }
+            : { ok: true, text: summary },
+        );
+      }
     } catch (e) {
       setTest({ ok: false, text: String(e) });
     } finally {

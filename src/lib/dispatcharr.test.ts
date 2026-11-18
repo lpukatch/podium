@@ -794,4 +794,50 @@ describe('channel', () => {
       new DispatcharrClient('http://d', { apiKey: 'k' }).channel(1),
     ).rejects.toBeInstanceOf(DispatcharrError);
   });
+
+  describe('streamUrlsVisible', () => {
+    it('returns visible when page 1 contains a non-empty stream url', async () => {
+      stubFetch(() => ({
+        body: {
+          count: 2,
+          next: null,
+          results: [
+            { id: 1, url: '' },
+            { id: 2, url: 'http://s/1' },
+          ],
+        },
+      }));
+      await expect(
+        new DispatcharrClient('http://d', { apiKey: 'k' }).streamUrlsVisible(),
+      ).resolves.toBe('visible');
+    });
+
+    it('returns redacted when every stream url on page 1 is empty, null, or omitted', async () => {
+      stubFetch(() => ({
+        body: {
+          count: 2,
+          next: null,
+          results: [
+            { id: 1, url: null },
+            { id: 2, url: '   ' },
+          ],
+        },
+      }));
+      await expect(
+        new DispatcharrClient('http://d', { apiKey: 'k' }).streamUrlsVisible(),
+      ).resolves.toBe('redacted');
+    });
+
+    it('handles bare-array and empty responses', async () => {
+      stubFetch(() => ({ body: [] }));
+      await expect(
+        new DispatcharrClient('http://d', { apiKey: 'k' }).streamUrlsVisible(),
+      ).resolves.toBe('empty');
+
+      stubFetch(() => ({ body: [{ id: 1, url: 'http://s/1' }] }));
+      await expect(
+        new DispatcharrClient('http://d', { apiKey: 'k' }).streamUrlsVisible(),
+      ).resolves.toBe('visible');
+    });
+  });
 });
