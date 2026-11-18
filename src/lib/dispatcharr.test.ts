@@ -840,4 +840,30 @@ describe('channel', () => {
       ).resolves.toBe('visible');
     });
   });
+
+  it('preserves long provider URLs up to 8192 characters without truncation', async () => {
+    const base =
+      'https://service-stitcher.clusters.pluto.tv/v2/stitch/hls/channel/abc/master.m3u8?jwt=';
+    const longUrl = base + 'a'.repeat(8192 - base.length);
+    expect(longUrl.length).toBe(8192);
+    stubFetch(() => ({
+      body: {
+        count: 1,
+        next: null,
+        results: [
+          {
+            id: 42,
+            name: 'Pluto Channel',
+            url: longUrl,
+            m3u_account: 7,
+            stream_hash: 'h42',
+          },
+        ],
+      },
+    }));
+    const streams = await new DispatcharrClient('http://d', { apiKey: 'k' }).streams();
+    expect(streams).toHaveLength(1);
+    expect(streams[0]!.url).toBe(longUrl);
+    expect(streams[0]!.url.length).toBe(8192);
+  });
 });

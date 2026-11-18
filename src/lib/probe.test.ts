@@ -19,8 +19,10 @@ import {
   deadReason,
   parseSampleStderr,
   probe,
+  protocolArgs,
   rejectUrl,
   sampleStream,
+  userAgentArgs,
 } from './probe';
 
 /** ffmpeg is installed in CI; skip the integration tests where it is not. */
@@ -537,5 +539,18 @@ describe('deadDetail', () => {
 
   it('stays bounded', () => {
     expect(deadDetail(`x ${'y'.repeat(500)}`).length).toBeLessThanOrEqual(200);
+  });
+
+  it('handles 8192-character provider URLs without errors or token leaks', () => {
+    const base =
+      'https://service-stitcher.clusters.pluto.tv/v2/stitch/hls/channel/abc/master.m3u8?jwt=';
+    const longUrl = base + 't'.repeat(8192 - base.length);
+    expect(longUrl.length).toBe(8192);
+    expect(rejectUrl(longUrl)).toBe('');
+    expect(protocolArgs(longUrl)[0]).toBe('-protocol_whitelist');
+    expect(userAgentArgs(longUrl, 'VLC/3.0.14')).toEqual(['-user_agent', 'VLC/3.0.14']);
+    const detail = deadDetail(`Error opening input ${longUrl}: Server returned 403 Forbidden`);
+    expect(detail).toBe('Error opening input Server returned 403 Forbidden');
+    expect(detail).not.toContain('tttt');
   });
 });
