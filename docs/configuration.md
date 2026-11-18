@@ -194,7 +194,10 @@ streaming from, whichever of these settings is on. Taking it off every provider
 because one has a viewer closes each single-connection account for as long as
 that viewer stays. The exception is a session Podium cannot place on a
 provider: that viewer could be on any of them, so every provider keeps the
-reserve.
+reserve. Note that this assumes closed connections free capacity promptly; if
+you raise Dispatcharr's Stream Retry Timeout (see
+[Recommended Dispatcharr settings](#recommended-dispatcharr-settings)),
+connections linger while retrying.
 
 Two things to know before turning it on:
 
@@ -293,6 +296,17 @@ Every proxy probe or soak becomes a real Dispatcharr client and holds a provider
 
 Proxy probes identify themselves with `PODIUM_PROBE_CLIENT_USER_AGENT`. Keep its value unique: Podium excludes sessions whose clients all carry that agent from pacing and stability reads, but retains sessions shared with a real viewer.
 
+#### Recommended Dispatcharr settings
+
+Alongside setting channel shutdown delay to `0`, newer Dispatcharr releases expose proxy knobs under **Settings → Proxy → Advanced** that govern how Dispatcharr consumes the stream order Podium writes (older installs on the v0.29 baseline will not have all of these):
+
+| Setting | Dispatcharr | Default | How it interacts with Podium |
+| --- | --- | --- | --- |
+| **Channel shutdown delay** | v0.29+ | — | Set to `0` so provider connections are released immediately when a proxy probe or soak ends. |
+| **Stream Startup Timeout** / **Stream Idle Timeout** | v0.33+ | `8s` / `10s` | Startup sets how long a tune waits with no data before switching streams; Idle drives mid-stream health checks. Together they decide how quickly Dispatcharr gives up on a stream Podium ranked, and they shape proxy probe sessions when `PODIUM_PROBE_VIA_DISPATCHARR=true`. |
+| **Max Connection Attempts** / **Stream Retry Timeout** | v0.34+ | `3` / `3s` | Sets how many tries a stream URL gets before failing over to the next-ranked stream, and how long startup waits for a free provider connection when every active M3U profile is full. That slot wait interacts with Podium's pacing: `PODIUM_MIN_FREE_SLOTS` ([above](#when-one-viewer-stops-everything)) assumes closed connections free capacity promptly, while a retry wait lets them linger. |
+| **Validate Redirect URLs** | v0.31+ | On | For Redirect profiles: whether Dispatcharr probes the provider before handing off the URL so it can fail over to alternates. Turning it off trades that validation for lower channel-change latency, meaning Redirect clients rely directly on Podium's ranking without a pre-flight check. |
+
 ### Recording how long streams hold
 
 `PODIUM_STABILITY` watches Dispatcharr's live sessions and records which stream
@@ -315,6 +329,13 @@ worth catching runs in tens of seconds, so sampling much slower than ten misses
 the legs it is meant to measure, and sampling much faster buys precision on a
 figure reported per hour. A stream that drops faster than one interval is never
 seen holding at all. It takes effect the next time the worker takes its lock.
+
+From Dispatcharr v0.30.0 onward, failover rotation wraps back to the first
+stream after a short cooldown once every stream has been tried, and a successful
+connection clears the tried-set (earlier releases stuck on the last backup).
+That means Podium's ordering beyond slot 0 is actively exercised during an
+outage, and stability-ledger observations from pre-v0.30 Dispatcharr installs
+will not match current rotation behaviour.
 
 Reading that endpoint makes Dispatcharr sweep its own stale client entries as a
 side effect. That is cleanup it does anyway and its own stats page polls the
