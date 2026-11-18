@@ -168,4 +168,43 @@ describe('the dispatcharr test payload', () => {
     expect(body.providers[0]!.maxStreams).toBe(3);
     expect(body.providers[0]!.profiles).toEqual([]);
   });
+
+  it('surfaces a diagnostic warning when stream url fields are redacted', async () => {
+    vi.mocked(DispatcharrClient).mockImplementation(
+      class {
+        login = async () => {};
+        providers = async (): Promise<Provider[]> => [provider()];
+        streamUrlsVisible = async () => 'redacted' as const;
+      } as unknown as FakeClientCtor,
+    );
+
+    const body = (await (await call({})).json()) as {
+      ok: boolean;
+      streamUrlsRedacted?: boolean;
+      warning?: string;
+    };
+    expect(body.ok).toBe(true);
+    expect(body.streamUrlsRedacted).toBe(true);
+    expect(body.warning).toContain('/api/channels/streams/');
+    expect(body.warning).toContain('admin or API-key credential');
+  });
+
+  it('omits the redaction warning when stream url fields are visible', async () => {
+    vi.mocked(DispatcharrClient).mockImplementation(
+      class {
+        login = async () => {};
+        providers = async (): Promise<Provider[]> => [provider()];
+        streamUrlsVisible = async () => 'visible' as const;
+      } as unknown as FakeClientCtor,
+    );
+
+    const body = (await (await call({})).json()) as {
+      ok: boolean;
+      streamUrlsRedacted?: boolean;
+      warning?: string;
+    };
+    expect(body.ok).toBe(true);
+    expect(body.streamUrlsRedacted).toBeUndefined();
+    expect(body.warning).toBeUndefined();
+  });
 });

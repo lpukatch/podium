@@ -992,6 +992,24 @@ export class DispatcharrClient {
   }
 
   /**
+   * Sample the first page of `/api/channels/streams/` to see whether upstream
+   * stream URLs are visible to the current credential.
+   *
+   * Dispatcharr v0.33.0+ redacts `url` for standard (non-admin) users, which
+   * causes `streams()` to drop every row and leaves direct probing with nothing
+   * to measure.
+   */
+  async streamUrlsVisible(): Promise<'visible' | 'redacted' | 'empty'> {
+    type Row = { url?: string | null };
+    const first = await this.page<Row>('/api/channels/streams/', 1);
+    const rows = Array.isArray(first) ? first : (first.results ?? []);
+    if (rows.length === 0) return 'empty';
+    return rows.some((row) => typeof row.url === 'string' && row.url.trim().length > 0)
+      ? 'visible'
+      : 'redacted';
+  }
+
+  /**
    * Resolve the request identity a stream profile contributes without copying
    * its processing command. Missing or inactive rows are omitted so callers
    * can fall back to their ordinary probe user agent.

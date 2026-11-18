@@ -37,6 +37,14 @@ through **Settings → Backup**; see
 | `PODIUM_ENABLE_WEB` / `_WORKER` | `true` | run the halves separately |
 | `PORT` | `3456` | UI and API; 3000 is too crowded a default to sit on |
 
+In Dispatcharr v0.33.0+, standard users are restricted from viewing upstream
+stream URLs. Podium's direct-probe mode requires an admin or API-key credential
+with permission to read upstream `url` values from `/api/channels/streams/`;
+if those fields come back empty or redacted, `Test Dispatcharr connection`
+surfaces a warning and streams are skipped. Dispatcharr v0.33.0 also separates
+XC API and Stream Endpoints IP allowlists, so ensure Podium's address is allowed
+if you restrict access by IP.
+
 ## Who can reach it
 
 | Variable | Default | Notes |

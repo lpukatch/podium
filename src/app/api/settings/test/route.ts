@@ -72,9 +72,19 @@ export async function POST(request: Request) {
     );
     await client.login();
     const providers = await client.providers();
+    const urlVisibility =
+      typeof client.streamUrlsVisible === 'function' ? await client.streamUrlsVisible() : 'visible';
 
     return NextResponse.json({
       ok: true,
+      ...(urlVisibility === 'redacted'
+        ? {
+            streamUrlsRedacted: true,
+            warning:
+              'Upstream stream URLs from /api/channels/streams/ came back empty or redacted. ' +
+              'Direct-probe mode requires an admin or API-key credential with permission to read upstream stream URLs.',
+          }
+        : {}),
       // Enough to prove it reached the right instance, not just something.
       providers: providers.map((p) => ({
         name: p.name,
