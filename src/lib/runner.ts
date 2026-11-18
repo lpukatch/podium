@@ -53,7 +53,7 @@ import {
   type MinResolution,
 } from './resolution';
 import { pruneDeletedChannelRules } from './rule-sync';
-import type { RulesSource } from './rules-source';
+import type { Rules, RulesSource } from './rules-source';
 import { AbortFlag, laneKey, type ProbeJob, runLanes } from './scheduler';
 import { withRulesLock } from './server/state';
 import {
@@ -1217,7 +1217,7 @@ export interface RunnerDeps {
 export class Runner {
   lastRun: RunSummary | null = null;
   private running = false;
-  private catalogueContext: { key: string; matcher: Matcher; fetchedAt: number } | null = null;
+  private catalogueContext: { key: string; rules: Rules; fetchedAt: number } | null = null;
   private progressWrittenAt = -Infinity;
   private progressFlush: ReturnType<typeof setTimeout> | null = null;
   private activeAbort: AbortFlag | null = null;
@@ -1540,26 +1540,26 @@ export class Runner {
         );
       }
 
-      const currentMatcher = this.deps.rules.get().matcher;
-      const contextKey = JSON.stringify([
-        config,
-        channels,
-        providers,
-        [...activity.channelIds].sort((a, b) => a - b),
-        [...activity.viewersByProfile].sort(([a], [b]) => a - b),
-        activity.unplacedSessions,
-        store.refreshMarksVersion(),
-        store.soakQueueVersion(),
-      ]);
+      const currentRules = this.deps.rules.get();
+      const catalogueKey = () =>
+        JSON.stringify([
+          config,
+          channels,
+          providers,
+          [...activity.channelIds].sort((a, b) => a - b),
+          [...activity.viewersByProfile].sort(([a], [b]) => a - b),
+          activity.unplacedSessions,
+          store.refreshMarksVersion(),
+          store.soakQueueVersion(),
+        ]);
+      const contextKey = catalogueKey();
       const previous = this.lastRun;
       const context = this.catalogueContext;
       const now = Date.now();
-      if (
-        !activity.idle &&
+      const catalogueUnchanged =
         !activity.probeFailed &&
-        previous &&
-        context &&
-        previous.deferred > 0 &&
+        previous !== null &&
+        context !== null &&
         previous.probed === 0 &&
         previous.runnableBacklog === 0 &&
         previous.reordered === 0 &&
@@ -1568,12 +1568,13 @@ export class Runner {
         previous.soakBacklog === 0 &&
         store.pendingSoakCount().total === 0 &&
         context.key === contextKey &&
-        context.matcher === currentMatcher &&
+        context.rules === currentRules &&
         now >= context.fetchedAt &&
         now - context.fetchedAt < Math.max(config.PODIUM_IDLE_MAX_MS, config.PODIUM_TICK_MS) &&
         (previous.nextDueAt === null || previous.nextDueAt > now) &&
-        (previous.nextEligibleAt === null || previous.nextEligibleAt > now)
-      ) {
+        (previous.nextEligibleAt === null || previous.nextEligibleAt > now);
+
+      if (catalogueUnchanged && !activity.idle && previous.deferred > 0) {
         this.emit({
           phase: 'paused',
           deferred: previous.deferred,
@@ -1586,6 +1587,21 @@ export class Runner {
         return summary;
       }
 
+      if (catalogueUnchanged && !previous.paused && previous.deferred === 0) {
+        this.emit({
+          phase: 'done',
+          probed: 0,
+          dead: previous.dead,
+          reordered: 0,
+          unchanged: previous.unchanged,
+          measured: 0,
+          message: 'nothing due; catalogue unchanged',
+        });
+        const summary = { ...previous, runId, elapsedMs: Date.now() - started, paused: false };
+        this.lastRun = summary;
+        return summary;
+      }
+
       store.startRun(runId);
       runRecorded = true;
       const [streams, epg, groups] = await Promise.all([
@@ -1593,7 +1609,7 @@ export class Runner {
         this.epgRows(client, config),
         client.groups(),
       ]);
-      this.catalogueContext = { key: contextKey, matcher: currentMatcher, fetchedAt: Date.now() };
+      this.catalogueContext = { key: contextKey, rules: currentRules, fetchedAt: Date.now() };
       const profileUserAgents =
         config.PODIUM_DIRECT_PROFILE_USER_AGENT && !config.PODIUM_PROBE_VIA_DISPATCHARR
           ? await client.streamProfileUserAgents().catch((error) => {
@@ -2544,6 +2560,11 @@ export class Runner {
         };
       }
       const blockedSoaks = this.blockedSoakStreams(channels, groupNames, eligibility, epgRows);
+      this.catalogueContext = {
+        key: catalogueKey(),
+        rules: this.deps.rules.get(),
+        fetchedAt: Date.now(),
+      };
       return this.finish(
         runId,
         started,
