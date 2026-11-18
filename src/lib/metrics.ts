@@ -83,7 +83,7 @@ export interface MetricsOptions {
   /**
    * Expose the per-channel source series. Off unless asked, so a caller that
    * does not care never pays the cardinality; the route passes
-   * `PODIUM_METRICS_CHANNELS`, which defaults on.
+   * `PODIUM_METRICS_CHANNELS`, which defaults off.
    */
   channelMetrics?: boolean;
   now?: number;
