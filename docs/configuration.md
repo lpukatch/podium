@@ -290,12 +290,12 @@ Proxy probes identify themselves with `PODIUM_PROBE_CLIENT_USER_AGENT`. Keep its
 
 #### Recommended Dispatcharr settings
 
-Alongside setting channel shutdown delay to `0`, newer Dispatcharr releases expose proxy knobs that govern how Dispatcharr consumes the stream order Podium writes (older installs on the v0.29 baseline will not have all of these):
+Alongside setting channel shutdown delay to `0`, newer Dispatcharr releases expose proxy knobs under **Settings → Proxy → Advanced** that govern how Dispatcharr consumes the stream order Podium writes (older installs on the v0.29 baseline will not have all of these):
 
 | Setting | Dispatcharr | Default | How it interacts with Podium |
 | --- | --- | --- | --- |
 | **Channel shutdown delay** | v0.29+ | — | Set to `0` so provider connections are released immediately when a proxy probe or soak ends. |
-| **Stream Startup Timeout** / **Stream Idle Timeout** | v0.33+ | `8s` / `10s` | Found in **Settings → Proxy → Advanced**. Startup sets how long a tune waits with no data before switching streams; Idle drives mid-stream health checks. Together they decide how quickly Dispatcharr gives up on a stream Podium ranked, and they shape proxy probe sessions when `PODIUM_PROBE_VIA_DISPATCHARR=true`. |
+| **Stream Startup Timeout** / **Stream Idle Timeout** | v0.33+ | `8s` / `10s` | Startup sets how long a tune waits with no data before switching streams; Idle drives mid-stream health checks. Together they decide how quickly Dispatcharr gives up on a stream Podium ranked, and they shape proxy probe sessions when `PODIUM_PROBE_VIA_DISPATCHARR=true`. |
 | **Max Connection Attempts** / **Stream Retry Timeout** | v0.34+ | `3` / `3s` | Sets how many tries a stream URL gets before failing over to the next-ranked stream, and how long startup waits for a free provider connection when every active M3U profile is full. That slot wait interacts with Podium's pacing: `PODIUM_MIN_FREE_SLOTS` ([above](#when-one-viewer-stops-everything)) assumes closed connections free capacity promptly, while a retry wait lets them linger. |
 | **Validate Redirect URLs** | v0.31+ | On | For Redirect profiles: whether Dispatcharr probes the provider before handing off the URL so it can fail over to alternates. Turning it off trades that validation for lower channel-change latency, meaning Redirect clients rely directly on Podium's ranking without a pre-flight check. |
 
