@@ -1,21 +1,16 @@
 # Podium
 
-Ranks the streams behind your [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr)
-channels, best first, by measuring them rather than trusting their names.
+Podium ranks the streams behind your [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) channels, best first, by measuring them instead of trusting their names.
 
-It fetches your channels and streams, works out which streams belong to which
-channel, probes each one with `ffprobe`/`ffmpeg`, and writes the ranked order
-back. One container, one volume.
+It fetches your channels and streams, matches each stream to a channel, and probes each stream with `ffprobe` and `ffmpeg`. It then writes the ranked order back to Dispatcharr. It runs in one container with one volume.
 
-![The rules editor, showing a channel's streams in their current Dispatcharr
-order with the measurement behind each one](docs/images/rules-editor.png)
+![The rules editor that shows a channel's streams in their current Dispatcharr order with the measurement behind each one](docs/images/rules-editor.png)
 
-One channel, its streams in the order Dispatcharr currently serves them, and
-what each one actually is. The stream named `1080p` at #2 measures 720p; the one
-named `UHD` at #5 is a black screen; #6 is dead. Matches update as you edit, and
-nothing is written until you say so.
+The screenshot shows one channel, its streams in the order that Dispatcharr serves them, and what each stream measures. The stream named `1080p` at #2 measures 720p. The stream named `UHD` at #5 is a black screen, and #6 is dead. Matches update as you edit, and Podium writes nothing until you save.
 
 ## Quick start
+
+Run Podium in Docker:
 
 ```sh
 docker run -d -p 127.0.0.1:3456:3456 -v podium-data:/app/data \
@@ -24,130 +19,79 @@ docker run -d -p 127.0.0.1:3456:3456 -v podium-data:/app/data \
   ghcr.io/lpukatch/podium:latest
 ```
 
-That publishes the port on loopback only. To reach Podium from another machine
-drop the `127.0.0.1:`, and read [who can reach it](docs/configuration.md#who-can-reach-it)
-first — there is no login, and it holds a Dispatcharr credential.
+This command binds port `3456` on the loopback address only. If you want to reach Podium from another host, remove `127.0.0.1:` from the `-p` flag. Read [who can reach it](docs/configuration.md#who-can-reach-it) before you expose the port. Podium has no login and holds a Dispatcharr credential.
 
-Or `docker compose up -d` with the [compose file](docker-compose.yml) in this
-repo.
+You can also run `docker compose up -d` with the [compose file](docker-compose.yml) in this repository.
 
-On first start it writes an empty rules file and comes up with nothing to check.
-Open the UI on `:3456`, pick a group and start adding channels — or
-[import rules you already have](docs/usage.md#importing-existing-rules).
+On first start, Podium writes an empty rules file and has no channels to probe. Open the UI on port `3456`, select a group, and add channels. You can also [import rules you already have](docs/usage.md#importing-existing-rules).
 
-If your lineups are already set and you only want them kept in the right order,
-you do not have to describe them twice: set a group to
-[`assigned`](docs/usage.md#channel-groups) and Podium ranks every channel in it
-off the streams Dispatcharr has already given it, no rules to write.
+If your lineups are already set in Dispatcharr, set a group to [`assigned`](docs/usage.md#channel-groups). Podium then ranks every channel in that group from the streams that Dispatcharr already assigned to it, with no rules to write.
 
-![The groups list, each showing how many of its channels have rules](docs/images/groups.png)
+![The groups list that shows how many channels in each group have rules](docs/images/groups.png)
 
-Podium needs no credentials to boot. If you would rather not put an API key in
-your environment, start it bare and enter one in **Settings**.
+Podium needs no credentials to start. If you do not want to put an API key in your environment, omit `DISPATCHARR_API_KEY`. Enter the key on the Settings page after Podium starts.
 
 > [!IMPORTANT]
-> **It starts in dry-run**, wherever you run it. Reordering a channel is a write
-> with no undo, so Podium watches and records first. Set `PODIUM_DRY_RUN=false`
-> once you have seen a few passes you agree with.
+> Podium starts in dry-run mode by default. Reordering a channel in Dispatcharr is a write with no undo, so Podium watches and records first. Set `PODIUM_DRY_RUN=false` after you see a few passes that you agree with.
 
 ## Why it exists
 
-Provider stream names lie. A stream advertised as `[1080p]` turns out to be
-720p; one advertised as 1080p turns out to deliver 193kbps of black screen. The
-only way to rank them honestly is to look.
+Provider stream names are often wrong. A stream labeled `[1080p]` can measure 720p, and another can deliver 193kbps of black screen. The only reliable way to rank streams is to probe them.
 
-Looking is expensive, though — every probe spends a connection you are paying
-for, against a provider that will cut you off for using too many at once. Most
-of Podium is about spending that budget well.
+Probing costs provider connections. Every probe uses a connection from your provider limit, and providers disconnect clients that open too many at once. Podium manages that connection budget across your providers.
 
-**Provider lanes, not a channel queue.** Providers have different concurrency
-limits. Checking channel-by-channel means one saturated provider stalls
-everything while the others sit idle, so Podium treats a *stream* as the unit of
-work and gives each provider its own lane. That takes hours off a full pass on a
-multi-provider catalogue. Extra logins saved as profiles on a Dispatcharr M3U
-account get lanes of their own too, and Podium pools them: their connection
-caps add up, and each stream is drawn by one login, so a 3-connection login
-beside a 2-connection one gets through the catalogue five streams at a time.
+### Provider lanes instead of a channel queue
 
-**Caches against `stream_hash`.** Provider stream sets barely change between
-runs, so most probing is repeated for nothing. Podium re-probes only when
-Dispatcharr's `stream_hash` changes or the verdict ages out. (`updated_at` is
-useless for this: the M3U refresh bumps it on every stream every few minutes.)
+Providers have different concurrency limits. If you probe channel by channel, one full provider stalls the queue while other providers sit idle. Podium treats a stream as the unit of work and gives each provider its own lane. This cuts hours off a full pass on a multi-provider catalogue.
 
-**Paces against a freshness target, not a clock.** "Every channel checked within
-24 hours, using only spare provider capacity, and stopping the moment somebody
-starts watching" is what you actually want. A nightly batch hammers every
-provider whether or not anyone is streaming, and if it overruns it is still
-going at breakfast.
+Extra logins saved as profiles on a Dispatcharr M3U account also get their own lanes. Podium pools these lanes so their connection limits add up. Each stream uses one login. A 3-connection login and a 2-connection login together probe five streams at a time.
 
-The target is a floor, though, and the afternoon of a big game is when that
-shows: everything can be comfortably inside the window and still have been
-measured at four in the morning. A channel, a group, or the whole catalogue
-can be [queued for a re-check](docs/usage.md#re-checking-on-demand) whatever the
-cache says. It queues rather than probes, so the pass that does the work is still the
-paced one, and calling it off puts the existing verdicts straight back in
-service.
+### Caching against `stream_hash`
 
-![The progress view: a pass in flight, three provider lanes draining
-independently, and how fresh the library is](docs/images/progress.png)
+Provider stream lists rarely change between runs, so repeated probes waste connections. Podium re-probes a stream only when its `stream_hash` in Dispatcharr changes or when its verdict expires. Podium ignores `updated_at` because the M3U refresh updates it on every stream every few minutes.
 
-All three show up on one page: each provider lane drains against its own limit,
-the library tiles say how much of the catalogue is still inside the freshness
-target, and channels whose EPG says the match has not kicked off yet are held
-back rather than probed.
+### Pacing against a freshness target
+
+You want every channel checked within 24 hours, using only spare provider capacity, and stopping when someone starts watching. A nightly batch hits every provider even when someone is streaming, and if it runs late it is still running in the morning.
+
+The freshness target is a floor, not a guarantee of recent data. All streams can be inside the 24-hour window and still date from four in the morning before a big game. You can [queue a channel, a group, or the whole catalogue for a re-check](docs/usage.md#re-checking-on-demand) regardless of the cache. Queuing lets the paced pass do the work. If you cancel the re-check, Podium restores the previous verdicts.
+
+![The progress view that shows a pass in flight, three provider lanes draining independently, and library freshness](docs/images/progress.png)
+
+The Progress page shows all three views together. Each provider lane drains against its own limit, and the library tiles show how much of the catalogue is inside the freshness target. If a channel's EPG (electronic program guide) shows that the event starts later, Podium holds that channel instead of probing it.
 
 ## What it measures
 
-Resolution, bitrate, fps and codec, scored and weighted, with your own rule
-order winning first. Dead streams sink to the bottom, and so do streams below a
-bitrate floor or showing a black screen — a slate is not a fallback.
+Podium scores and weights resolution, bitrate, frame rate, and codec, while your own rule order always wins first. Dead streams, streams below a bitrate floor, and streams that show a black screen move to the bottom. A black screen or slate never acts as a fallback.
 
-Bitrate is *measured*, not read from the container: live TS/HLS almost never
-declares one. Podium reads a few seconds of the stream, which also gives it the
-black-screen check from the same read, so it costs one provider connection
-rather than two.
+Podium measures bitrate directly instead of reading container metadata, because live TS and HLS streams rarely declare a bitrate. It reads a few seconds of each stream and runs the black-screen check on the same read. Both checks together cost one provider connection.
 
-By default the measurement is taken at the provider, which is the cheapest and
-most direct reading there is. Turning on **Probe through Dispatcharr** takes it
-through Dispatcharr's proxy instead, so each probe arrives via the stream's own
-stream profile and measures what a viewer would actually receive — the account's
-user agent, the proxy mode, the transcode if there is one. Off by default,
-because it makes every probe a real Dispatcharr client holding a provider
-connection; [the trade-offs are
-here](docs/configuration.md#probing-through-dispatcharr).
+By default, Podium probes the provider directly for the fastest and cheapest reading. If you turn on "Probe through Dispatcharr" in Settings, Podium probes through Dispatcharr's proxy instead. Each probe then uses the stream's profile and measures what a viewer receives, including the account's user agent, proxy mode, and any transcode. This option is off by default because each probe acts as a Dispatcharr client that holds a provider connection. Read [the trade-offs for probing through Dispatcharr](docs/configuration.md#probing-and-soaking-through-dispatcharr).
 
-There is deliberately no loop detection. Catching a loop means watching for at
-least one loop period — around 120s per stream against the ~1s the other checks
-cost — for a failure far rarer than dead, black or throttled.
+Podium does not include loop detection. Catching a video loop requires watching a stream for at least one loop period. That takes around 120 seconds per stream, compared to ~1 second for the other checks.
 
 ## Who can reach it
 
-Podium has no login: it manages one Dispatcharr on your own network, and
-accounts would be ceremony. It does refuse the two things that can reach it
-without being on your network — a page you are visiting driving your browser at
-your LAN address, and a hostname that resolves to it. So cross-site writes are
-rejected, and it only answers to private addresses and names (plus anything you
-put in `PODIUM_ALLOWED_HOSTS`).
+Podium has no login because it manages one Dispatcharr instance on your local network. It blocks two external paths that can reach a local service: cross-site writes from a browser page, and hostnames that resolve to your LAN address. Podium rejects cross-site writes and answers only to private addresses and names, plus hosts you list in `PODIUM_ALLOWED_HOSTS`.
 
-That is not the same as being safe to expose. Anyone who can reach the port can
-reorder your channels, and it holds a Dispatcharr credential. Keep it on your
-network, and set `PODIUM_AUTH_TOKEN` if it goes anywhere else —
-[the details are here](docs/configuration.md#who-can-reach-it).
+Those protections do not make Podium safe to expose to the internet. Anyone who can reach the port can reorder your channels, and Podium holds a Dispatcharr credential. Keep Podium on your local network. If you expose it anywhere else, set `PODIUM_AUTH_TOKEN` and read [who can reach it](docs/configuration.md#who-can-reach-it).
 
 ## Documentation
 
-| guide | what is in it |
+| Guide | Contents |
 | --- | --- |
-| **[Usage](docs/usage.md)** | Matching streams to channels, section qualifiers, group policy, ranking, and importing existing rules |
-| **[Reading every verdict](docs/usage.md#reading-every-verdict)** | `GET /api/verdicts`: every managed channel's streams in slot order, each with its cached verdict and latest soak, in one read-only call |
-| **[Reading probe history](docs/usage.md#reading-probe-history)** | `GET /api/probe-history`: each stream's recent verdicts, newest first, kept for 30 days and 100 per stream — for chosen streams, or everything probed since a given time |
-| **[Quality priors and the Teamarr export](docs/usage.md#exporting-what-podium-learned)** | Ranking a stream nobody has measured yet, from what its account and its name have been worth before — and exporting that as Teamarr scoring rules, or checking the rules you already run against it |
-| **[Configuration](docs/configuration.md)** | Every environment variable, who can reach it, concurrency limits, and how to keep a settled install quiet |
-| **[Metrics and Grafana](docs/configuration.md#metrics)** | Scraping `/api/metrics`, comparing providers from it, and an [example dashboard](docs/grafana/podium-provider-quality.json) to import |
-| **[Name miner](docs/miner.md)** | Learning `regex` rules from stream names instead of a hand-picked vocabulary — thresholds, guards, and the evidence behind them |
-| **[Contributing](CONTRIBUTING.md)** | Development setup, and how PRs land given the mirror |
+| [Usage](docs/usage.md) | Matching streams to channels, section qualifiers, group policy, ranking, and importing existing rules |
+| [Reading every verdict](docs/usage.md#reading-every-verdict) | `GET /api/verdicts`: returns every managed channel's streams in slot order, with each stream's cached verdict and latest soak (stability check) |
+| [Reading probe history](docs/usage.md#reading-probe-history) | `GET /api/probe-history`: returns recent verdicts for chosen streams or since a given time, kept for 30 days and 100 entries per stream |
+| [Quality priors and the Teamarr export](docs/usage.md#exporting-what-podium-learned) | Ranking unmeasured streams from past account and name quality, exporting Teamarr scoring rules, and comparing existing Teamarr rules |
+| [Configuration](docs/configuration.md) | Environment variables, network access, concurrency limits, webhook notifications, and keeping a settled install quiet |
+| [Metrics and Grafana](docs/configuration.md#metrics) | Scraping `/api/metrics`, comparing providers, and importing the [example dashboard](docs/grafana/podium-provider-quality.json) |
+| [Name miner](docs/miner.md) | Learning `regex` rules from stream names, including thresholds, guards, and evidence |
+| [Contributing](CONTRIBUTING.md) | Development setup and how pull requests land through the mirror |
 
 ## Development
+
+Run the following commands to install dependencies, start the UI and worker, and run the tests:
 
 ```sh
 npm install
@@ -156,19 +100,14 @@ npm run worker         # the paced loop
 npm run test:run
 ```
 
-`ffmpeg` on `PATH` matters for the tests: without it they exercise the probe
-parser but not the real `ffprobe` path.
+The UI runs on port `3456`, and the worker runs the paced probe loop. Make sure that `ffmpeg` is on your `PATH` before you run the tests, because without it the tests skip the real `ffprobe` path.
 
 ## Contributing
 
-Issues and pull requests are welcome. Development happens on a self-hosted
-Forgejo instance and **GitHub is a push mirror**, so a PR is landed by replaying
-its commits upstream rather than merged on GitHub — see
-[CONTRIBUTING.md](CONTRIBUTING.md) for what that means in practice.
+Issues and pull requests are welcome. Development happens on a self-hosted Forgejo instance, and GitHub is a push mirror. Maintainers land pull requests by replaying commits upstream instead of merging on GitHub, as described in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Images: `:latest` and `:X.Y.Z` are releases; `:main` tracks the tip of `main` and
-is rebuilt on every push. amd64 only for now.
+Container images `:latest` and `:X.Y.Z` are releases, while `:main` tracks the tip of `main` on every push (`linux/amd64` and `linux/arm64`).
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Podium uses the MIT license. See [LICENSE](LICENSE) for the full text.
