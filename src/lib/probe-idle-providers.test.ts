@@ -357,6 +357,55 @@ describe('a watching pass, end to end', () => {
     expect(paths).toContain('/proxy/ts/status');
   });
 
+  it('skips repeated catalogues for completed no-op passes until refresh, activity, or due time changes', async () => {
+    const paths = stubDispatcharr(12);
+    const worker = runner();
+    const first = await worker.runOnce();
+    expect(first.paused).toBe(false);
+    expect(first.deferred).toBe(0);
+    expect(first.probed).toBe(0);
+
+    const crawls = () => paths.filter((path) => path === '/api/channels/streams/').length;
+    const statusChecks = () => paths.filter((path) => path === '/proxy/ts/status').length;
+    const crawlsBefore = crawls();
+    const statusBefore = statusChecks();
+    const runsBefore = store.recentRuns().length;
+
+    const second = await worker.runOnce();
+    const third = await worker.runOnce();
+    expect(second.paused).toBe(false);
+    expect(third.paused).toBe(false);
+    // Activity is still checked every pass; the stream catalogue is not.
+    expect(statusChecks()).toBe(statusBefore + 2);
+    expect(crawls()).toBe(crawlsBefore);
+    expect(store.recentRuns()).toHaveLength(runsBefore);
+
+    // Explicit refresh forces the crawl again.
+    store.setRefreshMark(-1);
+    await worker.runOnce();
+    expect(crawls()).toBe(crawlsBefore + 1);
+
+    // Next pass settles back into the cache; due time expiring forces a crawl.
+    await worker.runOnce();
+    expect(crawls()).toBe(crawlsBefore + 1);
+    worker.lastRun = { ...worker.lastRun!, nextDueAt: Date.now() - 1 };
+    await worker.runOnce();
+    expect(crawls()).toBe(crawlsBefore + 2);
+  });
+
+  it('does not treat a capacity-paused pass with deferred === 0 as a completed no-op', async () => {
+    const paths = stubDispatcharr(null);
+    const worker = runner();
+    const first = await worker.runOnce();
+    expect(first.paused).toBe(true);
+    expect(first.deferred).toBe(0);
+
+    const crawlsBefore = paths.filter((path) => path === '/api/channels/streams/').length;
+    const second = await worker.runOnce();
+    expect(second.paused).toBe(true);
+    expect(paths.filter((path) => path === '/api/channels/streams/').length).toBe(crawlsBefore + 1);
+  });
+
   it('skips repeated catalogues for deferred-only work until capacity or due time changes', async () => {
     const paths = stubDispatcharr(12);
     const worker = runner();
