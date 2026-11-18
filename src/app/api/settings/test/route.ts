@@ -82,7 +82,7 @@ export async function POST(request: Request) {
             streamUrlsRedacted: true,
             warning:
               'Upstream stream URLs from /api/channels/streams/ came back empty or redacted. ' +
-              'Direct-probe mode requires an admin or API-key credential with permission to read upstream stream URLs.',
+              'Podium requires an admin or API-key credential with permission to read upstream stream URLs.',
           }
         : {}),
       // Enough to prove it reached the right instance, not just something.
