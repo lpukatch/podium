@@ -123,7 +123,7 @@ jobs:
           format: sarif
           output: trivy-results-${{ matrix.arch }}.sarif
           exit-code: '1'
-          scanners: vuln
+          scanners: vuln,secret
           vuln-type: os,library
           severity: HIGH,CRITICAL
           ignore-unfixed: true

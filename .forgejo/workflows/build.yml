@@ -72,6 +72,12 @@ jobs:
           GITLEAKS_VERSION: "v8.30.1"
         run: tar -c --exclude=./node_modules . | docker run --rm -i --entrypoint /bin/sh "ghcr.io/gitleaks/gitleaks:${GITLEAKS_VERSION}" -ec 'mkdir -p /repo && tar -x -C /repo && cd /repo && exec gitleaks git --no-banner'
 
+      - name: Scan Dockerfile and compose config
+        env:
+          # renovate: datasource=docker depName=aquasec/trivy
+          TRIVY_VERSION: "0.76.2"
+        run: tar -c Dockerfile docker-compose.yml .trivyignore | docker run --rm -i --entrypoint /bin/sh "aquasec/trivy:${TRIVY_VERSION}" -ec 'mkdir -p /repo && tar -x -C /repo && exec trivy config --exit-code 1 --severity HIGH,CRITICAL --ignorefile /repo/.trivyignore /repo'
+
       - name: Lint and format check
         run: npm run format:check
 
@@ -183,7 +189,7 @@ jobs:
           TRIVY_PASSWORD: ${{ secrets.REGISTRY_TOKEN }}
           TRIVY_CACHE_DIR: /tmp/trivy-cache
         run: |
-          docker run --rm -e IMAGE_REF -e TRIVY_USERNAME -e TRIVY_PASSWORD -e TRIVY_CACHE_DIR -e PODIUM_TRIVY_IGNORES="$(cat .trivyignore)" --entrypoint /bin/sh "aquasec/trivy:${TRIVY_VERSION}" -ec 'printf "%s" "$PODIUM_TRIVY_IGNORES" > /tmp/.trivyignore; trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --scanners vuln --ignorefile /tmp/.trivyignore --format table --output /tmp/trivy-report.txt "$IMAGE_REF" || RC=$?; cat /tmp/trivy-report.txt || true; exit "${RC:-0}"' > trivy-report.txt || RC=$?
+          docker run --rm -e IMAGE_REF -e TRIVY_USERNAME -e TRIVY_PASSWORD -e TRIVY_CACHE_DIR -e PODIUM_TRIVY_IGNORES="$(cat .trivyignore)" --entrypoint /bin/sh "aquasec/trivy:${TRIVY_VERSION}" -ec 'printf "%s" "$PODIUM_TRIVY_IGNORES" > /tmp/.trivyignore; trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --scanners vuln,secret --ignorefile /tmp/.trivyignore --format table --output /tmp/trivy-report.txt "$IMAGE_REF" || RC=$?; cat /tmp/trivy-report.txt || true; exit "${RC:-0}"' > trivy-report.txt || RC=$?
           cat trivy-report.txt || true
           exit "${RC:-0}"
 
@@ -237,3 +243,24 @@ jobs:
           URL="${GITHUB_SERVER_URL}/api/packages/${GITHUB_REPOSITORY_OWNER}/generic/${GITHUB_REPOSITORY_NAME}-trivy/${GITHUB_SHA}/trivy-${REF}.txt"
           curl -fsS --retry 3 --connect-timeout 10 --max-time 120 -H "Authorization: token ${PACKAGE_TOKEN}" --upload-file trivy-report.txt "$URL"
           echo "Report saved to $URL"
+
+      - name: Summarize and attach scan report
+        if: always() && hashFiles('trivy-report.txt') != ''
+        continue-on-error: true
+        run: |
+          if [ -s trivy-report.txt ]; then
+            {
+              echo "### Trivy Image Scan"
+              echo '```'
+              cat trivy-report.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload scan artifact
+        if: always() && hashFiles('trivy-report.txt') != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report-${{ github.sha }}
+          path: trivy-report.txt

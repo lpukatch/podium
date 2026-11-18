@@ -68,6 +68,12 @@ jobs:
           GITLEAKS_VERSION: "v8.30.1"
         run: tar -c --exclude=./node_modules . | docker run --rm -i --entrypoint /bin/sh "ghcr.io/gitleaks/gitleaks:${GITLEAKS_VERSION}" -ec 'mkdir -p /repo && tar -x -C /repo && cd /repo && exec gitleaks git --no-banner'
 
+      - name: Scan Dockerfile and compose config
+        env:
+          # renovate: datasource=docker depName=aquasec/trivy
+          TRIVY_VERSION: "0.76.2"
+        run: tar -c Dockerfile docker-compose.yml .trivyignore | docker run --rm -i --entrypoint /bin/sh "aquasec/trivy:${TRIVY_VERSION}" -ec 'mkdir -p /repo && tar -x -C /repo && exec trivy config --exit-code 1 --severity HIGH,CRITICAL --ignorefile /repo/.trivyignore /repo'
+
       - name: Lint and format check
         run: npm run format:check
 
