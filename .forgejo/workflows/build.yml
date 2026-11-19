@@ -193,6 +193,22 @@ jobs:
           cat trivy-report.txt || true
           exit "${RC:-0}"
 
+      # Non-blocking unfiltered scan (no --ignore-unfixed): records unfixed OS
+      # CVEs alongside the fixable-vulnerability gate so there is a paper
+      # trail for media-parser / runtime dependencies.
+      - name: Scan candidate (unfiltered)
+        if: always() && steps.build.outputs.digest != ''
+        continue-on-error: true
+        env:
+          # renovate: datasource=docker depName=aquasec/trivy
+          TRIVY_VERSION: "0.76.2"
+          IMAGE_REF: ${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          TRIVY_USERNAME: ${{ vars.REGISTRY_USERNAME }}
+          TRIVY_PASSWORD: ${{ secrets.REGISTRY_TOKEN }}
+          TRIVY_CACHE_DIR: /tmp/trivy-cache
+        run: |
+          docker run --rm -e IMAGE_REF -e TRIVY_USERNAME -e TRIVY_PASSWORD -e TRIVY_CACHE_DIR -e PODIUM_TRIVY_IGNORES="$(cat .trivyignore)" --entrypoint /bin/sh "aquasec/trivy:${TRIVY_VERSION}" -ec 'printf "%s" "$PODIUM_TRIVY_IGNORES" > /tmp/.trivyignore; trivy image --exit-code 0 --severity HIGH,CRITICAL --scanners vuln,secret --ignorefile /tmp/.trivyignore --format table --output /tmp/trivy-report-unfiltered.txt "$IMAGE_REF"; cat /tmp/trivy-report-unfiltered.txt || true' > trivy-report-unfiltered.txt || true
+
       # Only publishing events may promote; stale main builds skip :main and
       # older releases never overwrite aliases belonging to newer Git tags.
       - name: Plan promotion
@@ -243,6 +259,11 @@ jobs:
           URL="${GITHUB_SERVER_URL}/api/packages/${GITHUB_REPOSITORY_OWNER}/generic/${GITHUB_REPOSITORY_NAME}-trivy/${GITHUB_SHA}/trivy-${REF}.txt"
           curl -fsS --retry 3 --connect-timeout 10 --max-time 120 -H "Authorization: token ${PACKAGE_TOKEN}" --upload-file trivy-report.txt "$URL"
           echo "Report saved to $URL"
+          if [ -s trivy-report-unfiltered.txt ]; then
+            UNFILTERED_URL="${GITHUB_SERVER_URL}/api/packages/${GITHUB_REPOSITORY_OWNER}/generic/${GITHUB_REPOSITORY_NAME}-trivy/${GITHUB_SHA}/trivy-${REF}-unfiltered.txt"
+            curl -fsS --retry 3 --connect-timeout 10 --max-time 120 -H "Authorization: token ${PACKAGE_TOKEN}" --upload-file trivy-report-unfiltered.txt "$UNFILTERED_URL"
+            echo "Unfiltered report saved to $UNFILTERED_URL"
+          fi
 
       - name: Summarize and attach scan report
         if: always() && hashFiles('trivy-report.txt') != ''
@@ -263,4 +284,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: trivy-report-${{ github.sha }}
-          path: trivy-report.txt
+          path: trivy-report*.txt

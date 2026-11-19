@@ -68,3 +68,10 @@ test('the package token is documented for the events that scan', () => {
   // PR pipelines publish nothing, so they never need it.
   assert.doesNotMatch(docs, /PACKAGE_TOKEN.*pull_request/);
 });
+
+test('unfiltered trivy report is generated non-blocking and uploaded alongside the gated report', () => {
+  const build = read('.forgejo/workflows/build.yml');
+  assert.match(build, /- name: Scan candidate \(unfiltered\)/);
+  assert.match(build, /--format table --output \/tmp\/trivy-report-unfiltered\.txt/);
+  assert.match(build, /trivy-\$\{REF\}-unfiltered\.txt/);
+});
