@@ -83,10 +83,14 @@ export async function readText(
 export async function readJson<T = unknown>(
   request: Request,
   limit: number = MAX_BODY_BYTES,
-  options: { allowArray?: boolean } = {},
+  options: { allowArray?: boolean; allowEmpty?: boolean } = {},
 ): Promise<ParsedBody<T>> {
   const read = await readText(request, limit);
+  if (!read.ok && read.status === 400 && options.allowEmpty && !request.body) {
+    return { ok: true, value: {} as T };
+  }
   if (!read.ok) return read;
+  if (options.allowEmpty && !read.value.trim()) return { ok: true, value: {} as T };
   try {
     const value = JSON.parse(read.value) as T;
     if (

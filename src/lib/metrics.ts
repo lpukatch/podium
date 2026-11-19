@@ -11,7 +11,7 @@
  */
 
 import { DEAD_REASONS, type DeadReason, deadReason, type ProbeResult } from './probe';
-import { DEFAULT_WEIGHTS, isUsable, score } from './scoring';
+import { belowBitrateFloor, DEFAULT_WEIGHTS, isUsable, score } from './scoring';
 import { channelStability, dropsPerHour, MIN_FAILURES } from './stability';
 import { type Progress, STALE_LOCK_MS, type Store } from './store';
 import { VERSION } from './version';
@@ -49,6 +49,7 @@ const PHASES: Array<Progress['phase']> = [
   'fetching',
   'planning',
   'probing',
+  'soaking',
   'paused',
   'done',
   'failed',
@@ -478,12 +479,11 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
     // The same precedence `isUsable` applies when ranking: dead first, then a
     // black screen, then an honest-but-starved bitrate. 'alive' is therefore
     // exactly "would rank as usable", not merely "answered ffprobe".
-    const stateOf = (result: ProbeResult | undefined): ProviderStreamState => {
+    const stateOf = (result: ProbeResult | undefined, audioOnly = false): ProviderStreamState => {
       if (!result) return 'unmeasured';
       if (!result.alive) return 'dead';
       if (result.black) return 'black';
-      if (result.bitrateKbps > 0 && result.bitrateKbps < weights.minBitrateKbps)
-        return 'low_bitrate';
+      if (belowBitrateFloor(result, weights, audioOnly)) return 'low_bitrate';
       return 'alive';
     };
     const resolutionOf = (
@@ -527,7 +527,8 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
       const entry = rank1.get(row.providerName) ?? { total: 0, healthy: 0 };
       entry.total += 1;
       const verdict = verdicts.get(row.streamId)?.result;
-      if (verdict && isUsable(verdict, weights)) entry.healthy += 1;
+      if (verdict && isUsable(verdict, weights, verdicts.get(row.streamId)?.audioOnly))
+        entry.healthy += 1;
       rank1.set(row.providerName, entry);
     }
 
@@ -546,7 +547,7 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
       for (const streamId of providerStreams) {
         const cached = verdicts.get(streamId);
         const verdict = cached?.result;
-        const state = stateOf(verdict);
+        const state = stateOf(verdict, cached?.audioOnly);
         states.set(state, (states.get(state) ?? 0) + 1);
         const resolution = resolutionOf(verdict, state);
         resolutions.set(resolution, (resolutions.get(resolution) ?? 0) + 1);
@@ -558,7 +559,8 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
         // Only the streams that would actually rank contribute a score: `score`
         // returns 0 for everything else, and a median dragged toward 0 by dead
         // streams would double-count what the state family already says.
-        if (verdict && isUsable(verdict, weights)) scores.push(score(verdict, weights));
+        if (verdict && isUsable(verdict, weights, cached?.audioOnly))
+          scores.push(score(verdict, weights, cached?.audioOnly));
         // Only a bitrate the probe actually read counts toward the stats: a
         // declared one is exactly the number this section exists not to trust.
         if (verdict?.bitrateMeasured && verdict.bitrateKbps > 0) {
@@ -699,7 +701,7 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
           'Verdict state of the stream in this slot.',
           'gauge',
           1,
-          { ...channel, state: stateOf(verdict) },
+          { ...channel, state: stateOf(verdict, verdicts.get(row.streamId)?.audioOnly) },
         );
         out.add(
           'podium_channel_source_height_pixels',

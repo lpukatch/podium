@@ -1348,7 +1348,11 @@ export class Runner {
         pruneDeletedChannelRules(
           rulesPath,
           channels.map((c) => c.id),
-          async (id) => (await client.channel(id)) === null,
+          async (id) => {
+            if ((await client.channel(id)) !== null) return false;
+            this.deps.store.clearDeletedChannelState(id);
+            return true;
+          },
         ),
       );
       if (outcome?.refused) {

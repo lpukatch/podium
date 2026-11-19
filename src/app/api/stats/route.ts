@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
 import { responseErrorText } from '@/lib/error-text';
-import { DEFAULT_WEIGHTS, isUsable } from '@/lib/scoring';
+import { belowBitrateFloor, DEFAULT_WEIGHTS, isUsable } from '@/lib/scoring';
 import { resolveEnv } from '@/lib/settings';
 import { STALE_LOCK_MS, Store } from '@/lib/store';
 
@@ -42,7 +42,7 @@ export function GET() {
           ? 'dead'
           : result.black
             ? 'black'
-            : result.bitrateKbps > 0 && result.bitrateKbps < weights.minBitrateKbps
+            : belowBitrateFloor(result, weights, verdicts.get(streamId)?.audioOnly)
               ? 'low_bitrate'
               : 'alive';
       states[state]++;
@@ -54,7 +54,7 @@ export function GET() {
       const provider = primaryByProvider.get(row.providerName) ?? { primary: 0, healthy: 0 };
       provider.primary++;
       const verdict = verdicts.get(row.streamId)?.result;
-      if (verdict && isUsable(verdict, weights)) {
+      if (verdict && isUsable(verdict, weights, verdicts.get(row.streamId)?.audioOnly)) {
         provider.healthy++;
         healthyPrimary++;
       }

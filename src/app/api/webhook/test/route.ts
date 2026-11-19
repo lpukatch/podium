@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { loadConfig } from '@/lib/config';
+import { readJson } from '@/lib/http-body';
 import { createWebhook } from '@/lib/notify';
 import { mergeForTest, resolveEnv, validateSettings } from '@/lib/settings';
 import { Store } from '@/lib/store';
@@ -35,7 +36,13 @@ const noopLog = (): void => {};
 export async function POST(request: Request) {
   let store: Store | null = null;
   try {
-    const patch = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const parsed = await readJson<Record<string, unknown>>(request, undefined, {
+      allowEmpty: true,
+    });
+    if (!parsed.ok) {
+      return NextResponse.json({ ok: false, error: parsed.message }, { status: parsed.status });
+    }
+    const patch = parsed.value;
     const { values, errors } = validateSettings(patch);
     if (errors.length > 0) {
       return NextResponse.json({ ok: false, error: errors[0]?.message ?? 'invalid' });

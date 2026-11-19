@@ -130,9 +130,10 @@ export interface Webhook {
   /**
    * Fire-and-forget: queues the delivery and returns immediately, so a slow
    * or dead consumer never delays the pass that raised the event. Subject to
-   * the flood guard; failures are logged, never thrown.
+   * the flood guard; failures are logged, never thrown. Returns true only
+   * when accepted for delivery, not when disabled or flood-limited.
    */
-  send: (event: WebhookEvent) => void;
+  send: (event: WebhookEvent) => boolean;
   /**
    * Deliver and wait, reporting the outcome. The test route's path: the
    * settings page is asking "does this URL answer", which is exactly the
@@ -217,6 +218,7 @@ export function createWebhook(config: () => Config, log: Log): Webhook {
     try {
       const response = await fetch(url, {
         method: 'POST',
+        redirect: 'error',
         signal: controller.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(webhookPayload(event)),
@@ -240,11 +242,12 @@ export function createWebhook(config: () => Config, log: Log): Webhook {
     }
   };
 
-  const send = (event: WebhookEvent): void => {
-    if (!underLimit()) return;
+  const send = (event: WebhookEvent): boolean => {
+    if (!config().PODIUM_WEBHOOK_URL.trim() || !underLimit()) return false;
     void deliver(event).then((out) => {
       if (!out.ok) log(`webhook delivery failed: ${out.error}`);
     });
+    return true;
   };
 
   return { send, deliver };
@@ -299,7 +302,7 @@ export interface SweepOutcome {
  */
 export function sweepDegraded(
   store: DegradedStore,
-  notify: { send: (event: WebhookEvent) => void },
+  notify: Pick<Webhook, 'send'>,
   now = Date.now(),
 ): SweepOutcome {
   const degraded = store.degradedChannels();
@@ -317,7 +320,7 @@ export function sweepDegraded(
       channel.leadStreamId === null
         ? 'unmeasured'
         : store.streamVerdictStatus(channel.leadStreamId);
-    notify.send({
+    const accepted = notify.send({
       event: 'channel_down',
       channelId: channel.channelId,
       channelName: channel.channelName,
@@ -328,6 +331,7 @@ export function sweepDegraded(
         status: status === 'live' ? 'unmeasured' : (status ?? 'unmeasured'),
       },
     });
+    if (!accepted) continue;
     store.notifyStateSet(key, channel.channelName, now);
     announced += 1;
   }
@@ -343,7 +347,7 @@ export function sweepDegraded(
       continue;
     }
     const lead = store.catalogueLead(id);
-    notify.send({
+    const accepted = notify.send({
       event: 'channel_recovered',
       channelId: id,
       // The name as it was when the channel went down: the catalogue may no
@@ -352,6 +356,7 @@ export function sweepDegraded(
       channelName: row.value,
       lead,
     });
+    if (!accepted) continue;
     store.notifyStateDelete(row.key);
     recovered += 1;
   }

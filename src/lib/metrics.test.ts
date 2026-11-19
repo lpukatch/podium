@@ -117,10 +117,10 @@ describe('renderMetrics', () => {
     expect(m.get('podium_worker_running')).toBe(0);
   });
 
-  it('emits one phase series per phase with exactly one set', () => {
+  it.each(['probing', 'soaking'] as const)('emits one-hot phase series while %s', (phase) => {
     store.setProgress({
       runId: 'r1',
-      phase: 'probing',
+      phase,
       startedAt: NOW,
       probed: 12,
       total: 40,
@@ -139,7 +139,7 @@ describe('renderMetrics', () => {
       message: '',
     });
     const m = parse(renderMetrics(store, { maxAgeMs: 3600_000, now: NOW }));
-    expect(m.get('podium_run_phase{phase="probing"}')).toBe(1);
+    expect(m.get(`podium_run_phase{phase="${phase}"}`)).toBe(1);
     expect(m.get('podium_run_phase{phase="idle"}')).toBe(0);
     expect(m.get('podium_run_probed')).toBe(12);
     expect(m.get('podium_run_deferred')).toBe(5);
@@ -370,6 +370,26 @@ describe('renderMetrics', () => {
   });
 
   describe('provider quality', () => {
+    it('reports low-bitrate radio as healthy without exempting video streams', () => {
+      store.replaceCatalogue(
+        [
+          row(10, 'Radio', 0, 1, 'Provider A'),
+          row(11, 'Video', 0, 2, 'Provider A'),
+          row(12, 'Audio', 0, 3, 'Provider A'),
+        ],
+        null,
+      );
+      store.put(1, 'h', alive({ bitrateKbps: 128 }), 0, true);
+      store.put(2, 'h', alive({ bitrateKbps: 128 }));
+      store.put(3, 'h', alive({ bitrateKbps: 128, videoCodec: '', height: 0 }));
+      expect(store.verdicts([1]).get(1)?.audioOnly).toBe(true);
+      const m = parse(renderMetrics(store, { maxAgeMs: 3600_000, channelMetrics: true }));
+      expect(m.get('podium_provider_streams{provider="Provider A",state="alive"}')).toBe(2);
+      expect(m.get('podium_provider_streams{provider="Provider A",state="low_bitrate"}')).toBe(1);
+      expect(m.get('podium_provider_rank1_healthy{provider="Provider A"}')).toBe(2);
+      expect(m.get('podium_channel_source_state{channel_id="10",slot="0",state="alive"}')).toBe(1);
+    });
+
     /** A catalogue row, positional for brevity below. */
     const row = (
       channelId: number,
