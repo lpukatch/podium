@@ -5,6 +5,51 @@ import { Store } from './store';
 afterEach(() => vi.useRealTimers());
 
 describe('store maintenance cadence', () => {
+  const soak = {
+    heldMs: 1000,
+    drops: 0,
+    failedDials: 0,
+    unreachable: false,
+    legs: [],
+    stopped: false,
+  };
+
+  it('prunes orphaned soak summaries, including streams with no cached probe', () => {
+    const store = new Store(':memory:');
+    try {
+      for (const id of [1, 2, 3]) store.recordSoakResult(id, soak);
+      expect(store.pruneOutside(new Set())).toBe(0);
+      expect(store.soakResults([1, 2, 3]).size).toBe(3);
+      store.put(2, 'h', { alive: true } as ProbeResult);
+      expect(store.pruneOutside(new Set([1]))).toBe(1);
+      expect([...store.soakResults([1, 2, 3]).keys()]).toEqual([1]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('expires old soak summaries on the maintenance cadence', () => {
+    vi.useFakeTimers();
+    const now = 1_800_000_000_000;
+    vi.setSystemTime(now - 30 * 86_400_000);
+    const store = new Store(':memory:');
+    try {
+      store.recordSoakResult(1, soak);
+      vi.setSystemTime(now);
+      store.recordSoakResult(2, soak);
+      store.startRun('first');
+      expect(store.soakResults([1, 2]).size).toBe(2);
+      vi.advanceTimersByTime(60_000);
+      store.startRun('second');
+      expect(store.soakResults([1, 2]).size).toBe(2);
+      vi.advanceTimersByTime(14 * 60_000);
+      store.startRun('third');
+      expect([...store.soakResults([1, 2]).keys()]).toEqual([2]);
+    } finally {
+      store.close();
+    }
+  });
+
   it('prunes with more retained IDs than the SQLite variable limit', () => {
     const store = new Store(':memory:');
     try {

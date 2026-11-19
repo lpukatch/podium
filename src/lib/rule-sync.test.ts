@@ -229,6 +229,10 @@ describe('a pass', () => {
   it('removes the rules for deleted channels even when it then pauses', async () => {
     writeRules(tenRules());
     stubDispatcharr(allBut(2, 7));
+    for (const id of [1, 2, 7]) {
+      store.blockAssignment(id, 100);
+      store.setChannelRefreshMark(id);
+    }
     const lines: string[] = [];
 
     const summary = await new Runner({
@@ -240,6 +244,10 @@ describe('a pass', () => {
 
     expect(summary.paused).toBe(true);
     expect(ids()).toEqual(allBut(2, 7));
+    expect([...store.assignBlocks(1)]).toEqual([100]);
+    expect(store.assignBlocks(2).size).toBe(0);
+    expect(store.assignBlocks(7).size).toBe(0);
+    expect([...store.refreshMarks().byChannel.keys()]).toEqual([1]);
     expect(lines.join('\n')).toContain(
       'removed 2 rules for channels deleted in Dispatcharr: 2 (Channel 2), 7 (Channel 7)',
     );

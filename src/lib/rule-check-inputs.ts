@@ -9,7 +9,7 @@
  */
 
 import { loadConfig } from './config';
-import { assignmentIsRule, Eligibility } from './eligibility';
+import { assignmentIsRule, channelIsAudioOnly, Eligibility } from './eligibility';
 import { resolveOrdering } from './ordering';
 import { channelResolutionCeiling, channelResolutionFloor } from './resolution';
 import type { RankStrategy } from './scoring';
@@ -97,7 +97,7 @@ export function checkInputs(snap: Snapshot, store: Store): CheckInputs {
     channels.push({
       channelId: channel.id,
       channelName: channel.name,
-      audioOnly: policy.audioOnly,
+      audioOnly: channelIsAudioOnly(policy, channel),
       // Teamarr orders what it creates: the groups marked measure-only, or
       // ranked off their own assignment. Its rules reach nothing else.
       managed: Boolean(policy.measureOnly) || assignmentIsRule(policy.mode),

@@ -99,13 +99,14 @@ describe('deliver', () => {
   });
 
   function stubFetch(response: { status?: number; throw?: Error } = {}) {
-    const calls: Array<{ url: string; body: string; contentType?: string }> = [];
-    globalThis.fetch = (async (url: string, init?: { body?: string; headers?: unknown }) => {
+    const calls: Array<{ url: string; body: string; contentType?: string; redirect?: string }> = [];
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
       if (response.throw) throw response.throw;
       calls.push({
         url: String(url),
         body: String(init?.body),
         contentType: (init?.headers as Record<string, string>)?.['Content-Type'],
+        redirect: init?.redirect,
       });
       return { status: response.status ?? 201 } as Response;
     }) as unknown as typeof fetch;
@@ -126,6 +127,7 @@ describe('deliver', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe('https://ntfy.example/podium-topic');
     expect(calls[0]?.contentType).toBe('application/json');
+    expect(calls[0]?.redirect).toBe('error');
     const body = JSON.parse(calls[0]?.body ?? '{}');
     expect(body.source).toBe('podium');
     expect(body.event).toBe('run_failed');
@@ -189,6 +191,51 @@ describe('send and the flood guard', () => {
   const originalFetch = globalThis.fetch;
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    vi.useRealTimers();
+  });
+
+  it('does not fetch, log, or consume flood tokens while disabled', async () => {
+    const fetch = vi.fn(async () => new Response());
+    globalThis.fetch = fetch;
+    const log = vi.fn();
+    let url = '   ';
+    const webhook = createWebhook(() => loadConfig({ PODIUM_WEBHOOK_URL: url }), log);
+    for (let i = 0; i < WEBHOOK_FLOOD_LIMIT + 5; i++) {
+      expect(webhook.send({ event: 'test' })).toBe(false);
+    }
+    await settle();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+    url = 'https://ntfy.example/podium';
+    for (let i = 0; i < WEBHOOK_FLOOD_LIMIT; i++) {
+      expect(webhook.send({ event: 'test' })).toBe(true);
+    }
+    expect(webhook.send({ event: 'test' })).toBe(false);
+    await settle();
+    expect(fetch).toHaveBeenCalledTimes(WEBHOOK_FLOOD_LIMIT);
+  });
+
+  it('retries flood-limited down and recovery transitions on a later sweep', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_800_000_000_000);
+    globalThis.fetch = vi.fn(async () => new Response());
+    const webhook = createWebhook(
+      () => loadConfig({ PODIUM_WEBHOOK_URL: 'https://ntfy.example/podium' }),
+      () => {},
+    );
+    const store = stubDegradedStore(
+      Array.from({ length: WEBHOOK_FLOOD_LIMIT + 1 }, (_, i) => degradedRow(i + 1)),
+    );
+    expect(sweepDegraded(store, webhook).announced).toBe(WEBHOOK_FLOOD_LIMIT);
+    expect(store.state.size).toBe(WEBHOOK_FLOOD_LIMIT);
+    vi.advanceTimersByTime(60_000);
+    expect(sweepDegraded(store, webhook).announced).toBe(1);
+    store.degradedChannels = () => [];
+    expect(sweepDegraded(store, webhook).recovered).toBe(WEBHOOK_FLOOD_LIMIT - 1);
+    expect(store.state.size).toBe(2);
+    vi.advanceTimersByTime(60_000);
+    expect(sweepDegraded(store, webhook).recovered).toBe(2);
+    expect(store.state.size).toBe(0);
   });
 
   it('sends without blocking and logs a failed delivery instead of throwing', async () => {
@@ -279,11 +326,30 @@ const degradedRow = (channelId: number) => ({
 });
 
 describe('sweepDegraded', () => {
-  const notify = (): { events: WebhookEvent[]; send: (event: WebhookEvent) => void } => {
+  const notify = (): { events: WebhookEvent[]; send: (event: WebhookEvent) => boolean } => {
     const events: WebhookEvent[] = [];
-    return { events, send: (event) => events.push(event) };
+    return {
+      events,
+      send: (event) => {
+        events.push(event);
+        return true;
+      },
+    };
   };
 
+  it('preserves pending down and recovery transitions while notifications are disabled', () => {
+    const webhook = createWebhook(() => loadConfig({ PODIUM_WEBHOOK_URL: '' }), vi.fn());
+    const store = stubDegradedStore([degradedRow(7)]);
+    expect(sweepDegraded(store, webhook)).toEqual({ announced: 0, recovered: 0 });
+    expect(store.state.size).toBe(0);
+    const sink = notify();
+    expect(sweepDegraded(store, sink).announced).toBe(1);
+    store.degradedChannels = () => [];
+    expect(sweepDegraded(store, webhook).recovered).toBe(0);
+    expect(store.state.size).toBe(1);
+    expect(sweepDegraded(store, sink).recovered).toBe(1);
+    expect(store.state.size).toBe(0);
+  });
   it('announces a channel entering the down state, once', () => {
     const store = stubDegradedStore([degradedRow(7)]);
     const sink = notify();

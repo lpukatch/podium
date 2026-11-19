@@ -2008,6 +2008,7 @@ export class Store {
       // `pruneOutside`.
       this.sql('DELETE FROM probe_history WHERE probed_at < ?').run(now - PROBE_HISTORY_MS);
       this.sql('DELETE FROM probe_cache WHERE probed_at < ?').run(now - 30 * 86_400_000);
+      this.sql('DELETE FROM soak_results WHERE completed_at < ?').run(now - 30 * 86_400_000);
     })();
     // A failed transaction must leave maintenance due for the next attempt.
     if (maintenance) this.lastMaintenanceAt = now;
@@ -2078,8 +2079,11 @@ export class Store {
    */
   verdicts(
     streamIds: number[],
-  ): Map<number, { probedAt: number; alive: boolean; result: ProbeResult }> {
-    const out = new Map<number, { probedAt: number; alive: boolean; result: ProbeResult }>();
+  ): Map<number, { probedAt: number; alive: boolean; result: ProbeResult; audioOnly: boolean }> {
+    const out = new Map<
+      number,
+      { probedAt: number; alive: boolean; result: ProbeResult; audioOnly: boolean }
+    >();
     if (streamIds.length === 0) return out;
 
     // Chunked to stay under SQLite's bound-variable limit on a large channel.
@@ -2089,7 +2093,7 @@ export class Store {
       // Not cached: one bind hole per id, so the text varies with the chunk.
       const rawRows = this.db
         .prepare(
-          `SELECT rowid AS row_id, stream_id, stream_hash, variant_id, probed_at, alive, result FROM probe_cache
+          `SELECT rowid AS row_id, stream_id, stream_hash, variant_id, probed_at, alive, result, audio_only FROM probe_cache
            WHERE stream_id IN (${holes})`,
         )
         .all(...chunk) as Array<{
@@ -2100,6 +2104,7 @@ export class Store {
         probed_at: number;
         alive: number;
         result: string;
+        audio_only: number;
       }>;
       const newestByStream = new Map<number, (typeof rawRows)[number]>();
       for (const row of rawRows) {
@@ -2130,12 +2135,13 @@ export class Store {
             // An unreadable row is simply an unknown verdict.
           }
         }
-        const best = pickBestVariant(verdicts);
+        const audioOnly = Boolean(newestByStream.get(streamId)?.audio_only);
+        const best = pickBestVariant(verdicts, undefined, audioOnly);
         if (best) {
           // The newest verdict any login contributed: "when did we last look
           // at this stream through any of its logins".
           const probedAt = entries.reduce((max, e) => Math.max(max, e.row.probed_at), 0);
-          out.set(streamId, { probedAt, alive: best.alive, result: best });
+          out.set(streamId, { probedAt, alive: best.alive, result: best, audioOnly });
         }
       }
     }
@@ -4226,6 +4232,14 @@ export class Store {
     })();
   }
 
+  /** Remove local assignment state only after an upstream deletion is confirmed. */
+  clearDeletedChannelState(channelId: number): void {
+    this.db.transaction(() => {
+      this.sql('DELETE FROM assign_blocks WHERE channel_id = ?').run(channelId);
+      this.sql('DELETE FROM channel_refresh_marks WHERE channel_id = ?').run(channelId);
+    })();
+  }
+
   /**
    * Drop cache rows for streams no longer managed, so a stream that was probed
    * and then excluded, unmatched, or removed from every lineup does not linger
@@ -4278,6 +4292,9 @@ export class Store {
       // alone: it is what the pass logs as orphan cache rows.
       this.sql(
         'DELETE FROM probe_history WHERE stream_id NOT IN (SELECT id FROM _podium_keep)',
+      ).run();
+      this.sql(
+        'DELETE FROM soak_results WHERE stream_id NOT IN (SELECT id FROM _podium_keep)',
       ).run();
       return this.sql(
         'DELETE FROM probe_cache WHERE stream_id NOT IN (SELECT id FROM _podium_keep)',

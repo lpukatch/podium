@@ -18,6 +18,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { POST } from '@/app/api/webhook/test/route';
+import { MAX_BODY_BYTES } from '@/lib/http-body';
 import { Store } from '@/lib/store';
 
 const originalFetch = globalThis.fetch;
@@ -70,6 +71,71 @@ describe('the webhook test gate', () => {
     // commitment -- which is this same call with nothing saved.
     expect(calls).toHaveLength(0);
   });
+
+  it('rejects an oversized chunked body before attempting delivery', async () => {
+    process.env.PODIUM_WEBHOOK_URL = 'https://ntfy.example/saved';
+    const calls = stubFetch();
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(1024 * 1024));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const request = new Request('http://podium:3456/api/webhook/test', {
+      method: 'POST',
+      body,
+      duplex: 'half',
+    } as RequestInit);
+    expect(request.headers.has('content-length')).toBe(false);
+    const response = await POST(request);
+    expect(response.status).toBe(413);
+    expect(cancelled).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('rejects a declared oversized body even if no body arrives', async () => {
+    const response = await POST(
+      new Request('http://podium:3456/api/webhook/test', {
+        method: 'POST',
+        headers: { 'Content-Length': String(MAX_BODY_BYTES + 1) },
+      }),
+    );
+    expect(response.status).toBe(413);
+  });
+
+  it.each(['not JSON', 'null', '[]', '"text"'])(
+    'rejects invalid settings body %s',
+    async (body) => {
+      const calls = stubFetch();
+      const response = await POST(
+        new Request('http://podium:3456/api/webhook/test', {
+          method: 'POST',
+          body,
+        }),
+      );
+      expect(response.status).toBe(400);
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  it.each([undefined, '', '   '])(
+    'allows an empty body (%s) to test the saved URL',
+    async (body) => {
+      process.env.PODIUM_WEBHOOK_URL = 'https://ntfy.example/saved';
+      const calls = stubFetch();
+      const response = await POST(
+        new Request('http://podium:3456/api/webhook/test', {
+          method: 'POST',
+          body,
+        }),
+      );
+      expect((await response.json()).ok).toBe(true);
+      expect(calls).toHaveLength(1);
+    },
+  );
 
   it('tests the URL as typed once something is already saved', async () => {
     const store = new Store(join(dir, 'podium.db'));
