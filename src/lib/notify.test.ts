@@ -158,6 +158,24 @@ describe('deliver', () => {
     expect(out.error).toContain('ECONNREFUSED');
   });
 
+  it('refuses to follow a redirect instead of posting to wherever it points', async () => {
+    // The URL is validated before the post, but whatever answers it is not
+    // this install's choice: a 302 to somewhere else does not get the event
+    // -- or a retry of it -- delivered. `redirect: 'error'` makes fetch
+    // refuse the hop itself; what surfaces is the same could-not-reach shape
+    // every other refusal produces, never a follow.
+    let redirectMode: string | undefined;
+    const blocked = new TypeError('fetch failed');
+    globalThis.fetch = (async (_url: string, init?: { redirect?: string }) => {
+      redirectMode = init?.redirect;
+      throw blocked;
+    }) as unknown as typeof fetch;
+    const out = await webhook().deliver({ event: 'test' });
+    expect(redirectMode).toBe('error');
+    expect(out.ok).toBe(false);
+    expect(out.error).toBe('Could not reach the webhook');
+  });
+
   it('does nothing when no URL is set', async () => {
     const calls = stubFetch();
     const off = createWebhook(

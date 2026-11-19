@@ -187,4 +187,42 @@ describe('the webhook test gate', () => {
     expect(String(body.error)).toMatch(/no credentials/);
     expect(calls).toHaveLength(0);
   });
+
+  it('bounds the body it reads: a body over the cap answers 413 before the gate', async () => {
+    // This route was the last `request.json()` in the API -- a chunked body
+    // declares no length, so the proxy's door never stopped it and the read
+    // buffered whatever arrived. readJson stops at actual bytes now, the way
+    // every other route already did.
+    const store = new Store(join(dir, 'podium.db'));
+    store.setSettings({ PODIUM_WEBHOOK_URL: 'https://ntfy.example/saved-topic' });
+    store.close();
+
+    const calls = stubFetch();
+    const resp = await POST(
+      new Request('http://podium:3456/api/webhook/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          PODIUM_WEBHOOK_URL: 'https://x.example/'.padEnd(5 * 1024 * 1024 + 1, 'x'),
+        }),
+      }),
+    );
+    const body = await resp.json();
+    expect(resp.status).toBe(413);
+    expect(String(body.error)).toContain('Request body too large');
+    // Refused before anything is tested or delivered.
+    expect(calls).toHaveLength(0);
+  });
+
+  it('reads an empty body as an empty patch, the shrug it always was', async () => {
+    const calls = stubFetch();
+    const resp = await POST(new Request('http://podium:3456/api/webhook/test', { method: 'POST' }));
+    const body = await resp.json();
+    // An empty patch validates to nothing, so the decision still falls to the
+    // configured URL first: with nothing set and nothing saved, the route
+    // answers the same "No webhook URL is set" an empty object always did.
+    expect(body.ok).toBe(false);
+    expect(String(body.error)).toContain('No webhook URL is set');
+    expect(calls).toHaveLength(0);
+  });
 });
