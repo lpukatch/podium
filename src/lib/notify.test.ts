@@ -307,6 +307,61 @@ describe('send and the flood guard', () => {
     const floodLines = log.mock.calls.filter((args) => String(args[0]).includes('flood guard'));
     expect(floodLines).toHaveLength(1);
   });
+
+  it('reports whether an event was accepted for delivery', () => {
+    const webhook = createWebhook(
+      () => loadConfig({ PODIUM_WEBHOOK_URL: 'https://ntfy.example/podium' }),
+      () => {},
+    );
+    for (let i = 0; i < WEBHOOK_FLOOD_LIMIT; i += 1) {
+      expect(webhook.send({ event: 'test' })).toBe(true);
+    }
+    // The next one over the limit is dropped, and the caller can tell.
+    expect(webhook.send({ event: 'test' })).toBe(false);
+  });
+
+  it('stays silent when no URL is configured: no fetch, no log, no flood token', async () => {
+    const calls: string[] = [];
+    globalThis.fetch = (async (url: string) => {
+      calls.push(String(url));
+      return { status: 200 } as Response;
+    }) as unknown as typeof fetch;
+    const log = vi.fn();
+    let url = '';
+    const webhook = createWebhook(() => loadConfig({ PODIUM_WEBHOOK_URL: url }), log);
+
+    // Well past the flood limit, all with notifications off: if any of these
+    // spent a token, the burst would log a flood line and the first real
+    // event after the URL lands would be dropped with it.
+    const outcomes: boolean[] = [];
+    for (let i = 0; i < WEBHOOK_FLOOD_LIMIT + 5; i += 1) {
+      outcomes.push(
+        webhook.send({
+          event: 'channel_updated',
+          channelId: i,
+          channelName: `C${i}`,
+          reordered: true,
+          added: [],
+          removed: [],
+          lead: null,
+          was: null,
+        }),
+      );
+    }
+    await settle();
+    expect(outcomes).toEqual(Array(WEBHOOK_FLOOD_LIMIT + 5).fill(false));
+    expect(calls).toHaveLength(0);
+    // Not even a flood-guard or delivery-failed line: silence is the
+    // configured state, not a failure to log.
+    expect(log).not.toHaveBeenCalled();
+
+    // The URL arrives: the very next event delivers, because the silent
+    // events never spent a token.
+    url = 'https://ntfy.example/podium';
+    expect(webhook.send({ event: 'test' })).toBe(true);
+    await settle();
+    expect(calls).toEqual(['https://ntfy.example/podium']);
+  });
 });
 
 /** A two-method store stub with just enough state for the sweep. */
@@ -434,6 +489,61 @@ describe('sweepDegraded', () => {
     expect(out).toEqual({ announced: 0, recovered: 0 });
     expect(sink.events).toHaveLength(0);
     expect(store.state.has('channel_down:not-a-number')).toBe(false);
+  });
+
+  it('leaves a down transition unconsumed when the send is not accepted', () => {
+    // The live failure this pins: an install with no webhook URL watched
+    // notify_state fill with channel_down:* rows nobody would ever hear
+    // about -- the tracking row was written whether or not the send went
+    // anywhere. A send that reports not-accepted (URL unset, flood guard
+    // dropping) must leave the transition for the next pass instead.
+    const store = stubDegradedStore([degradedRow(7)]);
+    const events: WebhookEvent[] = [];
+    let accepting = false;
+    const sink = {
+      send: (event: WebhookEvent): boolean => {
+        events.push(event);
+        return accepting;
+      },
+    };
+
+    const dropped = sweepDegraded(store, sink, 1000);
+    expect(dropped).toEqual({ announced: 0, recovered: 0 });
+    expect(events).toHaveLength(1); // the send was attempted...
+    expect(store.state.size).toBe(0); // ...but consumed nothing.
+
+    // The URL arrives mid-outage: the next pass announces the still-down
+    // channel and tracks it from then on.
+    accepting = true;
+    const heard = sweepDegraded(store, sink, 2000);
+    expect(heard).toEqual({ announced: 1, recovered: 0 });
+    expect(store.state.get(channelDownKey(7))?.value).toBe('Channel 7');
+  });
+
+  it('holds a recovery until a send is accepted, then releases it', () => {
+    const store = stubDegradedStore([degradedRow(7)]);
+    sweepDegraded(store, notify(), 1000);
+    expect(store.state.has(channelDownKey(7))).toBe(true);
+
+    store.degradedChannels = () => [];
+    const events: WebhookEvent[] = [];
+    let accepting = false;
+    const sink = {
+      send: (event: WebhookEvent): boolean => {
+        events.push(event);
+        return accepting;
+      },
+    };
+
+    const held = sweepDegraded(store, sink, 2000);
+    expect(held).toEqual({ announced: 0, recovered: 0 });
+    expect(store.state.has(channelDownKey(7))).toBe(true);
+
+    accepting = true;
+    const released = sweepDegraded(store, sink, 3000);
+    expect(released).toEqual({ announced: 0, recovered: 1 });
+    expect(events.filter((e) => e.event === 'channel_recovered')).toHaveLength(2);
+    expect(store.state.has(channelDownKey(7))).toBe(false);
   });
 });
 
