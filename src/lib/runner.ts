@@ -1560,11 +1560,13 @@ export class Runner {
       const previous = this.lastRun;
       const context = this.catalogueContext;
       const now = Date.now();
+      // The recent context is the catalogue freshness guard. Probing alone
+      // does not make its stream list stale; remaining deferred work can wait
+      // on the capacity already described by that unchanged context.
       const catalogueUnchanged =
         !activity.probeFailed &&
         previous !== null &&
         context !== null &&
-        previous.probed === 0 &&
         previous.runnableBacklog === 0 &&
         previous.reordered === 0 &&
         previous.assigned === 0 &&

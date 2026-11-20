@@ -432,6 +432,27 @@ describe('a watching pass, end to end', () => {
     expect(crawls()).toBe(before + 1);
   });
 
+  it('skips the catalogue after a working pass leaves only capacity-deferred work', async () => {
+    const paths = stubDispatcharr(12);
+    const worker = runner();
+    const previous = await worker.runOnce();
+    worker.lastRun = {
+      ...previous,
+      probed: 1,
+      runnableBacklog: 0,
+      deferred: 5,
+      soakBacklog: 0,
+      nextDueAt: Date.now() + 60_000,
+      nextEligibleAt: null,
+    };
+
+    const crawls = () => paths.filter((path) => path === '/api/channels/streams/').length;
+    const before = crawls();
+
+    expect((await worker.runOnce()).paused).toBe(true);
+    expect(crawls()).toBe(before);
+  });
+
   it('re-fetches the catalogue when activity changes after deferred-only work', async () => {
     stubDispatcharr(12);
     const worker = runner();
