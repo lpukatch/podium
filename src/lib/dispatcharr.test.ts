@@ -549,26 +549,38 @@ describe('resource mapping', () => {
   });
 
   it('reads active channel ids in every shape the proxy returns', async () => {
-    stubFetch(() => ({
-      body: { channels: [7, { channel_id: 8 }, { id: 9 }, { channel: 10 }] },
-    }));
-    const ids = await new DispatcharrClient('http://d', { apiKey: 'k' }).activeChannelIds();
-    expect(ids).toEqual([7, 8, 9, 10]);
+    const { calls } = stubFetch(({ url }) =>
+      url.endsWith('/proxy/stats/')
+        ? { status: 404 }
+        : { body: { channels: [7, { channel_id: 8 }, { id: 9 }, { channel: 10 }] } },
+    );
+    const client = new DispatcharrClient('http://d', { apiKey: 'k' });
+    expect(await client.activeChannelIds()).toEqual([7, 8, 9, 10]);
+    expect(await client.activeChannelIds()).toEqual([7, 8, 9, 10]);
+    expect(calls.map(({ url }) => new URL(url).pathname)).toEqual([
+      '/proxy/stats/',
+      '/proxy/ts/status',
+      '/proxy/ts/status',
+    ]);
   });
 
   it('resolves active channel UUIDs using uuidMap', async () => {
-    stubFetch(() => ({
-      body: {
-        channels: [
-          {
-            channel_id: 'f08f5325-8fc2-4668-b765-37f90877828a',
-            state: 'playing',
-            stream_id: 94950,
+    stubFetch(({ url }) =>
+      url.endsWith('/proxy/stats/')
+        ? { status: 404 }
+        : {
+            body: {
+              channels: [
+                {
+                  channel_id: 'f08f5325-8fc2-4668-b765-37f90877828a',
+                  state: 'playing',
+                  stream_id: 94950,
+                },
+              ],
+              count: 1,
+            },
           },
-        ],
-        count: 1,
-      },
-    }));
+    );
     const uuidMap = new Map([['f08f5325-8fc2-4668-b765-37f90877828a', 46802]]);
     const ids = await new DispatcharrClient('http://d', { apiKey: 'k' }).activeChannelIds(uuidMap);
     expect(ids).toEqual([46802]);
@@ -578,17 +590,21 @@ describe('resource mapping', () => {
     // Dispatcharr picks a profile per session and reports it as
     // `m3u_profile_id`. It is what lets a viewer be charged to the lane they
     // are really occupying rather than guessed onto the default one.
-    stubFetch(() => ({
-      body: {
-        channels: [
-          { channel_id: 8, m3u_profile_id: 9 },
-          { channel_id: 10, m3u_profile_id: '5' },
-          { channel_id: 11 },
-          12,
-        ],
-        count: 4,
-      },
-    }));
+    stubFetch(({ url }) =>
+      url.endsWith('/proxy/stats/')
+        ? { status: 404 }
+        : {
+            body: {
+              channels: [
+                { channel_id: 8, m3u_profile_id: 9 },
+                { channel_id: 10, m3u_profile_id: '5' },
+                { channel_id: 11 },
+                12,
+              ],
+              count: 4,
+            },
+          },
+    );
     const sessions = await new DispatcharrClient('http://d', { apiKey: 'k' }).activeSessions();
     // The pairing is what this is about; sessions also carry the stability
     // fields, which are null on a payload that names none of them.
@@ -601,15 +617,79 @@ describe('resource mapping', () => {
     ]);
   });
 
-  it('raises a DispatcharrError on shape mismatch when channels are active but cannot be resolved', async () => {
+  it('retains playback that cannot be matched to a catalogue channel', async () => {
     stubFetch(() => ({
       body: {
-        channels: [{ channel_id: 'f08f5325-8fc2-4668-b765-37f90877828a' }],
-        count: 1,
+        live: {
+          channels: [{ channel_id: 'f08f5325-8fc2-4668-b765-37f90877828a', m3u_profile_id: 5 }],
+          count: 1,
+        },
+        vod: { vod_connections: [], total_connections: 0 },
+        catchup: { timeshift_sessions: [], total_connections: 0 },
       },
     }));
     const client = new DispatcharrClient('http://d', { apiKey: 'k' });
-    await expect(client.activeChannelIds()).rejects.toThrow(/0 channel IDs resolved/);
+    expect(await client.activeSessions()).toMatchObject([{ channelId: null, profileId: 5 }]);
+    expect(await client.activeChannelIds()).toEqual([]);
+  });
+
+  it('counts live HLS once per channel and catch-up/VOD once per connection', async () => {
+    const { calls } = stubFetch(() => ({
+      body: {
+        live: {
+          channels: [
+            {
+              channel_id: 8,
+              m3u_profile_id: 5,
+              clients: [{ output_format: 'hls' }, { output_format: 'mpegts' }],
+            },
+            { channel_id: 9, clients: [{ user_agent: 'Podium-Probe/1' }] },
+          ],
+          count: 2,
+        },
+        vod: {
+          vod_connections: [
+            {
+              connection_count: 2,
+              connections: [{ m3u_profile_id: '6' }, { m3u_profile_id: null }],
+            },
+          ],
+          total_connections: 2,
+        },
+        catchup: {
+          timeshift_sessions: [{ channel_id: 17, connections: [{ m3u_profile_id: 7 }] }],
+          total_connections: 1,
+        },
+      },
+    }));
+    const client = new DispatcharrClient('http://d', { apiKey: 'k' });
+    const sessions = await client.activeSessions(undefined, { ignoreUserAgent: 'Podium-Probe/1' });
+    expect(sessions.map((s) => [s.channelId, s.profileId, s.kind])).toEqual([
+      [8, 5, undefined],
+      [null, 6, 'VOD'],
+      [null, null, 'VOD'],
+      [17, 7, 'catch-up'],
+    ]);
+    expect(calls.map(({ url }) => new URL(url).pathname)).toEqual(['/proxy/stats/']);
+  });
+
+  it('fails closed when combined stats claim a connection they did not include', async () => {
+    stubFetch(() => ({
+      body: {
+        live: { channels: [] },
+        vod: { vod_connections: [], total_connections: 1 },
+        catchup: { timeshift_sessions: [], total_connections: 0 },
+      },
+    }));
+    const client = new DispatcharrClient('http://d', { apiKey: 'k' });
+    await expect(client.activeSessions()).rejects.toThrow('Incomplete VOD playback stats');
+  });
+
+  it('does not fall back to live-only stats on authorization failure', async () => {
+    const { calls } = stubFetch(() => ({ status: 403 }));
+    const client = new DispatcharrClient('http://d', { apiKey: 'k' });
+    await expect(client.activeSessions()).rejects.toThrow('playback stats -> 403');
+    expect(calls.map(({ url }) => new URL(url).pathname)).toEqual(['/proxy/stats/']);
   });
 
   it('treats an unreadable EPG grid as empty rather than fatal', async () => {

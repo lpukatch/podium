@@ -82,8 +82,12 @@ describe('the soak phase', () => {
       const url = String(input);
       const body = url.includes('/accounts/token/')
         ? { access: 'a', refresh: 'r' }
-        : url.includes('/proxy/ts/status')
-          ? { channels: [], count: 0 }
+        : url.includes('/proxy/stats/')
+          ? {
+              live: { channels: [] },
+              vod: { vod_connections: [] },
+              catchup: { timeshift_sessions: [] },
+            }
           : url.includes('/m3u/accounts/')
             ? {
                 count: 1,

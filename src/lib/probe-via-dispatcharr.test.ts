@@ -43,13 +43,13 @@ describe('proxyStreamUrl', () => {
     // stream_hash, which is what lets a stream be probed without being
     // attached to a channel at all.
     expect(proxyStreamUrl('http://dispatcharr:9191', 'abc123')).toBe(
-      'http://dispatcharr:9191/proxy/ts/stream/abc123',
+      'http://dispatcharr:9191/proxy/ts/stream/abc123?output_format=mpegts',
     );
   });
 
   it('tolerates a base URL with a trailing slash', () => {
     expect(proxyStreamUrl('http://dispatcharr:9191/', 'abc123')).toBe(
-      'http://dispatcharr:9191/proxy/ts/stream/abc123',
+      'http://dispatcharr:9191/proxy/ts/stream/abc123?output_format=mpegts',
     );
   });
 
@@ -62,7 +62,9 @@ describe('proxyStreamUrl', () => {
   });
 
   it('escapes the hash rather than pasting it into the path', () => {
-    expect(proxyStreamUrl('http://d', 'a/../b')).toBe('http://d/proxy/ts/stream/a%2F..%2Fb');
+    expect(proxyStreamUrl('http://d', 'a/../b')).toBe(
+      'http://d/proxy/ts/stream/a%2F..%2Fb?output_format=mpegts',
+    );
   });
 
   it('has no address for a stream with no hash', () => {
@@ -86,7 +88,9 @@ describe('probeTargetUrl', () => {
   });
 
   it('probes through Dispatcharr when a base is given', () => {
-    expect(probeTargetUrl(variant, 'abc123', 'http://d')).toBe('http://d/proxy/ts/stream/abc123');
+    expect(probeTargetUrl(variant, 'abc123', 'http://d')).toBe(
+      'http://d/proxy/ts/stream/abc123?output_format=mpegts',
+    );
   });
 
   it('falls back to the provider URL for a stream with no hash', () => {
@@ -119,8 +123,8 @@ describe('probeTargetUrl', () => {
     // Dispatcharr picks, the probe occupies exactly one connection on the
     // account -- which is what the lane charged it.
     expect(drawn.map((v) => probeTargetUrl(v, 'abc123', 'http://d'))).toEqual([
-      'http://d/proxy/ts/stream/abc123',
-      'http://d/proxy/ts/stream/abc123',
+      'http://d/proxy/ts/stream/abc123?output_format=mpegts',
+      'http://d/proxy/ts/stream/abc123?output_format=mpegts',
     ]);
   });
 });
@@ -153,7 +157,11 @@ describe('activeSessions with Podium as a client', () => {
       vi.fn(async () => ({
         ok: true,
         status: 200,
-        json: async () => body,
+        json: async () => ({
+          live: body,
+          vod: { vod_connections: [], total_connections: 0 },
+          catchup: { timeshift_sessions: [], total_connections: 0 },
+        }),
         text: async () => JSON.stringify(body),
       })),
     );
@@ -232,6 +240,6 @@ describe('activeSessions with Podium as a client', () => {
     });
     await expect(
       client().activeSessions(undefined, { ignoreUserAgent: 'Podium-Probe/1' }),
-    ).rejects.toThrow(/0 channel IDs resolved/);
+    ).rejects.toThrow('Incomplete live playback stats');
   });
 });

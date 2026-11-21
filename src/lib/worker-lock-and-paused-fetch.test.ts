@@ -295,8 +295,17 @@ describe('a pass that will pause does not fetch the catalogue', () => {
       paths.push(new URL(url).pathname);
       const body = url.includes('/accounts/token/')
         ? { access: 'a', refresh: 'r' }
-        : url.includes('/proxy/ts/status')
-          ? { channels: busy ? [{ channel_id: 1 }] : [], count: busy ? 1 : 0 }
+        : url.includes('/proxy/stats/')
+          ? {
+              live: { channels: [], count: 0 },
+              vod: { vod_connections: [], total_connections: 0 },
+              catchup: {
+                timeshift_sessions: busy
+                  ? [{ channel_id: 1, connections: [{ m3u_profile_id: 12 }] }]
+                  : [],
+                total_connections: busy ? 1 : 0,
+              },
+            }
           : url.includes('/m3u/accounts/')
             ? { count: 1, next: null, results: [{ id: 5, name: 'P', max_streams: 3 }] }
             : { count: 0, next: null, results: [] };
@@ -317,7 +326,7 @@ describe('a pass that will pause does not fetch the catalogue', () => {
       rules: new RulesSource(join(dir, 'rules.json')),
     });
 
-  it('skips the stream catalogue when someone is watching', async () => {
+  it('skips the stream catalogue when someone is watching catch-up only', async () => {
     const paths = stubDispatcharr(true);
     const summary = await runner().runOnce();
 
@@ -327,7 +336,7 @@ describe('a pass that will pause does not fetch the catalogue', () => {
     // away, at the exact moment Dispatcharr is busy serving the viewer.
     expect(paths).not.toContain('/api/channels/streams/');
     expect(paths).toContain('/api/channels/channels/');
-    expect(paths).toContain('/proxy/ts/status');
+    expect(paths).toContain('/proxy/stats/');
   });
 
   it('still fetches it when nobody is watching', async () => {
@@ -415,8 +424,12 @@ describe('stop drains the pass in flight', () => {
       }
       const body = url.includes('/accounts/token/')
         ? { access: 'a', refresh: 'r' }
-        : url.includes('/proxy/ts/status')
-          ? { channels: [], count: 0 }
+        : url.includes('/proxy/stats/')
+          ? {
+              live: { channels: [] },
+              vod: { vod_connections: [] },
+              catchup: { timeshift_sessions: [] },
+            }
           : {
               count: 1,
               next: null,

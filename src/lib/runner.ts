@@ -910,8 +910,8 @@ export interface LaneBudgets {
  * The viewer arithmetic is the part worth explaining. There are three counts
  * of the same thing and they disagree in exactly the cases that matter.
  *
- * `viewersByProfile` is the good one: `/proxy/ts/status` names the M3U profile
- * Dispatcharr chose for each live session, so a viewer is charged to the lane
+ * `viewersByProfile` is the good one: playback stats name the M3U profile
+ * Dispatcharr chose for each session, so a viewer is charged to the lane
  * they are really occupying. `current_viewers` on the profile row claims to
  * say the same thing, but it is a database column rather than Dispatcharr's
  * live connection accounting -- on the builds checked it is never written, so
@@ -976,7 +976,7 @@ export function laneBudgets(
 
 /** What `watchForViewers` needs to tell an arrival from the sitting tenant. */
 export interface ViewerGuard {
-  /** M3U profile id -> provider id, for placing a live session on an account. */
+  /** M3U profile id -> provider id, for placing a playback session on an account. */
   providerOfProfile: Map<number, number>;
   /** Providers this pass opened lanes on. Nothing else can be disturbed by it. */
   open: Set<number>;
@@ -2652,10 +2652,10 @@ export class Runner {
     channelIds: Set<number>;
     idle: boolean;
     probeFailed: boolean;
-    /** Live sessions per M3U profile id, for the lanes to charge them to. */
+    /** Playback sessions per M3U profile id, for the lanes to charge them to. */
     viewersByProfile: Map<number, number>;
     /**
-     * Live sessions Dispatcharr named no M3U profile for.
+     * Playback sessions Dispatcharr named no M3U profile for.
      *
      * Only `probeIdleProviders` cares. Everything else treats the viewer
      * counts as a budget, where an unplaceable session is absorbed by the
@@ -2676,7 +2676,9 @@ export class Runner {
         viewersByProfile.set(session.profileId, (viewersByProfile.get(session.profileId) ?? 0) + 1);
       }
       return {
-        channelIds: new Set(sessions.map((session) => session.channelId)),
+        channelIds: new Set(
+          sessions.flatMap((session) => (session.channelId === null ? [] : [session.channelId])),
+        ),
         idle: sessions.length === 0,
         probeFailed: false,
         viewersByProfile,
@@ -2731,7 +2733,8 @@ export class Runner {
           const sessions = await client.activeSessions(uuidMap, activityOptions(config));
           const first = guard ? blockingSession(sessions, guard) : sessions[0];
           if (first && !abort.aborted) {
-            log(`viewer started on channel ${first.channelId} -- stopping this pass`);
+            const playback = first.kind ?? `channel ${first.channelId}`;
+            log(`viewer started on ${playback} -- stopping this pass`);
             abort.abort();
           }
         } catch {

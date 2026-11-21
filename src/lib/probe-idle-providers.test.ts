@@ -300,8 +300,12 @@ describe('a watching pass, end to end', () => {
       if (profileId !== null) session.m3u_profile_id = profileId;
       const body = url.includes('/accounts/token/')
         ? { access: 'a', refresh: 'r' }
-        : url.includes('/proxy/ts/status')
-          ? { channels: [session], count: 1 }
+        : url.includes('/proxy/stats/')
+          ? {
+              live: { channels: [session], count: 1 },
+              vod: { vod_connections: [] },
+              catchup: { timeshift_sessions: [] },
+            }
           : url.includes('/m3u/accounts/')
             ? {
                 count: 2,
@@ -354,7 +358,7 @@ describe('a watching pass, end to end', () => {
     // The saving the plain pause makes, deliberately given up: the lanes to
     // leave alone cannot be worked out without these.
     expect(paths).toContain('/api/channels/streams/');
-    expect(paths).toContain('/proxy/ts/status');
+    expect(paths).toContain('/proxy/stats/');
   });
 
   it('skips repeated catalogues for completed no-op passes until refresh, activity, or due time changes', async () => {
@@ -366,7 +370,7 @@ describe('a watching pass, end to end', () => {
     expect(first.probed).toBe(0);
 
     const crawls = () => paths.filter((path) => path === '/api/channels/streams/').length;
-    const statusChecks = () => paths.filter((path) => path === '/proxy/ts/status').length;
+    const statusChecks = () => paths.filter((path) => path === '/proxy/stats/').length;
     const crawlsBefore = crawls();
     const statusBefore = statusChecks();
     const runsBefore = store.recentRuns().length;

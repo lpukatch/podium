@@ -135,7 +135,7 @@ export interface Provider {
 }
 
 /**
- * One live playback session, as `/proxy/ts/status` reports it.
+ * One occupied playback connection, including live, catch-up, and VOD.
  *
  * `profileId` is null when the payload does not name a login -- an entry that
  * is a bare channel id, or a build that does not carry `m3u_profile_id`. The
@@ -150,8 +150,10 @@ export interface Provider {
  * from. See `stability.ts`.
  */
 export interface ActiveSession {
-  channelId: number;
+  /** VOD has no live channel to protect from a reorder. */
+  channelId: number | null;
   profileId: number | null;
+  kind?: 'catch-up' | 'VOD';
   /**
    * The stream currently feeding the channel, from Redis metadata.
    *
@@ -234,6 +236,39 @@ function statusNumber(val: unknown): number | null {
   if (typeof val !== 'string' || val.trim() === '') return null;
   const n = Number(val);
   return Number.isFinite(n) ? n : null;
+}
+
+function statusRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/** The stats API groups connections by title (VOD) or session (catch-up). */
+function otherPlaybackSessions(value: unknown, kind: 'catch-up' | 'VOD'): ActiveSession[] {
+  const section = statusRecord(value);
+  const groups = section?.[kind === 'VOD' ? 'vod_connections' : 'timeshift_sessions'];
+  if (!Array.isArray(groups)) throw new DispatcharrError(`Invalid ${kind} playback stats`);
+
+  const sessions: ActiveSession[] = [];
+  for (const value of groups) {
+    const group = statusRecord(value);
+    if (!Array.isArray(group?.connections)) {
+      throw new DispatcharrError(`Invalid ${kind} playback connections`);
+    }
+    const channelId = kind === 'catch-up' ? statusNumber(group.channel_id) : null;
+    for (const connection of group.connections) {
+      const profileId = statusNumber(statusRecord(connection)?.m3u_profile_id);
+      sessions.push({ channelId, profileId, kind });
+    }
+    if ((statusNumber(group.connection_count) ?? 0) > group.connections.length) {
+      throw new DispatcharrError(`Incomplete ${kind} playback connections`);
+    }
+  }
+  if ((statusNumber(section?.total_connections) ?? 0) > sessions.length) {
+    throw new DispatcharrError(`Incomplete ${kind} playback stats`);
+  }
+  return sessions;
 }
 
 /**
@@ -465,7 +500,9 @@ export function proxyStreamUrl(
   // cosmetic difference -- and a 404 here reads as a dead stream, which is the
   // worst way for this to fail: every stream on the install ranks as dead and
   // nothing says why.
-  return `${base}/proxy/ts/stream/${encodeURIComponent(streamHash.trim())}`;
+  // The path alone can still pick up Dispatcharr's default of native HLS.
+  // Ask for a continuous MPEG-TS response so closing ffprobe closes the client.
+  return `${base}/proxy/ts/stream/${encodeURIComponent(streamHash.trim())}?output_format=mpegts`;
 }
 
 /**
@@ -638,6 +675,7 @@ export class DispatcharrClient {
   private refreshToken: string | null = null;
   private authPromise: Promise<void> | null = null;
   private refreshPromise: Promise<boolean> | null = null;
+  private combinedStatsUnavailable = false;
 
   constructor(
     baseUrl: string,
@@ -729,6 +767,7 @@ export class DispatcharrClient {
       const bulk =
         path.startsWith('/api/channels/') ||
         path.startsWith('/api/epg/') ||
+        path === '/proxy/stats/' ||
         path.startsWith('/proxy/ts/status');
       return await boundedResponse(response, bulk ? BULK_RESPONSE_BYTES : CONTROL_RESPONSE_BYTES);
     } finally {
@@ -1147,21 +1186,46 @@ export class DispatcharrClient {
    * profile per session and reports which one, so a viewer can be charged to
    * the lane they are actually occupying rather than guessed at.
    *
-   * Sessions whose channel id could not be resolved are dropped, and a payload
-   * that had entries but resolved none of them throws. Both are deliberate and
-   * both are for the pacer: it fails closed on a viewer it cannot place, and a
-   * silent empty list here would read as "nobody is watching" and let a pass
-   * probe straight over them. `liveChannels` makes the opposite trade -- see
-   * there.
+   * Pace all playback, not just live channels. A live session without a
+   * catalogue match still occupies a connection, just like VOD. `liveChannels`
+   * is the live-only read for the stability ledger.
    */
   async activeSessions(
     uuidMap?: Map<string, number> | Record<string, number>,
     options?: StatusOptions,
   ): Promise<ActiveSession[]> {
-    const { rawCount, ignoredCount, channels } = await this.liveStatus(uuidMap, options);
+    let live: ReturnType<typeof parseStatusPayload>;
+    let other: ActiveSession[] = [];
+    // A client is reused by the in-pass viewer watcher. Older Dispatcharr
+    // builds without combined stats only need one capability check per client.
+    if (this.combinedStatsUnavailable) {
+      live = await this.liveStatus(uuidMap, options);
+    } else {
+      const resp = await this.request('GET', '/proxy/stats/');
+      if (resp.status === 404) {
+        this.combinedStatsUnavailable = true;
+        live = await this.liveStatus(uuidMap, options);
+      } else {
+        if (!resp.ok) throw new DispatcharrError(`playback stats -> ${resp.status}`);
+        const body = statusRecord(await resp.json());
+        const liveStats = statusRecord(body?.live);
+        if (!Array.isArray(liveStats?.channels)) {
+          throw new DispatcharrError('Invalid live playback stats');
+        }
+        live = parseStatusPayload(
+          { channels: liveStats.channels, count: statusNumber(liveStats.count) ?? undefined },
+          uuidMap,
+          options,
+        );
+        other = [
+          ...otherPlaybackSessions(body?.vod, 'VOD'),
+          ...otherPlaybackSessions(body?.catchup, 'catch-up'),
+        ];
+      }
+    }
+    const { rawCount, ignoredCount, channels } = live;
     const sessions: ActiveSession[] = [];
     for (const channel of channels) {
-      if (channel.channelId === null) continue;
       sessions.push({
         channelId: channel.channelId,
         profileId: channel.profileId,
@@ -1174,25 +1238,18 @@ export class DispatcharrClient {
       });
     }
 
-    if (rawCount - ignoredCount > 0 && sessions.length === 0) {
-      throw new DispatcharrError(
-        `active channel probe status payload had ${rawCount} active entry/entries but 0 channel IDs resolved`,
-      );
+    if (rawCount - ignoredCount > sessions.length) {
+      throw new DispatcharrError('Incomplete live playback stats');
     }
-    return sessions;
+    return [...sessions, ...other];
   }
 
   /**
    * The same poll, as the stability ledger wants it.
    *
-   * Two differences from `activeSessions`, both because the ledger's failure
-   * mode is the opposite one. It keys legs on the endpoint's own channel key
-   * rather than on a resolved numeric id, so it needs no channel catalogue and
-   * can run on a ten-second timer without fetching one -- and it returns what
-   * it could read rather than throwing when nothing resolved, because a poll
-   * that comes back unreadable should cost the ledger one sample, not stop it.
-   * Missing a session is a gap in a rate; for the pacer it would be a viewer
-   * probed over.
+   * It keys legs on the endpoint's own channel key rather than on a resolved
+   * numeric id, so it can run without a catalogue, and it returns what it can
+   * read even when some entries are malformed.
    */
   async liveChannels(
     uuidMap?: Map<string, number> | Record<string, number>,
@@ -1217,7 +1274,9 @@ export class DispatcharrClient {
     uuidMap?: Map<string, number> | Record<string, number>,
     options?: StatusOptions,
   ): Promise<number[]> {
-    return (await this.activeSessions(uuidMap, options)).map((session) => session.channelId);
+    return (await this.activeSessions(uuidMap, options)).flatMap((session) =>
+      session.channelId === null ? [] : [session.channelId],
+    );
   }
 
   /**

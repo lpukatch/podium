@@ -304,7 +304,7 @@ describe('probeTargetUrl', () => {
 
   it('routes a hashed stream through Dispatcharr after the login is drawn', () => {
     expect(probeTargetUrl(variant, 'stream/123', 'http://dispatcharr:9191/')).toBe(
-      'http://dispatcharr:9191/proxy/ts/stream/stream%2F123',
+      'http://dispatcharr:9191/proxy/ts/stream/stream%2F123?output_format=mpegts',
     );
   });
 

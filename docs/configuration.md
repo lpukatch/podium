@@ -292,9 +292,11 @@ It needs `PODIUM_PROBE_IDLE_PROVIDERS` on, which in turn needs
 
 By default the measurement is taken directly at the provider URL. Set `PODIUM_PROBE_VIA_DISPATCHARR=true` to probe `/proxy/ts/stream/<stream_hash>` through Dispatcharr instead, measuring the stream profile, proxy mode, account user agent and any transcode a viewer receives. Set `PODIUM_SOAK_VIA_DISPATCHARR=true` to hold that same playback path open during soaks; it is off by default to preserve direct soak behaviour. Proxy routing is useful when the origin behaves differently from playback or when the transcode is what should be ranked.
 
-Every proxy probe or soak becomes a real Dispatcharr client and holds a provider connection while it runs. Set Dispatcharr's channel shutdown delay to `0` so that connection is released when the connection ends. Streams without a hash continue to connect directly.
+Each proxy probe or soak holds a provider connection while it runs. Podium requests MPEG-TS so the probe does not leave a native HLS session open after it stops. Set Dispatcharr's channel shutdown delay to `0` to release the connection when playback ends. Streams without a hash continue to connect directly.
 
 Proxy probes identify themselves with `PODIUM_PROBE_CLIENT_USER_AGENT`. Keep its value unique: Podium excludes sessions whose clients all carry that agent from pacing and stability reads, but retains sessions shared with a real viewer.
+
+Podium uses Dispatcharr's combined playback stats to count live playback, including native HLS, as well as catch-up and video on demand (VOD). If an older version of Dispatcharr does not have the combined endpoint, Podium counts only live playback.
 
 #### Recommended Dispatcharr settings
 
@@ -314,10 +316,9 @@ served, for how long, and when it failed over — the failure a five-second prob
 cannot see. See [Stability](usage.md#stability-the-failure-a-check-cannot-see)
 for what it does with that.
 
-On by default, and cheap to be: it is one small GET against `/proxy/ts/status`,
-an endpoint the worker already calls, and it writes a row only when a viewing
-*ends*, so an install nobody is watching writes nothing at all. Rows age out
-after a fortnight.
+Stability is on by default. It makes one small GET request to `/proxy/ts/status`
+per poll and writes a row only when a live viewing session ends. Rows expire
+after two weeks.
 
 Collecting is deliberately separate from acting on it. The Stability weight on
 the Ranking page decides whether any of this changes an order, and it starts at
