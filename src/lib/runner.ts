@@ -9,6 +9,7 @@
  * in-flight probes drain.
  */
 
+import { publishCatalogueSnapshot } from './catalogue-snapshot';
 import type { Config } from './config';
 import { DeferralLog } from './deferral-log';
 import { type ActiveSession, type Channel, DispatcharrClient, type Stream } from './dispatcharr';
@@ -1239,6 +1240,8 @@ export class Runner {
    * per-pass line buried everything else in the log across a viewing evening.
    */
   private readonly deferredLog = new DeferralLog();
+  /** Channel orders written during this pass, flushed to catalogue.json once. */
+  private catalogueOrdersPending = false;
   private progress: Omit<Progress, 'updatedAt'> = {
     runId: null,
     phase: 'idle',
@@ -1380,6 +1383,7 @@ export class Runner {
     // Dispatcharr, so overlap is refused rather than queued.
     if (this.running) throw new Error('a run is already in progress');
     this.running = true;
+    this.catalogueOrdersPending = false;
 
     const config = this.deps.config();
 
@@ -2588,6 +2592,7 @@ export class Runner {
       this.emit({ phase: 'failed', message: errorText(error).slice(0, 200) });
       throw error;
     } finally {
+      this.flushCatalogueOrders(config.cataloguePath);
       this.activeAbort = null;
       this.running = false;
     }
@@ -4157,6 +4162,12 @@ export class Runner {
         );
       }
       await client.setStreamOrder(channelId, writeOrder);
+      try {
+        this.deps.store.recordCatalogueOrder(channelId, writeOrder);
+        this.catalogueOrdersPending = true;
+      } catch (error) {
+        log(`catalogue order update failed for channel ${channelId}: ${errorText(error)}`);
+      }
       // Named, like the two lines above. "12 reordered" on the pass line says
       // nothing about which channels moved or what a viewer now gets first,
       // and that is the question somebody reading the log is asking.
@@ -4219,6 +4230,12 @@ export class Runner {
     } catch (error) {
       log(`reorder failed for channel ${channelId}: ${errorText(error)}`);
     }
+  }
+
+  private flushCatalogueOrders(path: string): void {
+    if (!this.catalogueOrdersPending) return;
+    publishCatalogueSnapshot(path, this.deps.store);
+    this.catalogueOrdersPending = false;
   }
 
   private finish(

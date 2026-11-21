@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { mkdtempSync, renameSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -1924,9 +1924,21 @@ describe('reorder live re-fetch', () => {
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'podium-reorder-'));
     store = new Store(join(dir, 'reorder.db'));
+    writeFileSync(
+      join(dir, 'catalogue.json'),
+      JSON.stringify({
+        fetchedAt: 1,
+        channels: [{ id: 1, name: 'ESPN', streams: [1, 2, 3] }],
+      }),
+    );
     runner = new Runner({
       // Dry-run is the default, and these cases are about the write itself.
-      config: () => loadConfig({ DISPATCHARR_API_KEY: 'k', PODIUM_DRY_RUN: 'false' }),
+      config: () =>
+        loadConfig({
+          DISPATCHARR_API_KEY: 'k',
+          PODIUM_DATA_DIR: dir,
+          PODIUM_DRY_RUN: 'false',
+        }),
       store,
       rules: new RulesSource(join(dir, 'rules.json')),
     });
@@ -2030,6 +2042,12 @@ describe('reorder live re-fetch', () => {
     expect(counters.assigned).toBe(0);
     // ...and the catalogue snapshot records what was actually written.
     expect(store.catalogue().rows.map((r) => r.streamId)).toEqual([2, 1, 3]);
+    (runner as unknown as { flushCatalogueOrders: (path: string) => void }).flushCatalogueOrders(
+      join(dir, 'catalogue.json'),
+    );
+    expect(
+      JSON.parse(readFileSync(join(dir, 'catalogue.json'), 'utf8')).channels[0].streams,
+    ).toEqual([2, 1, 3]);
   });
 
   it('recomputes against the live order and preserves a concurrent addition', async () => {

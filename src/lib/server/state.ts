@@ -8,7 +8,11 @@
  */
 
 import { readFileSync, renameSync, writeFileSync } from 'fs';
-import { rename, writeFile } from 'fs/promises';
+import {
+  type ChannelOrdersSnapshot,
+  publishCatalogueSnapshot,
+  replayCatalogueOrders,
+} from '../catalogue-snapshot';
 import { type Config, loadConfig, requireCredentials } from '../config';
 import type { Channel, Group, Provider, Stream } from '../dispatcharr';
 import { DispatcharrClient } from '../dispatcharr';
@@ -40,12 +44,11 @@ export function withRulesLock<T>(fn: () => T | Promise<T>): Promise<T> {
   return rulesMutex.run(async () => fn());
 }
 
-export interface Snapshot {
+export interface Snapshot extends ChannelOrdersSnapshot {
   channels: Channel[];
   streams: Stream[];
   providers: Provider[];
   groups: Group[];
-  fetchedAt: number;
 }
 
 interface Cache {
@@ -129,6 +132,10 @@ function client(): DispatcharrClient {
   });
 }
 
+function cataloguePath(): string {
+  return cache.config?.cataloguePath ?? loadConfig().cataloguePath;
+}
+
 export function readRulesDoc(): Record<string, unknown> {
   return readRulesFile(config().rulesPath).doc as Record<string, unknown>;
 }
@@ -196,6 +203,7 @@ export function channelCeilings(): Map<number, MaxResolution | null> {
 }
 
 export async function snapshot(force = false): Promise<Snapshot> {
+  syncPersistedChannelOrders();
   if (!force && cache.snapshot && Date.now() - cache.snapshot.fetchedAt < CACHE_TTL_MS) {
     return cache.snapshot;
   }
@@ -230,6 +238,7 @@ export async function snapshot(force = false): Promise<Snapshot> {
   const persisted = loadPersistedSnapshot();
   if (persisted) {
     cache.snapshot = persisted;
+    syncPersistedChannelOrders();
     if (Date.now() - persisted.fetchedAt >= CACHE_TTL_MS) startRevalidate();
     return persisted;
   }
@@ -247,17 +256,29 @@ export async function snapshot(force = false): Promise<Snapshot> {
 
 /** Crawl Dispatcharr, cache and persist the result. Never called concurrently. */
 async function revalidate(): Promise<Snapshot> {
+  const path = cataloguePath();
   const api = client();
   await api.login();
+  const store = settingsStore;
+  // Anything recorded after this point may be newer than the channel crawl.
+  const orderRevision = store?.catalogueOrderRevision() ?? 0;
   const [channels, streams, providers, groups] = await Promise.all([
     api.channels(),
     api.streams(),
     api.providers(),
     api.groups(),
   ]);
-  const snap: Snapshot = { channels, streams, providers, groups, fetchedAt: Date.now() };
+  const snap: Snapshot = {
+    channels,
+    streams,
+    providers,
+    groups,
+    fetchedAt: Date.now(),
+    orderRevision,
+  };
+  if (store) publishCatalogueSnapshot(path, store, snap);
   cache.snapshot = snap;
-  void persistSnapshot(snap);
+  claimsCache = null;
   // The index contains references to the previous snapshot's streams. Drop it
   // as soon as a replacement arrives, rather than retaining two catalogues
   // until the next route happens to request matching.
@@ -289,23 +310,7 @@ function startRevalidate(): void {
 }
 
 /**
- * Write the crawl to `catalogue.json` via a temp file, so a crash mid-write
- * never leaves a half-readable cache behind. Best effort: an unwritable data
- * directory costs a crawl on restart, not a page.
- */
-async function persistSnapshot(snap: Snapshot): Promise<void> {
-  try {
-    const path = config().cataloguePath;
-    const tmp = `${path}.${process.pid}.${++tmpSeq}.tmp`;
-    await writeFile(tmp, JSON.stringify(snap), 'utf8');
-    await rename(tmp, path);
-  } catch {
-    // left unpersisted
-  }
-}
-
-/**
- * Read back what `persistSnapshot` wrote. A week is the trust horizon: past
+ * Read back the persisted crawl. A week is the trust horizon: past
  * that the catalogue may have been rebuilt wholesale, and silently ranking
  * against channels that no longer exist is worse than the crawl.
  */
@@ -332,13 +337,37 @@ function loadPersistedSnapshot(): Snapshot | null {
  * cached copy true without the crawl.
  *
  * Only the stream array moves; nothing else about the channel changed, and the
- * match index is built from the stream catalogue, not from assignments.
+ * match index is built from the stream catalogue, not from assignments. The
+ * disk update lets a worker write reach this process without another crawl.
  */
-export function noteStreamOrder(channelId: number, streams: number[]): void {
+export function noteStreamOrder(
+  channelId: number,
+  streams: number[],
+  path = cataloguePath(),
+): void {
   const channel = cache.snapshot?.channels.find((c) => c.id === channelId);
   if (channel) {
     channel.streams = [...streams];
     claimsCache = null;
+  }
+  try {
+    if (!settingsStore) config();
+    if (settingsStore) {
+      settingsStore.recordCatalogueOrder(channelId, streams);
+      publishCatalogueSnapshot(path, settingsStore);
+    }
+  } catch {
+    // The Dispatcharr write succeeded even if the cache is unavailable.
+  }
+}
+
+/** Read only newer orders, without loading the full snapshot on each update. */
+function syncPersistedChannelOrders(): void {
+  if (!cache.snapshot || !settingsStore) return;
+  try {
+    if (replayCatalogueOrders(cache.snapshot, settingsStore)) claimsCache = null;
+  } catch {
+    // A temporary store failure need not invalidate the cached crawl.
   }
 }
 

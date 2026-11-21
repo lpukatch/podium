@@ -67,12 +67,12 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     // caller wanted it off the channel and it is off the channel, so this is a
     // success with nothing to write.
     if (order.length === previous.length) {
-      noteStreamOrder(id, previous);
+      noteStreamOrder(id, previous, config.cataloguePath);
       return NextResponse.json({ status: 'unchanged', channelId: id, streamId, order: previous });
     }
 
     await client.setStreamOrder(id, order);
-    noteStreamOrder(id, order);
+    noteStreamOrder(id, order, config.cataloguePath);
     // Same reasoning as the apply route: the persisted catalogue must show the
     // order that was just written, not the one the next full pass would fetch.
     // Opened per request rather than held for the process, matching how every
