@@ -8,7 +8,12 @@
  */
 
 import { readFileSync, renameSync, writeFileSync } from 'fs';
-import { rename, writeFile } from 'fs/promises';
+import { writeFile } from 'fs/promises';
+import {
+  catalogueSnapshotVersion,
+  mergePersistedChannelOrders,
+  updatePersistedChannelOrders,
+} from '../catalogue-snapshot';
 import { type Config, loadConfig, requireCredentials } from '../config';
 import type { Channel, Group, Provider, Stream } from '../dispatcharr';
 import { DispatcharrClient } from '../dispatcharr';
@@ -33,6 +38,7 @@ const CACHE_TTL_MS = 300_000;
  */
 const PERSIST_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 let tmpSeq = 0;
+let persistedCatalogueVersionToken = '';
 const rulesMutex = new Mutex();
 
 /** Serialize rule-file read-modify-write operations within this process. */
@@ -129,6 +135,10 @@ function client(): DispatcharrClient {
   });
 }
 
+function cataloguePath(): string {
+  return cache.config?.cataloguePath ?? loadConfig().cataloguePath;
+}
+
 export function readRulesDoc(): Record<string, unknown> {
   return readRulesFile(config().rulesPath).doc as Record<string, unknown>;
 }
@@ -196,6 +206,7 @@ export function channelCeilings(): Map<number, MaxResolution | null> {
 }
 
 export async function snapshot(force = false): Promise<Snapshot> {
+  syncPersistedChannelOrders();
   if (!force && cache.snapshot && Date.now() - cache.snapshot.fetchedAt < CACHE_TTL_MS) {
     return cache.snapshot;
   }
@@ -230,6 +241,7 @@ export async function snapshot(force = false): Promise<Snapshot> {
   const persisted = loadPersistedSnapshot();
   if (persisted) {
     cache.snapshot = persisted;
+    persistedCatalogueVersionToken = catalogueSnapshotVersion(cataloguePath()) ?? '';
     if (Date.now() - persisted.fetchedAt >= CACHE_TTL_MS) startRevalidate();
     return persisted;
   }
@@ -247,6 +259,9 @@ export async function snapshot(force = false): Promise<Snapshot> {
 
 /** Crawl Dispatcharr, cache and persist the result. Never called concurrently. */
 async function revalidate(): Promise<Snapshot> {
+  const path = cataloguePath();
+  const previousVersion = catalogueSnapshotVersion(path);
+  const previousFetchedAt = cache.snapshot?.fetchedAt ?? loadPersistedSnapshot()?.fetchedAt;
   const api = client();
   await api.login();
   const [channels, streams, providers, groups] = await Promise.all([
@@ -257,7 +272,7 @@ async function revalidate(): Promise<Snapshot> {
   ]);
   const snap: Snapshot = { channels, streams, providers, groups, fetchedAt: Date.now() };
   cache.snapshot = snap;
-  void persistSnapshot(snap);
+  void persistSnapshot(snap, path, previousVersion, previousFetchedAt);
   // The index contains references to the previous snapshot's streams. Drop it
   // as soon as a replacement arrives, rather than retaining two catalogues
   // until the next route happens to request matching.
@@ -293,12 +308,28 @@ function startRevalidate(): void {
  * never leaves a half-readable cache behind. Best effort: an unwritable data
  * directory costs a crawl on restart, not a page.
  */
-async function persistSnapshot(snap: Snapshot): Promise<void> {
+async function persistSnapshot(
+  snap: Snapshot,
+  path: string,
+  previousVersion: string | null,
+  previousFetchedAt: number | undefined,
+): Promise<void> {
   try {
-    const path = config().cataloguePath;
     const tmp = `${path}.${process.pid}.${++tmpSeq}.tmp`;
     await writeFile(tmp, JSON.stringify(snap), 'utf8');
-    await rename(tmp, path);
+    const currentVersion = catalogueSnapshotVersion(path);
+    if (currentVersion && currentVersion !== previousVersion && previousFetchedAt !== undefined) {
+      const previous = loadPersistedSnapshot();
+      if (
+        previous?.fetchedAt === previousFetchedAt &&
+        mergePersistedChannelOrders(snap, previous)
+      ) {
+        claimsCache = null;
+        writeFileSync(tmp, JSON.stringify(snap), 'utf8');
+      }
+    }
+    renameSync(tmp, path);
+    persistedCatalogueVersionToken = catalogueSnapshotVersion(path) ?? '';
   } catch {
     // left unpersisted
   }
@@ -332,14 +363,34 @@ function loadPersistedSnapshot(): Snapshot | null {
  * cached copy true without the crawl.
  *
  * Only the stream array moves; nothing else about the channel changed, and the
- * match index is built from the stream catalogue, not from assignments.
+ * match index is built from the stream catalogue, not from assignments. The
+ * disk update lets a worker write reach this process without another crawl.
  */
-export function noteStreamOrder(channelId: number, streams: number[]): void {
+export function noteStreamOrder(
+  channelId: number,
+  streams: number[],
+  path = cataloguePath(),
+): void {
   const channel = cache.snapshot?.channels.find((c) => c.id === channelId);
   if (channel) {
     channel.streams = [...streams];
     claimsCache = null;
   }
+  if (updatePersistedChannelOrders(path, [[channelId, streams]])) {
+    persistedCatalogueVersionToken = catalogueSnapshotVersion(path) ?? '';
+  }
+}
+
+/** Merge channel orders patched by the worker into this process's cached crawl. */
+function syncPersistedChannelOrders(): void {
+  const current = cache.snapshot;
+  if (!current) return;
+  const path = cataloguePath();
+  const version = catalogueSnapshotVersion(path);
+  if (!version || version === persistedCatalogueVersionToken) return;
+  persistedCatalogueVersionToken = version;
+  const persisted = loadPersistedSnapshot();
+  if (persisted && mergePersistedChannelOrders(current, persisted)) claimsCache = null;
 }
 
 export async function index(): Promise<StreamIndex> {

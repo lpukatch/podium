@@ -126,7 +126,7 @@ export async function POST(request: Request, context: { params: Promise<{ channe
     // forcing a full refetch of every channel and stream just to see its own
     // write -- which is what made an applied removal look like it had not
     // happened until Refresh.
-    noteStreamOrder(id, targetOrder);
+    noteStreamOrder(id, targetOrder, config.cataloguePath);
     // Keep the persisted catalogue honest about what was just written: it is
     // the worker's snapshot until the next pass, and an apply the worker did
     // not make would otherwise not show up in the metrics until a full pass
