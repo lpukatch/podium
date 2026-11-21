@@ -106,13 +106,10 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,scope=${{ matrix.arch }},mode=max
 
-      # Scan the exact candidate digest. Consumer tags have not moved yet.
-      #
-      # SARIF rather than a table: the file feeds the code-scanning upload
-      # below, so each scan lands on the Security tab as alerts with a
-      # history (new/fixed/resolved across builds) instead of vanishing with
-      # the run log. exit-code keeps the red/green gate.
+      # Gate the exact candidate digest before moving any consumer tags.
+      # Use table output so the action honors severity and logs any blockers.
       - name: Scan candidate
+        id: scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:
           # renovate: datasource=github-releases depName=aquasecurity/trivy
@@ -120,12 +117,29 @@ jobs:
         with:
           version: ${{ env.TRIVY_VERSION }}
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-          format: sarif
-          output: trivy-results-${{ matrix.arch }}.sarif
+          format: table
           exit-code: '1'
           scanners: vuln,secret
           vuln-type: os,library
           severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+
+      # SARIF mode reports all severities by default. Keep it for the Security
+      # tab, but do not let its broader results decide whether to publish.
+      - name: Generate scan results
+        if: ${{ !cancelled() && (steps.scan.outcome == 'success' || steps.scan.outcome == 'failure') }}
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          skip-setup-trivy: true
+          cache: false
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          format: sarif
+          output: trivy-results-${{ matrix.arch }}.sarif
+          exit-code: '0'
+          scanners: vuln,secret
+          vuln-type: os,library
           ignore-unfixed: true
           trivyignores: .trivyignore
 

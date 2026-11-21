@@ -82,6 +82,27 @@ test('both publishers gate promotion on validation and digest scans', () => {
   assert.ok(github.indexOf('name: Scan candidate') < github.indexOf('name: Promote scanned image'));
 });
 
+test('GitHub separates the blocking image scan from the all-severity report', () => {
+  const github = read('.github/workflows/publish.yml');
+  const step = (name) => github.split(`      - name: ${name}\n`)[1].split('\n      - name:')[0];
+  const gate = step('Scan candidate');
+  const report = step('Generate scan results');
+  for (const scan of [gate, report]) {
+    assert.match(scan, /image-ref: .*@\$\{\{ steps\.build\.outputs\.digest \}\}/);
+    assert.match(scan, /scanners: vuln,secret/);
+    assert.match(scan, /ignore-unfixed: true/);
+  }
+  assert.match(gate, /format: table/);
+  assert.match(gate, /exit-code: '1'/);
+  assert.match(gate, /severity: HIGH,CRITICAL/);
+  assert.doesNotMatch(gate, /continue-on-error/);
+  assert.match(report, /steps\.scan\.outcome == 'failure'/);
+  assert.match(report, /format: sarif/);
+  assert.match(report, /exit-code: '0'/);
+  assert.match(report, /continue-on-error: true/);
+  assert.match(github, /^  publish:\n    needs: \[validate, build\]/m);
+});
+
 test('promotion stops on the first failed registry copy', () => {
   const build = read('.forgejo/workflows/build.yml');
   const step = build.split('      - name: Promote scanned image\n')[1].split('\n      # ')[0];
