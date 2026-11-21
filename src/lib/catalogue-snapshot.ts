@@ -1,92 +1,76 @@
 import { randomUUID } from 'crypto';
-import { readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
+import { readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs';
+import type { Store } from './store';
 
-interface ChannelOrdersSnapshot {
+export interface ChannelOrdersSnapshot {
   fetchedAt: number;
   channels: Array<{ id: number; streams: number[] }>;
+  /** Older snapshots have no revision and can replay the available updates. */
+  orderRevision?: number;
 }
 
-/** Update only channel orders when the disk snapshot is the same crawl. */
-export function mergePersistedChannelOrders(
-  current: ChannelOrdersSnapshot,
-  persisted: ChannelOrdersSnapshot,
-): boolean {
-  if (current.fetchedAt !== persisted.fetchedAt) return false;
+/** Apply only orders recorded after this snapshot's crawl or last update. */
+export function replayCatalogueOrders(snapshot: ChannelOrdersSnapshot, store: Store): boolean {
+  const revision = snapshot.orderRevision ?? 0;
+  const updates = store.catalogueOrdersSince(revision);
+  if (updates.length === 0) return false;
 
-  const persistedChannels = new Map(persisted.channels.map((channel) => [channel.id, channel]));
+  const orders = new Map(updates.map(({ channelId, streams }) => [channelId, streams]));
   let changed = false;
-  for (const channel of current.channels) {
-    const saved = persistedChannels.get(channel.id);
+  for (const channel of snapshot.channels) {
+    const streams = orders.get(channel.id);
     if (
-      saved &&
-      Array.isArray(saved.streams) &&
-      (saved.streams.length !== channel.streams.length ||
-        saved.streams.some((id, index) => id !== channel.streams[index]))
+      streams &&
+      (streams.length !== channel.streams.length ||
+        streams.some((id, index) => id !== channel.streams[index]))
     ) {
-      channel.streams = [...saved.streams];
+      channel.streams = streams;
       changed = true;
     }
   }
+  snapshot.orderRevision = updates.reduce(
+    (latest, update) => Math.max(latest, update.revision),
+    revision,
+  );
   return changed;
 }
 
-/** A cheap token for detecting an order update written by another process. */
-export function catalogueSnapshotVersion(path: string): string | null {
-  try {
-    const stat = statSync(path);
-    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
-  } catch {
-    return null;
-  }
-}
-
-/** Patch one or more orders into the persisted crawl without rewriting it per channel. */
-export function updatePersistedChannelOrders(
-  path: string,
-  orders: Iterable<readonly [number, readonly number[]]>,
-): boolean {
-  let snapshot: unknown;
-  try {
-    snapshot = JSON.parse(readFileSync(path, 'utf8'));
-  } catch {
-    return false;
-  }
-
-  if (
-    !snapshot ||
-    typeof snapshot !== 'object' ||
-    !Array.isArray((snapshot as { channels?: unknown }).channels)
-  ) {
-    return false;
-  }
-
-  const channels = (snapshot as { channels: unknown[] }).channels;
-  const orderByChannel = new Map(orders);
-  if (orderByChannel.size === 0) return false;
-
-  let changed = false;
-  for (const channel of channels) {
-    if (!channel || typeof channel !== 'object') continue;
-    const row = channel as { id?: unknown; streams?: unknown };
-    if (typeof row.id !== 'number') continue;
-    const order = orderByChannel.get(row.id);
-    if (!order) continue;
-    row.streams = [...order];
-    changed = true;
-  }
-  if (!changed) return false;
-
+function writeSnapshot(path: string, snapshot: ChannelOrdersSnapshot): void {
   const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {
     writeFileSync(tmp, JSON.stringify(snapshot), 'utf8');
     renameSync(tmp, path);
-    return true;
-  } catch {
+  } catch (error) {
     try {
       unlinkSync(tmp);
     } catch {
       // The temp file may not have been created.
     }
-    return false;
+    throw error;
+  }
+}
+
+/** Best-effort cache publication, serialized with both web and worker patches. */
+export function publishCatalogueSnapshot(
+  path: string,
+  store: Store,
+  snapshot?: ChannelOrdersSnapshot,
+): void {
+  try {
+    store.withCatalogueSnapshotWrite(() => {
+      if (snapshot) {
+        replayCatalogueOrders(snapshot, store);
+        writeSnapshot(path, snapshot);
+        return;
+      }
+
+      const saved = JSON.parse(readFileSync(path, 'utf8')) as ChannelOrdersSnapshot;
+      if (!Array.isArray(saved?.channels)) return;
+      const revision = saved.orderRevision;
+      replayCatalogueOrders(saved, store);
+      if (saved.orderRevision !== revision) writeSnapshot(path, saved);
+    });
+  } catch {
+    // A missing/unwritable cache costs a crawl, not a failed order write.
   }
 }

@@ -264,6 +264,14 @@ CREATE TABLE IF NOT EXISTS catalogue_state (
     run_id     TEXT
 );
 
+-- Latest successful Dispatcharr order per channel, independent of the
+-- worker's full metrics catalogue and its pass boundaries.
+CREATE TABLE IF NOT EXISTS catalogue_order_updates (
+  channel_id INTEGER PRIMARY KEY,
+  revision INTEGER NOT NULL UNIQUE,
+  streams TEXT NOT NULL
+);
+
 -- Measured quality kept by provenance rather than by stream identity.
 --
 -- probe_cache answers "what is this stream", and is deliberately thrown away
@@ -4001,6 +4009,44 @@ export class Store {
         insert.run(r.channelId, r.channelName, r.slot, r.streamId, r.providerId, r.providerName);
       }
     })();
+  }
+
+  catalogueOrderRevision(): number {
+    return (
+      this.sql(
+        'SELECT COALESCE(MAX(revision), 0) AS revision FROM catalogue_order_updates',
+      ).get() as {
+        revision: number;
+      }
+    ).revision;
+  }
+
+  recordCatalogueOrder(channelId: number, streams: readonly number[]): void {
+    this.sql(
+      `INSERT INTO catalogue_order_updates (channel_id, revision, streams)
+       VALUES (?, (SELECT COALESCE(MAX(revision), 0) + 1 FROM catalogue_order_updates), ?)
+       ON CONFLICT(channel_id) DO UPDATE SET revision = excluded.revision, streams = excluded.streams`,
+    ).run(channelId, JSON.stringify(streams));
+  }
+
+  catalogueOrdersSince(revision: number): Array<{
+    channelId: number;
+    revision: number;
+    streams: number[];
+  }> {
+    const rows = this.sql(
+      `SELECT channel_id, revision, streams FROM catalogue_order_updates WHERE revision > ?`,
+    ).all(revision) as Array<{ channel_id: number; revision: number; streams: string }>;
+    return rows.map((row) => ({
+      channelId: row.channel_id,
+      revision: row.revision,
+      streams: JSON.parse(row.streams) as number[],
+    }));
+  }
+
+  /** All catalogue.json publishers share the SQLite writer lock. */
+  withCatalogueSnapshotWrite<T>(write: () => T): T {
+    return this.db.transaction(write).immediate();
   }
 
   /**
