@@ -278,14 +278,18 @@ describe('a shared pass, end to end', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  /** One viewer on provider 5, which sells five connections. 6 is untouched. */
+  /** One VOD viewer on provider 5, which sells five connections. 6 is untouched. */
   function stubDispatcharr() {
     globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       const body = url.includes('/accounts/token/')
         ? { access: 'a', refresh: 'r' }
-        : url.includes('/proxy/ts/status')
-          ? { channels: [{ channel_id: 1, m3u_profile_id: 12 }], count: 1 }
+        : url.includes('/proxy/stats/')
+          ? {
+              live: { channels: [], count: 0 },
+              vod: { vod_connections: [{ connections: [{ m3u_profile_id: 12 }] }] },
+              catchup: { timeshift_sessions: [] },
+            }
           : url.includes('/m3u/accounts/')
             ? {
                 count: 2,

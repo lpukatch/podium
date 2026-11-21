@@ -207,16 +207,21 @@ describe('a pass', () => {
     globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(String(input));
       const one = /^\/api\/channels\/channels\/\d+\/$/.test(url.pathname);
-      const body = url.pathname.includes('/proxy/ts/status')
-        ? // Someone watching: the pass pauses straight after the channel list.
-          { channels: [{ channel_id: 1 }], count: 1 }
-        : url.pathname === '/api/channels/channels/'
-          ? {
-              count: listed.length,
-              next: null,
-              results: listed.map((id) => ({ id, name: `Channel ${id}`, streams: [] })),
+      const body =
+        url.pathname === '/proxy/stats/'
+          ? // Someone watching: the pass pauses straight after the channel list.
+            {
+              live: { channels: [{ channel_id: 1 }], count: 1 },
+              vod: { vod_connections: [] },
+              catchup: { timeshift_sessions: [] },
             }
-          : { count: 0, next: null, results: [] };
+          : url.pathname === '/api/channels/channels/'
+            ? {
+                count: listed.length,
+                next: null,
+                results: listed.map((id) => ({ id, name: `Channel ${id}`, streams: [] })),
+              }
+            : { count: 0, next: null, results: [] };
       return {
         ok: !one,
         status: one ? 404 : 200,
