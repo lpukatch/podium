@@ -147,7 +147,10 @@ describe('the population gate — asked before the pipeline, not after it', () =
       });
       const store = {
         settings: () => [],
-        qualitySamples: () => [],
+        qualitySampleScopeRows: function* () {},
+        qualitySamples: () => {
+          throw new Error('deferred sync should not materialize quality samples');
+        },
         verdicts: () => new Map(),
         stabilityRecords: () => new Map(),
         peakManagedChannels: () => 50,

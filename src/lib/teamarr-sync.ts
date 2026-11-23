@@ -21,6 +21,7 @@ import type { Config } from './config';
 import { mineNames } from './miner';
 import {
   buildProfile,
+  countInScope,
   filterInScope,
   mergeTeamarrRules,
   scopeFromConfig,
@@ -303,15 +304,31 @@ export async function syncToTeamarr(
   }
 
   const scope = scopeFromConfig(config);
-  const samples = store.qualitySamples();
-  const scoped = filterInScope(samples, scope);
+  const populationGate = !options.force && (options.scheduled || options.dryRun);
+  let samples: ReturnType<Store['qualitySamples']> | undefined;
+  let scoped: ReturnType<typeof filterInScope> | undefined;
 
-  if (scoped.length < config.PODIUM_TEAMARR_MIN_SAMPLES) {
-    return fail(
-      `only ${scoped.length} in-scope samples, and the floor is ` +
-        `${config.PODIUM_TEAMARR_MIN_SAMPLES}. A few hours of samples still fit ` +
-        `confident-looking rules; this is the guard against pushing them.`,
-    );
+  if (populationGate) {
+    // A scheduled run may defer on channel population. Count only the fields
+    // that decide scope so a deferred pass does not materialize every sample.
+    const scopedCount = countInScope(store.qualitySampleScopeRows(), scope);
+    if (scopedCount < config.PODIUM_TEAMARR_MIN_SAMPLES) {
+      return fail(
+        `only ${scopedCount} in-scope samples, and the floor is ` +
+          `${config.PODIUM_TEAMARR_MIN_SAMPLES}. A few hours of samples still fit ` +
+          `confident-looking rules; this is the guard against pushing them.`,
+      );
+    }
+  } else {
+    samples = store.qualitySamples();
+    scoped = filterInScope(samples, scope);
+    if (scoped.length < config.PODIUM_TEAMARR_MIN_SAMPLES) {
+      return fail(
+        `only ${scoped.length} in-scope samples, and the floor is ` +
+          `${config.PODIUM_TEAMARR_MIN_SAMPLES}. A few hours of samples still fit ` +
+          `confident-looking rules; this is the guard against pushing them.`,
+      );
+    }
   }
 
   // Assembled before anything below it, and not only because everything below
@@ -336,7 +353,7 @@ export async function syncToTeamarr(
   // re-asks the question when the answer is worth having, where refusing would
   // bank the doubtful one -- and deferring *early* re-asks it without having
   // spent the fitting on an answer nobody will use.
-  if (!options.force && (options.scheduled || options.dryRun)) {
+  if (populationGate) {
     const peak = store.peakManagedChannels(at - PEAK_WINDOW_MS);
     // The last *push*, not the last attempt -- a deferral is an attempt too,
     // and measuring staleness from one would keep the escape hatch permanently
@@ -354,6 +371,9 @@ export async function syncToTeamarr(
     );
     if (thin) return { at, pushed: false, deferred: true, reason: `deferred: ${thin}` };
   }
+
+  samples ??= store.qualitySamples();
+  scoped ??= filterInScope(samples, scope);
 
   // The scheduled fit reads the same fit settings the Quality tab does, so a
   // push cannot quietly disagree with what an operator previewed -- which was

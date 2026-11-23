@@ -232,6 +232,8 @@ interface CompiledScope {
   exclude: Glob[];
 }
 
+type ScopeSample = Pick<StoredQualitySample, 'groupName' | 'channelGroupName' | 'policyMode'>;
+
 function compileScope(scope: QualityScope): CompiledScope {
   return {
     eventOnly: scope.eventOnly,
@@ -241,11 +243,11 @@ function compileScope(scope: QualityScope): CompiledScope {
 }
 
 /** The names a glob is tried against: the stream's group and its channel's. */
-function namesOf(sample: StoredQualitySample): string[] {
+function namesOf(sample: ScopeSample): string[] {
   return [sample.groupName, sample.channelGroupName].filter((name) => name !== '');
 }
 
-function judge(sample: StoredQualitySample, scope: CompiledScope): ScopeVerdict {
+function judge(sample: ScopeSample, scope: CompiledScope): ScopeVerdict {
   const names = namesOf(sample);
   if (scope.exclude.some((test) => names.some((name) => test.test(name)))) return 'excluded';
   if (scope.include.some((test) => names.some((name) => test.test(name)))) return 'in';
@@ -258,7 +260,7 @@ function judge(sample: StoredQualitySample, scope: CompiledScope): ScopeVerdict 
 }
 
 /** Whether one sample is in scope. Exported for callers that only want the bit. */
-export function inScope(sample: StoredQualitySample, scope: QualityScope): boolean {
+export function inScope(sample: ScopeSample, scope: QualityScope): boolean {
   return judge(sample, compileScope(scope)) === 'in';
 }
 
@@ -269,6 +271,16 @@ export function filterInScope(
 ): StoredQualitySample[] {
   const compiled = compileScope(scope);
   return samples.filter((sample) => judge(sample, compiled) === 'in');
+}
+
+/** Count a streamed set of scope fields without retaining full sample rows. */
+export function countInScope(samples: Iterable<ScopeSample>, scope: QualityScope): number {
+  const compiled = compileScope(scope);
+  let count = 0;
+  for (const sample of samples) {
+    if (judge(sample, compiled) === 'in') count += 1;
+  }
+  return count;
 }
 
 /** What the gate did to a run of samples, as the UI and the export both report it. */

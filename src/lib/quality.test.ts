@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildProfile,
+  countInScope,
+  filterInScope,
   inScope,
   mergeTeamarrRules,
   parseGlobs,
@@ -649,6 +651,24 @@ describe('scopeFromConfig', () => {
 });
 
 describe('store', () => {
+  it('counts scope fields from the lightweight sample projection', () => {
+    const store = new Store(':memory:');
+    const samples = [
+      sample({ policyMode: 'assigned', groupName: 'Sports' }),
+      sample({ policyMode: 'always', groupName: 'Sports' }),
+      sample({ policyMode: 'assigned', groupName: 'VOD' }),
+      sample({ policyMode: 'assigned', groupName: 'Sports', channelGroupName: 'VOD' }),
+    ];
+    for (const row of samples) store.recordQuality(row);
+
+    const scope = { eventOnly: true, include: ['*SPORT*'], exclude: ['*VOD*'] };
+    const projected = store.qualitySampleScopeRows();
+    expect(countInScope(projected, scope)).toBe(
+      filterInScope(store.qualitySamples(), scope).length,
+    );
+    store.close();
+  });
+
   it('keeps samples after the streams they came from are gone', () => {
     // The whole point: pruneOutside sweeps probe_cache for streams no longer
     // in the catalogue, which on an event install is most of them.
