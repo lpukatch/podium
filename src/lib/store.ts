@@ -3404,6 +3404,20 @@ export class Store {
     };
   }
 
+  /** Scope fields only, for population checks that can stop before fitting. */
+  qualitySampleScopeRows(): IterableIterator<
+    Pick<StoredQualitySample, 'groupName' | 'channelGroupName' | 'policyMode'>
+  > {
+    return this.sql(
+      `SELECT group_name AS groupName,
+              channel_group_name AS channelGroupName,
+              policy_mode AS policyMode
+         FROM quality_samples`,
+    ).iterate() as IterableIterator<
+      Pick<StoredQualitySample, 'groupName' | 'channelGroupName' | 'policyMode'>
+    >;
+  }
+
   /**
    * Every sample still held, newest first.
    *
