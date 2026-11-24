@@ -189,7 +189,7 @@ jobs:
           TRIVY_PASSWORD: ${{ secrets.REGISTRY_TOKEN }}
           TRIVY_CACHE_DIR: /tmp/trivy-cache
         run: |
-          docker run --rm -e IMAGE_REF -e TRIVY_USERNAME -e TRIVY_PASSWORD -e TRIVY_CACHE_DIR -e PODIUM_TRIVY_IGNORES="$(cat .trivyignore)" --entrypoint /bin/sh "aquasec/trivy:${TRIVY_VERSION}" -ec 'printf "%s" "$PODIUM_TRIVY_IGNORES" > /tmp/.trivyignore; trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --scanners vuln,secret --ignorefile /tmp/.trivyignore --format table --output /tmp/trivy-report.txt "$IMAGE_REF" || RC=$?; cat /tmp/trivy-report.txt || true; exit "${RC:-0}"' > trivy-report.txt || RC=$?
+          docker run --rm -e IMAGE_REF -e TRIVY_USERNAME -e TRIVY_PASSWORD -e TRIVY_CACHE_DIR -e PODIUM_TRIVY_IGNORES="$(cat .trivyignore)" --entrypoint /bin/sh "aquasec/trivy:${TRIVY_VERSION}" -ec 'printf "%s" "$PODIUM_TRIVY_IGNORES" > /tmp/.trivyignore; trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --scanners vuln,secret --vuln-type os,library --ignorefile /tmp/.trivyignore --format table --output /tmp/trivy-report.txt "$IMAGE_REF" || RC=$?; cat /tmp/trivy-report.txt || true; exit "${RC:-0}"' > trivy-report.txt || RC=$?
           cat trivy-report.txt || true
           exit "${RC:-0}"
 
@@ -207,7 +207,7 @@ jobs:
           TRIVY_PASSWORD: ${{ secrets.REGISTRY_TOKEN }}
           TRIVY_CACHE_DIR: /tmp/trivy-cache
         run: |
-          docker run --rm -e IMAGE_REF -e TRIVY_USERNAME -e TRIVY_PASSWORD -e TRIVY_CACHE_DIR -e PODIUM_TRIVY_IGNORES="$(cat .trivyignore)" --entrypoint /bin/sh "aquasec/trivy:${TRIVY_VERSION}" -ec 'printf "%s" "$PODIUM_TRIVY_IGNORES" > /tmp/.trivyignore; trivy image --exit-code 0 --severity HIGH,CRITICAL --scanners vuln,secret --ignorefile /tmp/.trivyignore --format table --output /tmp/trivy-report-unfiltered.txt "$IMAGE_REF"; cat /tmp/trivy-report-unfiltered.txt || true' > trivy-report-unfiltered.txt || true
+          docker run --rm -e IMAGE_REF -e TRIVY_USERNAME -e TRIVY_PASSWORD -e TRIVY_CACHE_DIR -e PODIUM_TRIVY_IGNORES="$(cat .trivyignore)" --entrypoint /bin/sh "aquasec/trivy:${TRIVY_VERSION}" -ec 'printf "%s" "$PODIUM_TRIVY_IGNORES" > /tmp/.trivyignore; trivy image --exit-code 0 --severity HIGH,CRITICAL --scanners vuln,secret --vuln-type os,library --ignorefile /tmp/.trivyignore --format table --output /tmp/trivy-report-unfiltered.txt "$IMAGE_REF"; cat /tmp/trivy-report-unfiltered.txt || true' > trivy-report-unfiltered.txt || true
 
       # Only publishing events may promote; stale main builds skip :main and
       # older releases never overwrite aliases belonging to newer Git tags.
