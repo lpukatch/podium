@@ -45,12 +45,15 @@ WORKDIR /app
 # runtime image -- they are npm's, not the app's, which npm ci never installs.
 # The standalone server and the healthcheck need only node, so npm (and its
 # ~17M) goes in the same RUN. The deps and build stages keep theirs.
-# Explicitly upgrade zlib1g inherited from the base image: installing ffmpeg
-# alone can leave its already-satisfied, vulnerable zlib dependency untouched.
-# The minimum is the Debian 13 security fix; newer revisions remain allowed.
+# Upgrade inherited base-image packages (e.g. zlib1g, krb5) alongside runtime
+# dependencies: installing ffmpeg alone can leave already-satisfied,
+# vulnerable dependencies untouched. The minimum checks enforce the Debian 13
+# security fixes while still allowing newer revisions.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg tini zlib1g \
+    && apt-get upgrade -y --no-install-recommends \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' zlib1g)" ge '1:1.3.dfsg+really1.3.1-1+deb13u1' \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libkrb5-3)" ge '1.21.3-5+deb13u2' \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
