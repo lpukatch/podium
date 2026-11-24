@@ -112,6 +112,7 @@ export function GET(request: Request) {
     const body = teamarrRules(profile, {
       minSamples,
       pointsPerMbps,
+      minBitrateKbps: config.PODIUM_MIN_BITRATE_KBPS,
       consolidated: miner.passB.consolidated,
     });
     return new NextResponse(JSON.stringify(body, null, 2), {
@@ -183,6 +184,7 @@ export async function POST(request: Request) {
     const generated = teamarrRules(profile, {
       minSamples,
       pointsPerMbps,
+      minBitrateKbps: config.PODIUM_MIN_BITRATE_KBPS,
       consolidated: miner.passB.consolidated,
     });
     const merged = mergeTeamarrRules(rules, generated.rules);

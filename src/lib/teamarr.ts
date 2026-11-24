@@ -322,6 +322,8 @@ export interface ChannelCheck {
   podium: PickView;
   /** What the measurements say is lost by taking Teamarr's pick, in kbps. */
   gapKbps: number;
+  /** What the measurements say is lost in `quality_score` (0..1). */
+  gapScore?: number;
 }
 
 export interface RuleCheck {
@@ -349,6 +351,8 @@ export interface RuleCheck {
     managedGapKbps: number;
     /** Total measured bitrate given up across every disagreement. */
     gapKbps: number;
+    /** Total `quality_score` given up across every disagreement, rounded to 3 decimals. */
+    gapScore: number;
     /**
      * Whether unevaluable rules could have changed any of this.
      *
@@ -458,6 +462,9 @@ export function checkRules(
     const teamarr = view(teamarrPick);
     const podium = view(podiumPick);
 
+    const teamarrScore = Number(factsById.get(teamarrPick)?.stats.quality_score ?? 0);
+    const podiumScore = Number(factsById.get(podiumPick)?.stats.quality_score ?? 0);
+
     rows.push({
       channelId: channel.channelId,
       channelName: channel.channelName,
@@ -468,6 +475,12 @@ export function checkRules(
       teamarr,
       podium,
       gapKbps: teamarrPick === podiumPick ? 0 : podium.bitrateKbps - teamarr.bitrateKbps,
+      gapScore:
+        teamarrPick === podiumPick ||
+        !Number.isFinite(podiumScore) ||
+        !Number.isFinite(teamarrScore)
+          ? 0
+          : Math.max(0, podiumScore - teamarrScore),
     });
   }
 
@@ -489,6 +502,9 @@ export function checkRules(
   // does not change under a UI that still reads history written before the
   // scoping, where the two genuinely differed.
   const managed = rows.filter((row) => row.managed);
+  const gapScore =
+    Math.round(disagreed.reduce((sum, row) => sum + Math.max(0, row.gapScore ?? 0), 0) * 1000) /
+    1000;
 
   return {
     generatedAt: Date.now(),
@@ -500,6 +516,7 @@ export function checkRules(
       ambiguous: rows.filter((row) => row.ambiguous).length,
       deadFirst: rows.filter(avoidablyDead).length,
       gapKbps: disagreed.reduce((sum, row) => sum + Math.max(0, row.gapKbps), 0),
+      gapScore,
       managedChannels: managed.length,
       managedAgreed: managed.filter((row) => row.agree).length,
       managedDeadFirst: managed.filter(avoidablyDead).length,
