@@ -418,8 +418,10 @@ describe('teamarrRules', () => {
       ],
       { minSamples: 20 },
     );
-    const { rules } = teamarrRules(inverted, { minSamples: 20 });
+    const { rules, podium } = teamarrRules(inverted, { minSamples: 20 });
     expect(rules.some((rule) => rule.type === 'regex')).toBe(false);
+    expect(podium.invertedTiers.map((t) => t.tier).sort()).toEqual(['hd', 'uhd']);
+    expect(podium.note).toContain('podium.invertedTiers');
   });
 
   it('sinks a dead stream below every prior it could possibly carry', () => {
@@ -914,29 +916,29 @@ describe('teamarrRules stats_metric export', () => {
   it('always carries the measured rules, which are not configurable', () => {
     // `deadPoints`/`bitratePoints` were options once, but nothing ever passed
     // them -- not the UI, not the docs' curl, not the scheduled push -- so
-    // they are constants now (`DEAD_POINTS`, `BITRATE_POINTS`). The test they
+    // the measured constants live in `quality.ts`. The test they
     // had pinned a suppression path nobody could reach; this one pins the
     // opposite, which is what every caller actually got.
     const profile = buildProfile(watchable(60, 6000), { minSamples: 20 });
-    const { rules } = teamarrRules(profile);
+    const { rules, podium } = teamarrRules(profile);
     const measured = rules.filter((rule) => rule.type === 'stats_metric');
     expect(measured.some((rule) => rule.value.startsWith('alive|'))).toBe(true);
     expect(measured.some((rule) => rule.value.startsWith('blank_detected|'))).toBe(true);
+    expect(measured.some((rule) => rule.value.startsWith('quality_score|'))).toBe(true);
     expect(measured.some((rule) => rule.value.startsWith('ffmpeg_output_bitrate|'))).toBe(true);
     // The export still records the constants used, for whoever opens the file.
-    const { podium } = teamarrRules(profile);
     expect(podium.measured.deadPoints).toBeLessThan(0);
-    expect(podium.measured.bitratePoints).toBeGreaterThan(0);
+    expect(podium.measured.minBitrateKbps).toBe(500);
+    expect(podium.measured.qualityScore.length).toBeGreaterThan(0);
   });
 
-  it('records the percentiles the rungs came from', () => {
-    // The thresholds are the one thing here that will look arbitrary later.
+  it('records the quality_score rungs and note in podium.measured', () => {
     const profile = buildProfile(watchable(60, 6000), { minSamples: 20 });
     const { podium } = teamarrRules(profile);
-    expect(podium.measured.ladder.floorPercentile).toBe(0.5);
-    expect(podium.measured.ladder.percentiles).toEqual([0.75, 0.9]);
-    expect(podium.measured.ladder.samples).toBe(60);
+    expect(podium.measured.qualityScore[0]).toEqual({ threshold: 0.35, points: -15 });
+    expect(podium.measured.qualityScore.at(-1)).toEqual({ threshold: 0.92, points: 10 });
     expect(podium.measured.deadPoints).toBeLessThan(0);
+    expect(podium.note).toContain('quality_score');
   });
 });
 
@@ -1052,6 +1054,7 @@ describe('mergeTeamarrRules and stats_metric families', () => {
       { type: 'group', value: 'Old Stale Group', priority: 99, mode: 'score', points: 12 },
       { type: 'm3u', value: 'Premium IPTV', priority: 99, mode: 'score', points: 5 },
     ];
+    // `previous` is Podium's own last generated set (never the merged export).
     const previous = [
       { type: 'group', value: 'Old Stale Group', priority: 99, mode: 'score', points: 12 },
       { type: 'm3u', value: 'Premium IPTV', priority: 99, mode: 'score', points: 5 },
@@ -1065,17 +1068,11 @@ describe('mergeTeamarrRules and stats_metric families', () => {
     expect(merged.find((rule) => rule.value === 'Premium IPTV')?.points).toBe(8);
   });
 
-  it('performs one-time legacy cleanup of old Podium-shaped rules and bitrate rungs', () => {
+  it('preserves hand-written m3u and group rules at priority 99 while superseding legacy bitrate rungs', () => {
     const existing = [
       { type: 'regex', value: '^NFL Game Pass.*', priority: 99, mode: 'score', points: 10 },
-      {
-        type: 'regex',
-        value: '(?i).*(?<![A-Za-z0-9])(?:NCAAF)\\d*(?![A-Za-z]).*',
-        priority: 99,
-        mode: 'score',
-        points: 5,
-      },
-      { type: 'group', value: 'Legacy Group', priority: 99, mode: 'score', points: 15 },
+      { type: 'm3u', value: 'Hand Written Account', priority: 99, mode: 'score', points: 15 },
+      { type: 'group', value: 'Hand Written Group', priority: 99, mode: 'score', points: 12 },
       {
         type: 'stats_metric',
         value: 'ffmpeg_output_bitrate|>=|8160',
@@ -1093,7 +1090,30 @@ describe('mergeTeamarrRules and stats_metric families', () => {
         points: 10,
       },
     ];
-    const merged = mergeTeamarrRules(existing, fresh, { resetLegacy: true });
-    expect(merged.map((rule) => rule.value)).toEqual(['^NFL Game Pass.*', 'quality_score|>=|0.55']);
+    const merged = mergeTeamarrRules(existing, fresh);
+    expect(merged.map((rule) => rule.value)).toEqual([
+      '^NFL Game Pass.*',
+      'Hand Written Account',
+      'Hand Written Group',
+      'quality_score|>=|0.55',
+    ]);
+  });
+
+  it('supersedes legacy ffmpeg_output_bitrate|< floor even when minBitrateKbps is 0', () => {
+    const profile = buildProfile(many(60, { policyMode: 'always', bitrateKbps: 6000 }), {
+      minSamples: 20,
+    });
+    const fresh = teamarrRules(profile, { minBitrateKbps: 0 }).rules;
+    const existing = [
+      {
+        type: 'stats_metric',
+        value: 'ffmpeg_output_bitrate|<|6602',
+        priority: 99,
+        mode: 'score',
+        points: -8,
+      },
+    ];
+    const merged = mergeTeamarrRules(existing, fresh);
+    expect(merged.some((rule) => rule.value.startsWith('ffmpeg_output_bitrate|<'))).toBe(false);
   });
 });

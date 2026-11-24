@@ -989,10 +989,10 @@ export interface ExportOptions extends ProfileOptions {
    *
    * Only the ratio between this and other people's hand-written rules matters,
    * since Teamarr sums them. The default is set against a real rule set, whose
-   * positives run +10 to +20 with a bitrate ladder at +20 per rung: 5 puts a
-   * provider running 3Mbps above the house average at +15, an opinion of
-   * comparable strength to the ones written by hand rather than one that
-   * drowns them.
+   * positives run +10 to +20 with the `quality_score` ladder spanning -30 to +50:
+   * 5 puts a provider running 3Mbps above the house average at +8 (capped), an
+   * opinion of comparable strength to the ones written by hand rather than one
+   * that drowns them.
    */
   pointsPerMbps?: number;
   /**
@@ -1036,7 +1036,7 @@ export interface ExportOptions extends ProfileOptions {
  * which is the failure the rule exists to stop.
  *
  * Large enough to sink beneath any plausible stack of priors: three generated
- * rules at the ±15 cap, plus whatever an operator has hand-written. Teamarr
+ * rules at the ±8 cap, plus whatever an operator has hand-written. Teamarr
  * clamps a score to ±(BAND_STRIDE/2 - 1), so there is a great deal of room
  * and no reason to be shy with it.
  *
@@ -1070,9 +1070,6 @@ const QUALITY_SCORE_PROMOTIONS: ReadonlyArray<{ threshold: number; points: numbe
 ];
 
 const TIER_RANK: Record<string, number> = { sd: 1, hd: 2, fhd: 3, uhd: 4 };
-
-/** What each step of the bitrate ladder is worth (retained in `podium.measured`). */
-const BITRATE_POINTS = 8;
 
 /**
  * The profile knobs as a URL carries them, clamped.
@@ -1135,18 +1132,19 @@ export interface RulesExport {
     scope: ScopeSummary;
     /** Tier rules withheld because one account supplied most of the evidence. */
     confoundedTiers: ConfoundedTier[];
+    /** Tier rules withheld because the fitted points invert the resolution hierarchy. */
+    invertedTiers: Array<{ tier: string; points: number }>;
     /**
-     * The `stats_metric` half: what a measurement is worth here, and why.
+     * The `stats_metric` half: what a measurement is worth here.
      *
-     * Carried because the ladder's thresholds are the one thing in this file
-     * that will look arbitrary in three months. They are not -- they are this
-     * catalogue's quartiles on the day it was exported -- and the only way to
-     * show that is to ship the percentiles beside them.
+     * Carried so whoever opens this file in three months can see the exact
+     * `quality_score` rungs and health floor in force when it was exported.
      */
     measured: {
       deadPoints: number;
-      bitratePoints: number;
-      ladder: BitrateLadder;
+      minBitrateKbps: number;
+      /** The `quality_score` rungs, demotions then promotions, as exported. */
+      qualityScore: Array<{ threshold: number; points: number }>;
     };
     /**
      * Mined regexes, and the group rules each one absorbed.
@@ -1233,7 +1231,6 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
   const minBitrateKbps = options.minBitrateKbps ?? DEFAULT_MIN_BITRATE_KBPS;
   const consolidated = options.consolidated ?? [];
   const deadPoints = DEAD_POINTS;
-  const bitratePoints = BITRATE_POINTS;
 
   const rules: TeamarrRule[] = [];
 
@@ -1375,10 +1372,12 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
       break;
     }
   }
-  if (
+  const invertedTiers =
     tiersMonotonic &&
     !tierCandidates.some((t) => (t.key === 'uhd' || t.key === 'fhd') && t.points < 0)
-  ) {
+      ? []
+      : tierCandidates.map((t) => ({ tier: t.key, points: t.points }));
+  if (invertedTiers.length === 0) {
     for (const tier of tierCandidates) {
       rules.push({
         type: 'regex',
@@ -1399,7 +1398,12 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
       minSamples,
       scope: profile.scope,
       confoundedTiers: confounded,
-      measured: { deadPoints, bitratePoints, ladder: profile.bitrateLadder },
+      invertedTiers,
+      measured: {
+        deadPoints,
+        minBitrateKbps,
+        qualityScore: [...QUALITY_SCORE_DEMOTIONS, ...QUALITY_SCORE_PROMOTIONS],
+      },
       minedRegex: consolidated.map((token) => ({
         token: token.token,
         pattern: token.pattern,
@@ -1414,15 +1418,15 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
         'group rule scores only where the two are spelled the same.' +
         ' `stats_metric` rules read the stream_stats Podium publishes to ' +
         'Dispatcharr, so they score a measurement of the stream itself ' +
-        'rather than a prior about where it came from. The bitrate ladder ' +
-        "is centred on this catalogue's median: a stream measured below " +
-        'it is demoted, one measured above the upper quartile is promoted, ' +
-        'and a stream with no stream_stats scores 0 and so sits level with ' +
-        'a median one -- absent stats are not a low reading. Merging ' +
-        'REPLACES any existing single-condition stats_metric rule on the ' +
-        'same metric and comparator, whatever its threshold -- a ' +
-        'recalibrated ladder has different rungs, and keeping the old ones ' +
-        'would score the same bitrate twice. See podium.measured.' +
+        'rather than a prior about where it came from. The `quality_score` ' +
+        'ladder is centred on 0.50: a stream measured below it is demoted, ' +
+        'one measured from 0.55 up is promoted, and a stream with no ' +
+        'stream_stats scores 0 and so sits level with a median one -- absent ' +
+        'stats are not a low reading. A dead or black verdict, an unstable ' +
+        'stream or a bitrate under the floor costs deadPoints. Merging ' +
+        'REPLACES any existing single-condition stats_metric rule on the same ' +
+        'metric and comparator, whatever its threshold, and retires the old ' +
+        'ffmpeg_output_bitrate ladder. See podium.measured.' +
         (consolidated.length > 0
           ? ` ${consolidated.length} regex rule(s) were mined from stream names and ` +
             'REPLACE the group rules they subsume -- those groups are re-emitted at ' +
@@ -1432,6 +1436,10 @@ export function teamarrRules(profile: QualityProfile, options: ExportOptions = {
           ? ` ${confounded.length} tier rule(s) withheld: one account supplied ` +
             'more than 80% of the samples, so the effect describes that account ' +
             'rather than the tier. See podium.confoundedTiers.'
+          : '') +
+        (invertedTiers.length > 0
+          ? ` ${invertedTiers.length} tier rule(s) withheld: the fitted points ` +
+            'invert the resolution hierarchy. See podium.invertedTiers.'
           : ''),
     },
   };
@@ -1486,33 +1494,14 @@ function statsFamily(rule: { type: string; value: string }): string | null {
  * `resolution_height` -- are untouched, because Podium generates nothing that
  * competes with them.
  */
-const LEGACY_PODIUM_REGEX = /^\(\?i\)\.\*\(\?<!\[A-Za-z0-9\]\)\(\?:.+\)\\d\*\(\?!\[A-Za-z\]\)\.\*$/;
-
-function isLegacyPodiumRule(rule: {
-  type: string;
-  value: string;
-  mode?: string;
-  priority?: number;
-}): boolean {
-  if (rule.priority !== 99 || (rule.mode ?? 'priority') !== 'score') return false;
-  if (rule.type === 'm3u' || rule.type === 'group') return true;
-  if (rule.type === 'regex') return LEGACY_PODIUM_REGEX.test(rule.value.trim());
-  return false;
-}
-
 export interface MergeOptions<T = { type: string; value: string; mode?: string }> {
   /**
-   * Rules from the previous Podium push (`store.teamarrRules()`). Any rule in
-   * `existing` that was in `previous` and is no longer in `generated` is
-   * pruned as stale, while hand-written rules are left untouched.
+   * Rules from Podium's own last generated export (`store.teamarrGeneratedRules()`).
+   * Must be Podium's last generated set, never a merged or uploaded one. Any
+   * rule in `existing` that was in `previous` and is no longer in `generated`
+   * is pruned as stale, while hand-written rules are left untouched.
    */
   previous?: T[];
-  /**
-   * One-time cleanup for installs upgrading from before `quality_score`
-   * tracking: prunes legacy Podium-shaped `m3u`, `group`, and generated `regex`
-   * rules (`priority: 99`, `mode: 'score'`) that are no longer emitted.
-   */
-  resetLegacy?: boolean;
 }
 
 export function mergeTeamarrRules<
@@ -1532,10 +1521,12 @@ export function mergeTeamarrRules<
     const family = statsFamily(rule);
     if (family) families.add(family);
   }
-  // Supersede legacy `ffmpeg_output_bitrate|>=` ladder rungs when `quality_score`
-  // is exported so the old bitrate ladder does not linger beside it.
+  // Supersede the whole legacy `ffmpeg_output_bitrate` ladder when `quality_score`
+  // is exported — the `>=` rungs and the `<` floor alike, whether or not a bitrate
+  // floor rule is generated this time — so no old rung lingers beside it.
   if (families.has('quality_score|>=')) {
     families.add('ffmpeg_output_bitrate|>=');
+    families.add('ffmpeg_output_bitrate|<');
   }
 
   const byKey = new Map<string, TeamarrRule>();
@@ -1560,7 +1551,6 @@ export function mergeTeamarrRules<
       continue;
     }
     if (previousKeys.has(ruleKey)) continue;
-    if (options.resetLegacy && isLegacyPodiumRule(rule)) continue;
     merged.push(rule);
   }
 

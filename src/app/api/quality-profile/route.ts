@@ -187,15 +187,7 @@ export async function POST(request: Request) {
       minBitrateKbps: config.PODIUM_MIN_BITRATE_KBPS,
       consolidated: miner.passB.consolidated,
     });
-    const previous = store.teamarrRules()?.rules as
-      | Array<{ type: string; value: string; mode?: string }>
-      | undefined;
-    const resetLegacy = !(
-      previous?.some(
-        (rule) => rule.type === 'stats_metric' && String(rule.value).startsWith('quality_score|'),
-      ) ?? false
-    );
-    const merged = mergeTeamarrRules(rules, generated.rules, { previous, resetLegacy });
+    const merged = mergeTeamarrRules(rules, generated.rules);
 
     const body = {
       rules: merged,

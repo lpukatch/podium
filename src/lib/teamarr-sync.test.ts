@@ -290,6 +290,89 @@ describe('the population gate — asked before the pipeline, not after it', () =
       globalThis.fetch = originalFetch;
     }
   });
+
+  it('preserves hand-written rules in teamarrRules() while pruning stale generated rules', async () => {
+    const handWrittenM3u = {
+      type: 'm3u',
+      value: 'Hand Written Provider',
+      priority: 99,
+      mode: 'score',
+      points: 12,
+    };
+    const staleGeneratedGroup = {
+      type: 'group',
+      value: 'Stale Podium Group',
+      priority: 99,
+      mode: 'score',
+      points: 5,
+    };
+    const saveTeamarrRules = vi.fn();
+    const store = {
+      settings: () => [],
+      qualitySampleScopeRows: function* () {},
+      qualitySamples: () => [],
+      verdicts: () => new Map(),
+      stabilityRecords: () => new Map(),
+      peakManagedChannels: () => 0,
+      teamarrSyncLog: () => [],
+      teamarrRules: () => ({
+        rules: [handWrittenM3u, staleGeneratedGroup],
+        uploadedAt: Date.now(),
+      }),
+      teamarrGeneratedRules: () => [staleGeneratedGroup],
+      saveTeamarrRules,
+    } as unknown as Store;
+    const config = loadConfig({
+      PODIUM_TEAMARR_URL: 'http://teamarr:9195',
+      PODIUM_TEAMARR_MIN_SAMPLES: '0',
+    });
+
+    const pushed: Array<{ type: string; value: string }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      if (
+        url.endsWith('/api/v1/settings/stream-ordering') &&
+        (!init?.method || init.method === 'GET')
+      ) {
+        return new Response(JSON.stringify({ rules: [handWrittenM3u, staleGeneratedGroup] }), {
+          status: 200,
+        });
+      }
+      if (url.endsWith('/api/v1/settings/stream-ordering') && init?.method === 'PUT') {
+        const body = JSON.parse(String(init.body)) as {
+          rules?: Array<{ type: string; value: string }>;
+        };
+        pushed.push(...(body.rules ?? []));
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url.endsWith('/api/v1/channels/managed')) {
+        return new Response(JSON.stringify({ channels: [] }), { status: 200 });
+      }
+      throw new Error(`unexpected Teamarr request: ${url}`);
+    }) as typeof fetch;
+
+    try {
+      const outcome = await syncToTeamarr(store, config, { force: true });
+      expect(outcome.pushed).toBe(true);
+      expect(pushed.some((r) => r.type === 'm3u' && r.value === 'Hand Written Provider')).toBe(
+        true,
+      );
+      expect(pushed.some((r) => r.type === 'group' && r.value === 'Stale Podium Group')).toBe(
+        false,
+      );
+      expect(outcome.rules?.total).toBe(pushed.length);
+      expect(saveTeamarrRules).toHaveBeenCalledTimes(1);
+      const [savedMerged, savedGenerated] = saveTeamarrRules.mock.calls[0] as [
+        Array<{ value: string }>,
+        Array<{ value: string }>,
+      ];
+      expect(savedMerged.some((r) => r.value === 'Hand Written Provider')).toBe(true);
+      expect(savedGenerated.some((r) => r.value === 'Hand Written Provider')).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 describe('populationBar — where a scheduled push is allowed to land', () => {

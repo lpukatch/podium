@@ -400,6 +400,7 @@ CREATE TABLE IF NOT EXISTS quality_samples (
 CREATE TABLE IF NOT EXISTS teamarr_rules (
     id           INTEGER PRIMARY KEY CHECK (id = 1),
     rules        TEXT    NOT NULL,
+    generated    TEXT    NOT NULL DEFAULT '[]',
     uploaded_at  INTEGER NOT NULL
 );
 
@@ -1538,6 +1539,9 @@ export class Store {
         // NULL is the truth for every request queued before a per-request
         // length existed: they all meant "whatever PODIUM_SOAK_SECONDS says".
         ['soak_requests', 'seconds INTEGER'],
+        // Rules Podium itself last generated, kept separate from the merged
+        // ruleset so stale-rule pruning never treats hand-written rules as its own.
+        ['teamarr_rules', "generated TEXT NOT NULL DEFAULT '[]'"],
       ] as const) {
         try {
           this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`);
@@ -3133,11 +3137,14 @@ export class Store {
    * current answer to "what is it running". History lives in the checks, which
    * carry the date of the rules they used.
    */
-  saveTeamarrRules(rules: unknown): void {
+  saveTeamarrRules(rules: unknown, generated?: unknown): void {
     this.sql(
-      `INSERT INTO teamarr_rules (id, rules, uploaded_at) VALUES (1, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET rules = excluded.rules, uploaded_at = excluded.uploaded_at`,
-    ).run(JSON.stringify(rules), Date.now());
+      `INSERT INTO teamarr_rules (id, rules, generated, uploaded_at) VALUES (1, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           rules = excluded.rules,
+           generated = excluded.generated,
+           uploaded_at = excluded.uploaded_at`,
+    ).run(JSON.stringify(rules), JSON.stringify(generated ?? []), Date.now());
   }
 
   /**
@@ -3235,6 +3242,20 @@ export class Store {
       // Reported as absent rather than thrown: a corrupt rule set must not be
       // able to fail a probing pass.
       return null;
+    }
+  }
+
+  /** Rules Podium itself last generated and pushed, for stale-rule pruning. */
+  teamarrGeneratedRules(): unknown[] {
+    const row = this.sql('SELECT generated FROM teamarr_rules WHERE id = 1').get() as
+      | { generated: string }
+      | undefined;
+    if (!row) return [];
+    try {
+      const parsed = JSON.parse(row.generated) as unknown;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
     }
   }
 

@@ -677,13 +677,16 @@ describe('what a pass keeps', () => {
   it('reads back the rule set every later pass is measured against', () => {
     const store = new Store(':memory:');
     expect(store.teamarrRules()).toBeNull();
-    store.saveTeamarrRules(LIVE_RULES);
+    expect(store.teamarrGeneratedRules()).toEqual([]);
+    store.saveTeamarrRules(LIVE_RULES, [LIVE_RULES[0]]);
     expect(store.teamarrRules()?.rules).toHaveLength(LIVE_RULES.length);
+    expect(store.teamarrGeneratedRules()).toHaveLength(1);
 
     // Replaced, not appended: there is one Teamarr and one current answer to
     // what it is running.
     store.saveTeamarrRules([LIVE_RULES[0]]);
     expect(store.teamarrRules()?.rules).toHaveLength(1);
+    expect(store.teamarrGeneratedRules()).toEqual([]);
     store.close();
   });
 });

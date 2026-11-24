@@ -1379,22 +1379,29 @@ own name.
 
 The export also writes `stats_metric` rules, and those are not priors at all.
 They read the `stream_stats` Podium publishes to Dispatcharr, so they score a
-measurement of *the stream in front of you*. Three kinds:
+measurement of *the stream in front of you*:
 
 ```
-alive|=|0                      -100
-blank_detected|=|1             -100
-ffmpeg_output_bitrate|<|6602     -8    <- your p50
-ffmpeg_output_bitrate|>=|8047    +8    <- your p75
-ffmpeg_output_bitrate|>=|9444    +8    <- your p90
+alive|=|0                                      -100
+blank_detected|=|1                             -100
+unstable|=|1                                   -100
+ffmpeg_output_bitrate|<|<PODIUM_MIN_BITRATE_KBPS>  -100
+quality_score|<|0.35                            -15
+quality_score|<|0.5                             -15
+quality_score|>=|0.55                           +10
+quality_score|>=|0.65                           +10
+quality_score|>=|0.75                           +10
+quality_score|>=|0.85                           +10
+quality_score|>=|0.92                           +10
 ```
 
-The two liveness rules are the ones that matter most, because no prior can
-express them. Provenance does not predict whether a stream is up right now, so
-without them a rule set ranks a dead stream from a good account above a working
-one from a mediocre account — measured on a live install, that was 27 of 61
-disagreements, and 20 channels leading with a dead or black stream while a
-working one sat below it.
+The health rules (`alive`, `blank_detected`, `unstable`, and the sub-floor
+bitrate penalty) are the ones that matter most, because no prior can express
+them. Provenance does not predict whether a stream is up right now, so without
+them a rule set ranks a dead stream from a good account above a working one from
+a mediocre account — measured on a live install, that was 27 of 61 disagreements,
+and 20 channels leading with a dead or black stream while a working one sat below
+it.
 
 They demote only. Nothing rewards a stream for being alive: a stream Podium has
 never probed carries no `alive` key at all, so neither rule fires and it scores
@@ -1416,39 +1423,27 @@ the ordering also sinks such a stream below every measured one, the same
 "unmeasured is not better" rule it already applied to unmeasured bitrates. At
 the default weight of 0 none of this moves anything.
 
-The **bitrate ladder is read off your own catalogue**, at the median, upper
-quartile and top decile of your watchable streams. Hand-picked thresholds go
-stale invisibly: a rule set found in the field carried rungs at 10000 and 15000
-kbps against a catalogue whose median watchable stream measured 6602, so the
-first cleared 5.7% of streams and the second 0.4%. Both looked exactly like
-rules that worked. Dead and black streams are excluded from the percentiles —
-they are the liveness rules' business, and leaving them in drags every rung
-toward zero until the bottom one is cleared by a black screen.
+The **`quality_score` ladder** replaces fixed bitrate rungs with Podium's
+composite 0–1 score across resolution, bitrate, HEVC efficiency, fps, codec,
+audio, HDR, and stability. Its rungs span `-30` (below `0.35`) to `+50` (from
+`0.92` up), leaving **`0.50`–`0.55` as the zero band**:
 
-The ladder is **centred on the median**, and that is the part worth
-understanding. Teamarr's `stats_metric` matcher does not fire on a stream with
-no `stream_stats` at all — absent stats are not read as zero, they are read as
-no match — so a ladder made only of promotions scores every unprobed stream 0
-and every probed one above it. That ranks *having been probed*, not being any
-good, and on event inventory the two are nothing like the same thing: the
-streams Podium has measured are the ones that sat still long enough to measure,
-which skews hard toward the long-lived linear feeds Teamarr attaches by EPG
-match and away from the per-event streams that appear an hour before kickoff. A
-bitrate rule built that way is an `epg_match` bonus wearing a bitrate's name.
+- a stream measured below `0.50` is demoted (`-15` below `0.5`, `-30` below
+  `0.35`);
+- a stream measured from `0.55` up is promoted (`+10` per rung up to `+50`);
+- a stream with no `stream_stats` scores `0` and sits **level with a median
+  one** — absent stats are not a low reading, because Teamarr's `stats_metric`
+  matcher skips absent keys rather than treating them as zero.
 
-So the bottom step is a **demotion below the median** rather than a promotion
-above it. A stream measured worse than your field loses points, one measured
-better gains them, and 0 — the score of a stream nobody has probed — lands level
-with a median stream. The span is unchanged; where zero sits in it is not.
+On event inventory, streams Podium has measured skew hard toward long-lived
+linear feeds that sit still long enough to probe, away from per-event streams
+that appear an hour before kickoff. Keeping unprobed streams in the zero band
+rather than below the field stops `stats_metric` from turning into an
+`epg_match` bonus.
 
-On a catalogue uniform enough that p50, p75 and p90 collapse onto one number,
-the promotions are **dropped rather than de-duplicated**: a `>=` at the median
-fires on everything the demotion did not catch, which is a flat bonus for having
-been probed, and reintroduces exactly what centring the ladder removed. What
-ships is the demotion alone.
-
-**Points per Mbps** in Settings tunes the slope of the bitrate ladder; set it
-to `0` to suppress it. Liveness penalty rules remain constant.
+**Points per Mbps** in Settings slopes the account, group and name priors only;
+set it to `0` to drop the priors and leave the measured `quality_score` ladder on
+its own. Liveness and `quality_score` rules remain constant.
 
 ### Pushing straight to Teamarr
 
@@ -1597,18 +1592,20 @@ throttled one, and pooling them in reads as a catastrophic provider. On the
 install above they were 18% of all probes and 30% of the untagged tier.
 
 `?pointsPerMbps=` scales the result; the default of 5 puts a provider running
-3Mbps above average at +15, which reads alongside a hand-written "+20 for the
-home feed" as an opinion of comparable strength rather than one that drowns it.
-Raise it if your own rules use larger numbers — only the ratio matters.
+3Mbps above average at +8 (capped), which reads alongside a hand-written "+20
+for the home feed" as an opinion of comparable strength rather than one that
+drowns it. Raise it if your own rules use larger numbers — only the ratio
+matters.
 
-No generated **prior** exceeds **±15** whatever it fitted — an `m3u`, `group`
+No generated **prior** exceeds **±8** whatever it fitted — an `m3u`, `group`
 or `regex` rule is an inference about streams of the same provenance, and the
-cap keeps the strongest inference inside the measured ladder's span, so a stream
-measured in your top decile outranks one that merely comes from a good account.
+cap keeps stacked priors (`m3u` + `group` + `regex`, max ±24) inside the
+measured `quality_score` ladder's 80-point span, so priors rank unprobed streams
+and break ties without overriding a measured `quality_score`.
 
 The `stats_metric` rules sit outside that cap, and have to. The cap exists so a
 prior never outranks a measurement; these *are* the measurement. Capping the
-liveness rules at 15 would leave a dead stream one account rule away from
+liveness rules at 8 would leave a dead stream one account rule away from
 winning its channel, which is the failure they exist to stop — so they are
 worth −100 by default, comfortably beneath any plausible stack of priors.
 
@@ -1851,9 +1848,9 @@ that part is, split by how each stream was attached:
 
 That split is the thing to watch. EPG-matched streams are long-lived linear
 feeds that sit still long enough to probe; per-event streams appear an hour
-before kickoff and are gone by morning. The wider the gap, the more a bitrate
+before kickoff and are gone by morning. The wider the gap, the more a stats
 rule is scoring *how a stream was attached* rather than how good it is. Centring
-the bitrate ladder on the median removes the worst of it — see above — but the
+the `quality_score` ladder on `0.50` removes the worst of it — see above — but the
 number is worth knowing before deciding what points per Mbps should be.
 
 #### It runs itself after the first upload

@@ -74,7 +74,7 @@ export interface SyncOutcome {
    *
    * Absent when Teamarr could not be read. Recorded on the outcome rather than
    * left in a log because it is the only thing that says whether the exported
-   * bitrate ladder is sorting the catalogue or sorting the part of it that
+   * `quality_score` ladder is sorting the catalogue or sorting the part of it that
    * happened to sit still long enough to probe.
    */
   coverage?: MatchCoverage;
@@ -411,16 +411,10 @@ export async function syncToTeamarr(
 
   const client = new TeamarrClient(config.PODIUM_TEAMARR_URL);
   const existing = await client.rules();
-  const previous = store.teamarrRules?.()?.rules as TeamarrRuleRow[] | undefined;
-  const resetLegacy = !(
-    previous?.some(
-      (rule) => rule.type === 'stats_metric' && String(rule.value).startsWith('quality_score|'),
-    ) ?? false
-  );
-  const merged = mergeTeamarrRules(existing, generated.rules, {
-    previous,
-    resetLegacy,
-  }) as TeamarrRuleRow[];
+  const previous = store.teamarrGeneratedRules?.() as
+    | Array<{ type: string; value: string; mode?: string }>
+    | undefined;
+  const merged = mergeTeamarrRules(existing, generated.rules, { previous }) as TeamarrRuleRow[];
 
   // Teamarr's own attach-time state, for the channels about to be scored. Read
   // once and applied to both sides, because a rule set carrying `epg_match`
@@ -478,6 +472,6 @@ export async function syncToTeamarr(
 
   // Recorded only after the write lands, so the stored set is what Teamarr is
   // actually running -- which is what every later pass scores against.
-  store.saveTeamarrRules(merged);
+  store.saveTeamarrRules(merged, generated.rules);
   return { ...outcome, pushed: true };
 }

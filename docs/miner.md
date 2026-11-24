@@ -187,9 +187,9 @@ else.
 export — Python `re`, inline flags, verified against `search`/`match`/
 `fullmatch`. See [the regex form](usage.md#the-regex-form).
 
-**Points.** `deltaKbps / 1000 × pointsPerMbps`, capped at ±15 like every other
-generated rule, so the strongest inference stays below the first rung of a
-measured `stats_metric` ladder.
+**Points.** `deltaKbps / 1000 × pointsPerMbps`, capped at ±8 like every other
+generated rule, so the strongest inference stays below the first rung of the
+measured `quality_score` ladder.
 
 **Cap.** 10 mined regex rules total, across both passes. Different fixtures
 want different rules and the set has to stay legible.
