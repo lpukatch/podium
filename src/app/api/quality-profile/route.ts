@@ -112,6 +112,7 @@ export function GET(request: Request) {
     const body = teamarrRules(profile, {
       minSamples,
       pointsPerMbps,
+      minBitrateKbps: config.PODIUM_MIN_BITRATE_KBPS,
       consolidated: miner.passB.consolidated,
     });
     return new NextResponse(JSON.stringify(body, null, 2), {
@@ -183,9 +184,18 @@ export async function POST(request: Request) {
     const generated = teamarrRules(profile, {
       minSamples,
       pointsPerMbps,
+      minBitrateKbps: config.PODIUM_MIN_BITRATE_KBPS,
       consolidated: miner.passB.consolidated,
     });
-    const merged = mergeTeamarrRules(rules, generated.rules);
+    const previous = store.teamarrRules()?.rules as
+      | Array<{ type: string; value: string; mode?: string }>
+      | undefined;
+    const resetLegacy = !(
+      previous?.some(
+        (rule) => rule.type === 'stats_metric' && String(rule.value).startsWith('quality_score|'),
+      ) ?? false
+    );
+    const merged = mergeTeamarrRules(rules, generated.rules, { previous, resetLegacy });
 
     const body = {
       rules: merged,

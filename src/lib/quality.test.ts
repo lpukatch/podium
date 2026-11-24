@@ -402,8 +402,24 @@ describe('teamarrRules', () => {
     const priors = teamarrRules(extreme).rules.filter((rule) => rule.type !== 'stats_metric');
     expect(priors.length).toBeGreaterThan(0);
     for (const rule of priors) {
-      expect(Math.abs(rule.points)).toBeLessThanOrEqual(15);
+      expect(Math.abs(rule.points)).toBeLessThanOrEqual(8);
     }
+  });
+
+  it('withholds inverted tier regexes that penalise higher resolutions', () => {
+    const inverted = buildProfile(
+      [
+        ...many(100, { providerId: 1, providerName: 'P1', tier: 'hd', bitrateKbps: 8000 }),
+        ...many(100, { providerId: 2, providerName: 'P2', tier: 'hd', bitrateKbps: 8000 }),
+        ...many(100, { providerId: 1, providerName: 'P1', tier: 'uhd', bitrateKbps: 3000 }),
+        ...many(100, { providerId: 2, providerName: 'P2', tier: 'uhd', bitrateKbps: 3000 }),
+        ...many(100, { providerId: 1, providerName: 'P1', tier: 'unknown', bitrateKbps: 6000 }),
+        ...many(100, { providerId: 2, providerName: 'P2', tier: 'unknown', bitrateKbps: 6000 }),
+      ],
+      { minSamples: 20 },
+    );
+    const { rules } = teamarrRules(inverted, { minSamples: 20 });
+    expect(rules.some((rule) => rule.type === 'regex')).toBe(false);
   });
 
   it('sinks a dead stream below every prior it could possibly carry', () => {
@@ -814,57 +830,45 @@ describe('teamarrRules stats_metric export', () => {
       { minSamples: 20 },
     );
 
-  /** What the emitted ladder is worth to a stream measured at `kbps`. */
-  const ladderScore = (rules: TeamarrRule[], kbps: number): number =>
+  /** What the emitted `quality_score` ladder is worth to a stream measured at `qs`. */
+  const ladderScore = (rules: TeamarrRule[], qs: number): number =>
     rules
-      .filter((rule) => rule.value.startsWith('ffmpeg_output_bitrate'))
+      .filter((rule) => rule.value.startsWith('quality_score|'))
       .reduce((sum, rule) => {
         const [, operator, threshold] = rule.value.split('|');
         const target = Number(threshold);
-        const hit = operator === '<' ? kbps < target : kbps >= target;
+        const hit = operator === '<' ? qs < target : qs >= target;
         return hit ? sum + rule.points : sum;
       }, 0);
 
-  it('reads the ladder off this catalogue rather than a hand-picked number', () => {
-    // The steps have to land inside the catalogue, not at somebody else's
-    // 10000/15000.
+  it('emits a monotonic quality_score ladder across [0, 1]', () => {
     const profile = spreadProfile();
-    const { floorKbps, rungsKbps } = profile.bitrateLadder;
-
-    expect(rungsKbps).toHaveLength(2);
-    expect(floorKbps).toBeLessThan(rungsKbps[0]!);
-    expect(rungsKbps[0]).toBeLessThan(rungsKbps[1]!);
-    for (const step of [floorKbps, ...rungsKbps]) {
-      expect(step).toBeGreaterThanOrEqual(1000);
-      expect(step).toBeLessThanOrEqual(10_000);
-    }
-
-    const ladder = teamarrRules(profile).rules.filter((rule) =>
-      rule.value.startsWith('ffmpeg_output_bitrate'),
-    );
+    const { rules } = teamarrRules(profile);
+    const ladder = rules.filter((rule) => rule.value.startsWith('quality_score|'));
     expect(ladder.map((rule) => rule.value)).toEqual([
-      `ffmpeg_output_bitrate|<|${floorKbps}`,
-      ...rungsKbps.map((rung) => `ffmpeg_output_bitrate|>=|${rung}`),
+      'quality_score|<|0.35',
+      'quality_score|<|0.5',
+      'quality_score|>=|0.55',
+      'quality_score|>=|0.65',
+      'quality_score|>=|0.75',
+      'quality_score|>=|0.85',
+      'quality_score|>=|0.92',
     ]);
+    expect(ladderScore(rules, 0.2)).toBe(-30);
+    expect(ladderScore(rules, 0.4)).toBe(-15);
+    expect(ladderScore(rules, 0.95)).toBe(50);
   });
 
   it('scores a stream nobody has probed the same as a median one', () => {
-    // The whole reason the ladder is centred rather than resting on zero. A
-    // stats_metric rule does not fire on absent stream_stats, so a
-    // promotion-only ladder would rank every unprobed stream beneath every
-    // probed one -- and on event inventory the probed set is the long-lived
-    // linear feeds, not the better streams.
+    // A stats_metric rule does not fire on absent stream_stats, so an unprobed
+    // stream scores 0 and sits level with a median (0.50..0.54) stream.
     const profile = spreadProfile();
     const { rules } = teamarrRules(profile);
-    const { floorKbps, rungsKbps } = profile.bitrateLadder;
 
-    // An unprobed stream matches no bitrate rule at all: 0 by construction.
-    expect(ladderScore(rules, floorKbps)).toBe(0);
-    expect(ladderScore(rules, rungsKbps[0]! - 1)).toBe(0);
-
-    expect(ladderScore(rules, floorKbps - 1)).toBeLessThan(0);
-    expect(ladderScore(rules, rungsKbps[0]!)).toBeGreaterThan(0);
-    expect(ladderScore(rules, rungsKbps[1]!)).toBeGreaterThan(ladderScore(rules, rungsKbps[0]!));
+    expect(ladderScore(rules, 0.52)).toBe(0);
+    expect(ladderScore(rules, 0.49)).toBeLessThan(0);
+    expect(ladderScore(rules, 0.6)).toBeGreaterThan(0);
+    expect(ladderScore(rules, 0.92)).toBeGreaterThan(ladderScore(rules, 0.6));
   });
 
   it('excludes dead and black streams from the ladder', () => {
@@ -883,18 +887,14 @@ describe('teamarrRules stats_metric export', () => {
     expect(profile.bitrateLadder.rungsKbps.every((rung) => rung === 8000)).toBe(true);
   });
 
-  it('drops a rung that collapses onto the floor rather than de-duplicating it', () => {
-    // A uniform catalogue puts p50, p75 and p90 on the same value. A `>=` rung
-    // there fires on everything the floor did not demote -- a flat bonus for
-    // having been probed, which is exactly what the floor exists to remove. So
-    // the promotions go and the demotion stays.
+  it('emits unstable and sub-floor bitrate health penalties at DEAD_POINTS', () => {
     const profile = buildProfile(watchable(60, 6000), { minSamples: 20 });
-    const { rules } = teamarrRules(profile);
-    const ladder = rules.filter((rule) => rule.value.startsWith('ffmpeg_output_bitrate'));
+    const { rules } = teamarrRules(profile, { minBitrateKbps: 500 });
+    const unstable = rules.find((rule) => rule.value === 'unstable|=|1')!;
+    const subFloor = rules.find((rule) => rule.value === 'ffmpeg_output_bitrate|<|500')!;
 
-    expect(ladder.map((rule) => rule.value)).toEqual(['ffmpeg_output_bitrate|<|6000']);
-    expect(ladder[0]!.points).toBeLessThan(0);
-    expect(ladderScore(rules, 6000)).toBe(0);
+    expect(unstable.points).toBe(-100);
+    expect(subFloor.points).toBe(-100);
   });
 
   it('demotes a measured-dead stream and says nothing about an unprobed one', () => {
@@ -1044,5 +1044,56 @@ describe('mergeTeamarrRules and stats_metric families', () => {
     const liveness = merged.filter((rule) => rule.value.startsWith('alive|'));
     expect(liveness).toHaveLength(1);
     expect(liveness[0]!.value).toBe('alive|=|0');
+  });
+
+  it('prunes stale rules from previous pushes while preserving hand-written rules', () => {
+    const existing = [
+      { type: 'regex', value: '^NFL Game Pass.*', priority: 99, mode: 'score', points: 10 },
+      { type: 'group', value: 'Old Stale Group', priority: 99, mode: 'score', points: 12 },
+      { type: 'm3u', value: 'Premium IPTV', priority: 99, mode: 'score', points: 5 },
+    ];
+    const previous = [
+      { type: 'group', value: 'Old Stale Group', priority: 99, mode: 'score', points: 12 },
+      { type: 'm3u', value: 'Premium IPTV', priority: 99, mode: 'score', points: 5 },
+    ];
+    const fresh: TeamarrRule[] = [
+      { type: 'm3u', value: 'Premium IPTV', priority: 99, mode: 'score', points: 8 },
+    ];
+    const merged = mergeTeamarrRules(existing, fresh, { previous });
+    expect(merged.some((rule) => rule.value === '^NFL Game Pass.*')).toBe(true);
+    expect(merged.some((rule) => rule.value === 'Old Stale Group')).toBe(false);
+    expect(merged.find((rule) => rule.value === 'Premium IPTV')?.points).toBe(8);
+  });
+
+  it('performs one-time legacy cleanup of old Podium-shaped rules and bitrate rungs', () => {
+    const existing = [
+      { type: 'regex', value: '^NFL Game Pass.*', priority: 99, mode: 'score', points: 10 },
+      {
+        type: 'regex',
+        value: '(?i).*(?<![A-Za-z0-9])(?:NCAAF)\\d*(?![A-Za-z]).*',
+        priority: 99,
+        mode: 'score',
+        points: 5,
+      },
+      { type: 'group', value: 'Legacy Group', priority: 99, mode: 'score', points: 15 },
+      {
+        type: 'stats_metric',
+        value: 'ffmpeg_output_bitrate|>=|8160',
+        priority: 99,
+        mode: 'score',
+        points: 8,
+      },
+    ];
+    const fresh: TeamarrRule[] = [
+      {
+        type: 'stats_metric',
+        value: 'quality_score|>=|0.55',
+        priority: 99,
+        mode: 'score',
+        points: 10,
+      },
+    ];
+    const merged = mergeTeamarrRules(existing, fresh, { resetLegacy: true });
+    expect(merged.map((rule) => rule.value)).toEqual(['^NFL Game Pass.*', 'quality_score|>=|0.55']);
   });
 });

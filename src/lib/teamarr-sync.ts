@@ -42,6 +42,8 @@ export interface SyncScore {
   deadFirst: number;
   /** Measured bitrate given up across every disagreement, in kbps. */
   gapKbps: number;
+  /** Overall `quality_score` given up across every disagreement. */
+  gapScore?: number;
 }
 
 export interface SyncOutcome {
@@ -125,12 +127,14 @@ function scoreOf(summary: {
   agreed: number;
   deadFirst: number;
   gapKbps: number;
+  gapScore?: number;
 }): SyncScore {
   return {
     channels: summary.channels,
     agreed: summary.agreed,
     deadFirst: summary.deadFirst,
     gapKbps: summary.gapKbps,
+    ...(summary.gapScore !== undefined ? { gapScore: summary.gapScore } : {}),
   };
 }
 
@@ -176,12 +180,23 @@ export function regression(before: SyncScore, after: SyncScore): string | null {
   if (after.deadFirst > before.deadFirst) {
     return `it would put a dead or black stream first on ${after.deadFirst} channels, up from ${before.deadFirst}`;
   }
-  if (after.agreed < before.agreed && after.gapKbps > before.gapKbps) {
-    return (
-      `it would agree with the measurements on ${after.agreed} of ${after.channels} ` +
-      `channels, down from ${before.agreed}, and give up ` +
-      `${after.gapKbps - before.gapKbps} kbps more`
-    );
+  if (after.agreed < before.agreed) {
+    const hasQualityScore = before.gapScore !== undefined && after.gapScore !== undefined;
+    if (hasQualityScore && after.gapScore! > before.gapScore!) {
+      return (
+        `it would agree with the measurements on ${after.agreed} of ${after.channels} ` +
+        `channels, down from ${before.agreed}, and lose ` +
+        `${(after.gapScore! - before.gapScore!).toFixed(3)} quality score`
+      );
+    }
+    const scoreNotBetter = !hasQualityScore || after.gapScore === before.gapScore;
+    if (scoreNotBetter && after.gapKbps > before.gapKbps) {
+      return (
+        `it would agree with the measurements on ${after.agreed} of ${after.channels} ` +
+        `channels, down from ${before.agreed}, and give up ` +
+        `${after.gapKbps - before.gapKbps} kbps more`
+      );
+    }
   }
   return null;
 }
@@ -385,14 +400,27 @@ export async function syncToTeamarr(
   };
   const profile = buildProfile(samples, { scope, minSamples: fit.minSamples });
   const miner = mineNames(scoped, profile.groups, { minCarrierSamples: fit.minSamples });
-  const generated = teamarrRules(profile, { ...fit, consolidated: miner.passB.consolidated });
+  const generated = teamarrRules(profile, {
+    ...fit,
+    minBitrateKbps: config.PODIUM_MIN_BITRATE_KBPS,
+    consolidated: miner.passB.consolidated,
+  });
   if (generated.rules.length === 0) {
     return fail('the profile produced no rules worth pushing');
   }
 
   const client = new TeamarrClient(config.PODIUM_TEAMARR_URL);
   const existing = await client.rules();
-  const merged = mergeTeamarrRules(existing, generated.rules) as TeamarrRuleRow[];
+  const previous = store.teamarrRules?.()?.rules as TeamarrRuleRow[] | undefined;
+  const resetLegacy = !(
+    previous?.some(
+      (rule) => rule.type === 'stats_metric' && String(rule.value).startsWith('quality_score|'),
+    ) ?? false
+  );
+  const merged = mergeTeamarrRules(existing, generated.rules, {
+    previous,
+    resetLegacy,
+  }) as TeamarrRuleRow[];
 
   // Teamarr's own attach-time state, for the channels about to be scored. Read
   // once and applied to both sides, because a rule set carrying `epg_match`

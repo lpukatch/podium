@@ -139,6 +139,44 @@ describe('regression — what refuses an unattended push', () => {
     const worse = regression(score(), score({ agreed: 90, deadFirst: 6, gapKbps: 0 }));
     expect(worse).toContain('dead or black');
   });
+
+  it('refuses a drop in agreement that loses overall quality_score even when bitrate is flat', () => {
+    const before = score({
+      channels: 100,
+      agreed: 80,
+      deadFirst: 0,
+      gapKbps: 10_000,
+      gapScore: 1.5,
+    });
+    const after = score({
+      channels: 100,
+      agreed: 75,
+      deadFirst: 0,
+      gapKbps: 10_000,
+      gapScore: 2.25,
+    });
+    const worse = regression(before, after);
+    expect(worse).toContain('down from 80');
+    expect(worse).toContain('0.750 quality score');
+  });
+
+  it('allows an agreement drop that improves overall quality_score', () => {
+    const before = score({
+      channels: 100,
+      agreed: 80,
+      deadFirst: 0,
+      gapKbps: 10_000,
+      gapScore: 2.0,
+    });
+    const after = score({
+      channels: 100,
+      agreed: 78,
+      deadFirst: 0,
+      gapKbps: 10_500,
+      gapScore: 1.8,
+    });
+    expect(regression(before, after)).toBeNull();
+  });
 });
 
 describe('the population gate — asked before the pipeline, not after it', () => {
