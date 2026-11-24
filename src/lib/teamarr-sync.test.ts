@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { loadConfig } from './config';
+import { type Snapshot, snapshot } from './server/state';
 import type { Store } from './store';
 import {
   populationBar,
@@ -17,6 +18,20 @@ vi.mock('./server/state', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./server/state')>();
   return {
     ...actual,
+    policies: () =>
+      new Map([
+        [
+          1,
+          {
+            mode: 'assigned',
+            graceMinutes: 5,
+            windowMinutes: 180,
+            requireLive: true,
+            audioOnly: false,
+            measureOnly: false,
+          },
+        ],
+      ]),
     snapshot: vi.fn(async () => ({
       channels: [],
       streams: [],
@@ -160,6 +175,79 @@ describe('the population gate — asked before the pipeline, not after it', () =
       expect(outcome.deferred).toBe(true);
       expect(outcome.reason).toContain('only be checked on 0 of the 50');
       expect(dialed).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('materializes samples once after a scheduled push clears both gates', async () => {
+    vi.mocked(snapshot).mockResolvedValueOnce({
+      channels: [{ id: 1, name: 'Channel', groupId: 1, streams: [1, 2] }],
+      streams: [
+        { id: 1, name: 'Provider A HD', providerId: 1, groupId: 1 },
+        { id: 2, name: 'Provider B HD', providerId: 1, groupId: 1 },
+      ],
+      providers: [{ id: 1, name: 'Provider' }],
+      groups: [{ id: 1, name: 'Managed' }],
+      fetchedAt: Date.now(),
+    } as Snapshot);
+
+    const result = {
+      alive: true,
+      width: 1920,
+      height: 1080,
+      fps: 50,
+      bitrateKbps: 6000,
+      videoCodec: 'h264',
+      audioCodec: 'aac',
+      pixelFormat: 'yuv420p',
+      audioChannels: 2,
+      channelLayout: 'stereo',
+      audioBitrateKbps: 128,
+      audioSampleRate: 48_000,
+      bitrateMeasured: true,
+      black: false,
+      blackSeconds: 0,
+      elapsedMs: 1000,
+      error: '',
+    };
+    const qualitySamples = vi.fn(() => []);
+    const store = {
+      settings: () => [],
+      qualitySampleScopeRows: function* () {},
+      qualitySamples,
+      verdicts: () =>
+        new Map(
+          [1, 2].map(
+            (id) => [id, { probedAt: Date.now(), alive: true, result, audioOnly: false }] as const,
+          ),
+        ),
+      stabilityRecords: () => new Map(),
+      peakManagedChannels: () => 1,
+      teamarrSyncLog: () => [],
+    } as unknown as Store;
+    const config = loadConfig({
+      PODIUM_TEAMARR_URL: 'http://teamarr:9195',
+      PODIUM_TEAMARR_MIN_SAMPLES: '0',
+      PODIUM_TEAMARR_MIN_CHANNELS: '1',
+    });
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input) => {
+      const url = String(input);
+      if (url.endsWith('/api/v1/settings/stream-ordering')) {
+        return new Response(JSON.stringify({ rules: [] }), { status: 200 });
+      }
+      if (url.endsWith('/api/v1/channels/managed')) {
+        return new Response(JSON.stringify({ channels: [] }), { status: 200 });
+      }
+      throw new Error(`unexpected Teamarr request: ${url}`);
+    }) as typeof fetch;
+    try {
+      const outcome = await syncToTeamarr(store, config, { scheduled: true, dryRun: true });
+
+      expect(outcome.reason).toBe('preview only, nothing was written');
+      expect(qualitySamples).toHaveBeenCalledTimes(1);
     } finally {
       globalThis.fetch = originalFetch;
     }
