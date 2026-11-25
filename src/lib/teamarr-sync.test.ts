@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { loadConfig } from './config';
 import { type Snapshot, snapshot } from './server/state';
-import type { Store } from './store';
+import type { Store, StoredQualitySample } from './store';
 import {
   populationBar,
   regression,
@@ -249,7 +249,28 @@ describe('the population gate — asked before the pipeline, not after it', () =
       elapsedMs: 1000,
       error: '',
     };
-    const qualitySamples = vi.fn(() => []);
+    const qualitySamples = vi.fn((): StoredQualitySample[] => [
+      {
+        providerId: 1,
+        providerName: 'Provider',
+        tier: '',
+        streamName: 'Provider A HD',
+        groupId: 1,
+        groupName: 'Managed',
+        channelGroupId: null,
+        channelGroupName: '',
+        policyMode: '',
+        audioOnly: false,
+        sampledAt: Date.now(),
+        alive: true,
+        black: false,
+        bitrateKbps: 6000,
+        measured: true,
+        height: 1080,
+        fps: 50,
+        videoCodec: 'h264',
+      },
+    ]);
     const store = {
       settings: () => [],
       qualitySampleScopeRows: function* () {},
@@ -285,6 +306,8 @@ describe('the population gate — asked before the pipeline, not after it', () =
       const outcome = await syncToTeamarr(store, config, { scheduled: true, dryRun: true });
 
       expect(outcome.reason).toBe('preview only, nothing was written');
+      expect(outcome.rules?.generated).toBeGreaterThan(0);
+      expect(outcome.before?.channels).toBe(1);
       expect(qualitySamples).toHaveBeenCalledTimes(1);
     } finally {
       globalThis.fetch = originalFetch;
