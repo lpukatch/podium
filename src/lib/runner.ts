@@ -1218,7 +1218,13 @@ export interface RunnerDeps {
 export class Runner {
   lastRun: RunSummary | null = null;
   private running = false;
-  private catalogueContext: { key: string; rules: Rules; fetchedAt: number } | null = null;
+  private catalogueContext: {
+    key: string;
+    activityKey: string;
+    rules: Rules;
+    fetchedAt: number;
+  } | null = null;
+  private streamCatalogue: { key: string; fetchedAt: number; streams: Stream[] } | null = null;
   private progressWrittenAt = -Infinity;
   private progressFlush: ReturnType<typeof setTimeout> | null = null;
   private activeAbort: AbortFlag | null = null;
@@ -1548,15 +1554,18 @@ export class Runner {
         );
       }
 
+      const activityKey = JSON.stringify([
+        [...activity.channelIds].sort((a, b) => a - b),
+        [...activity.viewersByProfile].sort(([a], [b]) => a - b),
+        activity.unplacedSessions,
+      ]);
       const currentRules = this.deps.rules.get();
       const catalogueKey = () =>
         JSON.stringify([
           config,
           channels,
           providers,
-          [...activity.channelIds].sort((a, b) => a - b),
-          [...activity.viewersByProfile].sort(([a], [b]) => a - b),
-          activity.unplacedSessions,
+          activityKey,
           store.refreshMarksVersion(),
           store.soakQueueVersion(),
         ]);
@@ -1564,6 +1573,53 @@ export class Runner {
       const previous = this.lastRun;
       const context = this.catalogueContext;
       const now = Date.now();
+      // A changed viewer/profile map can make deferred work runnable, but it
+      // does not change Dispatcharr's stream listing. Keep a recent stream
+      // catalogue for that re-plan instead of downloading every stream page
+      // again. Provider viewer counts are dynamic too, so leave them out of
+      // this key; account and profile configuration still invalidate it.
+      const streamCatalogueKey = JSON.stringify([
+        config,
+        channels,
+        providers.map((provider) => [
+          provider.id,
+          provider.name,
+          provider.maxStreams,
+          provider.accountType,
+          provider.profiles.map((profile) => [
+            profile.id,
+            profile.name,
+            profile.isDefault,
+            profile.isActive,
+            profile.maxStreams,
+            profile.searchPattern,
+            profile.replacePattern,
+          ]),
+        ]),
+        store.refreshMarksVersion(),
+        store.soakQueueVersion(),
+      ]);
+      const maxCatalogueAge = Math.max(config.PODIUM_IDLE_MAX_MS, config.PODIUM_TICK_MS);
+      const cachedStreams = this.streamCatalogue;
+      if (
+        cachedStreams &&
+        (cachedStreams.key !== streamCatalogueKey ||
+          now < cachedStreams.fetchedAt ||
+          now - cachedStreams.fetchedAt >= maxCatalogueAge)
+      ) {
+        this.streamCatalogue = null;
+      }
+      // An unchanged pass may skip planning without invalidating the listing.
+      const reusedCatalogue =
+        previous !== null &&
+        previous.deferred > 0 &&
+        previous.runnableBacklog === 0 &&
+        context !== null &&
+        context.activityKey !== activityKey &&
+        (previous.nextDueAt === null || previous.nextDueAt > now) &&
+        (previous.nextEligibleAt === null || previous.nextEligibleAt > now)
+          ? this.streamCatalogue
+          : null;
       // The recent context is the catalogue freshness guard. Probing alone
       // does not make its stream list stale; remaining deferred work can wait
       // on the capacity already described by that unchanged context.
@@ -1580,7 +1636,7 @@ export class Runner {
         context.key === contextKey &&
         context.rules === currentRules &&
         now >= context.fetchedAt &&
-        now - context.fetchedAt < Math.max(config.PODIUM_IDLE_MAX_MS, config.PODIUM_TICK_MS) &&
+        now - context.fetchedAt < maxCatalogueAge &&
         (previous.nextDueAt === null || previous.nextDueAt > now) &&
         (previous.nextEligibleAt === null || previous.nextEligibleAt > now);
 
@@ -1614,12 +1670,21 @@ export class Runner {
 
       store.startRun(runId);
       runRecorded = true;
+      const streamsPromise = reusedCatalogue?.streams ?? client.streams();
       const [streams, epg, groups] = await Promise.all([
-        client.streams(),
+        streamsPromise,
         this.epgRows(client, config),
         client.groups(),
       ]);
-      this.catalogueContext = { key: contextKey, rules: currentRules, fetchedAt: Date.now() };
+      if (!reusedCatalogue) {
+        this.streamCatalogue = { key: streamCatalogueKey, fetchedAt: Date.now(), streams };
+      }
+      this.catalogueContext = {
+        key: contextKey,
+        activityKey,
+        rules: currentRules,
+        fetchedAt: Date.now(),
+      };
       const profileUserAgents =
         config.PODIUM_DIRECT_PROFILE_USER_AGENT && !config.PODIUM_PROBE_VIA_DISPATCHARR
           ? await client.streamProfileUserAgents().catch((error) => {
@@ -1662,7 +1727,9 @@ export class Runner {
       const streamViewers = viewersByProvider(
         streams.map((s) => ({
           providerId: s.providerId,
-          currentViewers: s.currentViewers,
+          // A reused listing predates the activity read. If nobody is watching
+          // now, its old viewer counts must not keep provider slots occupied.
+          currentViewers: reusedCatalogue && activity.idle ? 0 : s.currentViewers,
           channelIds: streamToChannels.get(s.id),
         })),
         activity,
@@ -1782,8 +1849,11 @@ export class Runner {
                 .filter(Boolean)
                 .join(', ')}, others probing)`;
 
+      const listingNote = reusedCatalogue
+        ? `reused ${streams.length} streams from the catalogue fetched ${Math.round((now - reusedCatalogue.fetchedAt) / 1000)}s ago`
+        : `fetched ${streams.length} streams`;
       log(
-        `fetched ${channels.length} channels, ${streams.length} streams; ` +
+        `fetched ${channels.length} channels; ${listingNote}; ` +
           `lanes ${JSON.stringify(Object.fromEntries(limits))}${yieldNote}`,
       );
 
@@ -2572,6 +2642,7 @@ export class Runner {
       const blockedSoaks = this.blockedSoakStreams(channels, groupNames, eligibility, epgRows);
       this.catalogueContext = {
         key: catalogueKey(),
+        activityKey,
         rules: this.deps.rules.get(),
         fetchedAt: Date.now(),
       };
