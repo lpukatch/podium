@@ -291,18 +291,21 @@ describe('a watching pass, end to end', () => {
    * One viewer, on provider 5's default profile. Provider 6 is untouched.
    * `profileId` of null is the unattributable session.
    */
-  function stubDispatcharr(profileId: number | null) {
+  function stubDispatcharr(profileId: number | null | 'idle', streamViewers = 0) {
     const paths: string[] = [];
     globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       paths.push(new URL(url).pathname);
       const session: Record<string, unknown> = { channel_id: 1 };
-      if (profileId !== null) session.m3u_profile_id = profileId;
+      if (typeof profileId === 'number') session.m3u_profile_id = profileId;
       const body = url.includes('/accounts/token/')
         ? { access: 'a', refresh: 'r' }
         : url.includes('/proxy/stats/')
           ? {
-              live: { channels: [session], count: 1 },
+              live:
+                profileId === 'idle'
+                  ? { channels: [], count: 0 }
+                  : { channels: [session], count: 1 },
               vod: { vod_connections: [] },
               catchup: { timeshift_sessions: [] },
             }
@@ -325,7 +328,15 @@ describe('a watching pass, end to end', () => {
                   },
                 ],
               }
-            : { count: 0, next: null, results: [] };
+            : url.includes('/api/channels/streams/') && streamViewers > 0
+              ? {
+                  count: 1,
+                  next: null,
+                  results: [
+                    { id: 100, url: 'http://p/s', m3u_account: 5, current_viewers: streamViewers },
+                  ],
+                }
+              : { count: 0, next: null, results: [] };
       return {
         ok: true,
         status: 200,
@@ -457,7 +468,7 @@ describe('a watching pass, end to end', () => {
     expect(crawls()).toBe(before);
   });
 
-  it('reuses a recent stream catalogue when activity changes after deferred-only work', async () => {
+  it('keeps the stream catalogue across unchanged passes for a later activity change', async () => {
     const firstPaths = stubDispatcharr(12);
     const worker = runner();
     const previous = await worker.runOnce();
@@ -471,33 +482,63 @@ describe('a watching pass, end to end', () => {
       nextDueAt: null,
       nextEligibleAt: null,
     };
+    const unchangedPaths = stubDispatcharr(12);
+    expect((await worker.runOnce()).paused).toBe(true);
+    expect((await worker.runOnce()).paused).toBe(true);
+    expect(unchangedPaths).not.toContain('/api/channels/streams/');
+
     const paths = stubDispatcharr(13);
     await worker.runOnce();
     expect(paths).not.toContain('/api/channels/streams/');
     expect(paths).toContain('/proxy/stats/');
   });
 
-  it.each(['refresh', 'soak', 'config'])('re-fetches after a %s change', async (change) => {
-    const paths = stubDispatcharr(12);
-    const env: Record<string, string> = {};
-    const worker = runner(env);
+  it('restores idle provider capacity without using viewer counts from the cached listing', async () => {
+    stubDispatcharr(12, 1);
+    const messages: string[] = [];
+    const worker = runner({}, (message) => messages.push(message));
     const previous = await worker.runOnce();
     worker.lastRun = {
       ...previous,
-      probed: 0,
       runnableBacklog: 0,
       deferred: 5,
-      soakBacklog: 0,
       nextDueAt: null,
       nextEligibleAt: null,
     };
-    const before = paths.filter((path) => path === '/api/channels/streams/').length;
-    if (change === 'refresh') store.setRefreshMark(-1);
-    if (change === 'soak') store.queueSoaks([{ streamId: 1, channelId: 1 }]);
-    if (change === 'config') env.PODIUM_MAX_AGE_MS = '123456';
+
+    const paths = stubDispatcharr('idle');
     await worker.runOnce();
-    expect(paths.filter((path) => path === '/api/channels/streams/')).toHaveLength(before + 1);
+    expect(paths).toContain('/proxy/stats/');
+    expect(paths).not.toContain('/api/channels/streams/');
+    const reuseLog = messages.find((message) => message.includes('reused 1 streams'));
+    expect(reuseLog).toMatch(/catalogue fetched \d+s ago/);
+    expect(reuseLog).toContain('"5:0":3');
   });
+
+  it.each(['refresh', 'soak', 'config', 'due time'])(
+    're-fetches after a %s change',
+    async (change) => {
+      stubDispatcharr(12);
+      const env: Record<string, string> = {};
+      const worker = runner(env);
+      const previous = await worker.runOnce();
+      worker.lastRun = {
+        ...previous,
+        probed: 0,
+        runnableBacklog: 0,
+        deferred: 5,
+        soakBacklog: 0,
+        nextDueAt: change === 'due time' ? Date.now() - 1 : null,
+        nextEligibleAt: null,
+      };
+      if (change === 'refresh') store.setRefreshMark(-1);
+      if (change === 'soak') store.queueSoaks([{ streamId: 1, channelId: 1 }]);
+      if (change === 'config') env.PODIUM_MAX_AGE_MS = '123456';
+      const paths = stubDispatcharr(13);
+      await worker.runOnce();
+      expect(paths).toContain('/api/channels/streams/');
+    },
+  );
 
   it('pauses, and says why, when the session names no profile', async () => {
     const messages: string[] = [];

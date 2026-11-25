@@ -1565,9 +1565,7 @@ export class Runner {
           config,
           channels,
           providers,
-          [...activity.channelIds].sort((a, b) => a - b),
-          [...activity.viewersByProfile].sort(([a], [b]) => a - b),
-          activity.unplacedSessions,
+          activityKey,
           store.refreshMarksVersion(),
           store.soakQueueVersion(),
         ]);
@@ -1601,18 +1599,27 @@ export class Runner {
         store.refreshMarksVersion(),
         store.soakQueueVersion(),
       ]);
+      const maxCatalogueAge = Math.max(config.PODIUM_IDLE_MAX_MS, config.PODIUM_TICK_MS);
       const cachedStreams = this.streamCatalogue;
-      const reuseStreamCatalogue =
+      if (
+        cachedStreams &&
+        (cachedStreams.key !== streamCatalogueKey ||
+          now < cachedStreams.fetchedAt ||
+          now - cachedStreams.fetchedAt >= maxCatalogueAge)
+      ) {
+        this.streamCatalogue = null;
+      }
+      // An unchanged pass may skip planning without invalidating the listing.
+      const reusedCatalogue =
         previous !== null &&
         previous.deferred > 0 &&
         previous.runnableBacklog === 0 &&
         context !== null &&
         context.activityKey !== activityKey &&
-        cachedStreams !== null &&
-        cachedStreams.key === streamCatalogueKey &&
-        now >= cachedStreams.fetchedAt &&
-        now - cachedStreams.fetchedAt < Math.max(config.PODIUM_IDLE_MAX_MS, config.PODIUM_TICK_MS);
-      if (cachedStreams && !reuseStreamCatalogue) this.streamCatalogue = null;
+        (previous.nextDueAt === null || previous.nextDueAt > now) &&
+        (previous.nextEligibleAt === null || previous.nextEligibleAt > now)
+          ? this.streamCatalogue
+          : null;
       // The recent context is the catalogue freshness guard. Probing alone
       // does not make its stream list stale; remaining deferred work can wait
       // on the capacity already described by that unchanged context.
@@ -1629,7 +1636,7 @@ export class Runner {
         context.key === contextKey &&
         context.rules === currentRules &&
         now >= context.fetchedAt &&
-        now - context.fetchedAt < Math.max(config.PODIUM_IDLE_MAX_MS, config.PODIUM_TICK_MS) &&
+        now - context.fetchedAt < maxCatalogueAge &&
         (previous.nextDueAt === null || previous.nextDueAt > now) &&
         (previous.nextEligibleAt === null || previous.nextEligibleAt > now);
 
@@ -1663,16 +1670,13 @@ export class Runner {
 
       store.startRun(runId);
       runRecorded = true;
-      const streamsPromise =
-        reuseStreamCatalogue && cachedStreams
-          ? Promise.resolve(cachedStreams.streams)
-          : client.streams();
+      const streamsPromise = reusedCatalogue?.streams ?? client.streams();
       const [streams, epg, groups] = await Promise.all([
         streamsPromise,
         this.epgRows(client, config),
         client.groups(),
       ]);
-      if (!reuseStreamCatalogue) {
+      if (!reusedCatalogue) {
         this.streamCatalogue = { key: streamCatalogueKey, fetchedAt: Date.now(), streams };
       }
       this.catalogueContext = {
@@ -1723,7 +1727,9 @@ export class Runner {
       const streamViewers = viewersByProvider(
         streams.map((s) => ({
           providerId: s.providerId,
-          currentViewers: s.currentViewers,
+          // A reused listing predates the activity read. If nobody is watching
+          // now, its old viewer counts must not keep provider slots occupied.
+          currentViewers: reusedCatalogue && activity.idle ? 0 : s.currentViewers,
           channelIds: streamToChannels.get(s.id),
         })),
         activity,
@@ -1843,8 +1849,11 @@ export class Runner {
                 .filter(Boolean)
                 .join(', ')}, others probing)`;
 
+      const listingNote = reusedCatalogue
+        ? `reused ${streams.length} streams from the catalogue fetched ${Math.round((now - reusedCatalogue.fetchedAt) / 1000)}s ago`
+        : `fetched ${streams.length} streams`;
       log(
-        `fetched ${channels.length} channels, ${streams.length} streams; ` +
+        `fetched ${channels.length} channels; ${listingNote}; ` +
           `lanes ${JSON.stringify(Object.fromEntries(limits))}${yieldNote}`,
       );
 
