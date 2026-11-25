@@ -457,10 +457,11 @@ describe('a watching pass, end to end', () => {
     expect(crawls()).toBe(before);
   });
 
-  it('re-fetches the catalogue when activity changes after deferred-only work', async () => {
-    stubDispatcharr(12);
+  it('reuses a recent stream catalogue when activity changes after deferred-only work', async () => {
+    const firstPaths = stubDispatcharr(12);
     const worker = runner();
     const previous = await worker.runOnce();
+    expect(firstPaths).toContain('/api/channels/streams/');
     worker.lastRun = {
       ...previous,
       probed: 0,
@@ -472,7 +473,8 @@ describe('a watching pass, end to end', () => {
     };
     const paths = stubDispatcharr(13);
     await worker.runOnce();
-    expect(paths).toContain('/api/channels/streams/');
+    expect(paths).not.toContain('/api/channels/streams/');
+    expect(paths).toContain('/proxy/stats/');
   });
 
   it.each(['refresh', 'soak', 'config'])('re-fetches after a %s change', async (change) => {
