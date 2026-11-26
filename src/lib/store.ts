@@ -1758,6 +1758,20 @@ export class Store {
     this.db.close();
   }
 
+  /** Refresh planner stats and checkpoint WAL without making maintenance fragile. */
+  private maintainDatabase(): void {
+    try {
+      this.db.pragma('optimize');
+    } catch {
+      // A busy or read-only database must not prevent the worker from running.
+    }
+    try {
+      this.db.pragma('wal_checkpoint(PASSIVE)');
+    } catch {
+      // Another process may be using the database; a later pass can retry.
+    }
+  }
+
   /**
    * The stored verdict for a stream, whether or not it is still within its TTL.
    *
@@ -2023,7 +2037,12 @@ export class Store {
       this.sql('DELETE FROM soak_results WHERE completed_at < ?').run(now - 30 * 86_400_000);
     })();
     // A failed transaction must leave maintenance due for the next attempt.
-    if (maintenance) this.lastMaintenanceAt = now;
+    if (maintenance) {
+      this.lastMaintenanceAt = now;
+      // Run after the history sweep's transaction. Neither command is required
+      // for correctness, so database contention cannot fail a worker pass.
+      this.maintainDatabase();
+    }
   }
 
   finishRun(runId: string, fields: RunUpdate = {}): void {

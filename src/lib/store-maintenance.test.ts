@@ -1,8 +1,12 @@
+import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ProbeResult } from './probe';
 import { Store } from './store';
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
 
 describe('store maintenance cadence', () => {
   const soak = {
@@ -78,6 +82,34 @@ describe('store maintenance cadence', () => {
       store.startRun('third');
       expect(trim).toHaveBeenCalledTimes(2);
       expect(store.recentRuns(10)).toHaveLength(3);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('optimizes and passively checkpoints SQLite on the maintenance cadence', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_700_000_000_000);
+    const store = new Store(':memory:');
+    const pragma = vi.spyOn(Database.prototype, 'pragma');
+    try {
+      store.startRun('first');
+      expect(pragma.mock.calls.slice(-2).map(([statement]) => statement)).toEqual([
+        'optimize',
+        'wal_checkpoint(PASSIVE)',
+      ]);
+
+      const firstMaintenanceCalls = pragma.mock.calls.length;
+      vi.advanceTimersByTime(60_000);
+      store.startRun('second');
+      expect(pragma).toHaveBeenCalledTimes(firstMaintenanceCalls);
+
+      vi.advanceTimersByTime(14 * 60_000);
+      store.startRun('third');
+      expect(pragma.mock.calls.slice(-2).map(([statement]) => statement)).toEqual([
+        'optimize',
+        'wal_checkpoint(PASSIVE)',
+      ]);
     } finally {
       store.close();
     }
