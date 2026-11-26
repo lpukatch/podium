@@ -115,6 +115,28 @@ describe('store maintenance cadence', () => {
     }
   });
 
+  it.each([
+    ['optimize', 'sqlite optimize failed: Error: database busy'],
+    ['wal_checkpoint(PASSIVE)', 'sqlite wal_checkpoint failed: Error: database busy'],
+  ])('logs a failed %s pragma without interrupting the run', (failedPragma, warning) => {
+    const warn = vi.fn();
+    const store = new Store(':memory:', warn);
+    const db = (store as unknown as { db: Database.Database }).db;
+    const originalPragma = db.pragma.bind(db);
+    vi.spyOn(db, 'pragma').mockImplementation((statement, options) => {
+      if (statement === failedPragma) throw new Error('database busy');
+      return originalPragma(statement, options);
+    });
+
+    try {
+      expect(() => store.startRun('maintenance-failure')).not.toThrow();
+      expect(store.recentRuns(10)).toHaveLength(1);
+      expect(warn).toHaveBeenCalledExactlyOnceWith(warning);
+    } finally {
+      store.close();
+    }
+  });
+
   it('retries maintenance after a failed transaction', () => {
     const store = new Store(':memory:');
     try {

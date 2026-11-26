@@ -37,6 +37,7 @@ import { mkdirSync } from 'fs';
 import { dirname } from 'path';
 import type { ConnectEventName } from './connect-events';
 import type { ConnectActivity, ConnectDelivery, ConnectSummary } from './connect-status';
+import { errorText } from './error-text';
 import type { ProbeResult, SoakResult } from './probe';
 import type { Leg, StabilityRecord } from './stability';
 import { pickBestVariant, type VariantVerdict, verdictStatus } from './variants';
@@ -1473,8 +1474,10 @@ export class Store {
   private readonly statements = new Map<string, Database.Statement>();
   private lastMaintenanceAt: number | null = null;
   private static initializedPaths = new Set<string>();
+  private readonly warn: (message: string) => void;
 
-  constructor(path: string) {
+  constructor(path: string, warn: (message: string) => void = (message) => console.warn(message)) {
+    this.warn = warn;
     mkdirSync(dirname(path), { recursive: true });
     this.db = new Database(path);
     this.db.pragma('journal_mode = WAL');
@@ -1762,13 +1765,15 @@ export class Store {
   private maintainDatabase(): void {
     try {
       this.db.pragma('optimize');
-    } catch {
+    } catch (error) {
       // A busy or read-only database must not prevent the worker from running.
+      this.warn(`sqlite optimize failed: ${errorText(error)}`);
     }
     try {
       this.db.pragma('wal_checkpoint(PASSIVE)');
-    } catch {
+    } catch (error) {
       // Another process may be using the database; a later pass can retry.
+      this.warn(`sqlite wal_checkpoint failed: ${errorText(error)}`);
     }
   }
 
