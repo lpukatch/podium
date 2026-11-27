@@ -535,8 +535,57 @@ describe('store', () => {
     store.startRun('b');
     const runs = store.recentRuns(5);
     expect(runs[0]?.run_id).toBe('b');
+    expect(runs[0]?.outcome).toBe('running');
     expect(runs[1]?.probed).toBe(3);
     expect(runs[1]?.finished_at).not.toBeNull();
+    expect(runs[1]?.outcome).toBe('completed');
+  });
+
+  it('migrates old run history and recovers its unfinished rows', () => {
+    const dbPath = join(dir, 'legacy-runs.db');
+    const legacy = new Database(dbPath);
+    legacy.exec(`
+      CREATE TABLE runs (
+        run_id TEXT PRIMARY KEY,
+        started_at INTEGER NOT NULL,
+        finished_at INTEGER,
+        channels INTEGER NOT NULL DEFAULT 0,
+        probed INTEGER NOT NULL DEFAULT 0,
+        cached INTEGER NOT NULL DEFAULT 0,
+        dead INTEGER NOT NULL DEFAULT 0,
+        reordered INTEGER NOT NULL DEFAULT 0,
+        unchanged INTEGER NOT NULL DEFAULT 0,
+        assigned INTEGER NOT NULL DEFAULT 0,
+        removed INTEGER NOT NULL DEFAULT 0,
+        measured INTEGER NOT NULL DEFAULT 0,
+        skipped INTEGER NOT NULL DEFAULT 0,
+        deferred INTEGER NOT NULL DEFAULT 0,
+        backlog INTEGER NOT NULL DEFAULT 0,
+        next_due_at INTEGER,
+        oldest_probed_at INTEGER,
+        error TEXT
+      );
+    `);
+    const insert = legacy.prepare(
+      'INSERT INTO runs (run_id, started_at, finished_at, error) VALUES (?, ?, ?, ?)',
+    );
+    insert.run('completed', Date.now() - 30_000, Date.now() - 20_000, null);
+    insert.run('failed', Date.now() - 20_000, Date.now() - 10_000, 'network error');
+    insert.run('unfinished', Date.now() - 10_000, null, null);
+    legacy.close();
+
+    const migrated = new Store(dbPath);
+    try {
+      expect(migrated.runTotals()).toMatchObject({ runs: 3, failed: 1, interrupted: 0 });
+      expect(migrated.recentRuns(10).find((run) => run.run_id === 'unfinished')?.outcome).toBe(
+        null,
+      );
+      expect(migrated.interruptUnfinishedRuns()).toBe(1);
+      expect(migrated.runStats(0)).toMatchObject({ passes: 3, failed: 1, interrupted: 1 });
+      expect(migrated.runTotals()).toMatchObject({ runs: 3, failed: 1, interrupted: 1 });
+    } finally {
+      migrated.close();
+    }
   });
 
   it('prunes only rows older than the cutoff', () => {
@@ -640,6 +689,7 @@ describe('store', () => {
     expect(stats.probed).toBe(4);
     expect(stats.reordered).toBe(2);
     expect(stats.failed).toBe(1);
+    expect(stats.interrupted).toBe(0);
     // Outside the window, nothing counts.
     expect(store.runStats(Date.now() + 1000).passes).toBe(0);
   });

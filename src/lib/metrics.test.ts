@@ -204,6 +204,15 @@ describe('renderMetrics', () => {
     expect(m.get('podium_last_run_failed')).toBe(1);
   });
 
+  it('counts interrupted runs separately from errors', () => {
+    store.startRun('interrupted');
+    expect(store.interruptUnfinishedRuns()).toBe(1);
+
+    const m = parse(renderMetrics(store, { maxAgeMs: 3600_000, now: NOW }));
+    expect(m.get('podium_runs_failed_total')).toBe(0);
+    expect(m.get('podium_runs_interrupted_total')).toBe(1);
+  });
+
   it('keeps lifetime totals when the runs history is trimmed', () => {
     // The counter used to be a SUM over the runs table, which drops rows past
     // RUN_HISTORY_MS -- so the totals, and every rate() on them, walked

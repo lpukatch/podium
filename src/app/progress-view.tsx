@@ -85,6 +85,7 @@ interface RunRow {
   run_id: string;
   started_at: number;
   finished_at: number | null;
+  outcome?: 'running' | 'completed' | 'failed' | 'interrupted' | null;
   channels: number;
   probed: number;
   cached: number;
@@ -112,6 +113,7 @@ interface Stats {
     dead: number;
     reordered: number;
     failed: number;
+    interrupted: number;
   };
   activity: Array<{ from: number; probed: number; dead: number }>;
   liveTtlMs: number;
@@ -208,7 +210,8 @@ type Entry =
 export function collapseRuns(runs: RunRow[]): Entry[] {
   const out: Entry[] = [];
   for (const run of runs) {
-    const quiet = !run.error && run.probed === 0 && run.reordered === 0;
+    const quiet =
+      !run.error && run.outcome !== 'interrupted' && run.probed === 0 && run.reordered === 0;
     const last = out[out.length - 1];
     if (!quiet) {
       out.push({ kind: 'run', run });
@@ -825,6 +828,12 @@ export function ProgressView() {
               {n(stats.day.failed)} {stats.day.failed === 1 ? 'pass' : 'passes'} failed.
             </p>
           )}
+          {stats.day.interrupted > 0 && (
+            <p className="mt-2 text-sm text-[var(--color-warn)]">
+              {n(stats.day.interrupted)} {stats.day.interrupted === 1 ? 'pass' : 'passes'}{' '}
+              interrupted; end time unknown.
+            </p>
+          )}
         </div>
       )}
 
@@ -912,11 +921,20 @@ export function ProgressView() {
                     <span className="text-sm text-[var(--color-muted)]">
                       {entry.run.finished_at
                         ? `took ${((entry.run.finished_at - entry.run.started_at) / 1000).toFixed(1)}s`
-                        : 'running'}
+                        : entry.run.outcome === 'interrupted'
+                          ? 'interrupted · end time unknown'
+                          : 'running'}
                     </span>
                   </span>
                   <span className="text-sm tabular-nums text-[var(--color-muted)]">
-                    {entry.run.error ? (
+                    {entry.run.outcome === 'interrupted' ? (
+                      <span
+                        className="text-[var(--color-warn)]"
+                        title="The worker stopped before it recorded an end time."
+                      >
+                        Interrupted
+                      </span>
+                    ) : entry.run.error ? (
                       <span className="text-[var(--color-bad)]" title={entry.run.error}>
                         {describeRunError(entry.run.error)}
                       </span>

@@ -919,6 +919,23 @@ export async function startWorker(config: Config, log: Log): Promise<() => Promi
     }
 
     holding = true;
+    try {
+      const interrupted = store.interruptUnfinishedRuns();
+      if (interrupted > 0) {
+        log(`marked ${interrupted} unfinished run(s) interrupted; their end time is unknown`);
+      }
+    } catch (error) {
+      log(`could not reconcile unfinished runs after acquiring the lock: ${errorText(error)}`);
+      holding = false;
+      try {
+        store.releaseLock(owner);
+      } catch {
+        // The lock will become stale if the database is still unavailable.
+      }
+      retry = setTimeout(acquire, LOCK_RETRY_MS);
+      return;
+    }
+
     // Whatever is already on the table is picked up by the first pass below, so
     // it is not a wake-up -- only marks arriving after this are.
     try {
