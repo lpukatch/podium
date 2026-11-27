@@ -1770,9 +1770,19 @@ export class Store {
       this.warn(`sqlite optimize failed: ${errorText(error)}`);
     }
     try {
-      this.db.pragma('wal_checkpoint(PASSIVE)');
+      const [row] = this.db.pragma('wal_checkpoint(PASSIVE)') as {
+        busy: number;
+        log: number;
+        checkpointed: number;
+      }[];
+      // Passive checkpoints report contention in their result instead of throwing.
+      if (row?.busy === 1) {
+        this.warn(
+          `sqlite wal_checkpoint incomplete: reader or writer still busy (${row.checkpointed} of ${row.log} WAL frames)`,
+        );
+      }
     } catch (error) {
-      // Another process may be using the database; a later pass can retry.
+      // A later pass can retry if SQLite reports an actual error.
       this.warn(`sqlite wal_checkpoint failed: ${errorText(error)}`);
     }
   }
