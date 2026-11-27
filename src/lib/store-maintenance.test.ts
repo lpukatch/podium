@@ -116,26 +116,40 @@ describe('store maintenance cadence', () => {
   });
 
   it.each([
-    ['optimize', 'sqlite optimize failed: Error: database busy'],
-    ['wal_checkpoint(PASSIVE)', 'sqlite wal_checkpoint failed: Error: database busy'],
-  ])('logs a failed %s pragma without interrupting the run', (failedPragma, warning) => {
-    const warn = vi.fn();
-    const store = new Store(':memory:', warn);
-    const db = (store as unknown as { db: Database.Database }).db;
-    const originalPragma = db.pragma.bind(db);
-    vi.spyOn(db, 'pragma').mockImplementation((statement, options) => {
-      if (statement === failedPragma) throw new Error('database busy');
-      return originalPragma(statement, options);
-    });
+    {
+      pragma: 'optimize',
+      busyRow: false,
+      warning: 'sqlite optimize failed: Error: database busy',
+    },
+    {
+      pragma: 'wal_checkpoint(PASSIVE)',
+      busyRow: true,
+      warning: 'sqlite wal_checkpoint incomplete: reader or writer still busy (3 of 12 WAL frames)',
+    },
+  ] as const)(
+    'reports a $pragma maintenance issue without interrupting the run',
+    ({ pragma, busyRow, warning }) => {
+      const warn = vi.fn();
+      const store = new Store(':memory:', warn);
+      const db = (store as unknown as { db: Database.Database }).db;
+      const originalPragma = db.pragma.bind(db);
+      vi.spyOn(db, 'pragma').mockImplementation((statement, options) => {
+        if (statement === pragma) {
+          if (busyRow) return [{ busy: 1, log: 12, checkpointed: 3 }];
+          throw new Error('database busy');
+        }
+        return originalPragma(statement, options);
+      });
 
-    try {
-      expect(() => store.startRun('maintenance-failure')).not.toThrow();
-      expect(store.recentRuns(10)).toHaveLength(1);
-      expect(warn).toHaveBeenCalledExactlyOnceWith(warning);
-    } finally {
-      store.close();
-    }
-  });
+      try {
+        expect(() => store.startRun('maintenance-failure')).not.toThrow();
+        expect(store.recentRuns(10)).toHaveLength(1);
+        expect(warn).toHaveBeenCalledExactlyOnceWith(warning);
+      } finally {
+        store.close();
+      }
+    },
+  );
 
   it('retries maintenance after a failed transaction', () => {
     const store = new Store(':memory:');

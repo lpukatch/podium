@@ -8,11 +8,12 @@
  *   - a pass that will pause does not fetch the stream catalogue first
  */
 
+import type Database from 'better-sqlite3';
 import { mkdtempSync, renameSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { lockOwner, startWorker } from '../worker/loop';
+import { buildRunner, lockOwner, startWorker } from '../worker/loop';
 import { loadConfig } from './config';
 import { type Activity, Pacer } from './pacer';
 import { RulesSource } from './rules-source';
@@ -129,6 +130,33 @@ describe('startWorker when the lock is held', () => {
       await stop();
     } finally {
       vi.useRealTimers();
+    }
+  });
+});
+
+describe('worker store logging', () => {
+  it('routes SQLite maintenance warnings through the worker logger', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'podium-worker-store-log-'));
+    let store: Store | undefined;
+    try {
+      writeFileSync(join(dir, 'rules.json'), JSON.stringify({ schema: 2, channels: [] }), 'utf8');
+      const config = loadConfig({ PODIUM_DATA_DIR: dir, DISPATCHARR_API_KEY: 'k' });
+      const lines: string[] = [];
+      const workerStore = buildRunner(config, (message) => lines.push(message)).store;
+      store = workerStore;
+
+      const db = (workerStore as unknown as { db: Database.Database }).db;
+      const originalPragma = db.pragma.bind(db);
+      vi.spyOn(db, 'pragma').mockImplementation((statement, options) => {
+        if (statement === 'optimize') throw new Error('database busy');
+        return originalPragma(statement, options);
+      });
+
+      expect(() => workerStore.startRun('worker-store-log')).not.toThrow();
+      expect(lines).toContain('sqlite optimize failed: Error: database busy');
+    } finally {
+      store?.close();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

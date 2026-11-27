@@ -126,7 +126,7 @@ export function buildRunner(
     log(`no rules file at ${config.rulesPath} yet -- nothing to check until one exists`);
   }
 
-  const store = new Store(config.dbPath);
+  const store = new Store(config.dbPath, log);
   const pruned = store.prune();
   if (pruned > 0) log(`pruned ${pruned} stale cache rows`);
 
