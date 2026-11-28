@@ -1,31 +1,20 @@
-/**
- * The version string, and the one route that reports it to the outside.
- *
- * Under vitest neither inline path runs -- no esbuild define, no NEXT_PUBLIC
- * env -- so these tests exercise the `dev` fallback and, more usefully, pin
- * that /api/health carries whatever VERSION resolved to in both of its
- * response branches. An operator diagnosing "which build is this?" over HTTP
- * must get the same answer whether or not the database can be read.
- */
+/** The version string and the lightweight health route that reports it. */
 
-import { mkdtempSync, rmSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { VERSION } from './version';
 
-let dir = '';
+vi.mock('@/lib/config', () => ({
+  loadConfig: vi.fn(),
+}));
 
-beforeAll(() => {
-  // The route constructs a Store from the configured path; point it at a
-  // scratch directory so a test run never touches a real database.
-  dir = mkdtempSync(join(tmpdir(), 'podium-version-'));
-  process.env.PODIUM_DATA_DIR = dir;
-});
+vi.mock('@/lib/store', () => ({
+  STALE_LOCK_MS: 120_000,
+  Store: vi.fn(),
+}));
 
-afterAll(() => {
-  rmSync(dir, { recursive: true, force: true });
-  delete process.env.PODIUM_DATA_DIR;
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.clearAllMocks();
 });
 
 describe('VERSION', () => {
@@ -36,10 +25,18 @@ describe('VERSION', () => {
 });
 
 describe('GET /api/health', () => {
-  it('reports the version', async () => {
+  it('reports the version without reading configuration or SQLite', async () => {
+    vi.stubEnv('PODIUM_DATA_DIR', '/path/that/does/not/exist');
+
     const { GET } = await import('../app/api/health/route');
-    const body = (await (await GET()).json()) as { status: string; version: string };
-    expect(body.status).toBe('ok');
-    expect(body.version).toBe(VERSION);
+    const response = await GET();
+    const body = await response.json();
+    const { loadConfig } = await import('@/lib/config');
+    const { Store } = await import('@/lib/store');
+
+    expect(response.status).toBe(200);
+    expect(body).toEqual({ status: 'ok', version: VERSION });
+    expect(loadConfig).not.toHaveBeenCalled();
+    expect(Store).not.toHaveBeenCalled();
   });
 });

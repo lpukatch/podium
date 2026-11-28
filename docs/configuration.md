@@ -116,9 +116,16 @@ makes every request carry it: `Authorization: Bearer <token>`, an
 `X-Podium-Token` header, or the `podium_token` cookie. Visiting
 `http://podium.lan:3456/?token=<token>` once puts it in that cookie and takes it
 back out of the URL, which is how you log a browser in without a login page.
-`/api/health` is exempt so the container's own health check still works;
-`/api/metrics` is not, so give Prometheus the token too — see
-[Metrics](#metrics) for a scrape job.
+`/api/health` is exempt so the container's own health check still works. It
+reports the web process and version without reading the data directory or
+SQLite. Configure Docker and Kubernetes liveness, readiness, and startup probes
+to call `GET /api/health`. This route stays responsive if the data volume or
+database is unavailable or locked.
+
+`GET /api/health/worker` reports the worker heartbeat age for operators. It
+reads SQLite, so do not use it for a probe. It requires the token when
+`PODIUM_AUTH_TOKEN` is set. `/api/metrics` also requires the token, so give
+Prometheus the token too. See [Metrics](#metrics) for a scrape job.
 
 **Behind a reverse proxy, say so.** Some proxies forward the browser's `Host`
 header and some replace it with the address they are proxying to — nginx's
