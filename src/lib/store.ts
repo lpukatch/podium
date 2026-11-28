@@ -116,6 +116,7 @@ CREATE TABLE IF NOT EXISTS runs (
     run_id           TEXT PRIMARY KEY,
     started_at       INTEGER NOT NULL,
     finished_at      INTEGER,
+    outcome          TEXT,
     channels         INTEGER NOT NULL DEFAULT 0,
     probed           INTEGER NOT NULL DEFAULT 0,
     cached           INTEGER NOT NULL DEFAULT 0,
@@ -1016,6 +1017,7 @@ export interface RunRow {
   run_id: string;
   started_at: number;
   finished_at: number | null;
+  outcome: RunOutcome | null;
   channels: number;
   probed: number;
   cached: number;
@@ -1031,6 +1033,8 @@ export interface RunRow {
   oldest_probed_at?: number | null;
   error: string | null;
 }
+
+export type RunOutcome = 'running' | 'completed' | 'failed' | 'interrupted';
 
 /**
  * What the cache says about the library as a whole.
@@ -1062,6 +1066,7 @@ export interface RunStats {
   dead: number;
   reordered: number;
   failed: number;
+  interrupted: number;
 }
 
 /** One hour of run history, for the activity chart. */
@@ -1490,6 +1495,7 @@ export class Store {
     if (path === ':memory:' || !Store.initializedPaths.has(path)) {
       this.db.exec(SCHEMA);
       for (const [table, col] of [
+        ['runs', 'outcome TEXT'],
         ['runs', 'unchanged INTEGER NOT NULL DEFAULT 0'],
         ['runs', 'deferred INTEGER NOT NULL DEFAULT 0'],
         ['runs', 'backlog INTEGER NOT NULL DEFAULT 0'],
@@ -1564,6 +1570,8 @@ export class Store {
         INSERT OR IGNORE INTO lifetime_totals (key, n) SELECT 'runs', COUNT(*) FROM runs;
         INSERT OR IGNORE INTO lifetime_totals (key, n)
             SELECT 'failed', COALESCE(SUM(error IS NOT NULL), 0) FROM runs;
+        INSERT OR IGNORE INTO lifetime_totals (key, n)
+            SELECT 'interrupted', COALESCE(SUM(outcome = 'interrupted'), 0) FROM runs;
         INSERT OR IGNORE INTO lifetime_totals (key, n) SELECT 'probed', COALESCE(SUM(probed), 0) FROM runs;
         INSERT OR IGNORE INTO lifetime_totals (key, n) SELECT 'cached', COALESCE(SUM(cached), 0) FROM runs;
         INSERT OR IGNORE INTO lifetime_totals (key, n) SELECT 'dead', COALESCE(SUM(dead), 0) FROM runs;
@@ -2022,7 +2030,11 @@ export class Store {
       now < this.lastMaintenanceAt ||
       now - this.lastMaintenanceAt >= 15 * 60_000;
     this.db.transaction(() => {
-      this.sql('INSERT OR REPLACE INTO runs (run_id, started_at) VALUES (?, ?)').run(runId, now);
+      this.sql('INSERT OR REPLACE INTO runs (run_id, started_at, outcome) VALUES (?, ?, ?)').run(
+        runId,
+        now,
+        'running',
+      );
       this.bumpLifetimeTotals({ runs: 1 });
       // Keep per-tick accounting, but sweep history at most once per 15 minutes.
       if (!maintenance) return;
@@ -2082,12 +2094,6 @@ export class Store {
       .filter(([key]) => fields[key] !== undefined)
       .map(([key, col]) => [col, fields[key]] as const);
     const setClause = entries.map(([col]) => `${col} = ?`).join(', ');
-    // Not cached: the statement is built from whichever fields were supplied.
-    this.db
-      .prepare(
-        `UPDATE runs SET finished_at = ?${setClause ? `, ${setClause}` : ''} WHERE run_id = ?`,
-      )
-      .run(Date.now(), ...entries.map(([, value]) => value as string | number), runId);
 
     // The durable counters move with the row, so the totals the metrics
     // publish stay monotonic after the runs table trims. Only the fields this
@@ -2107,7 +2113,83 @@ export class Store {
       if (typeof n === 'number' && n !== 0) delta[key] = n;
     }
     if (fields.error) delta.failed = 1;
-    this.bumpLifetimeTotals(delta);
+    this.db.transaction(() => {
+      const result = this.db
+        .prepare(
+          `UPDATE runs SET finished_at = ?, outcome = ?${setClause ? `, ${setClause}` : ''}
+            WHERE run_id = ? AND finished_at IS NULL AND COALESCE(outcome, 'running') = 'running'`,
+        )
+        .run(
+          Date.now(),
+          fields.error ? 'failed' : 'completed',
+          ...entries.map(([, value]) => value as string | number),
+          runId,
+        );
+      // A stale worker can finish after a replacement has already classified
+      // its row as interrupted. Preserve its probe counts without changing the
+      // outcome or inventing an end time. Fill only fields that have not been
+      // recorded yet, so a retried late finish cannot count them twice. An
+      // error from the displaced worker must not turn the interruption into a
+      // failed run in the daily stats.
+      if (result.changes === 0) {
+        if (entries.length === 0) return;
+        const row = this.db
+          .prepare(
+            `SELECT ${entries.map(([col]) => col).join(', ')} FROM runs
+              WHERE run_id = ? AND finished_at IS NULL AND outcome = 'interrupted'`,
+          )
+          .get(runId) as Record<string, string | number | null> | undefined;
+        if (!row) return;
+
+        const lateEntries = entries.filter(
+          ([col, value]) =>
+            col !== 'error' && value !== null && (row[col] === null || row[col] === 0),
+        );
+        if (lateEntries.length === 0) return;
+
+        const lateSetClause = lateEntries.map(([col]) => `${col} = ?`).join(', ');
+        const lateResult = this.db
+          .prepare(
+            `UPDATE runs SET ${lateSetClause}
+              WHERE run_id = ? AND finished_at IS NULL AND outcome = 'interrupted'
+                AND ${lateEntries.map(([col]) => `(${col} IS NULL OR ${col} = 0)`).join(' AND ')}`,
+          )
+          .run(...lateEntries.map(([, value]) => value as string | number), runId);
+        if (lateResult.changes === 0) return;
+
+        const lateColumns = new Set(lateEntries.map(([col]) => col));
+        const lateDelta = Object.fromEntries(
+          Object.entries(delta).filter(([key]) => key !== 'failed' && lateColumns.has(key)),
+        );
+        if (Object.keys(lateDelta).length > 0) this.bumpLifetimeTotals(lateDelta);
+        return;
+      }
+
+      // Keep the durable counters atomic with the terminal row state. That way
+      // recovery and normal completion cannot leave a count behind or double it.
+      this.bumpLifetimeTotals(delta);
+    })();
+  }
+
+  /**
+   * Mark open runs interrupted after this process has acquired the worker lock.
+   *
+   * An unfinished row is only abandoned once the exclusive lock is ours: a
+   * worker that failed to acquire the lock must leave the active run untouched.
+   * `finished_at` remains NULL because recovery cannot know when the old worker
+   * stopped. The outcome and its lifetime counter change in one transaction, so
+   * repeating recovery is safe and cannot double-count.
+   */
+  interruptUnfinishedRuns(): number {
+    return this.db.transaction(() => {
+      const result = this.sql(
+        `UPDATE runs
+            SET outcome = 'interrupted'
+          WHERE finished_at IS NULL AND COALESCE(outcome, 'running') = 'running'`,
+      ).run();
+      if (result.changes > 0) this.bumpLifetimeTotals({ interrupted: result.changes });
+      return result.changes;
+    })();
   }
 
   /**
@@ -2967,7 +3049,8 @@ export class Store {
               COALESCE(SUM(probed), 0)    AS probed,
               COALESCE(SUM(dead), 0)      AS dead,
               COALESCE(SUM(reordered), 0) AS reordered,
-              COALESCE(SUM(error IS NOT NULL), 0) AS failed
+              COALESCE(SUM(error IS NOT NULL), 0) AS failed,
+              COALESCE(SUM(outcome = 'interrupted'), 0) AS interrupted
        FROM runs WHERE started_at >= ?`,
     ).get(sinceMs) as Record<string, number>;
     return {
@@ -2977,6 +3060,7 @@ export class Store {
       dead: row.dead ?? 0,
       reordered: row.reordered ?? 0,
       failed: row.failed ?? 0,
+      interrupted: row.interrupted ?? 0,
     };
   }
 
@@ -3015,6 +3099,7 @@ export class Store {
   runTotals(): {
     runs: number;
     failed: number;
+    interrupted: number;
     probed: number;
     cached: number;
     dead: number;
@@ -3027,6 +3112,7 @@ export class Store {
     return {
       runs: t.runs ?? 0,
       failed: t.failed ?? 0,
+      interrupted: t.interrupted ?? 0,
       probed: t.probed ?? 0,
       cached: t.cached ?? 0,
       dead: t.dead ?? 0,

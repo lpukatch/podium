@@ -38,6 +38,16 @@ describe('recent passes', () => {
     expect(entries.map((e) => e.kind)).toEqual(['run', 'quiet', 'run', 'run']);
   });
 
+  it('keeps an interrupted pass visible instead of folding it into quiet history', () => {
+    const entries = collapseRuns([
+      run({ outcome: 'interrupted', finished_at: null }),
+      run({ started_at: 100 }),
+    ]);
+
+    expect(entries.map((entry) => entry.kind)).toEqual(['run', 'quiet']);
+    expect(entries[0]).toMatchObject({ kind: 'run', run: { outcome: 'interrupted' } });
+  });
+
   it('says one when there was only one', () => {
     expect(collapseRuns([run({ started_at: 100 })])).toEqual([
       { kind: 'quiet', count: 1, from: 100, to: 100 },

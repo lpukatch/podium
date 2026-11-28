@@ -9,6 +9,7 @@
  */
 
 import type Database from 'better-sqlite3';
+import { spawnSync } from 'child_process';
 import { mkdtempSync, renameSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -18,7 +19,7 @@ import { loadConfig } from './config';
 import { type Activity, Pacer } from './pacer';
 import { RulesSource } from './rules-source';
 import { Runner } from './runner';
-import { Store } from './store';
+import { STALE_LOCK_MS, Store } from './store';
 
 const idle: Activity = { channelIds: new Set(), idle: true };
 const watching: Activity = { channelIds: new Set([5]), idle: false };
@@ -78,6 +79,73 @@ describe('lock ownership', () => {
   });
 });
 
+describe('unfinished-run recovery', () => {
+  it('recovers a hard-terminated run once after its stale lock is taken over', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'podium-run-recovery-'));
+    const dbPath = join(dir, 'recovery.db');
+    const script = `
+      import { Store } from './src/lib/store.ts';
+      const store = new Store(process.env.PODIUM_RECOVERY_DB);
+      if (!store.acquireLock('terminated-worker').ok) process.exit(2);
+      store.startRun('abandoned-run');
+      process.exit(42);
+    `;
+    const child = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', '--input-type=module', '-e', script],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, PODIUM_RECOVERY_DB: dbPath },
+        encoding: 'utf8',
+      },
+    );
+    expect(child.error).toBeUndefined();
+    expect(child.status).toBe(42);
+
+    const replacement = new Store(dbPath);
+    try {
+      // The fresh lock still belongs to the terminated worker, so a second
+      // worker must wait and leave the open run alone.
+      expect(replacement.acquireLock('replacement').ok).toBe(false);
+      expect(replacement.recentRuns().find((run) => run.run_id === 'abandoned-run')?.outcome).toBe(
+        'running',
+      );
+      expect(replacement.runTotals().interrupted).toBe(0);
+
+      const db = (replacement as unknown as { db: Database.Database }).db;
+      db.prepare('UPDATE worker_lock SET heartbeat = ? WHERE id = 1').run(
+        Date.now() - STALE_LOCK_MS - 1,
+      );
+      expect(replacement.acquireLock('replacement').ok).toBe(true);
+
+      expect(replacement.interruptUnfinishedRuns()).toBe(1);
+      const row = replacement.recentRuns().find((run) => run.run_id === 'abandoned-run');
+      expect(row?.outcome).toBe('interrupted');
+      expect(row?.finished_at).toBeNull();
+      expect(replacement.runStats(0)).toMatchObject({ passes: 1, failed: 0, interrupted: 1 });
+      expect(replacement.runTotals().interrupted).toBe(1);
+
+      // Recovery and late completion are idempotent. Keep probe counts already
+      // written by the old worker, but do not replace the interrupted result,
+      // invent an end time, or count its abort as a failure.
+      expect(replacement.interruptUnfinishedRuns()).toBe(0);
+      replacement.finishRun('abandoned-run', { probed: 9, error: 'worker was aborted' });
+      expect(replacement.runTotals()).toMatchObject({ probed: 9, failed: 0, interrupted: 1 });
+      expect(replacement.runStats(0)).toMatchObject({ probed: 9, failed: 0, interrupted: 1 });
+      const late = replacement.recentRuns().find((run) => run.run_id === 'abandoned-run');
+      expect(late).toMatchObject({ outcome: 'interrupted', probed: 9, error: null });
+      expect(late?.finished_at).toBeNull();
+
+      replacement.finishRun('abandoned-run', { probed: 9, error: 'worker was aborted' });
+      expect(replacement.runTotals()).toMatchObject({ probed: 9, failed: 0, interrupted: 1 });
+      expect(replacement.runStats(0)).toMatchObject({ probed: 9, failed: 0, interrupted: 1 });
+    } finally {
+      replacement.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+});
+
 describe('startWorker when the lock is held', () => {
   let dir: string;
   let store: Store;
@@ -102,6 +170,7 @@ describe('startWorker when the lock is held', () => {
     // down leaves a lock less than a minute old, so its replacement declined
     // and then served the UI forever without probing anything.
     const lines: string[] = [];
+    store.startRun('held-worker-run');
     const stop = await startWorker(config, (m) => lines.push(m));
 
     expect(typeof stop).toBe('function');
@@ -111,6 +180,10 @@ describe('startWorker when the lock is held', () => {
     // Waiting, not holding: the lock is still the other worker's, and stopping
     // a waiter must not delete a lock it never took.
     expect(store.lockState()?.owner).toBe('someone-else');
+    expect(store.recentRuns().find((run) => run.run_id === 'held-worker-run')?.outcome).toBe(
+      'running',
+    );
+    expect(store.runTotals().interrupted).toBe(0);
     await stop();
     expect(store.lockState()?.owner).toBe('someone-else');
   });
@@ -119,6 +192,7 @@ describe('startWorker when the lock is held', () => {
     vi.useFakeTimers();
     try {
       const lines: string[] = [];
+      store.startRun('released-worker-run');
       const stop = await startWorker(config, (m) => lines.push(m));
       expect(lines.join('\n')).not.toContain('paced loop started');
 
@@ -127,6 +201,9 @@ describe('startWorker when the lock is held', () => {
 
       expect(lines.join('\n')).toContain('paced loop started (lock acquired)');
       expect(store.lockState()?.owner).not.toBe('someone-else');
+      const interrupted = store.recentRuns().find((run) => run.run_id === 'released-worker-run');
+      expect(interrupted?.outcome).toBe('interrupted');
+      expect(interrupted?.finished_at).toBeNull();
       await stop();
     } finally {
       vi.useRealTimers();

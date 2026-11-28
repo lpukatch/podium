@@ -201,6 +201,12 @@ export function renderMetrics(store: Store, options: MetricsOptions): string {
   const totals = store.runTotals();
   out.add('podium_runs_total', 'Runs recorded.', 'counter', totals.runs);
   out.add('podium_runs_failed_total', 'Runs that ended in an error.', 'counter', totals.failed);
+  out.add(
+    'podium_runs_interrupted_total',
+    'Runs interrupted before an end time was recorded.',
+    'counter',
+    totals.interrupted,
+  );
   out.add('podium_streams_probed_total', 'Streams probed, all runs.', 'counter', totals.probed);
   out.add('podium_streams_cached_total', 'Probes served from cache.', 'counter', totals.cached);
   out.add('podium_streams_dead_total', 'Dead verdicts recorded.', 'counter', totals.dead);
