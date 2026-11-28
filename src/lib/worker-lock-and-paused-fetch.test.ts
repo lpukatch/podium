@@ -125,14 +125,20 @@ describe('unfinished-run recovery', () => {
       expect(replacement.runStats(0)).toMatchObject({ passes: 1, failed: 0, interrupted: 1 });
       expect(replacement.runTotals().interrupted).toBe(1);
 
-      // Recovery is idempotent, and a late completion from the old worker
-      // cannot replace the interrupted result or add another counter.
+      // Recovery and late completion are idempotent. Keep probe counts already
+      // written by the old worker, but do not replace the interrupted result,
+      // invent an end time, or count its abort as a failure.
       expect(replacement.interruptUnfinishedRuns()).toBe(0);
-      replacement.finishRun('abandoned-run', { probed: 9 });
-      expect(replacement.runTotals()).toMatchObject({ probed: 0, interrupted: 1 });
-      expect(
-        replacement.recentRuns().find((run) => run.run_id === 'abandoned-run')?.finished_at,
-      ).toBeNull();
+      replacement.finishRun('abandoned-run', { probed: 9, error: 'worker was aborted' });
+      expect(replacement.runTotals()).toMatchObject({ probed: 9, failed: 0, interrupted: 1 });
+      expect(replacement.runStats(0)).toMatchObject({ probed: 9, failed: 0, interrupted: 1 });
+      const late = replacement.recentRuns().find((run) => run.run_id === 'abandoned-run');
+      expect(late).toMatchObject({ outcome: 'interrupted', probed: 9, error: null });
+      expect(late?.finished_at).toBeNull();
+
+      replacement.finishRun('abandoned-run', { probed: 9, error: 'worker was aborted' });
+      expect(replacement.runTotals()).toMatchObject({ probed: 9, failed: 0, interrupted: 1 });
+      expect(replacement.runStats(0)).toMatchObject({ probed: 9, failed: 0, interrupted: 1 });
     } finally {
       replacement.close();
       rmSync(dir, { recursive: true, force: true });

@@ -2126,8 +2126,44 @@ export class Store {
           runId,
         );
       // A stale worker can finish after a replacement has already classified
-      // its row as interrupted. Do not overwrite that outcome or count it again.
-      if (result.changes === 0) return;
+      // its row as interrupted. Preserve its probe counts without changing the
+      // outcome or inventing an end time. Fill only fields that have not been
+      // recorded yet, so a retried late finish cannot count them twice. An
+      // error from the displaced worker must not turn the interruption into a
+      // failed run in the daily stats.
+      if (result.changes === 0) {
+        if (entries.length === 0) return;
+        const row = this.db
+          .prepare(
+            `SELECT ${entries.map(([col]) => col).join(', ')} FROM runs
+              WHERE run_id = ? AND finished_at IS NULL AND outcome = 'interrupted'`,
+          )
+          .get(runId) as Record<string, string | number | null> | undefined;
+        if (!row) return;
+
+        const lateEntries = entries.filter(
+          ([col, value]) =>
+            col !== 'error' && value !== null && (row[col] === null || row[col] === 0),
+        );
+        if (lateEntries.length === 0) return;
+
+        const lateSetClause = lateEntries.map(([col]) => `${col} = ?`).join(', ');
+        const lateResult = this.db
+          .prepare(
+            `UPDATE runs SET ${lateSetClause}
+              WHERE run_id = ? AND finished_at IS NULL AND outcome = 'interrupted'
+                AND ${lateEntries.map(([col]) => `(${col} IS NULL OR ${col} = 0)`).join(' AND ')}`,
+          )
+          .run(...lateEntries.map(([, value]) => value as string | number), runId);
+        if (lateResult.changes === 0) return;
+
+        const lateColumns = new Set(lateEntries.map(([col]) => col));
+        const lateDelta = Object.fromEntries(
+          Object.entries(delta).filter(([key]) => key !== 'failed' && lateColumns.has(key)),
+        );
+        if (Object.keys(lateDelta).length > 0) this.bumpLifetimeTotals(lateDelta);
+        return;
+      }
 
       // Keep the durable counters atomic with the terminal row state. That way
       // recovery and normal completion cannot leave a count behind or double it.
