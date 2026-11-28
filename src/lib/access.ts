@@ -242,12 +242,10 @@ export type AccessVerdict =
 /**
  * Paths that answer before any check but the host one.
  *
- * Only the container's own health probe. It reports "the web process replied"
- * plus a worker heartbeat age, which is nothing an attacker wants and exactly
- * what Docker and Kubernetes need -- and a probe that cannot carry a token
- * would otherwise mark a token-protected install unhealthy and restart it
- * forever. Metrics are *not* here: they describe your library, and Prometheus
- * can send an Authorization header.
+ * Only the container's own health probe. It reports that the web process
+ * replied, which Docker and Kubernetes need. A probe that cannot carry a token
+ * would otherwise restart a token-protected install forever. Metrics and the
+ * detailed worker heartbeat are not exempt because clients can send a token.
  */
 // Connect deliveries authenticate with their own token in the receiver route.
 const TOKEN_EXEMPT = new Set([

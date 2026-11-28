@@ -244,6 +244,12 @@ describe('checkAccess', () => {
     expect(
       checkAccess({ ...write({ method: 'GET', path: '/api/health' }), credentials: [] }, guarded),
     ).toEqual({ ok: true });
+    expect(
+      checkAccess(
+        { ...write({ method: 'GET', path: '/api/health/worker' }), credentials: [] },
+        guarded,
+      ).ok,
+    ).toBe(false);
     // Metrics describe your library, so they are not exempt.
     expect(
       checkAccess({ ...write({ method: 'GET', path: '/api/metrics' }), credentials: [] }, guarded)
